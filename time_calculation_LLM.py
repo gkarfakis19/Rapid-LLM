@@ -20,7 +20,7 @@ import LLM_util
 from hw_component import Core, MemoryHierarchy, Network
 from model import Model_LSTM, Model_GEMM, Model_LLM
 from tile import TiledGEMM, formatBytes
-from astrasim_lib.comparison import run_astra_simulation_only_onepath
+from astrasim_lib.executor import run_astra_simulation_only_onepath
 from functools import lru_cache
 
 from simulate_LLM import visualize_graph

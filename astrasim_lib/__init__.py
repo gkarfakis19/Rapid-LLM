@@ -22,7 +22,7 @@ from .et_utils import (
     new_send_node,
     write_et_node,
 )
-from .comparison import (
+from .executor import (
     convert_deepflow_graph_to_chakra_et,
     run_astra_simulation_only_onepath,
 )

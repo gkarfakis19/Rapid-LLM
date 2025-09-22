@@ -1,8 +1,7 @@
-"""
-AstraSim vs DeepFlow comparison functionality.
+"""AstraSim execution helpers used by DeepFlow's comparison workflow.
 
-This module converts DeepFlow graphs (with communication sizes) to AstraSim Chakra ET format
-and executes AstraSim simulation for comparison with DeepFlow analytical timing.
+This module converts DeepFlow graphs (with communication sizes) to AstraSim Chakra ET
+format and executes AstraSim simulation for comparison with DeepFlow analytical timing.
 
 Non-mainlined test functionality - designed to be easily removable.
 """
