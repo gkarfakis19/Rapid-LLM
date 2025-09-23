@@ -13,7 +13,15 @@ Pre-requirement: Python3
 	* pip install --upgrade pip
 	* pip install -r requirements.txt
 
-**Step 4**. Test if the installation has been successful:
+**Step 4**. (Optional) Setup AstraSim for advanced simulation capabilities:
+
+	* git clone git@github.com:astra-sim/astra-sim.git
+	* ASTRA_SIM=$(realpath ./astra-sim)
+	* cd ${ASTRA_SIM}
+	* git submodule update --init --recursive
+	* ./build/astra_analytical/build.sh
+
+**Step 5**. Test if the installation has been successful:
 
 	* python run_perf.py --hardware_config configs/hardware-config/waferscale_20v100_80hbm.yaml --model_config configs/model-config/LSTM.yaml --output_dir output
 	* check the output result: vim output/LSTM/summary_LSTM.txt
@@ -22,6 +30,53 @@ Pre-requirement: Python3
 ## Execution Modes ##
 
 DeepFlow can be used in 6 different modes:
+
+### Execution Backend Configuration
+
+DeepFlow supports 4 execution backends with different accuracy and performance characteristics. Configure the backend in your hardware config file under `execution_backend`:
+
+**(1) Analytical DeepFlow** (Default - no AstraSim needed)
+- **Accuracy**: Very fast but inaccurate - only ring network model and no congestion modeling.
+- **Configuration**:
+```yaml
+execution_backend:
+  model: analytical
+```
+
+**(2) Hybrid** (AstraSim needed)
+- **Accuracy**: More accurate - models congestion in transformer blocks (only) but roughly 2-3x slower.
+- **Execution**: DeepFlow executes pipeline graph, AstraSim executes transformer block graph
+- **Configuration**:
+```yaml
+execution_backend:
+  model: astra
+  astra:
+    mode: hybrid
+```
+
+**(3) Full AstraSim Hierarchical** (AstraSim needed)
+- **Accuracy**: Even more accurate - models congestion in transformer and pipeline graphs separately. Assumes no congestion between pipeline/data parallelism and tensor parallelism (optimistic). Roughly as fast as Hybrid for small systems, increasingly slower for larger systems.
+- **Execution**: AstraSim executes both pipeline and transformer block graphs separately
+- **Configuration**:
+```yaml
+execution_backend:
+  model: astra
+  astra:
+    mode: full_astrasim_hierarchical
+```
+
+**(4) Full AstraSim Flattened** (AstraSim needed)
+- **Accuracy**: Most accurate - models congestion between all collectives with no separate network assumptions. Very slow but most comprehensive.
+- **Execution**: AstraSim executes one big flattened graph combining pipeline and transformer operations
+- **Configuration**:
+```yaml
+execution_backend:
+  model: astra
+  astra:
+    mode: full_astrasim_flattened
+```
+
+### Model Prediction Modes
 
 (1) Peformance Prediction Mode (GEMM) 
  **When to use**: Use for distributed GEMM prediction  
@@ -57,6 +112,30 @@ LLM Mode is WIP. Not all parallelism configs are supported, and limited validati
 (6) Architecture Search mode for all types of parallelism strategies
 * python main.py arch_search --exp_dir [/path/to/output/directory] --exp_config configs/[config.yaml]
 
+
+## AstraSim Artifact and Graph Visualization ##
+
+DeepFlow can generate and visualize network communication artifacts when using AstraSim execution backend.
+
+**Environment Flags:**
+* `DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1`: Enable artifact persistence to disk
+* `DEEPFLOW_VISUALIZE_GRAPHS=1`: Generate graph visualizations of network operations
+
+**Artifact Output Locations:**
+* Flattened execution mode: `output/LLM/astra_flat/`
+* Hierarchical/Hybrid modes: `output/LLM/astra_hier/`
+
+**Generated Files:**
+* `.et` files: Chakra execution traces for AstraSim replay
+* `.png` files: Rendered PNG visualizations (when visualization enabled)
+
+**Usage Example:**
+```bash
+DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 python run_perf.py \
+  --hardware_config configs/hardware-config/a100_80GB.yaml \
+  --model_config configs/model-config/LLM.yaml \
+  --output_dir output
+```
 
 ## Tips ##
 

@@ -81,6 +81,21 @@ def _validate_astrasim_dependencies(hw_config) -> None:
             "are not available. Install or build the AstraSim externals before running with execution_backend.model='astra'."
         ) from exc
 
+def _validate_network_topology(hw_config) -> None:
+    backend = getattr(hw_config, "execution_backend", None)
+    model = getattr(backend, "model", "analytical") if backend else "analytical"
+    network_topology = getattr(hw_config, "network_topology", None)
+
+    if str(model).lower() == "analytical" and network_topology:
+        inter_topology = getattr(network_topology.inter, "topology", "ring")
+        intra_topology = getattr(network_topology.intra, "topology", "ring")
+
+        if str(inter_topology).lower() != "ring" or str(intra_topology).lower() != "ring":
+            raise RuntimeError(
+                "Non-ring network topologies are not supported in analytical mode. "
+                "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
+            )
+
 def run_LSTM(
     exp_hw_config_path,
     exp_model_config_path,
@@ -93,6 +108,7 @@ def run_LSTM(
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     _validate_astrasim_dependencies(exp_hw_config)
+    _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
     output_file = exp_dir + "/summary_%s.txt" % (
         mode,
@@ -125,6 +141,7 @@ def run_GEMM(
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     _validate_astrasim_dependencies(exp_hw_config)
+    _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
 
 
@@ -205,6 +222,7 @@ def run_LLM(
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     _validate_astrasim_dependencies(exp_hw_config)
+    _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
 
     variant = llm_execution_variant.strip().upper()
@@ -217,7 +235,7 @@ def run_LLM(
 def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "summary_LLM.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
-    total_time = tc_llm.calcTime_LLM()
+    total_time = tc_llm.calc_time_llm()
 
     with open(output_file, "a+") as f:
         f.write("\n\n==============================================\n")
@@ -225,9 +243,7 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
         f.write("==============================================\n")
         f.write("Total Time: {0:.8f}\n".format(total_time))
 
-    print("Total time: {}".format(tc_llm.getTime()))
-    print("Reduction time: {}".format(tc_llm.getReductionTotal()))
-
+    print("Total training time: {}".format(tc_llm.get_time()))
 
 def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
     base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
