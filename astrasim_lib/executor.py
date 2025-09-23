@@ -960,9 +960,8 @@ def run_astra_simulation_only_onepath(
             work_dir,
         )
         rank_count = len(rank_ids)
-        # TODO:
         # Astrasim doesn't play well with only 1 rank.
-        # When that happens, let's duplicate to 2 ranks. No collectives exist so this should not have an effect.
+        # When that happens, let's duplicate to 2 ranks. No collectives exist between the two so this should not have an effect.
         if rank_count == 1:
             # duplicate the .et file
             src = os.path.join(work_dir, "llm_graph.0.et")
@@ -971,6 +970,22 @@ def run_astra_simulation_only_onepath(
             rank_ids = [rank_ids[0], rank_ids[0]+1]
         rank_count = len(rank_ids)
 
+        # Handle artifact visualization if enabled
+        if persist and _env_truthy("DEEPFLOW_PERSIST_ARTIFACT_VIZ"):
+            et_paths = []
+            for rank in rank_ids:
+                if rank > 10:
+                    break
+                et_path = os.path.join(work_dir, f"llm_graph.{rank}.et")
+                if os.path.exists(et_path):
+                    et_paths.append(et_path)
+
+            if et_paths:
+                print(f"[AstraSim] Visualizing {len(et_paths)} persisted ET files...")
+                _visualize_et_files(et_paths)
+                _dump_et_text(et_paths)
+
+        # Debug visualization (separate from persistence)
         for rank in rank_ids:
             if rank > 10:
                 break
@@ -983,7 +998,6 @@ def run_astra_simulation_only_onepath(
         # Generate AstraSim configuration files using actual hardware config
         print(f"[AstraSim] Generating configuration files...")
         astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
-        remote_memory_json = get_remote_memory_path()
         comm_groups_dp = dp_count if dp_override is not None else getattr(time_calc_obj, "dp", 1)
         comm_groups_path = _write_comm_groups_json(work_dir, comm_groups_dp, rank_ids)
 

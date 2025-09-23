@@ -118,8 +118,9 @@ LLM Mode is WIP. Not all parallelism configs are supported, and limited validati
 DeepFlow can generate and visualize network communication artifacts when using AstraSim execution backend.
 
 **Environment Flags:**
+* `DEEPFLOW_VISUALIZE_GRAPHS=1`: Generate graph visualizations of computation graphs executed.
 * `DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1`: Enable artifact persistence to disk
-* `DEEPFLOW_VISUALIZE_GRAPHS=1`: Generate graph visualizations of network operations
+* `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1`: Generate PNG visualizations and text dumps for persisted ET files (very slow for many nodes!)
 
 **Artifact Output Locations:**
 * Flattened execution mode: `output/LLM/astra_flat/`
@@ -127,11 +128,12 @@ DeepFlow can generate and visualize network communication artifacts when using A
 
 **Generated Files:**
 * `.et` files: Chakra execution traces for AstraSim replay
-* `.png` files: Rendered PNG visualizations (when visualization enabled)
+* `.png` files: Rendered PNG visualizations (when `DEEPFLOW_VISUALIZE_GRAPHS=1` or `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1`)
+* `.txt` files: Human-readable text dumps of ET files (when `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1`)
 
 **Usage Example:**
 ```bash
-DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 python run_perf.py \
+DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSIST_ARTIFACT_VIZ=1 python run_perf.py \
   --hardware_config configs/hardware-config/a100_80GB.yaml \
   --model_config configs/model-config/LLM.yaml \
   --output_dir output
