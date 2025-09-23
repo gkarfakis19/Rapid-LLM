@@ -1,7 +1,10 @@
 
 import math
 import os
+from collections import OrderedDict
+
 import pandas as pd
+
 import config
 
 def reshape_gemm_to_3d(arg,options=None):
@@ -46,6 +49,9 @@ def reshape_gemm_to_3d(arg,options=None):
     return M, K, N
 
 
+ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
+
+
 def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
@@ -62,39 +68,27 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, voc
     """
     assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
     head_dim = d_model // num_heads
-    gemms = []
-    levels = [
-        "Q/K/V projection",
-        "Q x K^T (attention scores)",
-        "score x V (attention output)",
-        "output projection",
-        "FFN layer 1",
-        "FFN layer 2",
-        "linear layer"
-    ]
+    gemms = OrderedDict()
 
-    # 1. Input projection
-    gemms.append([batch_size , seq_len, d_model, 3 * d_model])
+    gemms["qkv_proj"] = (batch_size, seq_len, d_model, 3 * d_model)
+    gemms["attention_score"] = (
+        batch_size * num_heads,
+        seq_len,
+        head_dim,
+        seq_len,
+    )
+    gemms["attention_output"] = (
+        batch_size * num_heads,
+        seq_len,
+        seq_len,
+        head_dim,
+    )
+    gemms["output_proj"] = (batch_size, seq_len, d_model, d_model)
+    gemms["ffn1"] = (batch_size, seq_len, d_model, ffn_dim)
+    gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model)
+    gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
 
-    # 2. Attention score
-    gemms.append([batch_size * num_heads, seq_len,  head_dim, seq_len])
-
-    # 3. Attention output
-    gemms.append([ batch_size * num_heads, seq_len, seq_len, head_dim])#todo: check if this is correct
-
-    # 4. Output projection
-    gemms.append([batch_size , seq_len, d_model, d_model])
-
-    # 5. FFN layer 1
-    gemms.append([batch_size , seq_len, d_model, ffn_dim])
-
-    # 6. FFN layer 2
-    gemms.append([batch_size , seq_len, ffn_dim, d_model])
-
-    # 7. linear layer
-    gemms.append([batch_size , seq_len, d_model, vocab_size])
-
-    return list(zip(levels, gemms))
+    return gemms
 
 
 def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
@@ -112,11 +106,14 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_
     # Generate GEMM shapes in 4D
     gemm_shapes_4d = multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size)
 
-    # Reshape GEMM shapes to 3D
-    gemm_3d = [reshape_gemm_to_3d(shape, option) for _, shape in gemm_shapes_4d]
+    processed = OrderedDict()
+    for key, shape in gemm_shapes_4d.items():
+        if key in ATTENTION_GEMM_KEYS:
+            processed[key] = tuple(shape)
+        else:
+            processed[key] = reshape_gemm_to_3d(shape, option)
 
-
-    return  gemm_3d
+    return processed
 
 def caltime(N_L, B, S, ntokens, comm_time, N_PP, directory, output_dir):
 

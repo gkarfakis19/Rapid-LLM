@@ -247,7 +247,7 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
 
 def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
     base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
-    gemm_3d = process_gemm_shapes(
+    gemm_shapes = process_gemm_shapes(
         base_tc.batch_size,
         base_tc.seq_len,
         base_tc.hidden_dim,
@@ -255,9 +255,18 @@ def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
         base_tc.ffn_dim,
         option="multiply_batch_into_m",
     )
-    print(gemm_3d)  # m, k, n
-    for i, (m, k, n) in enumerate(gemm_3d):
-        print(f"Running main for GEMM dimensions: M={m}, K={k}, N={n} (Layer {i + 1})")
+    print(gemm_shapes)
+
+    flattened = []
+    for name, dims in gemm_shapes.items():
+        if len(dims) == 4:
+            batch, m, k, n = dims
+            flattened.append((name, (batch * m, k, n)))
+        else:
+            flattened.append((name, dims))
+
+    for i, (name, (m, k, n)) in enumerate(flattened):
+        print(f"Running main for GEMM dimensions: M={m}, K={k}, N={n} ({name}, Layer {i + 1})")
         output_file = os.path.join(
             exp_dir, f"summary_m{m}_n{n}_k{k}_layer{i + 1}.txt"
         )

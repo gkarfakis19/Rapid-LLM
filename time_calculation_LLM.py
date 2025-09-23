@@ -480,26 +480,54 @@ class TimeCalculationLLM(TimeCalculation):
         # Hybrid still uses the analytical pipeline, so keep the hybrid policy.
         return 'hybrid'
 
-    def _distributed_gemm_forward(self, m: int, k: int, n: int, name: str) -> Tuple[float, float]:
+    @staticmethod
+    def _expand_gemm_descriptor(gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
+        if len(gemm) == 3:
+            return 1, gemm[0], gemm[1], gemm[2]
+        if len(gemm) == 4:
+            return gemm[0], gemm[1], gemm[2], gemm[3]
+        raise ValueError(f"Unsupported GEMM descriptor length: {len(gemm)}")
+
+    @classmethod
+    def _effective_dims(cls, gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
+        batch, m, k, n = cls._expand_gemm_descriptor(gemm)
+        return batch, batch * m, k, n
+
+    def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
             gemm_time = self.getGEMMTime(m, k, n, name)[0]
-            return gemm_time, 0.0
-        if self.t == "CR":
-            return self.getDistGEMM_f_kp1(m, k, n, self.kp1, name)
-        if self.t == "RC":
-            return self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name)
-        raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
+            reduction_time = 0.0
+        elif self.t == "CR":
+            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name)
+        elif self.t == "RC":
+            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name)
+        else:
+            raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
 
-    def _distributed_gemm_backward(self, m: int, k: int, n: int, name: str) -> Tuple[float, float]:
+        if batch > 1:
+            gemm_time *= batch
+            reduction_time *= batch
+        return gemm_time, reduction_time
+
+    def _distributed_gemm_backward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
             grad_act_time, _, _, _ = self.getGEMMTime(m, n, k, f"{name}_act")
             grad_wt_time, _, _, _ = self.getGEMMTime(k, m, n, f"{name}_wt")
-            return grad_act_time + grad_wt_time, 0.0
-        if self.t == "CR":
-            return self.getDistGEMM_b_kp1(m, k, n, self.kp1, name)
-        if self.t == "RC":
-            return self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name)
-        raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
+            gemm_time = grad_act_time + grad_wt_time
+            reduction_time = 0.0
+        elif self.t == "CR":
+            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name)
+        elif self.t == "RC":
+            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name)
+        else:
+            raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
+
+        if batch > 1:
+            gemm_time *= batch
+            reduction_time *= batch
+        return gemm_time, reduction_time
 
 
     def get_embedding_f(self):
@@ -525,13 +553,11 @@ class TimeCalculationLLM(TimeCalculation):
         """
         Calculates the total computation time for a linear softmax operation using GEMM (General Matrix Multiply) and pointwise operations.
         """
-        m = gemm[0]
-        k = gemm[1]
-        n = gemm[2]
-        
-        gemm_time, reduction_time = self._distributed_gemm_forward(m, k, n, "linear_softmax_f")
-        point_flop = m * (3 * n - 1)
-        point_mem = self.precision * m * (7 * n)
+        _, effective_m, k, n = self._effective_dims(gemm)
+
+        gemm_time, reduction_time = self._distributed_gemm_forward(gemm, "linear_softmax_f")
+        point_flop = effective_m * (3 * n - 1)
+        point_mem = self.precision * effective_m * (7 * n)
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-f")
             + 4 * self.O
@@ -549,12 +575,11 @@ class TimeCalculationLLM(TimeCalculation):
         return total
     def get_scale_softmax_f(self, gemm):
 
-        m = gemm[0] # get the gemm shape of former layer which is attention_score layer here
-        n = gemm[2]
-        scale_flop = m * n
+        _, effective_m, _, n = self._effective_dims(gemm)
+        scale_flop = effective_m * n
         scale_mem = self.precision * scale_flop * 2
-        softmax_flop = m * n * 3
-        softmax_mem = self.precision * m * n * 7
+        softmax_flop = effective_m * n * 3
+        softmax_mem = self.precision * effective_m * n * 7
         scale_time = (
             self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
             + 1 * self.O
@@ -578,12 +603,11 @@ class TimeCalculationLLM(TimeCalculation):
 
         return scale_time + softmax_time
     def get_scale_softmax_b(self, gemm):
-        m = gemm[0]
-        n = gemm[2]
-        scale_flop = m * n
+        _, effective_m, _, n = self._effective_dims(gemm)
+        scale_flop = effective_m * n
         scale_mem = self.precision * scale_flop * 2
-        softmax_flop = m * n * 5
-        softmax_mem = self.precision * m * n * 11
+        softmax_flop = effective_m * n * 5
+        softmax_mem = self.precision * effective_m * n * 11
         scale_time = (
             self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
             + 1 * self.O
@@ -607,9 +631,8 @@ class TimeCalculationLLM(TimeCalculation):
 
         return scale_time + softmax_time
     def get_residual_f(self, gemm):
-        m = gemm[0] # get the gemm shape of former layer which is output_proj layer here
-        n = gemm[2]
-        residual_flop = m * n
+        _, effective_m, _, n = self._effective_dims(gemm)
+        residual_flop = effective_m * n
         residual_mem = self.precision * residual_flop * 3
 
         residual_time = (
@@ -628,9 +651,8 @@ class TimeCalculationLLM(TimeCalculation):
             
         return residual_time
     def get_residual_b(self, gemm):
-        m = gemm[0]
-        n = gemm[2]
-        residual_flop = m * n
+        _, effective_m, _, n = self._effective_dims(gemm)
+        residual_flop = effective_m * n
         residual_mem = self.precision * residual_flop * 3
         residual_time = (
             self.roofline(residual_flop, residual_mem, name="pointwise-scale-f")
@@ -646,10 +668,9 @@ class TimeCalculationLLM(TimeCalculation):
             
         return residual_time
     def get_layernorm_f(self, gemm):
-        m = gemm[0] # get the gemm shape of former layer 
-        n = gemm[2]
-        flops = m * n * 5
-        mem = self.precision * m * n * 9
+        _, effective_m, _, n = self._effective_dims(gemm)
+        flops = effective_m * n * 5
+        mem = self.precision * effective_m * n * 9
         time = (
             self.roofline(flops, mem, name="pointwise-scale-f")
             + 3 * self.O
@@ -664,10 +685,9 @@ class TimeCalculationLLM(TimeCalculation):
             
         return time
     def get_layernorm_b(self, gemm):
-        m = gemm[0]
-        n = gemm[2]
-        flops = m * n * 7
-        mem = self.precision * m * n * 11
+        _, effective_m, _, n = self._effective_dims(gemm)
+        flops = effective_m * n * 7
+        mem = self.precision * effective_m * n * 11
         time = (
             self.roofline(flops, mem, name="pointwise-scale-f")
             + 4 * self.O
@@ -682,17 +702,15 @@ class TimeCalculationLLM(TimeCalculation):
             
         return time
     def get_linear_softmax_b(self, gemm):
-        m = gemm[0]
-        k = gemm[1]
-        n = gemm[2]
-        gemm_time, reduction_time = self._distributed_gemm_backward(m, k, n, "linear_softmax_b")
-        point_flop = m * n * 5
+        _, effective_m, k, n = self._effective_dims(gemm)
+        gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
+        point_flop = effective_m * n * 5
         # 1: one for one of the divisions, grad(A) (y=A/B)
         # 2: one for division and multiplication, grad(B)
         # 1: one for addition, copies turn into add
         # 1: one for sigmoid
 
-        point_mem = self.precision * m * 11
+        point_mem = self.precision * effective_m * 11
         # 3: grad(A) in pointwise division
         # 3: grad(B) in pointwise division
         # 3: addition in copy backprop
@@ -875,17 +893,23 @@ class TimeCalculationLLM(TimeCalculation):
         """Compute latency for all GEMM operations and return structured results."""
 
         # Process GEMM shapes
-        gemm_3d = LLM_util.process_gemm_shapes( #get gemm shape for each layer in transformer and linear softmax layer
+        gemm_shapes = LLM_util.process_gemm_shapes(
             batch_size, seq_len, hidden_dim, num_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
         )
-        gemm_qkv_proj, gemm_attention_score, gemm_attention_output, gemm_output_proj, gemm_ffn1, gemm_ffn2, gemm_linear = gemm_3d
+        gemm_qkv_proj = gemm_shapes["qkv_proj"]
+        gemm_attention_score = gemm_shapes["attention_score"]
+        gemm_attention_output = gemm_shapes["attention_output"]
+        gemm_output_proj = gemm_shapes["output_proj"]
+        gemm_ffn1 = gemm_shapes["ffn1"]
+        gemm_ffn2 = gemm_shapes["ffn2"]
+        gemm_linear = gemm_shapes["linear"]
 
         # Compute GEMM times and organize in structured dict
         results = {}
 
         # QKV Projection GEMM
-        qkv_proj_gemm_f, qkv_proj_reduction_f = self._distributed_gemm_forward(gemm_qkv_proj[0], gemm_qkv_proj[1], gemm_qkv_proj[2], "qkv_projection_f")
-        qkv_proj_gemm_b, qkv_proj_reduction_b = self._distributed_gemm_backward(gemm_qkv_proj[0], gemm_qkv_proj[1], gemm_qkv_proj[2], "qkv_projection_b")
+        qkv_proj_gemm_f, qkv_proj_reduction_f = self._distributed_gemm_forward(gemm_qkv_proj, "qkv_projection_f")
+        qkv_proj_gemm_b, qkv_proj_reduction_b = self._distributed_gemm_backward(gemm_qkv_proj, "qkv_projection_b")
         qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
         qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
         results['qkv_proj'] = {
@@ -895,8 +919,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # Attention Score GEMM
-        attn_score_gemm_f, attn_score_reduction_f = self._distributed_gemm_forward(gemm_attention_score[0], gemm_attention_score[1], gemm_attention_score[2], "attention_score_f")
-        attn_score_gemm_b, attn_score_reduction_b = self._distributed_gemm_backward(gemm_attention_score[0], gemm_attention_score[1], gemm_attention_score[2], "attention_score_b")
+        attn_score_gemm_f, attn_score_reduction_f = self._distributed_gemm_forward(gemm_attention_score, "attention_score_f")
+        attn_score_gemm_b, attn_score_reduction_b = self._distributed_gemm_backward(gemm_attention_score, "attention_score_b")
         attention_score_f = attn_score_gemm_f + attn_score_reduction_f
         attention_score_b = attn_score_gemm_b + attn_score_reduction_b
         results['attention_score'] = {
@@ -906,8 +930,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # Attention Output GEMM
-        attn_out_gemm_f, attn_out_reduction_f = self._distributed_gemm_forward(gemm_attention_output[0], gemm_attention_output[1], gemm_attention_output[2], "attention_output_f")
-        attn_out_gemm_b, attn_out_reduction_b = self._distributed_gemm_backward(gemm_attention_output[0], gemm_attention_output[1], gemm_attention_output[2], "attention_output_b")
+        attn_out_gemm_f, attn_out_reduction_f = self._distributed_gemm_forward(gemm_attention_output, "attention_output_f")
+        attn_out_gemm_b, attn_out_reduction_b = self._distributed_gemm_backward(gemm_attention_output, "attention_output_b")
         attention_output_f = attn_out_gemm_f + attn_out_reduction_f
         attention_output_b = attn_out_gemm_b + attn_out_reduction_b
         results['attention_output'] = {
@@ -917,8 +941,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # Output Projection GEMM
-        out_proj_gemm_f, out_proj_reduction_f = self._distributed_gemm_forward(gemm_output_proj[0], gemm_output_proj[1], gemm_output_proj[2], "output_projection_f")
-        out_proj_gemm_b, out_proj_reduction_b = self._distributed_gemm_backward(gemm_output_proj[0], gemm_output_proj[1], gemm_output_proj[2], "output_projection_b")
+        out_proj_gemm_f, out_proj_reduction_f = self._distributed_gemm_forward(gemm_output_proj, "output_projection_f")
+        out_proj_gemm_b, out_proj_reduction_b = self._distributed_gemm_backward(gemm_output_proj, "output_projection_b")
         output_proj_f = out_proj_gemm_f + out_proj_reduction_f
         output_proj_b = out_proj_gemm_b + out_proj_reduction_b
         results['output_proj'] = {
@@ -928,8 +952,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # FFN1 GEMM
-        ffn1_gemm_f, ffn1_reduction_f = self._distributed_gemm_forward(gemm_ffn1[0], gemm_ffn1[1], gemm_ffn1[2], "ffn_f")
-        ffn1_gemm_b, ffn1_reduction_b = self._distributed_gemm_backward(gemm_ffn1[0], gemm_ffn1[1], gemm_ffn1[2], "ffn_b")
+        ffn1_gemm_f, ffn1_reduction_f = self._distributed_gemm_forward(gemm_ffn1, "ffn_f")
+        ffn1_gemm_b, ffn1_reduction_b = self._distributed_gemm_backward(gemm_ffn1, "ffn_b")
         ffn1_f = ffn1_gemm_f + ffn1_reduction_f
         ffn1_b = ffn1_gemm_b + ffn1_reduction_b
         results['ffn1'] = {
@@ -939,8 +963,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # FFN2 GEMM
-        ffn2_gemm_f, ffn2_reduction_f = self._distributed_gemm_forward(gemm_ffn2[0], gemm_ffn2[1], gemm_ffn2[2], "ffn2_f")
-        ffn2_gemm_b, ffn2_reduction_b = self._distributed_gemm_backward(gemm_ffn2[0], gemm_ffn2[1], gemm_ffn2[2], "ffn2_b")
+        ffn2_gemm_f, ffn2_reduction_f = self._distributed_gemm_forward(gemm_ffn2, "ffn2_f")
+        ffn2_gemm_b, ffn2_reduction_b = self._distributed_gemm_backward(gemm_ffn2, "ffn2_b")
         ffn2_f = ffn2_gemm_f + ffn2_reduction_f
         ffn2_b = ffn2_gemm_b + ffn2_reduction_b
         results['ffn2'] = {
@@ -1131,9 +1155,7 @@ class TimeCalculationLLM(TimeCalculation):
         self,
         entry: Dict[str, Any],
         metadata: Dict[str, Dict[str, Any]],
-        m: int,
-        k: int,
-        n: int,
+        gemm_spec: Tuple[int, ...],
     ) -> None:
         """Attach tensor-parallel collectives for a GEMM to metadata and entry."""
 
@@ -1144,6 +1166,8 @@ class TimeCalculationLLM(TimeCalculation):
 
         if not tp_mode or (kp1 <= 1 and kp2 <= 1):
             return
+
+        _, effective_m, effective_k, effective_n = self._effective_dims(gemm_spec)
 
         def add_comm(direction: str, suffix: str, kind: str, size_bytes: float, participants: int, interconnect: str) -> None:
             if participants <= 1:
@@ -1170,26 +1194,26 @@ class TimeCalculationLLM(TimeCalculation):
         if tp_mode == "CR":
             if kp1 <= 1:
                 return
-            total_bytes = math.ceil(precision * m * n)
+            total_bytes = math.ceil(precision * effective_m * effective_n)
             add_comm('forward', 'reduce_scatter', 'reduce_scatter', total_bytes, kp1, 'kp1')
 
             # Backward all-gather mirrors forward reduce-scatter.
-            total_bytes = math.ceil(precision * m * n)
+            total_bytes = math.ceil(precision * effective_m * effective_n)
             size_bytes = math.ceil(total_bytes / kp1)
             add_comm('backward', 'all_gather', 'all_gather', size_bytes, kp1, 'kp1')
             return
 
         if tp_mode == "RC":
             if kp2 > 1:
-                total_bytes = math.ceil(precision * (m // max(1, kp1)) * n)
+                total_bytes = math.ceil(precision * (effective_m // max(1, kp1)) * effective_n)
                 size_bytes = math.ceil(total_bytes / kp2)
                 add_comm('forward', 'all_gather', 'all_gather', size_bytes, kp2, 'kp2')
 
             if kp1 > 1:
-                total_bytes_row = math.ceil(precision * k * m)
+                total_bytes_row = math.ceil(precision * effective_k * effective_m)
                 size_row = math.ceil(total_bytes_row / kp1)
 
-                total_bytes_col = math.ceil(precision * m * (n / max(1, kp2)))
+                total_bytes_col = math.ceil(precision * effective_m * (effective_n / max(1, kp2)))
                 size_col = math.ceil(total_bytes_col / kp1)
 
                 add_comm(
@@ -1202,10 +1226,10 @@ class TimeCalculationLLM(TimeCalculation):
                 )
 
             if kp2 > 1:
-                total_bytes_row = math.ceil(precision * (m / max(1, kp1)) * n)
+                total_bytes_row = math.ceil(precision * (effective_m / max(1, kp1)) * effective_n)
                 size_row = math.ceil(total_bytes_row / kp2)
 
-                total_bytes_col = math.ceil(precision * k * n)
+                total_bytes_col = math.ceil(precision * effective_k * effective_n)
                 size_col = math.ceil(total_bytes_col / kp2)
 
                 add_comm(
@@ -1347,15 +1371,12 @@ class TimeCalculationLLM(TimeCalculation):
             vocab_size,
             option="multiply_batch_into_m",
         )
-        (
-            gemm_qkv_proj,
-            gemm_attention_score,
-            gemm_attention_output,
-            gemm_output_proj,
-            gemm_ffn1,
-            gemm_ffn2,
-            _,
-        ) = shapes
+        gemm_qkv_proj = shapes["qkv_proj"]
+        gemm_attention_score = shapes["attention_score"]
+        gemm_attention_output = shapes["attention_output"]
+        gemm_output_proj = shapes["output_proj"]
+        gemm_ffn1 = shapes["ffn1"]
+        gemm_ffn2 = shapes["ffn2"]
 
         gemm_specs = [
             ("gemm_qkv_proj", gemm_qkv_proj),
@@ -1380,7 +1401,7 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # Use structured results from node latency phase
-        for base_name, (m, k, n) in gemm_specs:
+        for base_name, gemm_spec in gemm_specs:
             result_key = gemm_name_mapping[base_name]
             result_data = gemm_results[result_key]
             fwd_time = result_data['forward_gemm']
@@ -1405,9 +1426,7 @@ class TimeCalculationLLM(TimeCalculation):
             self._populate_transformer_comm_metadata(
                 entry=entry,
                 metadata=transformer_comm_metadata,
-                m=m,
-                k=k,
-                n=n,
+                gemm_spec=gemm_spec,
             )
 
             transformer_gemm_entries.append(entry)
