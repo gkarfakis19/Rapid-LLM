@@ -1619,7 +1619,7 @@ class LLMExecutionDispatcher:
         if flattened_root is None:
             raise RuntimeError("Pipeline flattening produced an empty graph")
 
-        setattr(self.time_calc, "flattened_pipeline_root", flattened_root)
+        self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
@@ -1669,8 +1669,8 @@ class LLMExecutionDispatcher:
 
         self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
         self.time_calc.pipeline_astrasim_time = max_sec
-        setattr(self.time_calc, "flattened_astrasim_per_rank", per_rank_sec)
-        setattr(self.time_calc, "flattened_astrasim_total", max_sec)
+        self.time_calc.flattened_astrasim_per_rank = per_rank_sec
+        self.time_calc.flattened_astrasim_total = max_sec
 
         return ExecutionResult(
             total_time=max_sec,
@@ -1722,7 +1722,6 @@ class LLMExecutionDispatcher:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
             artifact_dir_fwd = os.path.join(artifact_dir, "fwd")
             artifact_dir_bwd = os.path.join(artifact_dir, "bwd")
-            os.makedirs(artifact_dir, exist_ok=True)
             os.makedirs(artifact_dir_fwd, exist_ok=True)
             os.makedirs(artifact_dir_bwd, exist_ok=True)
 
