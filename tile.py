@@ -186,7 +186,7 @@ def generate_tile_space(memLayer, num_levels: int, dim1: int, dim2: int, dim3: i
 @lru_cache(maxsize=65536)
 def _sysarray_accesses_sig(M: int, N: int, K: int,
                            FMA_x: int, FMA_y: int,
-                           dataflow_code: Union[int, Dataflow], dtype_size: int) -> float:
+                           dataflow_code: int, dtype_size: int) -> float:
     """Estimate systolic-array traffic (bytes) for a GEMM tile.
 
     Hot-path, pure function. Memoized aggressively because many evaluations
@@ -215,7 +215,7 @@ def _sysarray_accesses_sig(M: int, N: int, K: int,
 
 
 @lru_cache(maxsize=131072)
-def _simulate_accesses_sig(inner_code: Union[int, InnerLoop], M: int, K: int, N: int,
+def _simulate_accesses_sig(inner_code: int, M: int, K: int, N: int,
                            l2_M: int, l2_K: int, l2_N: int,
                            l1_M: int, l1_K: int, l1_N: int,
                            dtype_size: int, FMA_x: int, FMA_y: int, dataflow_code: Union[int, Dataflow],
@@ -386,7 +386,7 @@ class TiledGEMM:
     # It generates instances of the class.
     # Generator (yield) means it will return one instance at a time and doesn't precompute. It's like a lazy for loop.
     @classmethod
-    def enumerate_candidates(self, core, memLayer, dim1: int, dim2: int, dim3: int,
+    def enumerate_candidates(cls, core, memLayer, dim1: int, dim2: int, dim3: int,
                               dtype_size: int = 2, original: bool = False):
         """Yield `TiledGEMM` instances across tile shapes and preferred inner codes.
 
@@ -399,7 +399,7 @@ class TiledGEMM:
         for (l0, l1, l2) in space:
             tile_dims = (l0, l1, l2, (dim1, dim2, dim3))
             for code in inner_codes:
-                yield self(code, tile_dims, core, memLayer, dtype_size)
+                yield cls(code, tile_dims, core, memLayer, dtype_size)
     
     def per_layer_capacity(self):
         """Return utilization per memory level relative to its capacity.
