@@ -16,10 +16,11 @@ Pre-requirement: Python3
 **Step 4**. (Optional) Setup AstraSim for advanced simulation capabilities:
 
 	* git submodule update --init --recursive
+	* git submodule update --remote -- astra-sim
 	* ASTRA_SIM=$(realpath ./astra-sim)
 	* cd ${ASTRA_SIM}
 	* ./build/astra_analytical/build.sh
-  * cd ..
+	* cd ..
 
 **Step 5**. Test if the installation has been successful:
 
