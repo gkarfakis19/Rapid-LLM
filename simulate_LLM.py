@@ -4,6 +4,8 @@ import sys
 from typing import Any, Dict
 from graphviz import Digraph
 import os
+
+import graphviz_async
 debug = False
 
 class Node:
@@ -768,12 +770,14 @@ class Graph:
     #     return time_fw , time_bw
 
     def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):
-        dot_fw = visualize_graph(roots, filename=output_folder + filename)
-        dot_fw.render(output_folder + filename , format="png", cleanup=True)
-        # dot_bw = visualize_graph(roots, filename=output_folder + filename + "_bwd")
-        # dot_bw.render(output_folder + filename + "_bwd" , format="png", cleanup=True)
-        # print("Forward graph saved to %s%s.png" % (output_folder , filename))
-        print("graph saved to %s%s.png" % (output_folder , filename ))
+        os.makedirs(output_folder, exist_ok=True)
+
+        printstr = " | Graph saved to %s%s.png" % (output_folder, filename)
+        def _render_graph() -> None:
+            dot_fw = visualize_graph(roots, filename=output_folder + filename)
+            dot_fw.render(output_folder + filename, format="png", cleanup=True)
+
+        graphviz_async.submit(f"{filename}.png", _render_graph, print_message=printstr)
 
 # dedeepyo : 27-May-25 : Print DFS traversal of the graph.
 def print_graph(root_nodes, visited=None):

@@ -10,6 +10,8 @@ from astrasim_lib import ensure_chakra_available
 import pandas as pd
 import yaml
 import shutil
+
+import graphviz_async
 from tile import TiledGEMM, formatBytes
 from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
@@ -31,6 +33,9 @@ os.environ["DEEPFLOW_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
     cache_handling.strip().upper(), "CACHE_READWRITE"
 )
 
+# Default location for artifacts emitted by run_perf.
+DEFAULT_OUTPUT_DIR = "output"
+
 # Global wall-clock timer: report total program runtime at exit
 _program_start_time = time.perf_counter()
 
@@ -48,7 +53,6 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Run performance analysis for LSTM, GEMM, or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
-    parser.add_argument("--output_dir", required=False, help="Directory to save the output files.")
     return parser.parse_args()
 
 def get_mode_from_config(model_config_path):
@@ -233,6 +237,7 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "summary_LLM.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
     total_time = tc_llm.calc_time_llm()
+    graphviz_async.wait_for_all()
 
     with open(output_file, "a+") as f:
         f.write("\n\n==============================================\n")
@@ -250,6 +255,7 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     # Get total inference time (prefill + decode)
     inference_timing = tc_inf.calc_total_inference_time()
     total_time = inference_timing["total_inference_time"]
+    graphviz_async.wait_for_all()
 
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
@@ -273,8 +279,7 @@ if __name__ == "__main__":
     # Load configurations
     config_hardware_path = args.hardware_config
     config_model_path = args.model_config
-    output_dir = args.output_dir if args.output_dir else "output"
-
+    output_dir = DEFAULT_OUTPUT_DIR
 
     # Read mode from the model configuration file
     mode = get_mode_from_config(config_model_path)

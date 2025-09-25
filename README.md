@@ -83,14 +83,14 @@ execution_backend:
  **How**:   
 * Specify the GEMM parameters in configs/model-config/GEMM.yaml
 * Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/GEMM.yaml --output_dir [/path/to/output/directory]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/GEMM.yaml
 
 (2) Performance Prediction Mode (LSTM End-2-End Application)
  **When to use**: Use for End-2-End LSTM prediction  
  **How**:   
 * Specify the LSTM parameters in configs/model-config/LSTM.yaml
 * Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LSTM.yaml --output_dir [/path/to/output/directory]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LSTM.yaml
         
 
 (3) Performance Prediction Mode (LLM mode)
@@ -98,9 +98,9 @@ execution_backend:
  **How**:   
 * Specify the LLM parameters in configs/model-config/LLM.yaml
 * Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LLM.yaml --output_dir [/path/to/output/directory]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LLM.yaml
 
-LLM Mode is WIP. Not all parallelism configs are supported, and limited validation has been performed.
+LLM Mode is WIP. Not all parallelism configs are supported, and limited validation has been performed. Results are saved under `output/<mode>`.
 
 (4) Performance Prediction Mode (using main.py standalone argument; this is somewhat equivalent of option 2, for running on slurm)
 * python main.py stand_alone --exp_dir [/path/to/output/result/directory] --exp_config configs/[config.yaml]
@@ -135,8 +135,7 @@ DeepFlow can generate and visualize network communication artifacts when using A
 ```bash
 DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSIST_ARTIFACT_VIZ=1 python run_perf.py \
   --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/LLM.yaml \
-  --output_dir output
+  --model_config configs/model-config/LLM.yaml
 ```
 
 ## Tips ##

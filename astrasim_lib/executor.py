@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.setrecursionlimit(10000)
 
+import graphviz_async
 from graphviz import Digraph
 
 from .config_generation import ASTRA_DEBUG, generate_astrasim_configs_from_hw
@@ -135,18 +136,18 @@ def _visualize_et_files(et_paths: List[str]) -> None:
     if not et_paths:
         return
 
-    for et_path in et_paths:
+    def _render_et_file(et_path: str) -> None:
         try:
             fh = chakra_open(et_path)
         except OSError as exc:
             print(f"[WARN] Failed to open {et_path} for visualization: {exc}")
-            continue
+            return
 
         meta = pb.GlobalMetadata()
         if not chakra_decode(fh, meta):
             print(f"[WARN] {et_path} does not contain GlobalMetadata; skipping graph output")
             fh.close()
-            continue
+            return
 
         nodes: List[pb.Node] = []
         while True:
@@ -211,9 +212,17 @@ def _visualize_et_files(et_paths: List[str]) -> None:
                 except FileNotFoundError:
                     # Some graphviz versions return path without creating file when empty graph
                     pass
-            print(f"[AstraSim] Saved ET graph visualization to {final_png}")
         except Exception as exc:
             print(f"[WARN] Failed to render Graphviz graph for {et_path}: {exc}")
+
+    for et_path in et_paths:
+        message = f" | Saved ET graph visualization to {et_path}.png"
+        graphviz_async.submit(
+            f"et:{os.path.basename(et_path)}",
+            _render_et_file,
+            et_path,
+            print_message=message,
+        )
 
 
 
