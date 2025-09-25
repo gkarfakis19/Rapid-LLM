@@ -13,8 +13,7 @@ import shutil
 from tile import TiledGEMM, formatBytes
 from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
-from timecalculation_inf import calculate_llm_inference_prefill
-from simulate_inf import simulate_llm_inference_prefill
+from time_calculation_inf import TimeCalculationLLMInference
 from LLM_util import  process_gemm_shapes, caltime
 
 algByte = False  # algorithmic ops false
@@ -254,9 +253,23 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
 
 
 def _run_llm_inference_prefill(exp_hw_config, exp_model_config, exp_dir, mode):
-    artifacts = calculate_llm_inference_prefill(exp_hw_config, exp_model_config, mode, exp_dir)
-    summary = simulate_llm_inference_prefill(artifacts, exp_dir)
-    print(f"LLM inference prefill completed. Total time: {summary.total_time}")
+    tc_inf = TimeCalculationLLMInference(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
+    total_time = tc_inf.calc_time()
+
+    output_path = os.path.join(exp_dir, "LLM_inference_prefill_results.txt")
+    os.makedirs(exp_dir, exist_ok=True)
+    with open(output_path, "w") as handle:
+        handle.write("\n\n==============================================\n")
+        handle.write("Inference Prefill Results\n")
+        handle.write("==============================================\n")
+        handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
+        handle.write(f"Prefill Time: {total_time:.8f}\n")
+
+    print(
+        "LLM inference prefill total time: {} (mode={})".format(
+            total_time, tc_inf.execution_mode.value
+        )
+    )
 
 def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
     base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)

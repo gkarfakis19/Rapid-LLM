@@ -1245,19 +1245,168 @@ class TimeCalculationLLM(TimeCalculation):
         kp1 = self.kp1 if self.kp1 else 1
         kp2 = self.kp2 if self.kp2 else 1
         return int(kp1 * kp2)
-    
+
+    def _prepare_execution_graphs(
+        self,
+        *,
+        node_breakdown: Dict[str, float],
+        gemm_results: Dict[str, Dict[str, Any]],
+        batch_size: int,
+        seq_len: int,
+        hidden_dim: int,
+        num_heads: int,
+        ffn_dim: int,
+        vocab_size: int,
+        include_pipeline_backward: bool,
+        include_transformer_backward: bool,
+    ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
+        """Build pipeline/transformer graphs shared across training and inference."""
+
+        reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
+        local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
+        embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
+        softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
+        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
+
+        comm_metadata = self._build_comm_metadata(
+            reduction_sizes=reduction_sizes,
+            local_comp=local_comp,
+            embedding_size=embedding_size,
+            softmax_size=softmax_size,
+            cross_layer_bytes=cross_layer_bytes,
+        )
+
+        shapes = LLM_util.process_gemm_shapes(
+            batch_size,
+            seq_len,
+            hidden_dim,
+            num_heads,
+            ffn_dim,
+            vocab_size,
+            option="multiply_batch_into_m",
+        )
+
+        transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
+        transformer_gemm_entries: List[Dict[str, Any]] = []
+        gemm_specs = [
+            ("gemm_qkv_proj", shapes["qkv_proj"]),
+            ("gemm_attn_score", shapes["attention_score"]),
+            ("gemm_attn_output", shapes["attention_output"]),
+            ("gemm_output_proj", shapes["output_proj"]),
+            ("gemm_ffn1", shapes["ffn1"]),
+            ("gemm_ffn2", shapes["ffn2"]),
+        ]
+
+        gemm_name_mapping = {
+            "gemm_qkv_proj": "qkv_proj",
+            "gemm_attn_score": "attention_score",
+            "gemm_attn_output": "attention_output",
+            "gemm_output_proj": "output_proj",
+            "gemm_ffn1": "ffn1",
+            "gemm_ffn2": "ffn2",
+        }
+
+        for base_name, gemm_spec in gemm_specs:
+            result_key = gemm_name_mapping[base_name]
+            result_data = gemm_results[result_key]
+            entry = {
+                "name": base_name,
+                "forward": {
+                    "duration": result_data["forward_gemm"],
+                    "reduction": result_data["forward_reduction"],
+                    "comm_keys": [],
+                },
+                "backward": {
+                    "duration": result_data["backward_gemm"],
+                    "reduction": result_data["backward_reduction"],
+                    "comm_keys": [],
+                },
+            }
+
+            self._populate_transformer_comm_metadata(
+                entry=entry,
+                metadata=transformer_comm_metadata,
+                gemm_spec=gemm_spec,
+            )
+
+            transformer_gemm_entries.append(entry)
+
+        transformer_graph: Optional[Graph] = None
+        transformer_forward_root: Optional[Any] = None
+        transformer_backward_root: Optional[Any] = None
+
+        tp_degree = self._tp_degree()
+        transformer_comp_times = {
+            "transformer": {
+                "gemms": transformer_gemm_entries,
+                "tp_degree": tp_degree,
+            }
+        }
+
+        transformer_graph = simulate_LLM.Graph(
+            mode="transformer",
+            dp=self.dp,
+            lp=self.lp,
+            kp1=self.kp1,
+            kp2=self.kp2,
+            tp_mode=self.t,
+            comp_times=transformer_comp_times,
+            comm_metadata=transformer_comm_metadata,
+            misc_metadata={},
+        )
+        transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
+        if include_transformer_backward:
+            transformer_backward_root = transformer_graph.construct_transformer_graph(direction="backward")
+
+        comp_times = {
+            "embedding_f": node_breakdown.get('embedding_f', 0.0),
+            "embedding_b": node_breakdown.get('embedding_b', 0.0) if include_pipeline_backward else 0.0,
+            "linear_softmax_f": node_breakdown.get('linear_softmax_f', 0.0),
+            "linear_softmax_b": node_breakdown.get('linear_softmax_b', 0.0) if include_pipeline_backward else 0.0,
+            "transformer_f": node_breakdown.get('transformer_time_f', 0.0),
+            "transformer_b": node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0,
+            "cross_layer_f": 0.0,
+            "cross_layer_b": 0.0,
+        }
+        misc_metadata = {
+            "num_batch": self.mb,
+            "num_layer": self.num_layers,
+            "all_reduce": getattr(self, "all_reduce", "the end"),
+        }
+
+        pipeline_graph_obj = simulate_LLM.Graph(
+            mode="pipeline",
+            dp=self.dp,
+            lp=self.lp,
+            kp1=self.kp1,
+            kp2=self.kp2,
+            tp_mode=self.t,
+            comp_times=comp_times,
+            comm_metadata=comm_metadata,
+            misc_metadata=misc_metadata,
+        )
+        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+        interconnect_params = self._build_interconnect_params()
+
+        return (
+            pipeline_graph_obj,
+            graph_root,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        )
+
     def calc_time_llm(self):
         """Calculate time for LLM model."""
         # Extract model parameters
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
-        num_layers = self.num_layers
         hidden_dim = self.hidden_dim
         seq_len = self.seq_len
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
-        num_micro_batches = self.mb
 
         # Adjust types and calculate node latencies
         self.readjust_type()
@@ -1296,144 +1445,31 @@ class TimeCalculationLLM(TimeCalculation):
         print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
         print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
 
-        reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
-        local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
-        embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
-        softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
-        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
-
-        comm_metadata = self._build_comm_metadata(
-            reduction_sizes=reduction_sizes,
-            local_comp=local_comp,
-            embedding_size=embedding_size,
-            softmax_size=softmax_size,
-            cross_layer_bytes=cross_layer_bytes,
+        (
+            pipeline_graph_obj,
+            graph_root,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        ) = self._prepare_execution_graphs(
+            node_breakdown=node_breakdown,
+            gemm_results=gemm_results,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            ffn_dim=ffn_dim,
+            vocab_size=vocab_size,
+            include_pipeline_backward=True,
+            include_transformer_backward=True,
         )
 
-        shapes = LLM_util.process_gemm_shapes(
-            batch_size,
-            seq_len,
-            hidden_dim,
-            num_heads,
-            ffn_dim,
-            vocab_size,
-            option="multiply_batch_into_m",
-        )
-        gemm_qkv_proj = shapes["qkv_proj"]
-        gemm_attention_score = shapes["attention_score"]
-        gemm_attention_output = shapes["attention_output"]
-        gemm_output_proj = shapes["output_proj"]
-        gemm_ffn1 = shapes["ffn1"]
-        gemm_ffn2 = shapes["ffn2"]
-
-        gemm_specs = [
-            ("gemm_qkv_proj", gemm_qkv_proj),
-            ("gemm_attn_score", gemm_attention_score),
-            ("gemm_attn_output", gemm_attention_output),
-            ("gemm_output_proj", gemm_output_proj),
-            ("gemm_ffn1", gemm_ffn1),
-            ("gemm_ffn2", gemm_ffn2),
-        ]
-
-        transformer_gemm_entries = []
-        transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
-
-        # Map gemm_specs names to structured results keys
-        gemm_name_mapping = {
-            "gemm_qkv_proj": "qkv_proj",
-            "gemm_attn_score": "attention_score",
-            "gemm_attn_output": "attention_output",
-            "gemm_output_proj": "output_proj",
-            "gemm_ffn1": "ffn1",
-            "gemm_ffn2": "ffn2",
-        }
-
-        # Use structured results from node latency phase
-        for base_name, gemm_spec in gemm_specs:
-            result_key = gemm_name_mapping[base_name]
-            result_data = gemm_results[result_key]
-            fwd_time = result_data['forward_gemm']
-            fwd_red = result_data['forward_reduction']
-            bwd_time = result_data['backward_gemm']
-            bwd_red = result_data['backward_reduction']
-
-            entry = {
-                "name": base_name,
-                "forward": {
-                    "duration": fwd_time,
-                    "reduction": fwd_red,
-                    "comm_keys": [],
-                },
-                "backward": {
-                    "duration": bwd_time,
-                    "reduction": bwd_red,
-                    "comm_keys": [],
-                },
-            }
-
-            self._populate_transformer_comm_metadata(
-                entry=entry,
-                metadata=transformer_comm_metadata,
-                gemm_spec=gemm_spec,
-            )
-
-            transformer_gemm_entries.append(entry)
-
-        tp_degree = self._tp_degree()
-
-        transformer_comp_times = {
-            "transformer": {
-                "gemms": transformer_gemm_entries,
-                "tp_degree": tp_degree,
-            }
-        }
-        self.transformer_graph = simulate_LLM.Graph(
-            mode="transformer",
-            dp=self.dp,
-            lp=self.lp,
-            kp1=self.kp1,
-            kp2=self.kp2,
-            tp_mode=self.t,
-            comp_times=transformer_comp_times,
-            comm_metadata=transformer_comm_metadata,
-            misc_metadata={},
-        )
-        self.transformer_forward_root = self.transformer_graph.construct_transformer_graph(direction="forward")
-        self.transformer_backward_root = self.transformer_graph.construct_transformer_graph(direction="backward")
-
+        self.transformer_graph = transformer_graph
+        self.transformer_forward_root = transformer_forward_root
+        self.transformer_backward_root = transformer_backward_root
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
-
-        # Build pipeline graph directly using node breakdown dict
-        comp_times = {
-            "embedding_f": node_breakdown['embedding_f'],
-            "embedding_b": node_breakdown['embedding_b'],
-            "linear_softmax_f": node_breakdown['linear_softmax_f'],
-            "linear_softmax_b": node_breakdown['linear_softmax_b'],
-            "transformer_f": node_breakdown['transformer_time_f'],
-            "transformer_b": node_breakdown['transformer_time_b'],
-            "cross_layer_f": 0.0,
-            "cross_layer_b": 0.0,
-        }
-        misc_metadata = {
-            "num_batch": num_micro_batches,
-            "num_layer": num_layers,
-            "all_reduce": self.all_reduce,
-        }
-
-        pipeline_graph_obj = simulate_LLM.Graph(
-            mode="pipeline",
-            dp=self.dp,
-            lp=self.lp,
-            kp1=self.kp1,
-            kp2=self.kp2,
-            tp_mode=self.t,
-            comp_times=comp_times,
-            comm_metadata=comm_metadata,
-            misc_metadata=misc_metadata,
-        )
-        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph()
-        interconnect_params = self._build_interconnect_params()
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
