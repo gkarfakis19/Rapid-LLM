@@ -991,16 +991,6 @@ def run_astra_simulation_only_onepath(
                 _visualize_et_files(et_paths)
                 _dump_et_text(et_paths)
 
-        # Debug visualization (separate from persistence)
-        for rank in rank_ids:
-            if rank > 10:
-                break
-            if ASTRA_DEBUG:
-                et_path = os.path.join(work_dir, f"llm_graph.{rank}.et")
-                _visualize_et_files([et_path])
-                _dump_et_text([et_path])
-        # exit()
-
         # Generate AstraSim configuration files using actual hardware config
         print(f"[AstraSim] Generating configuration files...")
         astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)

@@ -1,15 +1,16 @@
 model_param:
     mode: "LLM"  # Mode of operation
     run_type: "inference"
-    batch_size: 2048  # Batch size for prefill tokens
-    seq_len: 16384
-    decode_len: 512
+    batch_size: 1  # Batch size for prefill tokens
+    seq_len: 1            # Total tokens presented at once (prefill_len + decode_len)
+    decode_len: 1           # Number of autoregressive decode steps.
+    # prefill_len = seq_len - decode_len (!!)
     hidden_dim: 8192
     num_heads: 64
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size
-    num_layers: 2  # only 1 layer for now
+    num_layers: 1  
     n_tokens: 10000000000  # Number of tokens processed historically (training reference)
     communication_time: 0  # Communication time in seconds
     N_PP: 1  # pipeline degree
@@ -17,5 +18,5 @@ model_param:
 
     # Inference-specific configuration
     inference:
-        sample_every: 32  # Sample decode steps every N steps for efficiency
+        sample_every: 256  # Sample decode steps every N steps for efficiency
         force_sample_last: true  # Always sample the final decode step

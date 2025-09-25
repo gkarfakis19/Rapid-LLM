@@ -1,11 +1,10 @@
 """LLM inference prefill time-calculation entry points."""
 
 from __future__ import annotations
-
 import os
-
+from typing import Dict, Tuple
 from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM
-from simulate_inf import InferenceEngine, InferenceConfig, DecodeGraph
+from simulate_inf import InferenceConfig, InferenceEngine
 
 
 class TimeCalculationLLMInference(TimeCalculationLLM):
@@ -13,15 +12,134 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
     def __init__(self, hw_config, model_config, mode, output_dir: str | None = None):
         super().__init__(hw_config, model_config, mode, output_dir)
+        self._raw_model_config = model_config
+
+    def _decode_node_breakdown(
+        self,
+        *,
+        gemm_results: Dict[str, Dict[str, float]],
+        batch_size: int,
+        total_seq_len: int,
+    ) -> Dict[str, float]:
+        head_dim = self.hidden_dim // self.num_heads
+        attention_score_shape = (
+            batch_size * self.num_heads,
+            1,
+            head_dim,
+            total_seq_len,
+        )
+        attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
+
+        kv_cache_enabled = getattr(self.model, "kv_cache_enabled", True)
+        output_seq_len = 1 if kv_cache_enabled else total_seq_len
+
+        output_proj_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.hidden_dim,
+        )
+        residual1_f = self.get_residual_f(output_proj_shape)
+        layernorm1_f = self.get_layernorm_f(output_proj_shape)
+
+        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        ffn2_shape = (
+            batch_size,
+            output_seq_len,
+            ffn_dim,
+            self.hidden_dim,
+        )
+        residual2_f = self.get_residual_f(ffn2_shape)
+        layernorm2_f = self.get_layernorm_f(ffn2_shape)
+
+        linear_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.vocab_size,
+        )
+        linear_softmax_f = self.get_linear_softmax_f(linear_shape)
+
+        def _inject(name: str, forward: float, backward: float = 0.0) -> None:
+            gemm_results.setdefault(
+                name,
+                {
+                    "forward": forward,
+                    "backward": backward,
+                    "forward_gemm": forward,
+                    "forward_reduction": 0.0,
+                    "backward_gemm": backward,
+                    "backward_reduction": 0.0,
+                },
+            )
+
+        _inject("attention_scale_softmax", attention_scale_softmax_f)
+        _inject("residual1", residual1_f)
+        _inject("layernorm1", layernorm1_f)
+        _inject("residual2", residual2_f)
+        _inject("layernorm2", layernorm2_f)
+
+        layer_time = (
+            gemm_results["qkv_proj"]["forward"]
+            + gemm_results["attention_score"]["forward"]
+            + attention_scale_softmax_f
+            + gemm_results["attention_output"]["forward"]
+            + gemm_results["output_proj"]["forward"]
+            + residual1_f
+            + layernorm1_f
+            + gemm_results["ffn1"]["forward"]
+            + gemm_results["ffn2"]["forward"]
+            + residual2_f
+            + layernorm2_f
+        )
+
+        return {
+            "transformer_time_f": layer_time,
+            "transformer_time_b": 0.0,
+            "linear_softmax_f": linear_softmax_f,
+            "linear_softmax_b": 0.0,
+            "embedding_f": 0.0,
+            "embedding_b": 0.0,
+        }
+
+    def prepare_decode_graphs(
+        self,
+        *,
+        gemm_results: Dict[str, Dict[str, float]],
+        batch_size: int,
+        total_seq_len: int,
+    ):
+        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        return self._prepare_execution_graphs(
+            node_breakdown=self._decode_node_breakdown(
+                gemm_results=gemm_results,
+                batch_size=batch_size,
+                total_seq_len=total_seq_len,
+            ),
+            gemm_results=gemm_results,
+            batch_size=batch_size,
+            seq_len=total_seq_len,
+            hidden_dim=self.hidden_dim,
+            num_heads=self.num_heads,
+            ffn_dim=ffn_dim,
+            vocab_size=self.vocab_size,
+            include_pipeline_backward=False,
+            include_transformer_backward=False,
+        )
 
     def calc_time(self) -> float:
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
-        seq_len = self.seq_len
+        decode_len = self.model.decode_len
+        prefill_len = max(self.seq_len - decode_len, 0)
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
+
+        if prefill_len == 0:
+            print("Skipping prefill")
+            return 0.0
 
         self.readjust_type()
 
@@ -29,7 +147,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch_size,
             vocab_size,
             hidden_dim,
-            seq_len,
+            prefill_len,
             num_heads,
             ffn_dim,
         )
@@ -45,7 +163,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             node_breakdown=node_breakdown,
             gemm_results=gemm_results,
             batch_size=batch_size,
-            seq_len=seq_len,
+            seq_len=prefill_len,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             ffn_dim=ffn_dim,
@@ -112,15 +230,20 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             float: Total decode phase execution time
         """
         # Get inference sampling configuration
-        inference_config_dict = getattr(getattr(self, "model", None), "inference", {})
+        inference_config_dict = getattr(self.model, "inference", {}) if hasattr(self, "model") else {}
         sample_every = inference_config_dict.get('sample_every', 32)
         force_sample_last = inference_config_dict.get('force_sample_last', True)
+
+        decode_len = self.model.decode_len
+        if decode_len == 0:
+            print("Skipping decode")
+            return 0.0
 
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
             batch_size=self._effective_transformer_batch(),
-            seq_len=self.seq_len,
-            decode_len=getattr(getattr(self, "model", None), "decode_len", 512),
+            seq_len=self.seq_len - decode_len,
+            decode_len=decode_len,
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
             ffn_dim=self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim,
@@ -128,9 +251,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             num_layers=self.num_layers,
             dp=self.dp,
             lp=self.lp,
-            kp1=self.kp1 if hasattr(self, 'kp1') else 1,
-            kp2=self.kp2 if hasattr(self, 'kp2') else 1,
-            tp_mode=self.t if hasattr(self, 't') else "row_col",
+            kp1=self.kp1,   
+            kp2=self.kp2,
+            tp_mode=self.t,
             kv_cache_enabled=inference_config_dict.get('kv_cache_enabled', True),
             sample_every=sample_every,
             force_sample_last=force_sample_last
@@ -141,13 +264,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         inference_engine = InferenceEngine(
             config=inference_config,
             hw_config=self.hw_config,
-            model_config=self.model_config
+            model_config=self._raw_model_config,
+            time_calc_cls=TimeCalculationLLMInference,
         )
 
         # Build decode phase using sample-based approach with real DeepFlow integration
         decode_time, decode_samples = inference_engine._build_decode_graph()
-        print(f"Decode simulation: {len(decode_samples)} samples for {inference_config.decode_len} steps (real timing enabled)")
-
         return decode_time
 
     def calc_total_inference_time(self) -> dict:
@@ -162,6 +284,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         # Calculate decode time (new functionality)
         decode_time = self.calc_decode_time()
+        print(
+            f"[prefill] time: {prefill_time:.6f}s, "
+            f"[decode] time: {decode_time:.6f}s, "
+            f"[total] time: {prefill_time + decode_time:.6f}s"
+        )
 
         total_time = prefill_time + decode_time
 

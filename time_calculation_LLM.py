@@ -507,7 +507,11 @@ class TimeCalculationLLM(TimeCalculation):
     def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
-            gemm_time = self.getGEMMTime(m, k, n, name)[0]
+            gemm_time, _, _, mem_access = self.getGEMMTime(m, k, n, name)
+            # dram_access = mem_access[3]
+            # in GB:
+            # dram_access = dram_access / 1e9
+            # print(f"{name} gemm_time: {gemm_time}, mem_access: {dram_access} GB")
             reduction_time = 0.0
         elif self.t == "CR":
             gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name)
@@ -1312,12 +1316,12 @@ class TimeCalculationLLM(TimeCalculation):
             entry = {
                 "name": base_name,
                 "forward": {
-                    "duration": result_data["forward_gemm"],
+                    "duration": result_data["forward"],
                     "reduction": result_data["forward_reduction"],
                     "comm_keys": [],
                 },
                 "backward": {
-                    "duration": result_data["backward_gemm"],
+                    "duration": result_data["backward"],
                     "reduction": result_data["backward_reduction"],
                     "comm_keys": [],
                 },
@@ -1330,6 +1334,35 @@ class TimeCalculationLLM(TimeCalculation):
             )
 
             transformer_gemm_entries.append(entry)
+
+        # Inject non-GEMM pointwise operations so analytical and hybrid sums align
+        extra_ops = (
+            "attention_scale_softmax",
+            "residual1",
+            "layernorm1",
+            "residual2",
+            "layernorm2",
+        )
+        for op_name in extra_ops:
+            op_results = gemm_results.get(op_name)
+            if not op_results:
+                raise ValueError(f"Operation {op_name} not found in gemm_results")
+
+            transformer_gemm_entries.append(
+                {
+                    "name": f"pt_{op_name}",
+                    "forward": {
+                        "duration": op_results.get("forward", 0.0),
+                        "reduction": op_results.get("forward_reduction", 0.0),
+                        "comm_keys": [],
+                    },
+                    "backward": {
+                        "duration": op_results.get("backward", 0.0),
+                        "reduction": op_results.get("backward_reduction", 0.0),
+                        "comm_keys": [],
+                    },
+                }
+            )
 
         transformer_graph: Optional[Graph] = None
         transformer_forward_root: Optional[Any] = None
@@ -1595,6 +1628,18 @@ class LLMExecutionDispatcher:
             self.time_calc.network_model,
             self.interconnect_params,
         )
+        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        if generate_graphs:
+            if declared_mode == ExecutionMode.HYBRID:
+                filename = "/hybrid_graph"
+            else:
+                filename = "/analytical_graph"
+            self.pipeline_graph.save_graph(
+                timed_root,
+                self.time_calc.output_dir,
+                filename,
+            )
+
         # Persist timed root for any downstream consumer
         self.pipeline_root = timed_root
         total_time = self.pipeline_graph.simulate(timed_root)
@@ -1602,6 +1647,14 @@ class LLMExecutionDispatcher:
 
     def _run_hybrid(self) -> ExecutionResult:
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+
+        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        if generate_graphs:
+            self.transformer_graph.save_graph(
+                self.transformer_forward_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer",
+            )
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
         return self._run_pipeline_with_analytical_comm(ExecutionMode.HYBRID)
@@ -1660,7 +1713,7 @@ class LLMExecutionDispatcher:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
-                "pipeline_graph_pre`",
+                "/pipeline_graph_pre",
             )
         self.pipeline_root = flattened_root
 
@@ -1694,6 +1747,16 @@ class LLMExecutionDispatcher:
 
         dp_count = max(1, getattr(self.time_calc, "dp", 1))
         expected_rank_count = dp_count * len(unique_hw_ids)
+        # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
+        # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
+        if expected_rank_count == 1:
+            if len(per_rank_sec) > 2:
+                raise RuntimeError(
+                    "AstraSim rank count mismatch for flattened execution: "
+                    f"expected {expected_rank_count}, got {len(per_rank_sec)}"
+                )
+            per_rank_sec = per_rank_sec[:1]
+
         if len(per_rank_sec) != expected_rank_count:
             raise RuntimeError(
                 "AstraSim rank count mismatch for flattened execution: "
@@ -1746,8 +1809,6 @@ class LLMExecutionDispatcher:
 
     def _run_transformer_astrasim(self, mode: ExecutionMode) -> Optional[TransformerTimings]:
         del mode  # mode currently unused but kept for signature consistency
-        if not self.transformer_forward_root or not self.transformer_backward_root:
-            return None
 
         # Use hierarchical artifact directory when persisting artifacts for transformer simulation
         artifact_dir = self.time_calc.output_dir
@@ -1760,34 +1821,41 @@ class LLMExecutionDispatcher:
             artifact_dir_bwd = os.path.join(artifact_dir, "bwd")
             os.makedirs(artifact_dir_fwd, exist_ok=True)
             os.makedirs(artifact_dir_bwd, exist_ok=True)
+        should_mute = getattr(self.time_calc, "quiet_astrasim", False)
 
-        fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
-            self.transformer_forward_root,
-            self.time_calc,
-            artifact_dir_fwd,
-            dp_override=1,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
-        )
-        bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
-            self.transformer_backward_root,
-            self.time_calc,
-            artifact_dir_bwd,
-            dp_override=1,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
-        )
+        fwd_per_rank = None
+        bwd_per_rank = None
+        fwd_max = 0
+        bwd_max = 0
+        if self.transformer_forward_root:
+            fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
+                self.transformer_forward_root,
+                self.time_calc,
+                artifact_dir_fwd,
+                dp_override=1,
+                persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            )
+        if self.transformer_backward_root:
+            bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
+                self.transformer_backward_root,
+                self.time_calc,
+                artifact_dir_bwd,
+                dp_override=1,
+                persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            )
 
         self.time_calc.transformer_astrasim_per_rank_forward = fwd_per_rank
         self.time_calc.transformer_astrasim_per_rank_backward = bwd_per_rank
         self.time_calc.transformer_astrasim_time_forward = fwd_max
         self.time_calc.transformer_astrasim_time_backward = bwd_max
 
-        if fwd_max <= 0 or bwd_max <= 0:
+        if fwd_max < 0 or bwd_max < 0:
             raise RuntimeError("AstraSim transformer execution returned non-positive duration")
 
         return TransformerTimings(forward=fwd_max, backward=bwd_max)
 
     def _apply_transformer_time(self, timings: TransformerTimings) -> None:
-        if timings.forward <= 0 or timings.backward <= 0:
+        if timings.forward < 0 or timings.backward < 0:
             raise ValueError("AstraSim transformer times must be positive")
 
         comp_times = getattr(self.pipeline_graph, "comp_times", None)
@@ -1841,8 +1909,8 @@ class LLMExecutionDispatcher:
         )
         attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
 
-        inference_cfg = getattr(getattr(self, "model", None), "inference", {})
-        kv_cache_enabled = inference_cfg.get("kv_cache_enabled", True)
+        model = getattr(self, "model", None)
+        kv_cache_enabled = getattr(model, "kv_cache_enabled", True) if model else True
         output_seq_len = 1 if kv_cache_enabled else total_seq_len
 
         output_proj_shape = (
@@ -1854,10 +1922,12 @@ class LLMExecutionDispatcher:
         residual1_f = self.get_residual_f(output_proj_shape)
         layernorm1_f = self.get_layernorm_f(output_proj_shape)
 
+        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+
         ffn2_shape = (
             batch_size,
             output_seq_len,
-            self.ffn_dim,
+            ffn_dim,
             self.hidden_dim,
         )
         residual2_f = self.get_residual_f(ffn2_shape)
@@ -1887,6 +1957,6 @@ class LLMExecutionDispatcher:
             + layernorm2_f
         )
 
-        total_transformer_time = layer_time * self.num_layer
+        total_transformer_time = layer_time * self.num_layers
 
         return total_transformer_time, linear_softmax_f

@@ -82,7 +82,7 @@ tech_param:
       num_links_per_mm: 400
       threshold_voltage: 0.25
       margin_voltage: 0.45
-      util: 1
+      util: 1000
     inter_node:
       latency: 5e-6
       nominal_frequency: 20e9
@@ -92,7 +92,7 @@ tech_param:
       num_links_per_mm: 20
       threshold_voltage: 0.35
       margin_voltage: 0.5
-      util: 0.96
+      util: 1000
 area_breakdown:
   device_area_budget: 1330
   proc_chip_area_budget: 826
@@ -119,7 +119,7 @@ perimeter_breakdown:
   intra_node: 0.33
   inter_node: 0.33
 system_hierarchy:
-  num_devices_per_node: 8
+  num_devices_per_node: 1
   num_nodes: 1
   inter_derate: 1
   intra_derate: 1
@@ -129,8 +129,8 @@ system_hierarchy:
   lp_inter: false
 network_topology:
   # Allowed values: ring | fc | switch
-  inter_node: fc
-  intra_node: fc
+  inter_node: ring
+  intra_node: ring
 memory_hierarchy:
   l0:
     type: SRAM-R
@@ -147,10 +147,10 @@ memory_hierarchy:
 scheduling_param:
   auto: false
   dp: 1
-  lp: 2 # pipeline stages 
+  lp: 1 # pipeline stages 
   mb: 1 # number of micro-batches
   t: "CR"
-  kp1: 4
+  kp1: 1
   kp2: 1
   # LSTM LEGACY PARAMS
   kp_hidden_dim1: 1
@@ -168,10 +168,10 @@ scheduling_param:
 
 
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
       # Note: if topology is 'switch' and value is 'auto', we default to 'halvingDoubling'.

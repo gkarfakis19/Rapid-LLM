@@ -6,100 +6,13 @@ workflows including both prefill and autoregressive decode phases.
 """
 
 import math
-from typing import Any, Dict, List, Tuple, Optional
+import os
+from typing import Any, Callable, Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
 from simulate_LLM import Graph, Node, Edge
 import LLM_util
-
-def _measure_decode_gemm(
-    *,
-    temp_time_calc,
-    name: str,
-    gemm: Tuple[int, ...],
-) -> Dict[str, float]:
-    if len(gemm) == 3:
-        gemm_args = gemm
-    elif len(gemm) == 4:
-        batch, seq_len, k_dim, n_dim = gemm
-        gemm_args = (batch * seq_len, k_dim, n_dim)
-    else:
-        raise ValueError(f"Invalid GEMM shape for {name}: {gemm}")
-
-    gemm_time, reduction_time = temp_time_calc._distributed_gemm_forward(gemm_args, f"decode_{name}_f")
-
-    return {
-        "forward": gemm_time + reduction_time,
-        "backward": 0.0,
-        "forward_gemm": gemm_time,
-        "forward_reduction": reduction_time,
-        "backward_gemm": 0.0,
-        "backward_reduction": 0.0,
-    }
-
-
-def _run_decode_step_execution(
-    *,
-    temp_time_calc,
-    gemm_results: Dict[str, Dict[str, float]],
-    gemm_shapes: Dict[str, Tuple[int, ...]],
-    batch_size: int,
-    seq_len: int,
-    total_seq_len: int,
-) -> float:
-    from time_calculation_LLM import ExecutionMode, LLMExecutionDispatcher
-
-    layer_time, linear_time = temp_time_calc.compute_decode_layer_time(
-        gemm_results=gemm_results,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        total_seq_len=total_seq_len,
-    )
-
-    node_breakdown = {
-        "transformer_time_f": layer_time,
-        "transformer_time_b": 0.0,
-        "linear_softmax_f": linear_time,
-        "linear_softmax_b": 0.0,
-        "embedding_f": 0.0,
-        "embedding_b": 0.0,
-    }
-
-    (
-        pipeline_graph,
-        pipeline_root,
-        transformer_graph,
-        transformer_forward_root,
-        _,
-        interconnect_params,
-    ) = temp_time_calc._prepare_execution_graphs(
-        node_breakdown=node_breakdown,
-        gemm_results=gemm_results,
-        batch_size=batch_size,
-        seq_len=total_seq_len,
-        hidden_dim=temp_time_calc.hidden_dim,
-        num_heads=temp_time_calc.num_heads,
-        ffn_dim=temp_time_calc.ffn_dim,
-        vocab_size=temp_time_calc.vocab_size,
-        include_pipeline_backward=False,
-        include_transformer_backward=False,
-    )
-
-    dispatcher = LLMExecutionDispatcher(
-        time_calc=temp_time_calc,
-        pipeline_graph=pipeline_graph,
-        pipeline_root=pipeline_root,
-        interconnect_params=interconnect_params,
-        transformer_graph=transformer_graph,
-        transformer_forward_root=transformer_forward_root,
-        transformer_backward_root=None,
-    )
-
-    execution_mode = getattr(temp_time_calc, "execution_mode", ExecutionMode.ANALYTICAL)
-    result = dispatcher.run(execution_mode)
-    return result.total_time
-
-
+from time_calculation_LLM import LLMExecutionDispatcher
 
 @dataclass
 class InferenceConfig:
@@ -121,18 +34,6 @@ class InferenceConfig:
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
     force_sample_last: bool = True  # Always sample final step
-
-
-@dataclass
-class DecodeStep:
-    """Represents a single decode step in autoregressive generation."""
-    step_id: int
-    generated_tokens: int  # number of newly generated tokens so far (1-indexed)
-    total_seq_len: int  # prefill length + generated tokens
-    gemm_shapes: Dict[str, Tuple[int, ...]]
-    kv_cache_size: int
-
-
 @dataclass
 class DecodeSample:
     """Represents a sampled decode step with execution results."""
@@ -151,17 +52,20 @@ class DecodeGraph(Graph):
     with evolving sequence lengths and KV-cache considerations.
     """
 
-    def __init__(self, config: InferenceConfig, *args, **kwargs):
+    def __init__(
+        self,
+        config: InferenceConfig,
+        hw_config,
+        model_config,
+        time_calc_cls: Callable[..., Any],
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.config = config
-        self.decode_steps: List[DecodeStep] = []
-        self.hw_config = None
-        self.model_config = None
-
-    def _set_execution_context(self, hw_config, model_config):
-        """Set hardware and model configs for proper execution integration."""
         self.hw_config = hw_config
         self.model_config = model_config
+        self.time_calc_cls = time_calc_cls
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -173,7 +77,7 @@ class DecodeGraph(Graph):
         Returns:
             Tuple of (total_decode_time, list_of_decode_samples)
         """
-        # Generate sample points
+        # Determine decode steps we actually simulate
         sample_points = self._generate_sample_points()
 
         # Execute graphs at sample points
@@ -193,16 +97,7 @@ class DecodeGraph(Graph):
                 option="multiply_batch_into_m"
             )
 
-            decode_step = DecodeStep(
-                step_id=step_id,
-                generated_tokens=generated_tokens,
-                total_seq_len=total_seq_len,
-                gemm_shapes=gemm_shapes,
-                kv_cache_size=total_seq_len,  # KV cache bytes still approximated by token count; refine later
-            )
-            self.decode_steps.append(decode_step)
-
-            sample_time = self._execute_decode_step_graph(
+            sample_time = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
@@ -240,7 +135,7 @@ class DecodeGraph(Graph):
 
         return sorted(sample_points)
 
-    def _execute_decode_step_graph(
+    def _execute_decode_step(
         self,
         *,
         step_id: int,
@@ -248,47 +143,90 @@ class DecodeGraph(Graph):
         gemm_shapes: Dict[str, Tuple[int, ...]],
     ) -> float:
         """Execute decode step using appropriate DeepFlow execution mode."""
-        from time_calculation_LLM import (
-            ExecutionMode,
-            Graph as DFGraph,
-            LLMExecutionDispatcher,
-            TimeCalculationLLM,
-        )
 
         if not self.hw_config or not self.model_config:
             raise RuntimeError("Hardware config and model config are required for decode step execution.")
+        if not self.time_calc_cls:
+            raise RuntimeError("time_calc_cls must be provided for decode execution.")
 
-        temp_time_calc = TimeCalculationLLM(
+        temp_time_calc = self.time_calc_cls(
             hw_config=self.hw_config,
             model_config=self.model_config,
             mode="LLM",
-            output_dir="/tmp",
+            output_dir="./output_graph/",
         )
 
-        gemm_results = {}
-        for name, shape in (
-            ("qkv_proj", gemm_shapes["qkv_proj"]),
-            ("attention_score", gemm_shapes["attention_score"]),
-            ("attention_output", gemm_shapes["attention_output"]),
-            ("output_proj", gemm_shapes["output_proj"]),
-            ("ffn1", gemm_shapes["ffn1"]),
-            ("ffn2", gemm_shapes["ffn2"]),
-            ("linear", gemm_shapes["linear"]),
-        ):
-            gemm_results[name] = _measure_decode_gemm(
-                temp_time_calc=temp_time_calc,
-                name=name,
-                gemm=shape,
+        def measure_gemm(name: str, shape: Tuple[int, ...]) -> Dict[str, float]:
+            if len(shape) == 3:
+                gemm_args = shape
+            elif len(shape) == 4:
+                batch, seq_len, k_dim, n_dim = shape
+                gemm_args = (batch * seq_len, k_dim, n_dim)
+            else:
+                raise ValueError(f"Invalid GEMM shape for {name}: {shape}")
+
+            gemm_time, reduction_time = temp_time_calc._distributed_gemm_forward(
+                gemm_args,
+                f"decode_{name}_f",
             )
 
-        return _run_decode_step_execution(
-            temp_time_calc=temp_time_calc,
+            return {
+                "forward": gemm_time + reduction_time,
+                "backward": 0.0,
+                "forward_gemm": gemm_time,
+                "forward_reduction": reduction_time,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+            }
+
+        gemm_results = {
+            name: measure_gemm(name, gemm_shapes[name])
+            for name in (
+                "qkv_proj",
+                "attention_score",
+                "attention_output",
+                "output_proj",
+                "ffn1",
+                "ffn2",
+            )
+        }
+
+        base_dir = temp_time_calc.output_dir.rstrip(os.sep)
+        sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
+        os.makedirs(sample_dir, exist_ok=True)
+        prev_output_dir = temp_time_calc.output_dir
+        temp_time_calc.output_dir = sample_dir
+
+        (
+            pipeline_graph,
+            pipeline_root,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        ) = temp_time_calc.prepare_decode_graphs(
             gemm_results=gemm_results,
-            gemm_shapes=gemm_shapes,
             batch_size=self.config.batch_size,
-            seq_len=self.config.seq_len,
             total_seq_len=total_seq_len,
         )
+
+        dispatcher = LLMExecutionDispatcher(
+            time_calc=temp_time_calc,
+            pipeline_graph=pipeline_graph,
+            pipeline_root=pipeline_root,
+            interconnect_params=interconnect_params,
+            transformer_graph=transformer_graph,
+            transformer_forward_root=transformer_forward_root,
+            transformer_backward_root=transformer_backward_root,
+        )
+
+        result = dispatcher.run(temp_time_calc.execution_mode)
+        temp_time_calc.output_dir = prev_output_dir
+        print(
+            f"[decode] sample step {step_id:04d}: seq_len={total_seq_len}, "
+            f"time={result.total_time:.6f}s, artifacts={sample_dir}"
+        )
+        return result.total_time
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
         """
@@ -305,6 +243,10 @@ class DecodeGraph(Graph):
         for idx, sample in enumerate(samples):
             if idx == 0:
                 total_time += sample.execution_time
+                print(
+                    f"[decode] integration seed step {sample.step_id:04d}: "
+                    f"time={sample.execution_time:.6f}s"
+                )
                 continue
 
             prev_sample = samples[idx - 1]
@@ -313,12 +255,27 @@ class DecodeGraph(Graph):
                 raise ValueError("Sample points must be strictly increasing")
 
             midpoint = 0.5 * (prev_sample.execution_time + sample.execution_time)
-            total_time += midpoint * step_gap
+            segment_time = midpoint * step_gap
+            total_time += segment_time
+            print(
+                f"[decode] integration segment {prev_sample.step_id:04d}->{sample.step_id:04d}: "
+                f"width={step_gap}, midpoint={midpoint:.6f}s, contribution={segment_time:.6f}s"
+            )
 
         last_sample = samples[-1]
         remaining_steps = self.config.decode_len - (last_sample.step_id + 1)
         if remaining_steps > 0:
-            total_time += remaining_steps * last_sample.execution_time
+            tail_time = remaining_steps * last_sample.execution_time
+            total_time += tail_time
+            print(
+                f"[decode] integration tail from {last_sample.step_id:04d} covering {remaining_steps} steps: "
+                f"contribution={tail_time:.6f}s"
+            )
+
+        print(
+            f"[decode] total interpolated decode time: {total_time:.6f}s "
+            f"from {len(samples)} samples"
+        )
 
         return total_time
 
@@ -332,12 +289,20 @@ class InferenceEngine:
     the overall inference execution using existing DeepFlow infrastructure.
     """
 
-    def __init__(self, config: InferenceConfig, hw_config=None, model_config=None):
+    def __init__(
+        self,
+        config: InferenceConfig,
+        hw_config=None,
+        model_config=None,
+        *,
+        time_calc_cls: Callable[..., Any] | None = None,
+    ):
         self.config = config
         self.hw_config = hw_config
         self.model_config = model_config
         self.prefill_graph: Optional[Graph] = None
         self.decode_graph: Optional[DecodeGraph] = None
+        self.time_calc_cls = time_calc_cls
 
 
     def _build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
@@ -347,6 +312,9 @@ class InferenceEngine:
         Returns:
             Tuple of (total_decode_time, decode_samples)
         """
+        if self.time_calc_cls is None:
+            raise RuntimeError("InferenceEngine requires time_calc_cls for decode graph building.")
+
         self.decode_graph = DecodeGraph(
             config=self.config,
             mode="inference",
@@ -357,11 +325,11 @@ class InferenceEngine:
             tp_mode=self.config.tp_mode,
             comp_times={},
             comm_metadata={},
-            misc_metadata={}
+            misc_metadata={},
+            hw_config=self.hw_config,
+            model_config=self.model_config,
+            time_calc_cls=self.time_calc_cls,
         )
-
-        if hasattr(self.decode_graph, '_set_execution_context'):
-            self.decode_graph._set_execution_context(self.hw_config, self.model_config)
 
         return self.decode_graph.build_decode_graph()
 

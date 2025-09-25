@@ -383,9 +383,6 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
     gemms["ffn1"] = (batch_size, output_seq_len, d_model, ffn_dim)
     gemms["ffn2"] = (batch_size, output_seq_len, ffn_dim, d_model)
 
-    # Language model head: Always only for new token(s)
-    gemms["linear"] = (batch_size, output_seq_len, d_model, vocab_size)
-
     return gemms
 
 
