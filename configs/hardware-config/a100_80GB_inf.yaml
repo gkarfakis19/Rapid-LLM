@@ -168,7 +168,7 @@ scheduling_param:
 
 
 execution_backend:
-  model: analytical # analytical | astra
+  model: astra # analytical | astra
   astra:
     backend: astra
     mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

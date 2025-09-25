@@ -565,14 +565,16 @@ class TimeCalculationLLM(TimeCalculation):
         return embedding_time + embedding_transfer_time
 
     def get_linear_softmax_f(self, gemm):
-        """
-        Calculates the total computation time for a linear softmax operation using GEMM (General Matrix Multiply) and pointwise operations.
-        """
+        """Estimate time for final projection + softmax forward."""
         _, effective_m, k, n = self._effective_dims(gemm)
 
         gemm_time, reduction_time = self._distributed_gemm_forward(gemm, "linear_softmax_f")
-        point_flop = effective_m * (3 * n - 1)
-        point_mem = self.precision * effective_m * (7 * n)
+
+        # Softmax forward: subtract max, exponentiate, sum, normalize (≈5 ops/elt)
+        point_flop = effective_m * n * 5
+        # read logits, write normalized probs, read/write intermediate buffers
+        point_mem = self.precision * effective_m * n * 8
+
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-f")
             + 4 * self.O
@@ -580,24 +582,25 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "Linear Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Linear Softmax (f) point_flop: {:,}, point_mem: {:,}".format(
                     int(point_flop / 1e9), int(point_mem / 1e9)
                 )
             )
-            print("point_time: {:,}\n".format(point_time))
+            print("Linear Softmax (f) point_time: {:,}\n".format(point_time))
 
-        total = gemm_time + reduction_time + point_time
-        return total
+        return gemm_time + reduction_time + point_time
     def get_scale_softmax_f(self, gemm):
 
         _, effective_m, _, n = self._effective_dims(gemm)
-        scale_flop = effective_m * n
-        scale_mem = self.precision * scale_flop * 2
-        softmax_flop = effective_m * n * 3
-        softmax_mem = self.precision * effective_m * n * 7
+        scale_flop = effective_m * n  # multiply by 1/sqrt(d)
+        scale_mem = self.precision * effective_m * n * 3  # read, write, reuse
+
+        softmax_flop = effective_m * n * 5  # subtract max, exp, sum, div
+        softmax_mem = self.precision * effective_m * n * 8
+
         scale_time = (
             self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
-            + 1 * self.O
+            + self.O
         )
         softmax_time = (
             self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-f")
@@ -606,130 +609,132 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "Scale Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Scale (f) flop: {:,}, mem: {:,}".format(
                     int(scale_flop / 1e9), int(scale_mem / 1e9)
                 )
             )
-            print("scale point_time: {:,}\n".format(scale_time))
-            print("softmax point_flop: {:,}, softmax point_mem: {:,}".format(
-                int(softmax_flop / 1e9), int(softmax_mem / 1e9)
-            ))
-            print("softmax point_time: {:,}\n".format(softmax_time))
+            print("Scale (f) time: {:,}".format(scale_time))
+            print(
+                "Softmax (f) flop: {:,}, mem: {:,}".format(
+                    int(softmax_flop / 1e9), int(softmax_mem / 1e9)
+                )
+            )
+            print("Softmax (f) time: {:,}\n".format(softmax_time))
 
         return scale_time + softmax_time
     def get_scale_softmax_b(self, gemm):
         _, effective_m, _, n = self._effective_dims(gemm)
         scale_flop = effective_m * n
-        scale_mem = self.precision * scale_flop * 2
-        softmax_flop = effective_m * n * 5
-        softmax_mem = self.precision * effective_m * n * 11
+        scale_mem = self.precision * effective_m * n * 3
+
+        # Backward softmax uses forward probabilities and gradient accumulation (≈6 ops/elt)
+        softmax_flop = effective_m * n * 6
+        softmax_mem = self.precision * effective_m * n * 10
+
         scale_time = (
-            self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
-            + 1 * self.O
+            self.roofline(scale_flop, scale_mem, name="pointwise-scale-b")
+            + self.O
         )
         softmax_time = (
-            self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-f")
+            self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-b")
             + 4 * self.O
         )
 
         if self.debug:
             print(
-                "(gr)Scale Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Scale (b) flop: {:,}, mem: {:,}".format(
                     int(scale_flop / 1e9), int(scale_mem / 1e9)
                 )
             )
-            print("(gr)scale point_time: {:,}\n".format(scale_time))
-            print("(gr)softmax point_flop: {:,}, softmax point_mem: {:,}".format(
-                int(softmax_flop / 1e9), int(softmax_mem / 1e9)
-            ))
-            print("(gr)softmax point_time: {:,}\n".format(softmax_time))
+            print("Scale (b) time: {:,}".format(scale_time))
+            print(
+                "Softmax (b) flop: {:,}, mem: {:,}".format(
+                    int(softmax_flop / 1e9), int(softmax_mem / 1e9)
+                )
+            )
+            print("Softmax (b) time: {:,}\n".format(softmax_time))
 
         return scale_time + softmax_time
-    def get_residual_f(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        residual_flop = effective_m * n
-        residual_mem = self.precision * residual_flop * 3
+    def get_residual_f(self, tensor_shape):
+        _, elements, _, _ = self._effective_dims(tensor_shape)
+        flops = 2 * elements  # add + bias
+        mem = self.precision * elements * 3  # read main, read residual, write out
 
-        residual_time = (
-            self.roofline(residual_flop, residual_mem, name="pointwise-scale-f")
-            + 1 * self.O
-        )
-    
+        time = self.roofline(flops, mem, name="pointwise-residual-f") + self.O
 
         if self.debug:
             print(
-                "Residual point_flop: {:,}, point_mem: {:,}".format(
-                    int(residual_flop / 1e9), int(residual_mem / 1e9)
+                "Residual (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(flops / 1e9), int(mem / 1e9)
                 )
             )
-            print("Residual point_time: {:,}\n".format(residual_time))
-            
-        return residual_time
-    def get_residual_b(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        residual_flop = effective_m * n
-        residual_mem = self.precision * residual_flop * 3
-        residual_time = (
-            self.roofline(residual_flop, residual_mem, name="pointwise-scale-f")
-            + 1 * self.O
-        )
-        if self.debug:
-            print(
-                "(gr)Residual point_flop: {:,}, point_mem: {:,}".format(
-                    int(residual_flop / 1e9), int(residual_mem / 1e9)
-                )
-            )
-            print("(gr)Residual point_time: {:,}\n".format(residual_time))
-            
-        return residual_time
-    def get_layernorm_f(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        flops = effective_m * n * 5
-        mem = self.precision * effective_m * n * 9
-        time = (
-            self.roofline(flops, mem, name="pointwise-scale-f")
-            + 3 * self.O
-        )
-        if self.debug:
-            print(
-                "Layernorm point_flop: {:,}, point_mem: {:,}".format(
-                    int(flops / 1e9), int(mem / 1e9)
-                )
-            )
-            print("Layernorm point_time: {:,}\n".format(time))
-            
+            print("Residual (f) time: {:,}\n".format(time))
+
         return time
-    def get_layernorm_b(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        flops = effective_m * n * 7
-        mem = self.precision * effective_m * n * 11
-        time = (
-            self.roofline(flops, mem, name="pointwise-scale-f")
-            + 4 * self.O
-        )
+
+    def get_residual_b(self, tensor_shape):
+        _, elements, _, _ = self._effective_dims(tensor_shape)
+        flops = elements  # dL/dx = dL/dy passthrough
+        mem = self.precision * elements * 3  # read grad, read forward residual, write grad
+
+        time = self.roofline(flops, mem, name="pointwise-residual-b") + self.O
+
         if self.debug:
             print(
-                "(gr)Layernorm point_flop: {:,}, point_mem: {:,}".format(
-                    int(flops / 1e9), int(mem / 1e9)
+                "Residual (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(flops / 1e9), int(mem / 1e9)
                 )
             )
-            print("(gr)Layernorm point_time: {:,}\n".format(time))
-            
+            print("Residual (b) time: {:,}\n".format(time))
+
+        return time
+
+    def get_layernorm_f(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+
+        # LayerNorm forward (in LN2-style batch): mean + variance + normalize + affine
+        compute_flops = elements * (2 * hidden)  # mean
+        compute_flops += elements * (3 * hidden)  # variance: square, add, divide
+        compute_flops += elements * (4 * hidden)  # normalize: x - mean, * inv_std
+        compute_flops += elements * (2 * hidden)  # affine: gamma/beta
+
+        mem_bytes = self.precision * elements * hidden * 10
+
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
+
+        if self.debug:
+            print(
+                "LayerNorm (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
+                )
+            )
+            print("LayerNorm (f) time: {:,}\n".format(time))
+
+        return time
+
+    def get_layernorm_b(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+
+        compute_flops = elements * hidden * 8
+        mem_bytes = self.precision * elements * hidden * 12
+
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
+
+        if self.debug:
+            print(
+                "LayerNorm (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
+                )
+            )
+            print("LayerNorm (b) time: {:,}\n".format(time))
+
         return time
     def get_linear_softmax_b(self, gemm):
         _, effective_m, k, n = self._effective_dims(gemm)
         gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
-        point_flop = effective_m * n * 5
-        # 1: one for one of the divisions, grad(A) (y=A/B)
-        # 2: one for division and multiplication, grad(B)
-        # 1: one for addition, copies turn into add
-        # 1: one for sigmoid
 
-        point_mem = self.precision * effective_m * 11
-        # 3: grad(A) in pointwise division
-        # 3: grad(B) in pointwise division
-        # 3: addition in copy backprop
-        # 2: sigmoid
+        point_flop = effective_m * n * 6
+        point_mem = self.precision * effective_m * n * 10
 
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-b")
@@ -738,14 +743,13 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "(gr) Linear Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Linear Softmax (b) point_flop: {:,}, point_mem: {:,}".format(
                     int(point_flop / 1e9), int(point_mem / 1e9)
                 )
             )
-            print("(gr) Linear Softmax point_time: {:,}\n".format(point_time))
+            print("Linear Softmax (b) point_time: {:,}\n".format(point_time))
 
-        total = gemm_time + reduction_time + point_time
-        return total
+        return gemm_time + reduction_time + point_time
     
     def get_embedding_b(self):
         batch = self._effective_transformer_batch()
@@ -992,28 +996,28 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_b = self.get_embedding_b()
         gemm_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
 
-        attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
-        attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
+        attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
+        attention_scale_softmax_b = self.get_scale_softmax_b(gemm_attention_score)
         gemm_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
-        residual1_f = self.get_residual_f(gemm=gemm_output_proj)
-        residual1_b = self.get_residual_b(gemm=gemm_output_proj)
+        residual1_f = self.get_residual_f(gemm_output_proj)
+        residual1_b = self.get_residual_b(gemm_output_proj)
         gemm_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
 
-        layernorm1_f = self.get_layernorm_f(gemm=gemm_output_proj)
-        layernorm1_b = self.get_layernorm_b(gemm=gemm_output_proj)
+        layernorm1_f = self.get_layernorm_f(gemm_output_proj)
+        layernorm1_b = self.get_layernorm_b(gemm_output_proj)
         gemm_results['layernorm1'] = {'forward': layernorm1_f, 'backward': layernorm1_b}
 
-        residual2_f = self.get_residual_f(gemm=gemm_ffn2)
-        residual2_b = self.get_residual_b(gemm=gemm_ffn2)
+        residual2_f = self.get_residual_f(gemm_ffn2)
+        residual2_b = self.get_residual_b(gemm_ffn2)
         gemm_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
 
-        layernorm2_f = self.get_layernorm_f(gemm=gemm_ffn2)
-        layernorm2_b = self.get_layernorm_b(gemm=gemm_ffn2)
+        layernorm2_f = self.get_layernorm_f(gemm_ffn2)
+        layernorm2_b = self.get_layernorm_b(gemm_ffn2)
         gemm_results['layernorm2'] = {'forward': layernorm2_f, 'backward': layernorm2_b}
 
-        linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
-        linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
+        linear_softmax_f = self.get_linear_softmax_f(gemm_linear)
+        linear_softmax_b = self.get_linear_softmax_b(gemm_linear)
         gemm_results['linear_softmax'] = {'forward': linear_softmax_f, 'backward': linear_softmax_b}
 
         # Calculate MHA and FFN times directly from results dict
