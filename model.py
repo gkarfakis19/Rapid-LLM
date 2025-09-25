@@ -30,11 +30,15 @@ class Model_LLM:
       self.ffn_dim          = exp_config.model_config.ffn_dim
       self.ffn_mult        = exp_config.model_config.ffn_mult
       self.n_tokens         = exp_config.model_config.n_tokens
-      self.communication_time = exp_config.model_config.communication_time
-      self.N_PP             = exp_config.model_config.N_PP
       self.all_reduce       = exp_config.model_config.all_reduce
       self.run_type         = exp_config.model_config.run_type
-      self.inference        = getattr(exp_config.model_config, 'inference', {})
+      inference_cfg = getattr(exp_config, 'inference_config', None)
+      if inference_cfg is not None:
+          self.inference_sample_every = inference_cfg.sample_every
+          self.inference_force_sample_last = inference_cfg.force_sample_last
+      else:
+          self.inference_sample_every = 32
+          self.inference_force_sample_last = True
       
       
       

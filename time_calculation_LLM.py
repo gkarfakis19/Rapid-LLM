@@ -1280,8 +1280,23 @@ class TimeCalculationLLM(TimeCalculation):
     ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
         """Build pipeline/transformer graphs shared across training and inference."""
 
-        reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
-        local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
+        if not include_pipeline_backward and not include_transformer_backward:
+            # Forward-only inference: skip training all-reduce bookkeeping.
+            reduction_sizes = {
+                'qkv_size': 0,
+                'output_size': 0,
+                'ffn_size': 0,
+                'total_size': 0,
+            }
+            local_comp = {
+                'qkv_local': 0.0,
+                'output_local': 0.0,
+                'ffn_local': 0.0,
+                'total_local': 0.0,
+            }
+        else:
+            reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
+            local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
         embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
         softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]

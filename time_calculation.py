@@ -396,8 +396,6 @@ class TimeCalculation:
             else:
                 self.ffn_dim = self.model.ffn_dim
             self.n_tokens = self.model.n_tokens
-            self.communication_time = self.model.communication_time
-            self.N_PP = self.model.N_PP
             if self.batch_size % self.dp != 0:
                 raise ValueError("Batch size must be divisible by data parallelism degree")
             self.miniB = math.ceil(self.batch_size / self.dp) # mini-batch size for each data parallel node

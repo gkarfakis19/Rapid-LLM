@@ -403,10 +403,14 @@ LLMConfig = _namedtuple(
         "ffn_mult",
         "vocab_size",
         "n_tokens",
-        "communication_time",
-        "N_PP",
         "all_reduce",
-        "inference",
+    ],
+)
+LLMInferenceConfig = _namedtuple(
+    "inference_param",
+    [
+        "sample_every",
+        "force_sample_last",
     ],
 )
 SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])
@@ -519,7 +523,7 @@ MODELConfig = _namedtuple(
     "MODELConfig",
     [
         "model_config",
-        
+        "inference_config",
     ],
 )
 
@@ -657,19 +661,24 @@ def parse_config(filename, config_type):
         )
     elif config_type == "LSTM":
         model_config = ModelLSTMConfig(**config_dict["model_param"])
-        config = MODELConfig(model_config=model_config)
+        config = MODELConfig(model_config=model_config, inference_config=None)
     elif config_type == "GEMM":
         mp = dict(config_dict["model_param"])  # copy
         if "backward" not in mp:
             mp["backward"] = False
         model_config = GEMMConfig(**mp)
-        config = MODELConfig(model_config=model_config)
+        config = MODELConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
         mp.setdefault("run_type", "training")
         mp.setdefault("decode_len", None)
+        inference_dict = dict(config_dict.get("inference_param", {}) or {})
+        inference_config = LLMInferenceConfig(
+            sample_every=inference_dict.get("sample_every", 32),
+            force_sample_last=bool(inference_dict.get("force_sample_last", True)),
+        )
         model_config = LLMConfig(**mp)
-        config = MODELConfig(model_config=model_config)
+        config = MODELConfig(model_config=model_config, inference_config=inference_config)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))
     

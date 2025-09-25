@@ -3,8 +3,6 @@ import math
 import os
 from collections import OrderedDict
 
-import pandas as pd
-
 import config
 
 def reshape_gemm_to_3d(arg,options=None):
@@ -114,84 +112,6 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_
             processed[key] = reshape_gemm_to_3d(shape, option)
 
     return processed
-
-def caltime(N_L, B, S, ntokens, comm_time, N_PP, directory, output_dir):
-
-    
-    # Directory containing the files
-    # directory = "output/Trans/"
-    
-    # os.makedirs(output_dir, exist_ok=True)
-     # Ensure the output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Define the output log file
-    log_file = os.path.join(output_dir, "summary_LLM.txt")
-    
-    
-    t_elapsed =0.0
-    # print("Time spent in different GEMMs")
-    
-    
-    with open(log_file, "w") as log:
-        t_elapsed = 0.0
-        log.write("Time spent in different GEMMs:\n")
-        print("Time spent in different GEMMs")
-
-        # Loop through files in the directory
-        for filename in os.listdir(directory):
-            if filename.endswith(".txt") and filename != "summary_LLM.txt":  # Exclude the log file
-                file_path = os.path.join(directory, filename)
-
-                data = pd.read_csv(file_path, sep=':', header=None, names=['Field', 'Value'], skipinitialspace=True)
-                # Extract the time value
-                time_row = data[data['Field'] == 'Time']
-                if not time_row.empty:
-                    time_value = float(time_row['Value'].iloc[0])
-                    print(time_value)
-                    log.write(f"{filename}: {time_value} seconds\n")
-                else:
-                    print("Time value not found in the file.")
-                
-                t_elapsed += time_value
-
-        t_elapsed *= 3.0  # FW pass + BW pass (~2x FW pass)
-        comp_time = t_elapsed
-        nbatch = ntokens / (S * B)
-        time = N_L * nbatch * t_elapsed / N_PP + comm_time
-
-        # Log and print the results
-        log.write(f"\nTotal computation time (FW + BW): {comp_time} seconds\n")
-        log.write(f"Number of tokens: {ntokens}\n")
-        log.write(f"Time to exhaust all tokens: {time} seconds ({time / 3600.0 / 24.0} days)\n")
-
-    
-    
-    # Loop through files in the directory
-    # for filename in os.listdir(directory):
-    #     if filename.endswith(".txt"):  # You can adjust the file extension as needed
-    #         file_path = os.path.join(directory, filename)
-
-    #         data = pd.read_csv(file_path, sep=':', header=None, names=['Field', 'Value'], skipinitialspace=True)
-    #         # Extract the time value
-    #         time_row = data[data['Field'] == 'Time']
-    #         if not time_row.empty:
-    #             time_value = float(time_row['Value'].iloc[0])
-    #             print(time_value)
-    #         else:
-    #             print("Time value not found in the file.")
-            
-    #         t_elapsed += time_value
-
-    # t_elapsed = t_elapsed*3.0 #FW pass + BW pass (~ 2x FW pass)
-    # comp_time = t_elapsed
-    # #comm_time = 8.85 # (hours) comes from AMPED
-    # nbatch = ntokens/(S*B)
-    # time = N_L*nbatch*t_elapsed/N_PP + comm_time
-
-    print("number of tokens:", ntokens, " | time to exhaust all tokens:", time, "(s)", " or ", time/3600.0/24.0, " days")
-    print("Performance Results written to {}".format(log_file))
-
 
 def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
     #Activations refer to output activations that need to be stored

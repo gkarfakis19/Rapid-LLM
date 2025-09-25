@@ -1,7 +1,7 @@
 model_param:
     mode: "LLM"  # Mode of operation
     run_type: "inference"
-    batch_size: 1  # Batch size
+    batch_size: 1024  # Batch size
     seq_len: 131072
     decode_len: 126976           # Number of autoregressive decode steps.
     # prefill_len = seq_len - decode_len (!!)
@@ -12,11 +12,7 @@ model_param:
     vocab_size: 800000  # Vocabulary size
     num_layers: 96  # only 1 layer for now
     n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
-    communication_time: 0  # Communication time in seconds
-    N_PP: 1  # pipeline degree
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"
-
-    # Inference-specific configuration
-    inference:
-        sample_every: 999999  # Sample decode steps every N steps for efficiency
-        force_sample_last: true  # Always sample the final decode step
+inference_param:
+    sample_every: 999999  # Sample decode steps every N steps for efficiency
+    force_sample_last: true  # Always sample the final decode step

@@ -10,6 +10,4 @@ model_param:
     vocab_size: 800000  # Vocabulary size
     num_layers: 2  # only 1 layer for now
     n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
-    communication_time: 0  # Communication time in seconds
-    N_PP: 1  # pipeline degree
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"

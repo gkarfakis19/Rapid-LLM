@@ -14,6 +14,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     def __init__(self, hw_config, model_config, mode, output_dir: str | None = None):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
+        if getattr(self.model, "run_type", "") == "inference" and self.mb != 1:
+            raise ValueError(
+                "Inference mode requires scheduling_param.mb = 1 so pipeline stages receive full tokens."
+            )
 
     def _decode_node_breakdown(
         self,
@@ -261,20 +265,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         total_time = result.total_time
 
-        graph_folder = self.output_dir.rstrip(os.sep) + os.sep
-        if self._generate_graphs and self.transformer_forward_root is not None:
-            self.transformer_graph.save_graph(
-                self.transformer_forward_root,
-                graph_folder,
-                "transformer_graph_forward_inference",
-            )
-        if self._generate_graphs and self.pipeline_root is not None:
-            self.pipeline_graph.save_graph(
-                self.pipeline_root,
-                graph_folder,
-                "pipeline_graph_inference",
-            )
-
         return total_time
 
     def calc_decode_time(self) -> float:
@@ -287,9 +277,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             float: Total decode phase execution time
         """
         # Get inference sampling configuration
-        inference_config_dict = getattr(self.model, "inference", {}) if hasattr(self, "model") else {}
-        sample_every = inference_config_dict.get('sample_every', 32)
-        force_sample_last = inference_config_dict.get('force_sample_last', True)
+        sample_every = getattr(self.model, "inference_sample_every", 32)
+        force_sample_last = getattr(self.model, "inference_force_sample_last", True)
 
         decode_len = self.model.decode_len
         if decode_len == 0:

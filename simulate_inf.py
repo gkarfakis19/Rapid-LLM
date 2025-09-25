@@ -26,7 +26,7 @@ class InferenceConfig:
     ffn_dim: int
     vocab_size: int
     num_layers: int
-    dp: int = 1  # data parallel
+    dp: int = 1  # data parallel (acts as replica count during inference)
     lp: int = 1  # layer parallel
     kp1: int = 1  # tensor parallel dim 1
     kp2: int = 1  # tensor parallel dim 2

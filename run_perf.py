@@ -14,7 +14,6 @@ from tile import TiledGEMM, formatBytes
 from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
 from time_calculation_inf import TimeCalculationLLMInference
-from LLM_util import  process_gemm_shapes, caltime
 
 algByte = False  # algorithmic ops false
 proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
@@ -31,10 +30,6 @@ _CACHE_MODE_MAP = {
 os.environ["DEEPFLOW_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
     cache_handling.strip().upper(), "CACHE_READWRITE"
 )
-
-# Execution backend for LLM workloads.
-# Options: "LLMTEST" (TimeCalculationLLM) or "LEGACY_HEURISTIC" (historical pipeline).
-llm_execution_variant = "LLMTEST"
 
 # Global wall-clock timer: report total program runtime at exit
 _program_start_time = time.perf_counter()
@@ -231,11 +226,7 @@ def run_LLM(
         _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
         return
 
-    variant = llm_execution_variant.strip().upper()
-    if variant == "LEGACY_HEURISTIC":
-        _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode)
-    else:
-        _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode)
+    _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode)
 
 
 def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
@@ -276,52 +267,6 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             total_time, tc_inf.execution_mode.value
         )
     )
-
-def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
-    base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
-    gemm_shapes = process_gemm_shapes(
-        base_tc.batch_size,
-        base_tc.seq_len,
-        base_tc.hidden_dim,
-        base_tc.num_heads,
-        base_tc.ffn_dim,
-        option="multiply_batch_into_m",
-    )
-    print(gemm_shapes)
-
-    flattened = []
-    for name, dims in gemm_shapes.items():
-        if len(dims) == 4:
-            batch, m, k, n = dims
-            flattened.append((name, (batch * m, k, n)))
-        else:
-            flattened.append((name, dims))
-
-    for i, (name, (m, k, n)) in enumerate(flattened):
-        print(f"Running main for GEMM dimensions: M={m}, K={k}, N={n} ({name}, Layer {i + 1})")
-        output_file = os.path.join(
-            exp_dir, f"summary_m{m}_n{n}_k{k}_layer{i + 1}.txt"
-        )
-
-        layer_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
-        gemm_time_info = layer_tc.getGEMMTime(m, k, n, "Cf")
-
-        with open(output_file, "w") as f:
-            f.write("Best Order: {}\n".format(gemm_time_info[1]))
-            f.write("Best Tile: {}\n".format(gemm_time_info[2]))
-            f.write("Time: {}\n".format(gemm_time_info[0]))
-
-    caltime(
-        base_tc.num_layers,
-        base_tc.batch_size,
-        base_tc.seq_len,
-        base_tc.n_tokens,
-        base_tc.communication_time,
-        base_tc.N_PP,
-        exp_dir,
-        exp_dir,
-    )
-
 
 if __name__ == "__main__":
     args = parse_arguments()
