@@ -1823,3 +1823,70 @@ class LLMExecutionDispatcher:
 
         for child in getattr(node, "children", []):
             self._assign_transformer_durations(child, visited, forward_value, backward_value)
+
+    def compute_decode_layer_time(
+        self,
+        *,
+        gemm_results: Dict[str, Dict[str, float]],
+        batch_size: int,
+        seq_len: int,
+        total_seq_len: int,
+    ) -> Tuple[float, float]:
+        head_dim = self.hidden_dim // self.num_heads
+        attention_score_shape = (
+            batch_size * self.num_heads,
+            1,
+            head_dim,
+            total_seq_len,
+        )
+        attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
+
+        inference_cfg = getattr(getattr(self, "model", None), "inference", {})
+        kv_cache_enabled = inference_cfg.get("kv_cache_enabled", True)
+        output_seq_len = 1 if kv_cache_enabled else total_seq_len
+
+        output_proj_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.hidden_dim,
+        )
+        residual1_f = self.get_residual_f(output_proj_shape)
+        layernorm1_f = self.get_layernorm_f(output_proj_shape)
+
+        ffn2_shape = (
+            batch_size,
+            output_seq_len,
+            self.ffn_dim,
+            self.hidden_dim,
+        )
+        residual2_f = self.get_residual_f(ffn2_shape)
+        layernorm2_f = self.get_layernorm_f(ffn2_shape)
+
+        linear_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.vocab_size,
+        )
+        linear_softmax_f = self.get_linear_softmax_f(linear_shape)
+        if "linear" in gemm_results:
+            gemm_results["linear"]["forward"] = linear_softmax_f
+
+        layer_time = (
+            gemm_results["qkv_proj"]["forward"]
+            + gemm_results["attention_score"]["forward"]
+            + attention_scale_softmax_f
+            + gemm_results["attention_output"]["forward"]
+            + gemm_results["output_proj"]["forward"]
+            + residual1_f
+            + layernorm1_f
+            + gemm_results["ffn1"]["forward"]
+            + gemm_results["ffn2"]["forward"]
+            + residual2_f
+            + layernorm2_f
+        )
+
+        total_transformer_time = layer_time * self.num_layer
+
+        return total_transformer_time, linear_softmax_f

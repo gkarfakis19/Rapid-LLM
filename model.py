@@ -34,6 +34,7 @@ class Model_LLM:
       self.N_PP             = exp_config.model_config.N_PP
       self.all_reduce       = exp_config.model_config.all_reduce
       self.run_type         = exp_config.model_config.run_type
+      self.inference        = getattr(exp_config.model_config, 'inference', {})
       
       
       

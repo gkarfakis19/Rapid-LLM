@@ -14,3 +14,8 @@ model_param:
     communication_time: 0  # Communication time in seconds
     N_PP: 1  # pipeline degree
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"
+
+    # Inference-specific configuration
+    inference:
+        sample_every: 32  # Sample decode steps every N steps for efficiency
+        force_sample_last: true  # Always sample the final decode step

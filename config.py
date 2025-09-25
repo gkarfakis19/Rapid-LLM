@@ -406,6 +406,7 @@ LLMConfig = _namedtuple(
         "communication_time",
         "N_PP",
         "all_reduce",
+        "inference",
     ],
 )
 SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])

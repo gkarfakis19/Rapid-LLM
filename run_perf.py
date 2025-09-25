@@ -228,7 +228,7 @@ def run_LLM(
 
     llm_run_type = getattr(exp_model_config.model_config, "run_type", "training")
     if str(llm_run_type).lower() == "inference":
-        _run_llm_inference_prefill(exp_hw_config, exp_model_config, exp_dir, mode)
+        _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
         return
 
     variant = llm_execution_variant.strip().upper()
@@ -252,21 +252,27 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
     print("Total training time: {}".format(tc_llm.get_time()))
 
 
-def _run_llm_inference_prefill(exp_hw_config, exp_model_config, exp_dir, mode):
+def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
+    """Run LLM inference simulation including prefill + decode phases."""
     tc_inf = TimeCalculationLLMInference(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
-    total_time = tc_inf.calc_time()
 
-    output_path = os.path.join(exp_dir, "LLM_inference_prefill_results.txt")
+    # Get total inference time (prefill + decode)
+    inference_timing = tc_inf.calc_total_inference_time()
+    total_time = inference_timing["total_inference_time"]
+
+    output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
     with open(output_path, "w") as handle:
         handle.write("\n\n==============================================\n")
-        handle.write("Inference Prefill Results\n")
+        handle.write("LLM Inference Results\n")
         handle.write("==============================================\n")
         handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
-        handle.write(f"Prefill Time: {total_time:.8f}\n")
+        handle.write(f"Total Inference Time: {total_time:.8f}s\n")
+        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.8f}s\n")
+        handle.write(f"Decode Time: {inference_timing['decode_time']:.8f}s\n")
 
     print(
-        "LLM inference prefill total time: {} (mode={})".format(
+        "LLM inference time: {:.6f}s (mode={})".format(
             total_time, tc_inf.execution_mode.value
         )
     )
