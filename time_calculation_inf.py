@@ -277,8 +277,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             float: Total decode phase execution time
         """
         # Get inference sampling configuration
-        sample_every = getattr(self.model, "inference_sample_every", 32)
-        force_sample_last = getattr(self.model, "inference_force_sample_last", True)
+        sample_every = self.model.inference_sample_every
+        if sample_every == -1:
+            sample_every = 2**31 - 1
 
         decode_len = self.model.decode_len
         if decode_len == 0:
@@ -301,7 +302,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             kp2=self.kp2,
             tp_mode=self.t,
             sample_every=sample_every,
-            force_sample_last=force_sample_last,
             kv_cache_fetch_overlap=self.kv_cache_fetch_overlap,
         )
 

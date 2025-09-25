@@ -410,7 +410,6 @@ LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
         "sample_every",
-        "force_sample_last",
     ],
 )
 SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])
@@ -674,8 +673,7 @@ def parse_config(filename, config_type):
         mp.setdefault("decode_len", None)
         inference_dict = dict(config_dict.get("inference_param", {}) or {})
         inference_config = LLMInferenceConfig(
-            sample_every=inference_dict.get("sample_every", 32),
-            force_sample_last=bool(inference_dict.get("force_sample_last", True)),
+            sample_every=inference_dict["sample_every"],
         )
         model_config = LLMConfig(**mp)
         config = MODELConfig(model_config=model_config, inference_config=inference_config)

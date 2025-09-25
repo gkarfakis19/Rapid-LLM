@@ -35,10 +35,8 @@ class Model_LLM:
       inference_cfg = getattr(exp_config, 'inference_config', None)
       if inference_cfg is not None:
           self.inference_sample_every = inference_cfg.sample_every
-          self.inference_force_sample_last = inference_cfg.force_sample_last
       else:
-          self.inference_sample_every = 32
-          self.inference_force_sample_last = True
+          raise ValueError("Inference configuration not found")
       
       
       

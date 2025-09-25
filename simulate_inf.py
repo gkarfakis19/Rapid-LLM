@@ -33,7 +33,6 @@ class InferenceConfig:
     tp_mode: str = "row_col"
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
-    force_sample_last: bool = True  # Always sample final step
     kv_cache_fetch_overlap: bool = False
 @dataclass
 class DecodeSample:
@@ -132,7 +131,7 @@ class DecodeGraph(Graph):
 
         # Always sample the last step if configured
         last_step = self.config.decode_len - 1
-        if self.config.force_sample_last and last_step not in sample_points:
+        if last_step not in sample_points:
             sample_points.append(last_step)
 
         return sorted(sample_points)
