@@ -13,10 +13,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
-        if getattr(self.model, "run_type", "") == "inference" and self.mb != 1:
-            raise ValueError(
-                "Inference mode requires scheduling_param.mb = 1 (WIP)."
-            )
 
     def _decode_node_breakdown(
         self,
@@ -335,6 +331,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_time, decode_samples = self.calc_decode_time()
         total_time = prefill_time + decode_time
 
+        time_to_first_token = prefill_time
+        if decode_samples:
+            time_to_first_token += decode_samples[0].execution_time
+
         head_dim = self.hidden_dim // self.num_heads
         token_bytes = LLM_util.kv_cache_token_bytes(
             batch_size=self._effective_transformer_batch(),
@@ -359,7 +359,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             return byte_val / (1024 ** 3)
 
         if decode_samples:
-            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self._effective_transformer_batch())
+            # do NOT use effective_transformer_batch here
+            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self.batch_size)
         else:
             decode_rates = None
 
@@ -379,6 +380,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "prefill_time": prefill_time,
             "decode_time": decode_time,
             "total_inference_time": total_time,
+            "time_to_first_token": time_to_first_token,
             "kv_cache_prefill_store_bytes": prefill_store_bytes,
             "kv_cache_decode_store_bytes": decode_store_bytes,
             "kv_cache_decode_fetch_bytes": decode_fetch_bytes,

@@ -156,15 +156,10 @@ class Graph:
         # If there's local computation time, create local node after edge
         local_comp_time = comm_data.get('local_comp_time', 0)
         if local_comp_time > 0:
-            if local_hw_id is None:
-                raise ValueError(f"Local compute time requires a hardware id for edge '{name}'")
-            local_node = Node(
-                name=f"{name}_local_comp",
-                op_id=op_id + 100000,  # Offset to avoid ID conflicts
-                hw_id=local_hw_id,
-                duration=local_comp_time
-            )
-            comm_edge.add_child(local_node)
+            # TODO TODO TODO
+            # We want to ignore this in the future. Skipping it directly so that we match astrasim for now.
+            # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
+            local_comp_time = 0
 
         return comm_edge
 
@@ -192,7 +187,7 @@ class Graph:
                         ib, ll = interconnect_params[interconnect_type]
                     else:
                         raise ValueError(f"Invalid interconnect type: {interconnect_type}") 
-                        
+
                     child.duration = network_model.collective(
                         kind=child.comm_type,
                         size_bytes=child.comm_size_bytes,

@@ -1710,11 +1710,19 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
+        run_kwargs = {
+            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+        }
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        if run_type == "inference":
+            run_kwargs["dp_override"] = 1
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
             artifact_dir,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            **run_kwargs,
         )
         self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
         self.time_calc.pipeline_astrasim_time = max_sec
@@ -1772,18 +1780,25 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")
 
+        run_kwargs = {
+            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+        }
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        if run_type == "inference":
+            run_kwargs["dp_override"] = 1
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             flattened_root,
             self.time_calc,
             artifact_dir,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            **run_kwargs,
         )
 
         if not per_rank_sec:
             raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
 
-        dp_count = max(1, getattr(self.time_calc, "dp", 1))
-        expected_rank_count = dp_count * len(unique_hw_ids)
+        expected_rank_count = effective_dp * len(unique_hw_ids)
         # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
         # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
         if expected_rank_count == 1:

@@ -266,12 +266,24 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write(f"Total Inference Time: {total_time:.8f}s\n")
         handle.write(f"Prefill Time: {inference_timing['prefill_time']:.8f}s\n")
         handle.write(f"Decode Time: {inference_timing['decode_time']:.8f}s\n")
+        handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.8f}s\n")
+        dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+        if dp_replicas > 1:
+            handle.write(f"Data Parallel Replicas: {dp_replicas}\n")
 
     print(
         "LLM inference time: {:.6f}s (mode={})".format(
             total_time, tc_inf.execution_mode.value
         )
     )
+    print(
+        "LLM time to first token: {:.6f}s".format(
+            inference_timing["time_to_first_token"],
+        )
+    )
+    dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+    if dp_replicas > 1:
+        print(f"Data parallel replicas: {dp_replicas}")
     if decode_rates:
         start_rate = decode_rates.get("start", 0.0)
         mid_rate = decode_rates.get("midpoint", 0.0)
@@ -285,6 +297,16 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
                 end_rate,
             )
         )
+        if dp_replicas > 1:
+            print(
+                "Aggregate decode throughput tok/s (dp={}): start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+                    dp_replicas,
+                    start_rate * dp_replicas,
+                    mid_step,
+                    mid_rate * dp_replicas,
+                    end_rate * dp_replicas,
+                )
+            )
 
 if __name__ == "__main__":
     args = parse_arguments()

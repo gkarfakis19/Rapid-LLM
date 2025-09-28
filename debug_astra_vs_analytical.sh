@@ -73,18 +73,21 @@ run_and_capture() {
     rm -f "$tmpfile"
     return 1
   fi
-  local inf_line throughput_line
+  local inf_line throughput_line ttft_line
   inf_line=$(grep -F 'LLM inference time:' "$tmpfile" | tail -n1 || true)
   throughput_line=$(grep -F 'Decode throughput tok/s:' "$tmpfile" | tail -n1 || true)
+  ttft_line=$(grep -F 'LLM time to first token:' "$tmpfile" | tail -n1 || true)
   rm -f "$tmpfile"
   case "$mode" in
     analytical)
       ANALYTICAL_INF_LINE="$inf_line"
       ANALYTICAL_TPUT_LINE="$throughput_line"
+      ANALYTICAL_TTFT_LINE="$ttft_line"
       ;;
     astra)
       ASTRA_INF_LINE="$inf_line"
       ASTRA_TPUT_LINE="$throughput_line"
+      ASTRA_TTFT_LINE="$ttft_line"
       ;;
   esac
 }
@@ -106,5 +109,7 @@ fi
 
 printf 'ANALYTICAL: %s\n' "${ANALYTICAL_INF_LINE:-LLM inference time not found}"
 printf 'ANALYTICAL: %s\n' "${ANALYTICAL_TPUT_LINE:-Decode throughput tok/s not found}"
+printf 'ANALYTICAL: %s\n' "${ANALYTICAL_TTFT_LINE:-LLM time to first token not found}"
 printf 'ASTRA: %s\n' "${ASTRA_INF_LINE:-LLM inference time not found}"
 printf 'ASTRA: %s\n' "${ASTRA_TPUT_LINE:-Decode throughput tok/s not found}"
+printf 'ASTRA: %s\n' "${ASTRA_TTFT_LINE:-LLM time to first token not found}"

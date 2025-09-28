@@ -968,7 +968,9 @@ def run_astra_simulation_only_onepath(
 
         # For now, just convert forward graph (can extend to include backward later)
         print(f"[AstraSim] Converting graph...")
-        dp_count = dp_override if dp_override is not None else time_calc_obj.dp
+        user_dp = max(1, getattr(time_calc_obj, "dp", 1))
+        run_type = getattr(getattr(time_calc_obj, "model", None), "run_type", "")
+        dp_count = dp_override if dp_override is not None else user_dp
         fwd_et_prefix, rank_ids, fwd_manifest = convert_deepflow_graph_to_chakra_et(
             fwdbwd_root,
             dp_count,
@@ -1003,7 +1005,7 @@ def run_astra_simulation_only_onepath(
         # Generate AstraSim configuration files using actual hardware config
         print(f"[AstraSim] Generating configuration files...")
         astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
-        comm_groups_dp = dp_count if dp_override is not None else getattr(time_calc_obj, "dp", 1)
+        comm_groups_dp = dp_count if dp_override is not None else user_dp
         comm_groups_path = _write_comm_groups_json(work_dir, comm_groups_dp, rank_ids)
 
         # Run AstraSim simulation on forward graph (cached via manifest)

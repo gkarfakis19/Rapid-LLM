@@ -90,13 +90,10 @@ class NetworkModel:
                 debug_label=debug_label,
             )
 
+        # TODO TODO TODO
+        # We want to ignore this in the future. Skipping it directly so that we match astrasim for now.
+        # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
         local_time = 0.0
-        if local_ops or local_bytes:
-            local_time = self._roofline(
-                local_ops,
-                local_bytes_int,
-                name=f"{debug_label}-local",
-            )
 
         overhead_kinds = {"all_reduce", "reduce_scatter", "all_gather"}
         overhead = self.O if (network_bytes and kind in overhead_kinds) else 0.0
@@ -304,23 +301,21 @@ class TimeCalculation:
         self.updateParParams(self.t, self.kp1, self.kp2)
         # # Define miniBatch size
         # self.miniB = math.ceil(self.B / self.dp)
-        if self.num_workers % (self.kp_hidden_dim1 * self.kp_hidden_dim2) != 0:
-            raise ValueError("num_workers must be divisible by (kp_hidden_dim1 * kp_hidden_dim2)")
+        
+        # Validate that total number of workers equals the product of all parallelism dimensions
+        expected_workers = self.dp * self.lp * self.kp_hidden_dim1 * self.kp_hidden_dim2
+        if self.num_workers != expected_workers:
+            raise ValueError(
+                f"Total number of workers (num_devices_per_node * num_nodes = {self.num_workers}) must equal "
+                f"dp * lp * kp_hidden_dim1 * kp_hidden_dim2 = "
+                f"{self.dp} * {self.lp} * {self.kp_hidden_dim1} * {self.kp_hidden_dim2} = {expected_workers}"
+            )
+        
+        # Calculate worker distribution across parallelism dimensions
         num_workers = self.num_workers/(self.kp_hidden_dim1*self.kp_hidden_dim2)
-        # print(f'num_workers after kp_hidden_dim1 and kp_hidden_dim2: {num_workers}')
-
-        if num_workers % self.dp != 0:
-            raise ValueError("num_workers must be divisible by dp")
         self.num_workers_dp = num_workers / self.dp # number of workers for each data parallelism batch
-        # print(f'num_workers_dp after dividing by dp: {self.num_workers_dp}')
-
-        if self.num_workers_dp % self.lp != 0:
-            raise ValueError("num_workers_dp must be divisible by lp")
         self.num_workers_lp = self.num_workers_dp / self.lp if self.lp > 1 else self.num_workers_dp #number of workers per pipeline stage
-        # print(f'num_workers_lp after dividing by lp: {self.num_workers_lp}')
-        # print(f'lp: {self.lp}')
-        if self.num_workers_lp != 1:
-            raise ValueError("num_workers_lp must be equal to 1")
+
         
         
         #check parallelism parameters
