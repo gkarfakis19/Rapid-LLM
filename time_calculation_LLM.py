@@ -1322,69 +1322,59 @@ class TimeCalculationLLM(TimeCalculation):
 
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         transformer_gemm_entries: List[Dict[str, Any]] = []
-        gemm_specs = [
-            ("qkv_proj", shapes["qkv_proj"]),
-            ("attention_score", shapes["attention_score"]),
-            ("attention_output", shapes["attention_output"]),
-            ("output_proj", shapes["output_proj"]),
-            ("ffn1", shapes["ffn1"]),
-            ("ffn2", shapes["ffn2"]),
-        ]
 
-        for base_name, gemm_spec in gemm_specs:
-            result_data = gemm_results[base_name]
-            forward_duration = result_data["forward_gemm"]
-            backward_duration = result_data["backward_gemm"]
-            entry = {
-                "name": base_name,
-                "forward": {
-                    # AstraSim models reductions through explicit comm edges, so only feed compute time here.
-                    "duration": forward_duration,
-                    "reduction": result_data["forward_reduction"],
-                    "comm_keys": [],
-                },
-                "backward": {
-                    "duration": backward_duration,
-                    "reduction": result_data["backward_reduction"],
-                    "comm_keys": [],
-                },
-            }
+        gemm_shapes = {
+            "qkv_proj": shapes["qkv_proj"],
+            "attention_score": shapes["attention_score"],
+            "attention_output": shapes["attention_output"],
+            "output_proj": shapes["output_proj"],
+            "ffn1": shapes["ffn1"],
+            "ffn2": shapes["ffn2"],
+        }
+        gemm_ops = tuple(gemm_shapes.keys())
 
-            self._populate_transformer_comm_metadata(
-                entry=entry,
-                metadata=transformer_comm_metadata,
-                gemm_spec=gemm_spec,
-            )
-
-            transformer_gemm_entries.append(entry)
-        # Inject non-GEMM pointwise operations so analytical and hybrid sums align
-        extra_ops = (
-            "attention_scale_softmax",
-            "residual1",
+        op_sequence = (
             "layernorm1",
+            "qkv_proj",
+            "attention_score",
+            "attention_scale_softmax",
+            "attention_output",
+            "output_proj",
+            "residual1",
+            "ffn1",
+            "ffn2",
             "residual2",
             "layernorm2",
         )
-        for op_name in extra_ops:
+
+        for op_name in op_sequence:
             op_results = gemm_results.get(op_name)
             if not op_results:
                 raise ValueError(f"Operation {op_name} not found in gemm_results")
 
-            transformer_gemm_entries.append(
-                {
-                    "name": f"pt_{op_name}",
-                    "forward": {
-                        "duration": op_results.get("forward", 0.0),
-                        "reduction": op_results.get("forward_reduction", 0.0),
-                        "comm_keys": [],
-                    },
-                    "backward": {
-                        "duration": op_results.get("backward", 0.0),
-                        "reduction": op_results.get("backward_reduction", 0.0),
-                        "comm_keys": [],
-                    },
-                }
-            )
+            entry_name = op_name if op_name in gemm_ops else f"pt_{op_name}"
+            entry = {
+                "name": entry_name,
+                "forward": {
+                    "duration": op_results.get("forward_gemm", op_results.get("forward", 0.0)),
+                    "reduction": op_results.get("forward_reduction", 0.0),
+                    "comm_keys": [],
+                },
+                "backward": {
+                    "duration": op_results.get("backward_gemm", op_results.get("backward", 0.0)),
+                    "reduction": op_results.get("backward_reduction", 0.0),
+                    "comm_keys": [],
+                },
+            }
+
+            if op_name in gemm_ops:
+                self._populate_transformer_comm_metadata(
+                    entry=entry,
+                    metadata=transformer_comm_metadata,
+                    gemm_spec=gemm_shapes[op_name],
+                )
+
+            transformer_gemm_entries.append(entry)
 
         transformer_graph: Optional[Graph] = None
         transformer_forward_root: Optional[Any] = None
