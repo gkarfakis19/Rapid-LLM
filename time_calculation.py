@@ -295,25 +295,25 @@ class TimeCalculation:
         self.kp_embedding_type = par.kp_embedding_type  # 1: CR, 2: RC
         self.kp_projection_type = par.kp_projection_type  # 1: CR, 2: RC
         self.t = par.t  # type of parallelism, e.g., "CR", "RC", "none"
+        self.tp = par.tp 
         self.kp1= par.kp1  # first parallelism parameter
         self.kp2 = par.kp2  # second parallelism parameter
         
         self.updateParParams(self.t, self.kp1, self.kp2)
         # # Define miniBatch size
         # self.miniB = math.ceil(self.B / self.dp)
-        
-        # Validate that total number of workers equals the product of all parallelism dimensions
-        expected_workers = self.dp * self.lp * self.kp_hidden_dim1 * self.kp_hidden_dim2
-        if self.num_workers != expected_workers:
-            raise ValueError(
-                f"Total number of workers (num_devices_per_node * num_nodes = {self.num_workers}) must equal "
-                f"dp * lp * kp_hidden_dim1 * kp_hidden_dim2 = "
-                f"{self.dp} * {self.lp} * {self.kp_hidden_dim1} * {self.kp_hidden_dim2} = {expected_workers}"
-            )
-        
-        # Calculate worker distribution across parallelism dimensions
-        num_workers = self.num_workers/(self.kp_hidden_dim1*self.kp_hidden_dim2)
+        if self.num_workers % (self.tp) != 0:
+            raise ValueError("num_workers must be divisible by tp")
+        num_workers = self.num_workers/(self.tp)
+        # print(f'num_workers after kp_hidden_dim1 and kp_hidden_dim2: {num_workers}')
+
+        if num_workers % self.dp != 0:
+            raise ValueError("num_workers must be divisible by dp")
         self.num_workers_dp = num_workers / self.dp # number of workers for each data parallelism batch
+        # print(f'num_workers_dp after dividing by dp: {self.num_workers_dp}')
+
+        if self.num_workers_dp % self.lp != 0:
+            raise ValueError("num_workers_dp must be divisible by lp")
         self.num_workers_lp = self.num_workers_dp / self.lp if self.lp > 1 else self.num_workers_dp #number of workers per pipeline stage
 
         

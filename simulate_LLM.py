@@ -1,7 +1,8 @@
 import math
 from heapq import heappush, heappop
 import sys
-from typing import Any, Dict
+from collections import deque
+from typing import Any, Dict, List, Optional, Set, Tuple
 from graphviz import Digraph
 import os
 
@@ -98,9 +99,10 @@ class Graph:
         mode: str,
         dp: int,
         lp: int,
-        kp1: int,
-        kp2: int,
-        tp_mode: str,
+        tp: int,
+        # kp1: int,
+        # kp2: int,
+        # tp_mode: str,
         comp_times: Dict[str, Any],
         comm_metadata: Dict[str, Any],
         misc_metadata: Dict[str, Any],
@@ -108,9 +110,10 @@ class Graph:
         self.mode = mode
         self.dp = int(dp)
         self.lp = int(lp)
-        self.kp1 = int(kp1) if kp1 else 1
-        self.kp2 = int(kp2) if kp2 else 1
-        self.tp_mode = tp_mode
+        self.tp = int(tp)
+        # self.kp1 = int(kp1) if kp1 else 1
+        # self.kp2 = int(kp2) if kp2 else 1
+        # self.tp_mode = tp_mode
         self.comp_times = comp_times or {}
         self.comm_metadata = comm_metadata or {}
         self.misc_metadata = misc_metadata or {}
@@ -162,6 +165,299 @@ class Graph:
             local_comp_time = 0
 
         return comm_edge
+
+    def extract_forward_graph(self, root: Any) -> Tuple[Any, Any]:
+        """Detach backward branches and return separate forward/backward clones."""
+
+        if root is None:
+            return None, None
+
+        clone_cache: Dict[str, Dict[int, Any]] = {"forward": {}, "backward": {}}
+        creation_order: Dict[str, List[Any]] = {"forward": [], "backward": []}
+        visited: Set[int] = set()
+
+        def is_backward(node: Any) -> bool:
+            direction = getattr(node, "direction", None)
+            if direction is not None and str(direction).lower() == "backward":
+                return True
+            if hasattr(node, "fwd"):
+                return bool(getattr(node, "fwd") is False)
+            return False
+
+        def classify(node: Any) -> str:
+            return "backward" if is_backward(node) else "forward"
+
+        def copy_optional_attrs(source: Any, target: Any) -> None:
+            for attr in (
+                "stage_id",
+                "micro_batch_index",
+                "layer_index",
+                "direction",
+                "tp_rank",
+                "flatten_placeholder",
+                "comm_interconnect_type",
+                "comm_type",
+                "comm_size_bytes",
+                "participants",
+                "is_cross_layer",
+                "local_hw_id",
+            ):
+                if hasattr(source, attr):
+                    setattr(target, attr, getattr(source, attr))
+
+        def ensure_clone(obj: Any, cls: str) -> Any:
+            obj_id = id(obj)
+            cache = clone_cache[cls]
+            cached = cache.get(obj_id)
+            if cached is not None:
+                return cached
+
+            if isinstance(obj, Node):
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone.memory = getattr(obj, "memory", 0)
+            elif isinstance(obj, Edge):
+                clone = Edge(
+                    obj.name,
+                    obj.op_id,
+                    obj.duration,
+                    is_all_reduce=getattr(obj, "is_all_reduce", False),
+                    comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
+                    comm_type=getattr(obj, "comm_type", None),
+                    participants=getattr(obj, "participants", 1),
+                    comm_interconnect_type=getattr(obj, "comm_interconnect_type", None),
+                )
+            elif isinstance(obj, Data_batch):
+                clone = Data_batch(obj.name, obj.batch_id, obj.duration)
+            elif isinstance(obj, Gradient):
+                clone = Gradient(obj.name, obj.op_id, obj.hw_id, obj.duration)
+            else:
+                raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
+
+            copy_optional_attrs(obj, clone)
+            cache[obj_id] = clone
+            creation_order[cls].append(clone)
+            return clone
+
+        def traverse(obj: Any) -> None:
+            if obj is None:
+                return
+
+            if isinstance(obj, (list, tuple)):
+                for item in obj:
+                    traverse(item)
+                return
+
+            obj_id = id(obj)
+            cls = classify(obj)
+            current_clone = ensure_clone(obj, cls)
+
+            for child in getattr(obj, "children", []):
+                child_cls = classify(child)
+                child_clone = ensure_clone(child, child_cls)
+                if cls == child_cls:
+                    if child_clone not in current_clone.children:
+                        current_clone.add_child(child_clone)
+
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+
+            for child in getattr(obj, "children", []):
+                traverse(child)
+
+        traverse(root)
+
+        def clone_structure(obj: Any) -> Any:
+            if obj is None:
+                return None
+            if isinstance(obj, (list, tuple)):
+                cloned_items: List[Any] = []
+                for item in obj:
+                    cloned = clone_structure(item)
+                    if cloned is not None:
+                        cloned_items.append(cloned)
+                if not cloned_items:
+                    return None
+                return tuple(cloned_items) if isinstance(obj, tuple) else cloned_items
+
+            cls = classify(obj)
+            if cls != "forward":
+                return None
+            return ensure_clone(obj, cls)
+
+        forward_root = clone_structure(root)
+        if forward_root is None:
+            forward_root = ensure_clone(root, classify(root))
+
+        candidates: List[Any] = []
+        seen: Set[int] = set()
+        for clone in creation_order["backward"]:
+            clone_id = id(clone)
+            if clone_id in seen:
+                continue
+            seen.add(clone_id)
+            backward_parents = [p for p in getattr(clone, "parents", []) if classify(p) == "backward"]
+            if backward_parents:
+                continue
+            candidates.append(clone)
+
+        if not candidates:
+            backward_root: Optional[Any] = None
+        elif len(candidates) == 1:
+            backward_root = candidates[0]
+        else:
+            backward_root = Data_batch("backward_root", -1, 0.0)
+            for candidate in candidates:
+                backward_root.add_child(candidate)
+
+        return forward_root, backward_root
+
+    def extract_backward_graph(self, root: Any) -> Any:
+        """Return a backward-only clone of the provided graph root."""
+
+        if root is None:
+            return None
+
+        def is_backward(node):
+            direction = getattr(node, "direction", None)
+            if direction is not None:
+                return str(direction).lower() == "backward"
+            if hasattr(node, "fwd"):
+                return bool(getattr(node, "fwd") is False)
+            for child in getattr(node, "children", []):
+                if getattr(child, "direction", None) == "backward" or getattr(child, "fwd", True) is False:
+                    return True
+            return False
+
+
+        visited: Set[int] = set()
+        all_objects: List[Any] = []
+
+        def collect(obj: Any) -> None:
+            if obj is None:
+                return
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+
+            if isinstance(obj, (list, tuple)):
+                for item in obj:
+                    collect(item)
+                return
+
+            all_objects.append(obj)
+            for child in getattr(obj, "children", []):
+                collect(child)
+
+        collect(root)
+
+        backward_objects = [obj for obj in all_objects if is_backward(obj)]
+        if not backward_objects:
+            return None
+
+        included_ids = {id(obj) for obj in backward_objects}
+
+        def should_include(obj: Any) -> bool:
+            if is_backward(obj):
+                return True
+            if getattr(obj, "comm_type", None):
+                return True
+            name = getattr(obj, "name", "")
+            if isinstance(obj, Node) and "local_comp" in name:
+                return True
+            return False
+
+        queue = deque(backward_objects)
+        while queue:
+            current = queue.popleft()
+            for child in getattr(current, "children", []):
+                child_id = id(child)
+                if child_id in included_ids:
+                    continue
+                if should_include(child):
+                    included_ids.add(child_id)
+                    backward_objects.append(child)
+                    queue.append(child)
+
+        backward_ids = included_ids
+        clone_cache: Dict[int, Any] = {}
+
+        def ensure_clone(obj: Any) -> Any:
+            obj_id = id(obj)
+            cached = clone_cache.get(obj_id)
+            if cached is not None:
+                return cached
+
+            if isinstance(obj, Node):
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone.memory = getattr(obj, "memory", 0)
+            elif isinstance(obj, Edge):
+                clone = Edge(
+                    obj.name,
+                    obj.op_id,
+                    obj.duration,
+                    is_all_reduce=getattr(obj, "is_all_reduce", False),
+                    comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
+                    comm_type=getattr(obj, "comm_type", None),
+                    participants=getattr(obj, "participants", 1),
+                    comm_interconnect_type=getattr(obj, "comm_interconnect_type", None),
+                )
+            elif isinstance(obj, Data_batch):
+                clone = Data_batch(obj.name, obj.batch_id, obj.duration)
+            elif isinstance(obj, Gradient):
+                clone = Gradient(obj.name, obj.op_id, obj.hw_id, obj.duration)
+            else:
+                raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
+
+            for attr in (
+                "stage_id",
+                "micro_batch_index",
+                "layer_index",
+                "direction",
+                "tp_rank",
+                "flatten_placeholder",
+                "comm_interconnect_type",
+                "comm_type",
+                "comm_size_bytes",
+                "participants",
+                "is_cross_layer",
+                "local_hw_id",
+            ):
+                if hasattr(obj, attr):
+                    setattr(clone, attr, getattr(obj, attr))
+
+            clone_cache[obj_id] = clone
+            return clone
+
+        for obj in backward_objects:
+            ensure_clone(obj)
+
+        for obj in backward_objects:
+            clone = clone_cache[id(obj)]
+            for child in getattr(obj, "children", []):
+                if id(child) not in backward_ids:
+                    continue
+                child_clone = ensure_clone(child)
+                if child_clone not in clone.children:
+                    clone.add_child(child_clone)
+
+        root_candidates: List[Any] = []
+        for obj in backward_objects:
+            parents = [p for p in getattr(obj, "parents", []) if id(p) in backward_ids]
+            if parents:
+                continue
+            root_candidates.append(clone_cache[id(obj)])
+
+        if not root_candidates:
+            return None
+        # if len(root_candidates) == 1:
+        #     return root_candidates[0]
+
+        # backward_root = Data_batch("backward_root", -1, 0.0)
+        # for candidate in root_candidates:
+            # backward_root.add_child(candidate)
+        return root_candidates[0]
 
     def convert_comm_sizes_to_times(self, roots, network_model, interconnect_params):
         """
@@ -542,7 +838,7 @@ class Graph:
         if not gemm_entries:
             raise ValueError("Transformer GEMM times not provided")
 
-        tp_degree = int(transformer_cfg.get("tp_degree", max(1, self.kp1 * self.kp2)))
+        tp_degree = self.tp
 
         root = Data_batch("transformer_root", 0, 0)
         op_id = 0
@@ -906,3 +1202,6 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
         visualize_graph(child, filename, visited, dot)
 
     return dot
+
+
+        

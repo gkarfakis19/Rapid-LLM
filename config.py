@@ -443,6 +443,7 @@ SchedulingConfig = _namedtuple(
         "kp_embedding_type",
         "kp_projection_type",
         "t",
+        "tp",
         "kp1",
         "kp2",
     ],
@@ -598,7 +599,10 @@ def parse_config(filename, config_type):
         sw_params = dict(config_dict["sw_param"])
         sw_params.setdefault("h2d_bandwidth", 12.4 * 1024 * 1024 * 1024)
         sw_config = SWConfig(**sw_params)
-        sch_config = SchedulingConfig(**config_dict["scheduling_param"])
+        sch_params = dict(config_dict["scheduling_param"])
+        if "tp" not in sch_params:
+            sch_params["tp"] = None
+        sch_config = SchedulingConfig(**sch_params)
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
         power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
         area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])

@@ -4,6 +4,7 @@ import os
 from collections import OrderedDict
 
 import config
+import csv
 
 def reshape_gemm_to_3d(arg,options=None):
     """
@@ -106,10 +107,13 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_
 
     processed = OrderedDict()
     for key, shape in gemm_shapes_4d.items():
+        print(f"Original shape for {key}: {shape}")
+        
         if key in ATTENTION_GEMM_KEYS:
             processed[key] = tuple(shape)
         else:
             processed[key] = reshape_gemm_to_3d(shape, option)
+        print(f"Processed shape for {key}: {processed[key]}")
 
     return processed
 
@@ -153,7 +157,38 @@ def getEmbeddingMem(batch_size, seq_len, hidden_dim, p, t, precision):
     mem = 4 * seq_len * batch_size * hidden_dim * p / t * precision / 2  # from https://arxiv.org/pdf/2205.05198
 
     return mem
+def save_transformer_breakdown_csv(data,filename="transformer_tensor_comparison.csv"):
+#     categories = [
+#     "Q_K_V",
+#     "Q_mul_K",
+#     "A_mul_V",
+#     "Wo_proj",
+#     "W1_proj",
+#     "W2_proj",
+#     "Softmax",
+#     "LayerNorm_MHA",
+#     "LayerNorm_FFN",
+#     "GeLU",
+#     "AllReduce_MHA",
+#     "AllReduce_FFN",
+# ]
+    with open(filename, "w", newline="") as f:
+        writer = csv.writer(f)
+        # writer.writerow(header)  # write header once
+        writer.writerow(data)     # write one row of data
+    # for i in range(len(data)):
+    #     to_csv.
+        
+    
 
+
+
+    
+    # Save to CSV file
+    # df.to_csv("transformer_tensor_comparison.csv", index=False)
+    print("Transformer breakdown saved to {}".format(filename))
+    
+    
 def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
     # Model Params
     batch_size                   = int(kwargs.get('batch_size', exp_model_config.model_config.batch_size))
