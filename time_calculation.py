@@ -302,7 +302,7 @@ class TimeCalculation:
         self.updateParParams(self.t, self.kp1, self.kp2)
         # # Define miniBatch size
         # self.miniB = math.ceil(self.B / self.dp)
-        if self.num_workers % (self.tp) != 0:
+        if self.num_workers % self.tp != 0:
             raise ValueError("num_workers must be divisible by tp")
         num_workers = self.num_workers/(self.tp)
         # print(f'num_workers after kp_hidden_dim1 and kp_hidden_dim2: {num_workers}')

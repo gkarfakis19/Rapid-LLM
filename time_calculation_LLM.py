@@ -1004,7 +1004,8 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['qkv_proj'] = {
             'forward': qkv_proj_f, 'backward': qkv_proj_b,
             'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': qkv_proj_reduction_f,
-            'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b
+            'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b,
+            'comm_size': qkv_proj_size_b
         }
 
         # Attention Score GEMM
@@ -1016,6 +1017,7 @@ class TimeCalculationLLM(TimeCalculation):
             'forward': attention_score_f, 'backward': attention_score_b,
             'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
             'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b
+            
         }
 
         # Attention Output GEMM
@@ -1037,7 +1039,8 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['output_proj'] = {
             'forward': output_proj_f, 'backward': output_proj_b,
             'forward_gemm': out_proj_gemm_f, 'forward_reduction': out_proj_reduction_f,
-            'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b
+            'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b,
+            'comm_size': out_proj_size
         }
 
         # FFN1 GEMM
@@ -1048,7 +1051,8 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['ffn1'] = {
             'forward': ffn1_f, 'backward': ffn1_b,
             'forward_gemm': ffn1_gemm_f, 'forward_reduction': ffn1_reduction_f,
-            'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b
+            'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b,
+            'comm_size': ffn1_size_b
         }
 
         # FFN2 GEMM
@@ -1059,7 +1063,8 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['ffn2'] = {
             'forward': ffn2_f, 'backward': ffn2_b,
             'forward_gemm': ffn2_gemm_f, 'forward_reduction': ffn2_reduction_f,
-            'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b
+            'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b,
+            'comm_size': ffn2_size
         }
 
         # Calculate non-GEMM operations
@@ -1071,20 +1076,20 @@ class TimeCalculationLLM(TimeCalculation):
         attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
         transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
-        residual1_f = self.get_residual_f(gemm=gemm_output_proj)
-        residual1_b = self.get_residual_b(gemm=gemm_output_proj)
+        residual1_f = self.get_residual_f(tensor_shape=gemm_output_proj)
+        residual1_b = self.get_residual_b(tensor_shape=gemm_output_proj)
         # transformer_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
 
-        layernorm1_f = self.get_layernorm_f(gemm=gemm_output_proj)
-        layernorm1_b = self.get_layernorm_b(gemm=gemm_output_proj)
+        layernorm1_f = self.get_layernorm_f(tensor_shape=gemm_output_proj)
+        layernorm1_b = self.get_layernorm_b(tensor_shape=gemm_output_proj)
         transformer_results['layernorm1'] = {'forward': layernorm1_f + residual1_f, 'backward': layernorm1_b + residual1_b}
 
-        residual2_f = self.get_residual_f(gemm=gemm_ffn2)
-        residual2_b = self.get_residual_b(gemm=gemm_ffn2)
+        residual2_f = self.get_residual_f(tensor_shape=gemm_ffn2)
+        residual2_b = self.get_residual_b(tensor_shape=gemm_ffn2)
         # transformer_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
 
-        layernorm2_f = self.get_layernorm_f(gemm=gemm_ffn2)
-        layernorm2_b = self.get_layernorm_b(gemm=gemm_ffn2)
+        layernorm2_f = self.get_layernorm_f(tensor_shape=gemm_ffn2)
+        layernorm2_b = self.get_layernorm_b(tensor_shape=gemm_ffn2)
         transformer_results['layernorm2'] = {'forward': layernorm2_f + residual2_f, 'backward': layernorm2_b + residual2_b}
 
         linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
@@ -1104,7 +1109,7 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_results['attention_output']['backward_gemm'] + transformer_results['output_proj']['backward_gemm'] +
             transformer_results['attention_scale_softmax']['backward']
         )
-        transformer_results['MHA'] = {'forward': mha_time_f, 'backward': mha_time_b, "forward_reduction": out_proj_reduction_f, "backward_reduction": qkv_proj_reduction_b, "comm_size_forward": out_proj_size, "comm_size_backward": qkv_proj_size_b}
+        transformer_results['MHA'] = {'forward': mha_time_f, 'backward': mha_time_b, "forward_reduction": out_proj_reduction_f, "backward_reduction": qkv_proj_reduction_b, "comm_size_forward": out_proj_size, "comm_size_backward": qkv_proj_size_b }
 
         ffn_time_f = transformer_results['ffn1']['forward_gemm'] + transformer_results['ffn2']['forward_gemm']
         ffn_time_b = (
@@ -1136,25 +1141,7 @@ class TimeCalculationLLM(TimeCalculation):
             f.write(f"Total Transformer Forward Time: {transformer_time_f}\n")
             f.write(f"Total Transformer Backward Time: {transformer_time_b}\n")
 
-        # Debugging output
-        # if debug:
-        #     print(f"embedding_f: {gemm_results['embedding']['forward'] * m:.1f}{second}")
-        #     print(f"qkv_proj_f: {gemm_results['qkv_proj']['forward'] * m:.1f}{second}")
-        #     print(f"attention_score_f: {gemm_results['attention_score']['forward'] * m:.1f}{second}")
-        #     print(f"attention_output_f: {gemm_results['attention_output']['forward'] * m:.1f}{second}")
-        #     print(f"output_proj_f: {gemm_results['output_proj']['forward'] * m:.1f}{second}")
-        #     print(f"residual1_f: {gemm_results['residual1']['forward'] * m:.1f}{second}")
-        #     print(f"layernorm1_f: {gemm_results['layernorm1']['forward'] * m:.1f}{second}")
-        #     print(f"ffn1_f: {gemm_results['ffn1']['forward'] * m:.1f}{second}")
-        #     print(f"ffn2_f: {gemm_results['ffn2']['forward'] * m:.1f}{second}")
-        #     print(f"residual2_f: {gemm_results['residual2']['forward'] * m:.1f}{second}")
-        #     print(f"layernorm2_f: {gemm_results['layernorm2']['forward'] * m:.1f}{second}")
-        #     print(f"linear_softmax_f: {gemm_results['linear_softmax']['forward'] * m:.1f}{second}")
-        #     print(f"MHA Time: {mha_time_f * m:.1f}{second}")
-        #     print(f"FFN Time: {ffn_time_f * m:.1f}{second}")
-        #     print(f"Transformer Time (1 layer): {transformer_time_f * m:.1f}{second}")
 
-        # Create node breakdown dict for pipeline graph construction
         node_breakdown = {
             'transformer_time_f': transformer_time_f,
             'transformer_time_b': transformer_time_b,
@@ -1218,7 +1205,8 @@ class TimeCalculationLLM(TimeCalculation):
         entry: Dict[str, Any],
         metadata: Dict[str, Dict[str, Any]],
         # gemm_spec: Tuple[int, ...],
-        comm_bytes: int,
+        comm_bytes_fwd: int,
+        comm_bytes_bwd: int,
     ) -> None:
         """Attach tensor-parallel collectives for a GEMM to metadata and entry."""
 
@@ -1265,9 +1253,9 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.tp>1:
             # total_bytes = math.ceil(precision * effective_m * effective_n)
-            # total_bytes= 
-            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes, self.tp, 'tp')
-            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes, self.tp, 'tp')
+            # total_bytes=
+            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
+            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
         # if tp_mode == "CR":
         #     if kp1 <= 1:
         #         return
@@ -1337,7 +1325,7 @@ class TimeCalculationLLM(TimeCalculation):
         self,
         *,
         node_breakdown: Dict[str, float],
-        gemm_results: Dict[str, Dict[str, Any]],
+        transformer_results: Dict[str, Dict[str, Any]],
         batch_size: int,
         seq_len: int,
         hidden_dim: int,
@@ -1400,7 +1388,9 @@ class TimeCalculationLLM(TimeCalculation):
         # gemm_output_proj = shapes["output_proj"]
         # gemm_ffn1 = shapes["ffn1"]
         # gemm_ffn2 = shapes["ffn2"]
-
+        # transformer_results = compute_all_gemm_and_node_times(
+        #     self,
+        #     batch_size,
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
 
@@ -1410,18 +1400,19 @@ class TimeCalculationLLM(TimeCalculation):
             bwd_time = spec['backward']
             fwd_red = spec.get('forward_reduction', 0.0)
             bwd_red = spec.get('backward_reduction', 0.0)
-            comm_bytes = spec.get('comm_size', 0)
+            comm_bytes_fwd = spec.get('comm_size_forward', 0)
+            comm_bytes_bwd = spec.get('comm_size_backward', 0)
 
             entry = {
                 "name": key,
                 "forward": {
-                    "duration": op_results.get("forward_gemm", op_results.get("forward", 0.0)),
-                    "reduction": op_results.get("forward_reduction", 0.0),
+                    "duration": fwd_time,
+                    "reduction": fwd_red,
                     "comm_keys": [],
                 },
                 "backward": {
-                    "duration": op_results.get("backward_gemm", op_results.get("backward", 0.0)),
-                    "reduction": op_results.get("backward_reduction", 0.0),
+                    "duration": bwd_time,
+                    "reduction": bwd_red,
                     "comm_keys": [],
                 },
             }
@@ -1429,7 +1420,8 @@ class TimeCalculationLLM(TimeCalculation):
             self._populate_transformer_comm_metadata(
                 entry=entry,
                 metadata=transformer_comm_metadata,
-                comm_bytes=comm_bytes,
+                comm_bytes_fwd=comm_bytes_fwd,
+                comm_bytes_bwd=comm_bytes_bwd,
             )
 
             transformer_operation_entries.append(entry)
@@ -1529,8 +1521,8 @@ class TimeCalculationLLM(TimeCalculation):
         # Adjust types and calculate node latencies
         self.readjust_type()
 
-        # Get structured GEMM results and node breakdown in one efficient call
-        gemm_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
+        # Get structured transformer results and node breakdown in one efficient call
+        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
 
         if self.debug:
             print(
@@ -1572,7 +1564,7 @@ class TimeCalculationLLM(TimeCalculation):
             interconnect_params,
         ) = self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
-            gemm_results=gemm_results,
+            transformer_results=transformer_results,
             batch_size=batch_size,
             seq_len=seq_len,
             hidden_dim=hidden_dim,
@@ -1588,6 +1580,9 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_backward_root = transformer_backward_root
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
+        self.transformer_graph.save_graph(transformer_forward_root, "output_graph/", "transformer_graph_forward_initial")
+        
+        self.transformer_graph.save_graph(transformer_backward_root, "output_graph/", "transformer_graph_backward_initial")
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
@@ -1596,44 +1591,44 @@ class TimeCalculationLLM(TimeCalculation):
         
         mode = self.execution_mode
         # start = time.perf_counter()
-        forward_graph, _ = self.pipeline_graph.extract_forward_graph(self.pipeline_root)
-        backward_graph= self.pipeline_graph.extract_backward_graph(self.pipeline_root)
+        # forward_graph, _ = self.pipeline_graph.extract_forward_graph(self.pipeline_root)
+        # backward_graph= self.pipeline_graph.extract_backward_graph(self.pipeline_root)
         # elapsed = time.perf_counter() - start
         # print(f"extracting forward graph took {elapsed:.3f}s")
-        setattr(self, "forward_only_root", forward_graph)
-        setattr(self, "backward_only_root", backward_graph)
-        self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"forward_path_before_dispatcher_{mode.value.lower()}")
-        self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"backward_path_before_dispacher_{mode.value.lower()}")
-        dispather_forward = LLMExecutionDispatcher(
-            time_calc=self,
-            pipeline_graph=self.pipeline_graph,
-            pipeline_root=forward_graph,
-            interconnect_params=self.pipeline_interconnect,
-            transformer_graph=self.transformer_graph,
-            transformer_forward_root=self.transformer_forward_root,
-            transformer_backward_root=self.transformer_backward_root,
-        )
-        dispatcher_backward = LLMExecutionDispatcher(
-            time_calc=self,
-            pipeline_graph=self.pipeline_graph,
-            pipeline_root=backward_graph,
-            interconnect_params=self.pipeline_interconnect,
-            transformer_graph=self.transformer_graph,
-            transformer_forward_root=self.transformer_forward_root,
-            transformer_backward_root=self.transformer_backward_root,
-        )
-        result_forward = dispather_forward.run(self.execution_mode)
-        result_backward = dispatcher_backward.run(self.execution_mode)
-        time_fw = result_forward.total_time
-        time_bw = result_backward.total_time
-        print(f"{self.execution_mode.value} pipeline forward execution time: {time_fw:.3f}s")
-        print(f"{self.execution_mode.value} pipeline backward execution time: {time_bw:.3f}s")
-        forward_graph = result_forward.graph_root
-        backward_graph = result_backward.graph_root
+        # setattr(self, "forward_only_root", forward_graph)
+        # setattr(self, "backward_only_root", backward_graph)
+        # self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"forward_path_before_dispatcher_{mode.value.lower()}")
+        # self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"backward_path_before_dispacher_{mode.value.lower()}")
+        # dispather_forward = LLMExecutionDispatcher(
+        #     time_calc=self,
+        #     pipeline_graph=self.pipeline_graph,
+        #     pipeline_root=forward_graph,
+        #     interconnect_params=self.pipeline_interconnect,
+        #     transformer_graph=self.transformer_graph,
+        #     transformer_forward_root=self.transformer_forward_root,
+        #     transformer_backward_root=self.transformer_backward_root,
+        # )
+        # dispatcher_backward = LLMExecutionDispatcher(
+        #     time_calc=self,
+        #     pipeline_graph=self.pipeline_graph,
+        #     pipeline_root=backward_graph,
+        #     interconnect_params=self.pipeline_interconnect,
+        #     transformer_graph=self.transformer_graph,
+        #     transformer_forward_root=self.transformer_forward_root,
+        #     transformer_backward_root=self.transformer_backward_root,
+        # )
+        # result_forward = dispather_forward.run(self.execution_mode)
+        # # result_backward = dispatcher_backward.run(self.execution_mode)
+        # time_fw = result_forward.total_time
+        # time_bw = result_backward.total_time
+        # print(f"{self.execution_mode.value} pipeline forward execution time: {time_fw:.3f}s")
+        # print(f"{self.execution_mode.value} pipeline backward execution time: {time_bw:.3f}s")
+        # forward_graph = result_forward.graph_root
+        # backward_graph = result_backward.graph_root
         
         
-        self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"pipeline_graph_forward_{mode.value.lower()}")
-        self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"pipeline_graph_backward_{mode.value.lower()}")
+        # self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"pipeline_graph_forward_{mode.value.lower()}")
+        # self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"pipeline_graph_backward_{mode.value.lower()}")
         
 
         
@@ -1676,30 +1671,30 @@ class TimeCalculationLLM(TimeCalculation):
 
 
 
-        self.transformer_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
-            self.transformer_forward_root,
-            self.network_model,
-            self.pipeline_interconnect,
-        )
-        self.transformer_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
-            self.transformer_backward_root,
-            self.network_model,
-            self.pipeline_interconnect,
-        )
+        # self.transformer_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
+        #     self.transformer_forward_root,
+        #     self.network_model,
+        #     self.pipeline_interconnect,
+        # )
+        # self.transformer_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+        #     self.transformer_backward_root,
+        #     self.network_model,
+        #     self.pipeline_interconnect,
+        # )
 
-        graph_folder = self.output_dir.rstrip(os.sep) + os.sep
-        if self._generate_graphs and self.transformer_forward_root is not None:
-            self.transformer_graph.save_graph(
-                self.transformer_forward_root,
-                graph_folder,
-                "transformer_graph_forward",
-            )
-        if self._generate_graphs and self.transformer_backward_root is not None:
-            self.transformer_graph.save_graph(
-                self.transformer_backward_root,
-                graph_folder,
-                "transformer_graph_backward",
-            )
+        # graph_folder = self.output_dir.rstrip(os.sep) + os.sep
+        # if self._generate_graphs and self.transformer_forward_root is not None:
+        #     self.transformer_graph.save_graph(
+        #         self.transformer_forward_root,
+        #         graph_folder,
+        #         "transformer_graph_forward",
+        #     )
+        # if self._generate_graphs and self.transformer_backward_root is not None:
+        #     self.transformer_graph.save_graph(
+        #         self.transformer_backward_root,
+        #         graph_folder,
+        #         "transformer_graph_backward",
+        #     )
         # if self._generate_graphs and self.pipeline_root is not None:
         #     self.pipeline_graph.save_graph(
         #         self.pipeline_root,
