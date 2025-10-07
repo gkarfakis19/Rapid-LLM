@@ -85,9 +85,7 @@ class PipelineGraphFlattener:
         self.pipeline_graph = pipeline_graph
         self.transformer_graph = transformer_graph
         self._gemm_entries = list(gemm_entries)
-        tp_degree = transformer_cfg.get("tp_degree")
-        if tp_degree is None:
-            tp_degree = max(1, getattr(pipeline_graph, "kp1", 1) * getattr(pipeline_graph, "kp2", 1))
+        tp_degree = transformer_graph.tp
         self._tp_degree = max(1, int(tp_degree))
 
         self._clone_cache: Dict[int, Any] = {}
@@ -200,6 +198,7 @@ class PipelineGraphFlattener:
 
         rank_heads: List[Any] = []
         rank_tails: List[Any] = []
+        
 
         for tp_rank in range(self._tp_degree):
             previous: Optional[Any] = None
