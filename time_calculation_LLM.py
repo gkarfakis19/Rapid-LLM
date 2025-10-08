@@ -597,9 +597,9 @@ class TimeCalculationLLM(TimeCalculation):
 
         if comm_after:
             if tensor_type == "column":
-                act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
+                act_bytes = math.ceil(self.precision * m * k)
             elif tensor_type == "row":
-                act_bytes = math.ceil(self.precision * m * n)
+                act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
 
         gemm_time = grad_time_act + grad_time_wt
 
@@ -654,21 +654,19 @@ class TimeCalculationLLM(TimeCalculation):
         multiple by n_heads and batch size
         the total time should be divided by tensor parallelism degree
         """
+        batch, effective_m, k, n = self._expand_gemm_descriptor(gemm)
 
-        ##???? What happened here?
+        time = batch * self.getGEMMTime(effective_m, 1, n, "scale_softmax_f")[0] / self.tp
 
-        time = gemm[0] * self.getGEMMTime(gemm[1], 1, gemm[3], "scale_softmax_f")[0] / self.tp
-        
-        return time 
+        return time
     
     def get_scale_softmax_b(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        reduction_time = 0.0
-        
+        batch, effective_m, _, n = self._effective_dims(gemm)
 
-        scale_flop = effective_m * n
-        scale_mem = self.precision * effective_m * n * 3
+
+        elements = batch * effective_m * n / self.tp
+        scale_flop = elements * 3
+        scale_mem = self.precision * elements * 3
 
         # Backward softmax uses forward probabilities and gradient accumulation (≈6 ops/elt)
         softmax_flop = effective_m * n * 6
@@ -810,13 +808,13 @@ class TimeCalculationLLM(TimeCalculation):
             per_rank_bytes = self.precision * elements
             total_bytes = int(math.ceil(per_rank_bytes * seq_degree))
             reduction_time = self.network_model.collective(
-                kind="reduce_scatter",
+                kind="all_gather",
                 size_bytes=total_bytes,
                 participants=int(seq_degree),
                 ib=self.IBTP,
                 ll=self.LLTP,
                 local_bytes=0,
-                debug_label="layernorm_b_reduce_scatter",
+                debug_label="layernorm_b_all_gather",
             )
             
         else:
@@ -1301,7 +1299,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif self.tp > 1 and seq_degree > 1:
             if entry['name'] in ['layernorm1', 'layernorm2']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, seq_degree, 'tp')
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
+                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, seq_degree, 'tp')
             elif entry['name'] in ['MHA', 'MLP']:
                 add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, seq_degree, 'tp')
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
@@ -1431,16 +1429,6 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_comp_times = {
             "transformer": {
                 "gemms": transformer_operation_entries,
-                # "non_gemm": [
-                #     {"operation": "scale_softmax", "duration": transformer_results['attention_scale_softmax']['forward']},
-                    
-                    # {"operation": "transformer_b", "duration": node_breakdown['transformer_time_b']},
-                    # {"operation": "embedding_f", "duration": node_breakdown['embedding_f']},
-                    # {"operation": "embedding_b", "duration": node_breakdown['embedding_b']},
-                    # {"operation": "linear_softmax_f", "duration": node_breakdown['linear_softmax_f']},
-                    # {"operation": "linear_softmax_b", "duration": node_breakdown['linear_softmax_b']},
-                # ],
-                # "tp_degree": tp_degree,
             }
         }
 
