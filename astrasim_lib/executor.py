@@ -4,6 +4,11 @@ This module converts DeepFlow graphs (with communication sizes) to AstraSim Chak
 format and executes AstraSim simulation for comparison with DeepFlow analytical timing.
 
 Non-mainlined test functionality - designed to be easily removable.
+
+Note: AstraSim's scheduler prioritizes lower node IDs when multiple GPU comm nodes are
+ready. To keep 1-byte pipeline control sends from being starved behind large collectives,
+we renumber control send IDs just before writing each ET so they occupy the lowest
+indices. See `_RankTrace._renumber_control_priority` for details.
 """
 
 import itertools
@@ -97,7 +102,69 @@ class _RankTrace:
     def next_id(self) -> int:
         return len(self.nodes)
 
+    def append_node(self, node: pb.Node) -> None:
+        """Append ``node`` to this trace without mutating its id."""
+
+        self.nodes.append(node)
+
+    def _renumber_control_priority(self) -> None:
+        """Renumber nodes so pipeline control sends receive the lowest IDs.
+
+        AstraSim schedules multiple ready GPU comm operations strictly by
+        ascending node ID. Our pipeline control sends are single-byte messages
+        that unblock downstream collectives; if they keep their "natural"
+        IDs (created late in the build), they lose the race to the heavy
+        collectives and we deadlock.  This routine rewrites IDs and
+        dependencies so that every ``COMM_SEND_NODE`` whose name ends with
+        "_send_control" occupies the lowest indices, while all other nodes
+        retain their relative order above that block.
+        """
+
+        if not self.nodes:
+            return
+
+        def _is_control_send(node: pb.Node) -> bool:
+            return (
+                node.type == pb.COMM_SEND_NODE
+                and (node.name or "").endswith("_send_control")
+            )
+
+        control_nodes: List[pb.Node] = []
+        regular_nodes: List[pb.Node] = []
+        for node in self.nodes:
+            if _is_control_send(node):
+                control_nodes.append(node)
+            else:
+                regular_nodes.append(node)
+
+        if not control_nodes:
+            return
+
+        id_map: Dict[int, int] = {}
+        new_order: List[pb.Node] = []
+
+        for node in control_nodes:
+            new_id = len(new_order)
+            id_map[int(node.id)] = new_id
+            node.id = new_id
+            new_order.append(node)
+
+        for node in regular_nodes:
+            new_id = len(new_order)
+            id_map[int(node.id)] = new_id
+            node.id = new_id
+            new_order.append(node)
+
+        for node in new_order:
+            remapped: List[int] = []
+            for dep in node.ctrl_deps:
+                remapped.append(id_map.get(int(dep), int(dep)))
+            node.ctrl_deps[:] = remapped
+
+        self.nodes = new_order
+
     def close(self) -> None:
+        self._renumber_control_priority()
         with open(self.path, "wb") as fh:
             chakra_encode(fh, pb.GlobalMetadata(version="0.0.4"))
             for node in self.nodes:
@@ -716,7 +783,7 @@ def convert_deepflow_graph_to_chakra_et(
             send_name = f"{getattr(edge_obj, 'name', 'pipeline')}_send_dp{dp_idx}"
         send_node = new_send_node(send_id, send_name, size, dst_rank, tag)
         send_node.ctrl_deps.append(compute_et_ids[(parent, src_rank)])
-        send_trace.nodes.append(send_node)
+        send_trace.append_node(send_node)
 
         recv_id = recv_trace.next_id
         if is_control:
@@ -725,7 +792,7 @@ def convert_deepflow_graph_to_chakra_et(
             recv_name = f"{getattr(edge_obj, 'name', 'pipeline')}_recv_dp{dp_idx}"
         recv_node = new_recv_node(recv_id, recv_name, size, src_rank, tag)
         # recv_node.ctrl_deps.append(send_id)
-        recv_trace.nodes.append(recv_node)
+        recv_trace.append_node(recv_node)
 
         pipeline_recv_cache[key] = recv_id
         return recv_id
@@ -777,7 +844,7 @@ def convert_deepflow_graph_to_chakra_et(
                         group_id = str(stage_idx + 1)
                         comm_node.attr.append(pb.AttributeProto(name="pg_name", string_val=group_id))
                     comm_node.ctrl_deps.extend(unique_deps)
-                    trace.nodes.append(comm_node)
+                    trace.append_node(comm_node)
                     collective_et_ids[(task, rank)] = node_id
             else:
                 info = compute_info[task]
@@ -805,7 +872,7 @@ def convert_deepflow_graph_to_chakra_et(
                         max(duration_micros, 0)
                     )
                     comp_node.ctrl_deps.extend(unique_deps)
-                    trace.nodes.append(comp_node)
+                    trace.append_node(comp_node)
                     compute_et_ids[(task, rank)] = node_id
 
                     # NOTE: Do not generate collective nodes here. Collectives
