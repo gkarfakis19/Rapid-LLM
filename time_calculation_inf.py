@@ -43,14 +43,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         ) + self.O
 
         seq_degree = self._sequence_parallel_degree()
-        tp_degree = max(1, int(self.tp))
-        seq_mode = seq_degree > 1
-
-        def _tp_total_bytes(per_rank_bytes: int) -> int:
-            if not per_rank_bytes:
-                return 0
-            parts = seq_degree if seq_mode else tp_degree
-            return int(math.ceil(per_rank_bytes * parts))
 
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
 
@@ -168,7 +160,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward": 0.0,
                 "forward_reduction": out_proj_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": _tp_total_bytes(out_proj_size),
+                "comm_size_forward": out_proj_size,
                 "comm_size_backward": 0,
             },
             "MLP": {
@@ -176,7 +168,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward": 0.0,
                 "forward_reduction": ffn2_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": _tp_total_bytes(ffn2_size),
+                "comm_size_forward": ffn2_size,
                 "comm_size_backward": 0,
             },
             "layernorm1": {

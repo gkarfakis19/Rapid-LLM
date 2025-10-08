@@ -605,44 +605,6 @@ class TimeCalculationLLM(TimeCalculation):
 
         return gemm_time, act_bytes if comm_after else 0
                 
-                
-    def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type=None, comm_after = False) -> Tuple[float, float]:
-        batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
-            gemm_time, _, _, mem_access = self.getGEMMTime(m, k, n, name)
-            # dram_access = mem_access[3]
-            # in GB:
-            # dram_access = dram_access / 1e9
-            # print(f"{name} gemm_time: {gemm_time}, mem_access: {dram_access} GB")
-            reduction_time = 0.0
-            gemm_time *= batch # handled internally for CR and RC
-        elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name, batch = batch)
-        elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
-        else:
-            raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
-
-        return gemm_time, reduction_time
-
-
-    def _distributed_gemm_backward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
-        batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
-            grad_act_time, _, _, _ = self.getGEMMTime(m, n, k, f"{name}_act")
-            grad_wt_time, _, _, _ = self.getGEMMTime(k, m, n, f"{name}_wt")
-            gemm_time = grad_act_time + grad_wt_time
-            reduction_time = 0.0
-            gemm_time *= batch # handled internally for CR and RC
-        elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name, batch = batch)
-        elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
-        else:
-            raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
-        return gemm_time, reduction_time
-
-
     def get_embedding_f(self):
         """
         Calculates the total time required for embedding operations, including computation and data transfer.
@@ -665,9 +627,6 @@ class TimeCalculationLLM(TimeCalculation):
     def get_linear_softmax_f(self, gemm):
         """Estimate time for final projection + softmax forward."""
         _, effective_m, k, n = self._effective_dims(gemm)
-        # if self.tp >1:
-        # gemm_time = 0 
-        # reduction_time = 0
         gemm_time,  size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", tensor_type="row", comm_after=True)
         reduction_time = self.get_tensor_reduction_time(size_bytes, kind="all_reduce", name="linear_softmax_f")
         point_flop = effective_m * (3 * n - 1)
@@ -695,8 +654,8 @@ class TimeCalculationLLM(TimeCalculation):
         multiple by n_heads and batch size
         the total time should be divided by tensor parallelism degree
         """
-        print("Calculating scale softmax forward")
-        print("GEMM:", gemm)
+
+        ##???? What happened here?
 
         time = gemm[0] * self.getGEMMTime(gemm[1], 1, gemm[3], "scale_softmax_f")[0] / self.tp
         
@@ -867,8 +826,12 @@ class TimeCalculationLLM(TimeCalculation):
 
         return compute_time, reduction_time, total_bytes
     def get_linear_softmax_b(self, gemm):
-        _, effective_m, k, n = self._effective_dims(gemm)
-        gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
+        # _, effective_m, k, n = self._effective_dims(gemm)
+        # gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
+
+        effective_m, k, n = self._effective_dims(gemm)
+        gemm_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", tensor_type="column", comm_after=True)
+        reduction_time = self.get_tensor_reduction_time(size_bytes, kind="all_reduce", name="linear_softmax_b")
 
         point_flop = effective_m * n * 6
         point_mem = self.precision * effective_m * n * 10
@@ -1990,107 +1953,3 @@ class LLMExecutionDispatcher:
 
         for child in getattr(node, "children", []):
             self._assign_transformer_durations(child, visited, forward_value, backward_value)
-
-    def compute_decode_layer_time(
-        self,
-        *,
-        gemm_results: Dict[str, Dict[str, float]],
-        batch_size: int,
-        seq_len: int,
-        total_seq_len: int,
-    ) -> Tuple[float, float]:
-        kv_heads = getattr(self, "kv_heads", None) or self.num_heads
-        head_dim = self.hidden_dim // self.num_heads
-        shared_heads = max(1, self.num_heads // kv_heads)
-        attention_score_shape = (
-            batch_size * kv_heads,
-            1 * shared_heads,
-            head_dim,
-            total_seq_len,
-        )
-        attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
-
-        token_bytes = LLM_util.kv_cache_token_bytes(
-            batch_size=batch_size,
-            kv_heads=kv_heads,
-            head_dim=head_dim,
-            precision_bytes=self.kv_cache_precision,
-        )
-        kv_cache_fetch_time = self.roofline(
-            0,
-            token_bytes * total_seq_len,
-            name="kv_cache_fetch",
-        ) + self.O
-        kv_cache_store_time = self.roofline(
-            0,
-            token_bytes,
-            name="kv_cache_store",
-        ) + self.O
-
-        output_seq_len = 1
-
-        output_proj_shape = (
-            batch_size,
-            output_seq_len,
-            self.hidden_dim,
-            self.hidden_dim,
-        )
-        residual1_f = self.get_residual_f(output_proj_shape)
-        layernorm1_f = self.get_layernorm_f(output_proj_shape)
-
-        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
-
-        ffn2_shape = (
-            batch_size,
-            output_seq_len,
-            ffn_dim,
-            self.hidden_dim,
-        )
-        residual2_f = self.get_residual_f(ffn2_shape)
-        layernorm2_f = self.get_layernorm_f(ffn2_shape)
-
-        linear_shape = (
-            batch_size,
-            output_seq_len,
-            self.hidden_dim,
-            self.vocab_size,
-        )
-        linear_softmax_f = self.get_linear_softmax_f(linear_shape)
-        if "linear" in gemm_results:
-            gemm_results["linear"]["forward"] = linear_softmax_f
-        gemm_results["kv_cache_fetch"] = {
-            "forward": kv_cache_fetch_time,
-            "backward": 0.0,
-            "forward_gemm": kv_cache_fetch_time,
-            "forward_reduction": 0.0,
-            "backward_gemm": 0.0,
-            "backward_reduction": 0.0,
-        }
-        gemm_results["kv_cache_store"] = {
-            "forward": kv_cache_store_time,
-            "backward": 0.0,
-            "forward_gemm": kv_cache_store_time,
-            "forward_reduction": 0.0,
-            "backward_gemm": 0.0,
-            "backward_reduction": 0.0,
-        }
-
-        core_time = (
-            gemm_results["qkv_proj"]["forward"]
-            + gemm_results["attention_score"]["forward"]
-            + attention_scale_softmax_f
-            + gemm_results["attention_output"]["forward"]
-            + gemm_results["output_proj"]["forward"]
-            + residual1_f
-            + layernorm1_f
-            + gemm_results["ffn1"]["forward"]
-            + gemm_results["ffn2"]["forward"]
-            + residual2_f
-            + layernorm2_f
-        )
-
-        layer_time = core_time
-
-        total_transformer_time = layer_time * self.num_layers
-
-        return total_transformer_time, linear_softmax_f
