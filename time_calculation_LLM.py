@@ -537,33 +537,25 @@ class TimeCalculationLLM(TimeCalculation):
         # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
         
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        # reduction_time = 0.0
-        
-        if batch > 1: # for attention gemm only
-            gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch/self.tp #each gemm is independent, so multiply by batch size and divide by tp
-            print("calculating attention gemm time of shape:", (m,k,n))
-            print(f"gemm_time for attention is multiplied by batch/tp: {batch}/{self.tp}")
-        else: # for qkv, output_projection, ffn1, ffn2
-            if tensor_type == "column": 
-                gemm_time = self.getGEMMTime(m, k, math.ceil(n / self.tp), name)[0]
-                print("calculating column wise gemm time of shape:", (m,k,math.ceil(n / self.tp)))
-            elif tensor_type == "row":
-                gemm_time = self.getGEMMTime(m, math.ceil(k/self.tp), n, name)[0]
-                print("calculating row wise gemm time of shape:", (m,math.ceil(k/self.tp),n))
-            else:
-                raise ValueError(f"Invalid tensor type: {tensor_type}")
-        if comm_after: #only after output_projection and ffn2
+        if batch > 1:
+            gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch / max(1, self.tp)
+        elif tensor_type == "column":
+            shard_n = math.ceil(n / max(1, self.tp))
+            gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
+        elif tensor_type == "row":
+            shard_k = math.ceil(k / max(1, self.tp))
+            gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
+        else:
+            gemm_time = self.getGEMMTime(m, k, n, name)[0]
+
+        size_bytes = 0
+        if comm_after:
             if tensor_type == "column":
-                size_bytes = math.ceil(self.precision * m * n / self.tp )
-                print(f"communication after gemm of size {m,n} divided by tp {self.tp}: {size_bytes}")
+                size_bytes = math.ceil(self.precision * m * n / max(1, self.tp))
             elif tensor_type == "row":
-                size_bytes = math.ceil(self.precision * m * n )
-                print(f"communication after gemm of size {m,n} without tp division: {size_bytes}")
-            
+                size_bytes = math.ceil(self.precision * m * n)
 
-
-
-        return gemm_time, size_bytes if comm_after else 0
+        return gemm_time, size_bytes
     def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type = None, comm_after = False) -> Tuple[float, float]:
         # tensor_type:"row", "column" determines the way gemm is distributed
         # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
@@ -574,43 +566,34 @@ class TimeCalculationLLM(TimeCalculation):
         reduction size is the size of activation
         """
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        reduction_time = 0.0
-        
-        if batch > 1: # for attention gemm only
-            grad_time_act = self.getGEMMTime(m, n, k, name)[0] * batch/self.tp #each gemm is independent, so multiply by batch size and divide by tp
-            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch/self.tp
-            print("calculating attention gemm time of shape: ", (m,n,k) , (k,m,n))
-            print(f"grad_time for attention is multiplied by batch/tp: {batch}/{self.tp}")
-            # print("calculating attention gemm time:", (k,m,n))
-        else: # for qkv, output_projection, ffn1, ffn2
-            if tensor_type == "column": 
-                act_bytes = math.ceil(self.precision * m * k )
-                grad_time_act = self.getGEMMTime(m, math.ceil(n / self.tp), k, name)[0]
-                grad_time_wt = self.getGEMMTime(k, m, math.ceil(n / self.tp), name)[0]
-                print("calculating column wise gemm time of shape for gradient:", (m,math.ceil(n / self.tp),k), (k,m,math.ceil(n / self.tp)))
+        act_bytes = 0
+
+        if batch > 1:
+            grad_time_act = self.getGEMMTime(m, n, k, name)[0] * batch / max(1, self.tp)
+            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch / max(1, self.tp)
+        elif tensor_type == "column":
+            shard_n = math.ceil(n / max(1, self.tp))
+            grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
+            grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
+        elif tensor_type == "row":
+            shard_k = math.ceil(k / max(1, self.tp))
+            grad_time_act = self.getGEMMTime(m, n, shard_k, name)[0]
+            grad_time_wt = self.getGEMMTime(shard_k, m, n, name)[0]
+        else:
+            grad_time_act = self.getGEMMTime(m, n, k, name)[0]
+            grad_time_wt = self.getGEMMTime(k, m, n, name)[0]
+
+        if comm_after:
+            if tensor_type == "column":
+                act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
             elif tensor_type == "row":
-                act_bytes = math.ceil(self.precision * m * math.ceil(k/self.tp))
-                grad_time_act = self.getGEMMTime(m, n, math.ceil(k/self.tp), name)[0]
-                grad_time_wt = self.getGEMMTime(math.ceil(k/self.tp), m, n, name)[0]
-                print("calculating row wise gemm time of shape for gradient:", (m, n, math.ceil(k/self.tp)), (math.ceil(k/self.tp), m, n))
+                act_bytes = math.ceil(self.precision * m * n)
             else:
-                raise ValueError(f"Invalid tensor type: {tensor_type}")
-        # if comm_after: #only after qkv_projection and ffn1 in backward pass
-            
-        #     # size_bytes = math.ceil(self.precision * m * n / self.tp ) 
-        #     print("all reduce size in backward:", act_bytes)
-        #     reduction_time = self.network_model.collective(
-        #         kind="all_reduce", 
-        #         size_bytes=act_bytes,#for each rank or total?
-        #         participants=int(self.tp),
-        #         ib=self.IBTP,
-        #         ll=self.LLTP,
-        #         local_bytes= 0, 
-        #         debug_label=name or "comm",
-        # )
+                act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
+
         gemm_time = grad_time_act + grad_time_wt
 
-        return gemm_time,  act_bytes if comm_after else 0
+        return gemm_time, act_bytes if comm_after else 0
                 
                 
     def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type=None, comm_after = False) -> Tuple[float, float]:
@@ -1048,7 +1031,9 @@ class TimeCalculationLLM(TimeCalculation):
         return reduction_time + apply_grad_time
     
     
-    
+    # TODO TODO:
+    # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
+    # FIX at some point!
     def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim):
         """Compute latency for all GEMM operations and node breakdown times in one function."""
 
@@ -1056,7 +1041,21 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_shapes = LLM_util.process_gemm_shapes(
             batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
         )
-        print("generating gemm shapes for transformer batch size:", batch_size, "seq_len:", seq_len, "hidden_dim:", hidden_dim, "num_heads:", num_heads,  "kv_heads", kv_heads, "ffn_dim:",ffn_dim)
+        if self.debug:
+            print(
+                "generating gemm shapes for transformer batch size:",
+                batch_size,
+                "seq_len:",
+                seq_len,
+                "hidden_dim:",
+                hidden_dim,
+                "num_heads:",
+                num_heads,
+                "kv_heads:",
+                kv_heads,
+                "ffn_dim:",
+                ffn_dim,
+            )
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
         gemm_attention_score = gemm_shapes["attention_score"]
         gemm_attention_output = gemm_shapes["attention_output"]
@@ -1217,13 +1216,6 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_results['MHA']['backward'] + transformer_results['MHA']['backward_reduction'] + transformer_results['MLP']['backward'] + transformer_results['MLP']['backward_reduction'] +
             transformer_results['layernorm1']['backward'] + transformer_results['layernorm1']['backward_reduction']+ transformer_results['layernorm2']['backward']+ transformer_results['layernorm2']['backward_reduction']
         )
-        output_csv = os.path.join(self.output_dir, "Transformer_breakdown_times.csv")
-        with open(output_csv, "w") as f:
-            data = [qkv_proj_gemm_f, attn_score_gemm_f, attn_out_gemm_f, out_proj_gemm_f,ffn1_gemm_f, ffn2_gemm_f,
-                    attention_scale_softmax_f, layernorm1_f + residual1_f, layernorm2_f + residual2_f ,gelu_f,
-                    out_proj_reduction_f, ffn2_reduction_f]
-            LLM_util.save_transformer_breakdown_csv(data)
-            
         # Write results to file
         output_file = os.path.join(self.output_dir, "Transformer_breakdown_results.txt")
         with open(output_file, "w") as f:
@@ -1561,8 +1553,6 @@ class TimeCalculationLLM(TimeCalculation):
         attention_type = self.attention_type
         kv_heads = self.kv_heads
         
-        print("self.tp:", self.tp)
-
         # Adjust types and calculate node latencies
         self.readjust_type()
 
@@ -1576,15 +1566,18 @@ class TimeCalculationLLM(TimeCalculation):
 
 
 
-        print("Calculating LLM time...")
-
-        # Create graph and calculate times
-
-        print("simulating parallelism with dp = {}, lp = {}, total data batch = {}, "
-            "for each dp node, data batch = {}, for each pipeline stage, data batch = {}".format(self.dp, self.lp, self.batch_size, self.miniB, self.microB))
-        print("total number of workers: {}".format(self.num_workers))
-        print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
-        print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
+        if self.debug:
+            print("self.tp:", self.tp)
+            print("Calculating LLM time...")
+            print(
+                "simulating parallelism with dp = {}, lp = {}, total data batch = {}, "
+                "for each dp node, data batch = {}, for each pipeline stage, data batch = {}".format(
+                    self.dp, self.lp, self.batch_size, self.miniB, self.microB
+                )
+            )
+            print("total number of workers: {}".format(self.num_workers))
+            print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
+            print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
         
 
         (
@@ -1695,45 +1688,6 @@ class TimeCalculationLLM(TimeCalculation):
         # print(f"save_graph took {elapsed:.3f}s")
 
         # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", f"pipeline_graph_{mode.value.lower()}")
-        
-        
-        # import time
-
-
-
-
-
-        # self.transformer_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
-        #     self.transformer_forward_root,
-        #     self.network_model,
-        #     self.pipeline_interconnect,
-        # )
-        # self.transformer_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
-        #     self.transformer_backward_root,
-        #     self.network_model,
-        #     self.pipeline_interconnect,
-        # )
-
-        # graph_folder = self.output_dir.rstrip(os.sep) + os.sep
-        # if self._generate_graphs and self.transformer_forward_root is not None:
-        #     self.transformer_graph.save_graph(
-        #         self.transformer_forward_root,
-        #         graph_folder,
-        #         "transformer_graph_forward",
-        #     )
-        # if self._generate_graphs and self.transformer_backward_root is not None:
-        #     self.transformer_graph.save_graph(
-        #         self.transformer_backward_root,
-        #         graph_folder,
-        #         "transformer_graph_backward",
-        #     )
-        # if self._generate_graphs and self.pipeline_root is not None:
-        #     self.pipeline_graph.save_graph(
-        #         self.pipeline_root,
-        #         graph_folder,
-        #         "pipeline_graph_post",
-        #     )
-
         # debug helper. If set, print analytical transformer time and actual transformer time
         if self._generate_graphs:
             print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.4f}s")
@@ -1787,27 +1741,19 @@ class LLMExecutionDispatcher:
 
     def run(self, mode: ExecutionMode) -> ExecutionResult:
         if mode == ExecutionMode.ANALYTICAL:
-            print("Running analytical execution...")
             return self._run_pipeline_with_analytical_comm(ExecutionMode.ANALYTICAL)
         if mode == ExecutionMode.HYBRID:
-            print("Running hybrid execution...")
             return self._run_hybrid()
         if mode == ExecutionMode.FULL_ASTRASIM_HIERARCHICAL:
-            print("Running full AstraSim hierarchical execution...")
             return self._run_full_astrasim_hierarchical()
         if mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
-            print("Running full AstraSim flattened execution...")
             return self._run_full_astrasim_flattened()
         raise ValueError(f"Unsupported execution mode: {mode}")
 
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
         if declared_mode == ExecutionMode.HYBRID:
             filename = "/hybrid_graph"
-            timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
-                self.pipeline_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
+            timed_root = self.pipeline_root
         else: # must be "ANALYTICAL"
             filename = "/analytical_graph"
             timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
@@ -1827,10 +1773,6 @@ class LLMExecutionDispatcher:
         # Persist timed root for any downstream consumer
         self.pipeline_root = timed_root
         total_time = self.pipeline_graph.simulate(timed_root)
-        self.pipeline_graph.save_graph(timed_root, "output_graph/", f"pipeline_graph_{declared_mode.value.lower()}")
-        # print("g")
-        print(f"{declared_mode.value} pipeline execution time: {total_time:.3f}s")
-        
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
@@ -1839,43 +1781,7 @@ class LLMExecutionDispatcher:
             self.transformer_graph.save_graph(
                 self.transformer_forward_root,
                 self.time_calc.output_dir,
-                "/hybrid_graph_transformer_forward",
-            )
-            self.transformer_graph.save_graph(
-                self.transformer_backward_root,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer_backward",
-            )
-            
-            timed_root = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_forward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            timed_root_b = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_backward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            self.transformer_graph.save_graph(
-                timed_root,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer_deepflow_annotated",
-            )
-            self.transformer_graph.save_graph(
-                timed_root_b,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer_backward_deepflow_annotated",
-            )
-            timed_root_pipeline = self.pipeline_graph.convert_comm_sizes_to_times(
-                self.pipeline_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            self.pipeline_graph.save_graph(
-                timed_root_pipeline,
-                self.time_calc.output_dir,
-                "/hybrid_graph_pipeline_deepflow_annotated",
+                "/hybrid_graph_transformer",
             )
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
 
@@ -1948,11 +1854,6 @@ class LLMExecutionDispatcher:
                 "/pipeline_graph_pre",
             )
         self.pipeline_root = flattened_root
-        self.pipeline_graph.save_graph(
-            flattened_root,
-            self.time_calc.output_dir,
-            "pipeline_graph_flattened",
-        )
         # output_dir = "./astra_flattened_graph"
         # os.makedirs(output_dir, exist_ok=True)
         # base_path = os.path.join(output_dir, "pipeline_flattened")
@@ -2105,9 +2006,7 @@ class LLMExecutionDispatcher:
         comp_times = getattr(self.pipeline_graph, "comp_times", None)
         if isinstance(comp_times, dict):
             if "transformer_f" in comp_times:
-                print(f"Original transformer forward time: {comp_times['transformer_f']:.3f}s, updating to AstraSim value: {timings.forward:.3f}s")
                 comp_times["transformer_f"] = timings.forward
-                # print(f"Updated transformer forward time to AstraSim value: {timings.forward:.3f}s")
             if "transformer_b" in comp_times:
                 comp_times["transformer_b"] = timings.backward
 

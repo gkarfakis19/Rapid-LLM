@@ -4,7 +4,6 @@ import os
 from collections import OrderedDict
 
 import config
-import csv
 
 def reshape_gemm_to_3d(arg,options=None):
     """
@@ -51,7 +50,7 @@ def reshape_gemm_to_3d(arg,options=None):
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
 
-def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size ):
+def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
 
@@ -72,41 +71,22 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
     head_dim = d_model // num_heads
     shared_heads = num_heads // kv_heads # how many heads share the same K,V
     gemms = OrderedDict()
-    # if shared_heads > 1:
-        
 
     gemms["qkv_proj"] = (batch_size, seq_len, d_model, (2 * kv_heads + num_heads) * head_dim)
-    
+
     gemms["attention_score"] = (
-    batch_size * kv_heads,
-    seq_len * shared_heads,
-    head_dim,
-    seq_len)
-    
+        batch_size * kv_heads,
+        seq_len * shared_heads,
+        head_dim,
+        seq_len,
+    )
+
     gemms["attention_output"] = (
-    batch_size * kv_heads,
-    seq_len * shared_heads,
-    seq_len,
-    head_dim)
-        
-        
-    # else:
-    #     gemms["qkv_proj"] = (batch_size, seq_len, d_model, 3 * d_model)
-        
-    #     gemms["attention_score"] = (
-    #     batch_size * num_heads,
-    #     seq_len,
-    #     head_dim,
-    #     seq_len)
-        
-    #     gemms["attention_output"] = (
-    #     batch_size * num_heads,
-    #     seq_len,
-    #     seq_len,
-    #     head_dim)
-        
-
-
+        batch_size * kv_heads,
+        seq_len * shared_heads,
+        seq_len,
+        head_dim,
+    )
     gemms["output_proj"] = (batch_size, seq_len, d_model, d_model)
     gemms["ffn1"] = (batch_size, seq_len, d_model, ffn_dim)
     gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model)
@@ -115,7 +95,7 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
     return gemms
 
 
-def process_gemm_shapes(batch_size, seq_len, d_model, num_heads,  kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
+def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
     """
     Process GEMM shapes, reshape them into 3d.
 
@@ -128,7 +108,15 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads,  kv_heads, ffn_
         vocab_size (int): Vocabulary size.
     """
     # Generate GEMM shapes in 4D
-    gemm_shapes_4d = multihead_decoder_gemm(batch_size = batch_size, seq_len = seq_len, d_model= d_model, num_heads = num_heads, kv_heads=kv_heads, ffn_dim = ffn_dim, vocab_size= vocab_size)
+    gemm_shapes_4d = multihead_decoder_gemm(
+        batch_size=batch_size,
+        seq_len=seq_len,
+        d_model=d_model,
+        num_heads=num_heads,
+        kv_heads=kv_heads,
+        ffn_dim=ffn_dim,
+        vocab_size=vocab_size,
+    )
 
     processed = OrderedDict()
     for key, shape in gemm_shapes_4d.items():
@@ -182,36 +170,6 @@ def getEmbeddingMem(batch_size, seq_len, hidden_dim, p, t, precision):
     mem = 4 * seq_len * batch_size * hidden_dim * p / t * precision / 2  # from https://arxiv.org/pdf/2205.05198
 
     return mem
-def save_transformer_breakdown_csv(data,filename="transformer_tensor_comparison.csv"):
-#     categories = [
-#     "Q_K_V",
-#     "Q_mul_K",
-#     "A_mul_V",
-#     "Wo_proj",
-#     "W1_proj",
-#     "W2_proj",
-#     "Softmax",
-#     "LayerNorm_MHA",
-#     "LayerNorm_FFN",
-#     "GeLU",
-#     "AllReduce_MHA",
-#     "AllReduce_FFN",
-# ]
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        # writer.writerow(header)  # write header once
-        writer.writerow(data)     # write one row of data
-    # for i in range(len(data)):
-    #     to_csv.
-        
-    
-
-
-
-    
-    # Save to CSV file
-    # df.to_csv("transformer_tensor_comparison.csv", index=False)
-    print("Transformer breakdown saved to {}".format(filename))
     
     
 def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
