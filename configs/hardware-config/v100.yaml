@@ -165,6 +165,7 @@ scheduling_param:
   kp_softmax_type: -1
   kp_embedding_type: -1
   kp_projection_type: -1
+  
 execution_backend:
   model: astra # analytical | astra
   astra:

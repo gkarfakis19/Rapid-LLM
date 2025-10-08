@@ -322,20 +322,6 @@ class TimeCalculation:
             self.kp1 = None
             self.kp2 = None
 
-        if self.num_workers % self.tp != 0:
-            raise ValueError("num_workers must be divisible by tp")
-        workers_after_tp = self.num_workers // self.tp
-
-        if workers_after_tp % self.dp != 0:
-            raise ValueError("num_workers must be divisible by dp")
-        self.num_workers_dp = workers_after_tp // self.dp
-
-        if self.num_workers_dp % self.lp != 0:
-            raise ValueError("num_workers_dp must be divisible by lp")
-        self.num_workers_lp = (
-            self.num_workers_dp // self.lp if self.lp > 1 else self.num_workers_dp
-        )
-
         if self.mode == "LLM":
             expected_workers = self.tp * self.dp * self.lp
             label = f"tp({self.tp}) * dp({self.dp}) * lp({self.lp})"
@@ -350,7 +336,6 @@ class TimeCalculation:
                 f"Parallelism mismatch: {label} = {expected_workers}, "
                 f"but system_hierarchy reports num_workers={self.num_workers}."
             )
-        
         
         # Statistics Param
         self.tot_flop = 0

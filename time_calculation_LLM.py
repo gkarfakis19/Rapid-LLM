@@ -829,7 +829,7 @@ class TimeCalculationLLM(TimeCalculation):
         # _, effective_m, k, n = self._effective_dims(gemm)
         # gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
 
-        effective_m, k, n = self._effective_dims(gemm)
+        _, effective_m, k, n = self._effective_dims(gemm)
         gemm_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", tensor_type="column", comm_after=True)
         reduction_time = self.get_tensor_reduction_time(size_bytes, kind="all_reduce", name="linear_softmax_b")
 
@@ -1701,6 +1701,12 @@ class LLMExecutionDispatcher:
                 "/hybrid_graph_transformer",
             )
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+        if generate_graphs:
+            self.transformer_graph.save_graph(
+                self.transformer_forward_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer",
+            )
 
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
@@ -1728,6 +1734,13 @@ class LLMExecutionDispatcher:
         if run_type == "inference":
             run_kwargs["dp_override"] = 1
 
+        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+            self.pipeline_graph.save_graph(
+                self.pipeline_root,
+                self.time_calc.output_dir,
+                "/pipeline_graph_hierarchical",
+            )
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
@@ -1746,15 +1759,6 @@ class LLMExecutionDispatcher:
         if not self.transformer_graph:
             raise RuntimeError("Transformer graph metadata is required for flattening")
 
-        # output_dir = "./astra_flattened_graph"
-        # os.makedirs(output_dir, exist_ok=True)
-        # base_path = os.path.join(output_dir, "pipeline_unflattened")
-        # dot = visualize_graph(self.pipeline_root, filename=base_path)
-        # try:
-        #     dot.render(base_path, format="png", cleanup=True)
-        # except Exception as exc:
-        #     print(f"[WARN] Failed to render pipeline graph: {exc}")
-
         flattener = PipelineGraphFlattener(
             pipeline_graph=self.pipeline_graph,
             transformer_graph=self.transformer_graph,
@@ -1768,7 +1772,12 @@ class LLMExecutionDispatcher:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
-                "/pipeline_graph_pre",
+                "/pipeline_graph_pre_flatten",
+            )
+            self.pipeline_graph.save_graph(
+                flattened_root,
+                self.time_calc.output_dir,
+                "/pipeline_graph_post_flatten",
             )
         self.pipeline_root = flattened_root
         # output_dir = "./astra_flattened_graph"
