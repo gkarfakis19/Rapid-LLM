@@ -122,7 +122,7 @@ perimeter_breakdown:
   intra_node: 0.33
   inter_node: 0.33
 system_hierarchy:
-  num_devices_per_node: 8
+  num_devices_per_node: 4
   num_nodes: 1
   inter_derate: 1
   intra_derate: 1
@@ -130,10 +130,11 @@ system_hierarchy:
   kp2_inter: false
   dp_inter: false
   lp_inter: false
+  tp_inter: false
 network_topology:
   # Allowed values: ring | fc | switch
-  inter_node: fc
-  intra_node: fc
+  inter_node: ring
+  intra_node: ring
 memory_hierarchy:
   l0:
     type: SRAM-R
@@ -150,12 +151,13 @@ memory_hierarchy:
 scheduling_param:
   auto: false
   dp: 1
-  lp: 2 # pipeline stages 
-  mb: 1 # number of micro-batches
-  t: "CR"
+  lp: 1
+  mb: 1
+  tp: 4
+  tp_sp: true
+  t: CR
   kp1: 4
   kp2: 1
-  # LSTM LEGACY PARAMS
   kp_hidden_dim1: 1
   kp_hidden_dim2: 1
   kp_softmax_dim1: 1
@@ -168,8 +170,6 @@ scheduling_param:
   kp_softmax_type: -1
   kp_embedding_type: -1
   kp_projection_type: -1
-
-
 execution_backend:
   model: analytical # analytical | astra
   astra:

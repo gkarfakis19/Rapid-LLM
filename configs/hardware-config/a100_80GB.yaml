@@ -127,6 +127,7 @@ system_hierarchy:
   kp2_inter: false
   dp_inter: false
   lp_inter: false
+  tp_inter: false
 network_topology:
   # Allowed values: ring | fc | switch
   inter_node: ring
@@ -146,15 +147,16 @@ memory_hierarchy:
     scope: global
 scheduling_param:
   auto: false
+  ### LLM PARAMS ###
   dp: 2 # acts as replica count during inference
   lp: 2 # pipeline stages 
   mb: 2 # number of micro-batches
   tp: 4 # tensor parallelism
-  sp: 4 # sequence parallelism     should be equal to tp if sequence parallelism is enabled or 1 if not
+  tp_sp: true # sequence parallelism
+  ### LSTM/GEMM LEGACY PARAMS ###
   t: "CR"
   kp1: 4
   kp2: 1
-  # LSTM LEGACY PARAMS
   kp_hidden_dim1: 1
   kp_hidden_dim2: 1
   kp_softmax_dim1: 1

@@ -280,6 +280,7 @@ class SystemHierarchyConfig:
     kp2_inter: float
     dp_inter: float
     lp_inter: float
+    tp_inter: float
     par2cross: dict
 
     @classmethod
@@ -297,11 +298,13 @@ class SystemHierarchyConfig:
             kp2_inter=system_config_dict["kp2_inter"],
             dp_inter=system_config_dict["dp_inter"],
             lp_inter=system_config_dict["lp_inter"],
+            tp_inter=system_config_dict["tp_inter"],
             par2cross={
                 "kp1": system_config_dict["kp1_inter"],
                 "kp2": system_config_dict["kp2_inter"],
                 "dp": system_config_dict["dp_inter"],
                 "lp": system_config_dict["lp_inter"],
+                "tp": system_config_dict["tp_inter"],
             },
         )
 
@@ -444,7 +447,7 @@ SchedulingConfig = _namedtuple(
         "kp_projection_type",
         "t",
         "tp",
-        "sp",
+        "tp_sp",
         "kp1",
         "kp2",
     ],
@@ -603,8 +606,8 @@ def parse_config(filename, config_type):
         sch_params = dict(config_dict["scheduling_param"])
         if "tp" not in sch_params:
             sch_params["tp"] = None
-        if "sp" not in sch_params:
-            sch_params["sp"] = None
+        if "tp_sp" in sch_params:
+            tp_sp_value = sch_params["tp_sp"]
         sch_config = SchedulingConfig(**sch_params)
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
         power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])

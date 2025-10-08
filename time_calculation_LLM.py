@@ -471,6 +471,11 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_astrasim_time: Optional[float] = None
         self.pipeline_astrasim_per_rank: Optional[List[float]] = None
 
+    def _sequence_parallel_degree(self) -> int:
+        """Return tensor-parallel degree used for sequence-parallel collectives."""
+
+        return self.tp if getattr(self, "tp_sp", False) else 1
+
     @staticmethod
     def _derive_execution_mode(hw_config) -> ExecutionMode:
         backend = getattr(hw_config, "execution_backend", None)
@@ -519,8 +524,8 @@ class TimeCalculationLLM(TimeCalculation):
                 kind=kind, 
                 size_bytes=size_bytes,#for each rank or total?
                 participants=int(self.tp),
-                ib=self.IBK1, 
-                ll=self.LLK1,
+                ib=self.IBTP,
+                ll=self.LLTP,
                 local_bytes= 0, 
                 debug_label=name or "comm",
         )
@@ -598,8 +603,8 @@ class TimeCalculationLLM(TimeCalculation):
         #         kind="all_reduce", 
         #         size_bytes=act_bytes,#for each rank or total?
         #         participants=int(self.tp),
-        #         ib=self.IBK1, 
-        #         ll=self.LLK1,
+        #         ib=self.IBTP,
+        #         ll=self.LLTP,
         #         local_bytes= 0, 
         #         debug_label=name or "comm",
         # )
@@ -807,22 +812,23 @@ class TimeCalculationLLM(TimeCalculation):
             print("GELU (b) time: {:,}\n".format(time))
 
         return time
-    def get_layernorm_f(self, batch, seq_len, d_model, comm_after = False):
-        if self.sp ==1:
+    def get_layernorm_f(self, batch, seq_len, d_model, comm_after=False):
+        seq_degree = self._sequence_parallel_degree()
+        if seq_degree == 1:
             elements = batch * seq_len * d_model
-        else: #for sequence parallelism, layernorm is calculated within each sequence partition
-            elements = batch * math.ceil(seq_len/self.sp) * d_model
+        else:  # sequence parallelism partitions tokens
+            elements = batch * math.ceil(seq_len / seq_degree) * d_model
         compute_flops = elements * 7
         mem_bytes = self.precision * elements * 2
-        
-        if self.sp > 1: #all gather after layernorm when sequence parallelism is used
+
+        if seq_degree > 1:  # all-gather after layernorm when sequence parallelism is used
             size_bytes = self.precision * elements
             reduction_time = self.network_model.collective(
                 kind="all_gather", 
                 size_bytes=size_bytes,#for each rank or total?
-                participants=int(self.sp),
-                ib=self.IBK1, 
-                ll=self.LLK1, #TODO fix the bandwidth and latency for sequence parallelism
+                participants=int(seq_degree),
+                ib=self.IBTP,
+                ll=self.LLTP, #TODO fix the bandwidth and latency for sequence parallelism
                 local_bytes= 0, 
                 debug_label="layernorm_f_all_gather",
         )
@@ -837,23 +843,24 @@ class TimeCalculationLLM(TimeCalculation):
     
     
 
-    def get_layernorm_b(self, batch, seq_len, d_model, comm_after = False):
-        if self.sp == 1:
+    def get_layernorm_b(self, batch, seq_len, d_model, comm_after=False):
+        seq_degree = self._sequence_parallel_degree()
+        if seq_degree == 1:
             elements = batch * seq_len * d_model
-        else: #for sequence parallelism, layernorm is calculated within each sequence partition
-            elements = batch * math.ceil(seq_len/self.sp) * d_model
+        else:  # sequence parallelism partitions tokens
+            elements = batch * math.ceil(seq_len / seq_degree) * d_model
         compute_flops = elements * 14
         mem_bytes = self.precision * elements * 4
 
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
-        if self.sp > 1: #all gather after layernorm when sequence parallelism is used
+        if seq_degree > 1:  # all-gather after layernorm when sequence parallelism is used
             size_bytes = self.precision * elements
             reduction_time = self.network_model.collective(
                 kind="all_gather", 
                 size_bytes=size_bytes,#for each rank or total?
-                participants=int(self.sp),
-                ib=self.IBK1, 
-                ll=self.LLK1,
+                participants=int(seq_degree),
+                ib=self.IBTP,
+                ll=self.LLTP,
                 local_bytes= 0, 
                 debug_label="layernorm_b_all_gather",
         )
@@ -1060,10 +1067,10 @@ class TimeCalculationLLM(TimeCalculation):
 
         # Compute GEMM times and organize in structured dict
         transformer_results = {}
-        comm_kind_fwd = "all_reduce" if self.sp == 1 else "reduce_scatter"
-        comm_kind_bwd = "all_reduce" if self.sp == 1 else "reduce_scatter"
+        seq_degree = self._sequence_parallel_degree()
+        comm_kind_fwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
+        comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
         # QKV Projection GEMM
-        # if self.sp == 1:
         qkv_proj_gemm_f,  qkv_proj_size = self._tensor_parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", tensor_type="column")
         # qkv_proj_reduction_f = self.get_tensor_reduction_time(qkv_proj_size, kind="all_reduce", name="qkv_projection_f") if qkv_proj_size else 0
         qkv_proj_gemm_b,  qkv_proj_size_b = self._tensor_parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", tensor_type="column", comm_after=True)
@@ -1328,91 +1335,32 @@ class TimeCalculationLLM(TimeCalculation):
                 'interconnect_type': interconnect,
             }
             entry[direction]['comm_keys'].append(unique_key)
-            print(f"Added collective {unique_key}: {metadata[unique_key]}")
-            # print(f"Entry now: {entry}")
 
-        # row_participants = max(1, kp1)
-        # col_participants = max(1, kp2)
-        # row_shard = math.ceil(effective_m / row_participants) if effective_m else 0
-        # col_shard = math.ceil(effective_n / col_participants) if effective_n else 0
-
-        if self.tp>1 and self.sp==1:
-            # total_bytes = math.ceil(precision * effective_m * effective_n)
-            # total_bytes=
+        seq_degree = self._sequence_parallel_degree()
+        if self.tp > 1 and seq_degree == 1:
             #TODO: correct the communication type here
-            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'kp1')
-            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'kp1')
-        elif self.tp>1 and self.sp>1:
+            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
+            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
+        elif self.tp > 1 and seq_degree > 1:
             if entry['name'] in ['layernorm1', 'layernorm2']:
-                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.sp, 'kp1')
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.sp, 'kp1')
+                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, seq_degree, 'tp')
+                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, seq_degree, 'tp')
             elif entry['name'] in ['MHA', 'MLP']:
-                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.sp, 'kp1')
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.sp, 'kp1')
-        # if tp_mode == "CR":
-        #     if kp1 <= 1:
-        #         return
-        #     total_bytes = math.ceil(precision * effective_m * effective_n)
-        #     add_comm('forward', 'reduce_scatter', 'reduce_scatter', total_bytes, kp1, 'kp1')
+                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, seq_degree, 'tp')
+                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
 
-        #     # Backward all-gather mirrors forward reduce-scatter.
-        #     total_bytes = math.ceil(precision * effective_m * effective_n)
-        #     size_bytes = math.ceil(total_bytes / kp1)
-        #     add_comm('backward', 'all_gather', 'all_gather', size_bytes, kp1, 'kp1')
-        #     return
-
-        # if tp_mode == "RC":
-        #     if kp2 > 1:
-        #         total_bytes = math.ceil(precision * row_shard * effective_n)
-        #         size_bytes = math.ceil(total_bytes / col_participants)
-        #         add_comm('forward', 'all_gather', 'all_gather', size_bytes, kp2, 'kp2')
-
-        #     if kp1 > 1:
-        #         total_bytes_row = math.ceil(precision * effective_k * effective_m)
-        #         size_row = math.ceil(total_bytes_row / row_participants)
-
-        #         total_bytes_col = math.ceil(precision * effective_m * col_shard)
-        #         size_col = math.ceil(total_bytes_col / row_participants)
-
-        #         add_comm(
-        #             'backward',
-        #             'wt_all_gather',
-        #             'all_gather',
-        #             size_row + size_col,
-        #             kp1,
-        #             'kp1',
-        #         )
-
-        #     if kp2 > 1:
-        #         total_bytes_row = math.ceil(precision * row_shard * effective_n)
-        #         size_row = math.ceil(total_bytes_row / col_participants)
-
-        #         total_bytes_col = math.ceil(precision * effective_k * effective_n)
-        #         size_col = math.ceil(total_bytes_col / col_participants)
-
-        #         add_comm(
-        #             'backward',
-        #             'act_all_gather',
-        #             'all_gather',
-        #             size_row + size_col,
-        #             kp2,
-        #             'kp2',
-        #         )
         
 
     def _build_interconnect_params(self) -> Dict[str, Tuple[float, float]]:
         return {
             'dp': (self.IBD, self.LLD),
             'lp': (self.IBL, self.LLL),
-            'kp1': (self.IBK1, self.LLK1),
-            'kp2': (self.IBK2, self.LLK2)
+            'tp': (self.IBTP, self.LLTP),
         }
 
 
     def _tp_degree(self) -> int:
-        kp1 = self.kp1 if self.kp1 else 1
-        kp2 = self.kp2 if self.kp2 else 1
-        return int(kp1 * kp2)
+        return max(1, int(self.tp))
 
     def _prepare_execution_graphs(
         self,
@@ -1523,7 +1471,6 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_forward_root: Optional[Any] = None
         transformer_backward_root: Optional[Any] = None
 
-        tp_degree = self._tp_degree()
         transformer_comp_times = {
             "transformer": {
                 "gemms": transformer_operation_entries,
@@ -1612,12 +1559,9 @@ class TimeCalculationLLM(TimeCalculation):
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
         
         attention_type = self.attention_type
-        print(f"Attention type: {attention_type}")
         kv_heads = self.kv_heads if self.kv_heads else num_heads
-        print(f"Number of key/value heads: {kv_heads}")
         
         print("self.tp:", self.tp)
-        print("self.sp:", self.sp)
 
         # Adjust types and calculate node latencies
         self.readjust_type()

@@ -272,12 +272,19 @@ class TimeCalculation:
             if par2cross["lp"]
             else (derated_intra_throughput, intra_latency)
         )
+
+        self.IBTP, self.LLTP = (
+            (derated_inter_throughput, inter_latency)
+            if par2cross["tp"]
+            else (derated_intra_throughput, intra_latency)
+        )
         
 
 
         # Scheduling Parameters
         par = Parallelism(hw_config)
         par.findParallelStrategy()
+        self.mode = mode
         self.autoPar = par.autoPar
         self.lp = par.lp
         self.mb = par.mb
@@ -294,38 +301,55 @@ class TimeCalculation:
         self.kp_softmax_type = par.kp_softmax_type  # 1: CR, 2: RC
         self.kp_embedding_type = par.kp_embedding_type  # 1: CR, 2: RC
         self.kp_projection_type = par.kp_projection_type  # 1: CR, 2: RC
-        self.t = par.t  # type of parallelism, e.g., "CR", "RC", "none"
-        self.tp = par.tp 
-        self.sp = par.sp
-        self.kp1= par.kp1  # first parallelism parameter
-        self.kp2 = par.kp2  # second parallelism parameter
-        
-        self.updateParParams(self.t, self.kp1, self.kp2)
-        # # Define miniBatch size
-        # self.miniB = math.ceil(self.B / self.dp)
+
+        self.t = par.t if self.mode != "LLM" else None
+
+        tp_value = par.tp if par.tp not in (None, 0) else 1
+        try:
+            self.tp = int(tp_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("scheduling_param.tp must be an integer") from exc
+        if self.tp < 1:
+            raise ValueError("scheduling_param.tp must be >= 1")
+
+        self.tp_sp = par.tp_sp
+
+        if self.mode != "LLM":
+            self.kp1 = par.kp1  # first parallelism parameter
+            self.kp2 = par.kp2  # second parallelism parameter
+            self.updateParParams(self.t, self.kp1, self.kp2)
+        else:
+            self.kp1 = None
+            self.kp2 = None
+
         if self.num_workers % self.tp != 0:
             raise ValueError("num_workers must be divisible by tp")
-        num_workers = self.num_workers/(self.tp)
-        # print(f'num_workers after kp_hidden_dim1 and kp_hidden_dim2: {num_workers}')
+        workers_after_tp = self.num_workers // self.tp
 
-        if num_workers % self.dp != 0:
+        if workers_after_tp % self.dp != 0:
             raise ValueError("num_workers must be divisible by dp")
-        self.num_workers_dp = num_workers / self.dp # number of workers for each data parallelism batch
-        # print(f'num_workers_dp after dividing by dp: {self.num_workers_dp}')
+        self.num_workers_dp = workers_after_tp // self.dp
 
         if self.num_workers_dp % self.lp != 0:
             raise ValueError("num_workers_dp must be divisible by lp")
-        self.num_workers_lp = self.num_workers_dp / self.lp if self.lp > 1 else self.num_workers_dp #number of workers per pipeline stage
+        self.num_workers_lp = (
+            self.num_workers_dp // self.lp if self.lp > 1 else self.num_workers_dp
+        )
 
-        
-        
-        #check parallelism parameters
-        if self.kp1 != None and self.kp2 != None:
-            if self.dp * self.lp * self.kp1 * self.kp2 != self.num_workers :
-                raise ValueError("Product of dp, lp, kp1 and kp2 must be equal to number of workers")
-        else:
-            if self.dp * self.lp  != self.num_workers :
-                raise ValueError("Product of dp, lp must be equal to number of workers")
+        def _product(values):
+            result = 1
+            for value in values:
+                if value in (None, 0):
+                    continue
+                result *= int(value)
+            return result
+
+        kp_factor = _product([self.kp1, self.kp2])
+        expected_workers = self.dp * self.lp * kp_factor * self.tp
+        if expected_workers != self.num_workers:
+            raise ValueError(
+                "Product of tp, dp, lp, and kernel-parallel dims must equal number of workers"
+            )
             
         # Allow data parallelism to stay intra-node when dp_inter is False
         # (previously this raised an error). We now support dp using intra links.
@@ -337,7 +361,6 @@ class TimeCalculation:
         self.tot_time = 0
         self.debug = False
         
-        self.mode = mode
         default_policy = 'analytical'
         eb = getattr(hw_config, "execution_backend", None)
         if eb and getattr(eb, "model", "analytical") == "astra":
@@ -460,7 +483,10 @@ class TimeCalculation:
             self.IBK2 = util.scale_down(self.IBK2, self.kp_hidden_dim2, "kp2")
             self.IBD = util.scale_down(self.IBD, self.dp, "dp")
             self.IBL = util.scale_down(self.IBL, self.lp, "lp")
-            
+            if getattr(self, "tp", None):
+                self.IBTP = util.scale_down(self.IBTP, self.tp, "tp")
+
+        # Keep tensor-parallel interconnect parameters aligned with configured tensor-parallel links.
     def updateParams(
         self,
         debug,
