@@ -100,9 +100,6 @@ class Graph:
         dp: int,
         lp: int,
         tp: int,
-        # kp1: int,
-        # kp2: int,
-        # tp_mode: str,
         comp_times: Dict[str, Any],
         comm_metadata: Dict[str, Any],
         misc_metadata: Dict[str, Any],
@@ -111,9 +108,6 @@ class Graph:
         self.dp = int(dp)
         self.lp = int(lp)
         self.tp = int(tp)
-        # self.kp1 = int(kp1) if kp1 else 1
-        # self.kp2 = int(kp2) if kp2 else 1
-        # self.tp_mode = tp_mode
         self.comp_times = comp_times or {}
         self.comm_metadata = comm_metadata or {}
         self.misc_metadata = misc_metadata or {}

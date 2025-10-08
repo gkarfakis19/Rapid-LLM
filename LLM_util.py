@@ -239,12 +239,12 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
 # DECODE-SPECIFIC UTILITIES FOR AUTOREGRESSIVE INFERENCE
 # ====================================================================
 
-def kv_cache_token_bytes(batch_size, num_heads, head_dim, precision_bytes):
+def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
     """Return total bytes to store K+V for a single new token."""
-    return batch_size * num_heads * head_dim * precision_bytes * 2
+    return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
-def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size):
+def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
@@ -258,6 +258,7 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
         current_seq_len (int): Current sequence length including cache (growing: 1, 2, 3, ...)
         d_model (int): Hidden size (D)
         num_heads (int): Number of attention heads (H)
+        kv_heads (int): Number of key/value heads (H_kv)
         ffn_dim (int): First FFN layer output dimension (typically 4 * D)
         vocab_size (int): Vocabulary size (V)
 
@@ -265,26 +266,28 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
         OrderedDict: GEMM shapes [M, K, N] for decode step operations
     """
     assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+    assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim = d_model // num_heads
+    shared_heads = num_heads // kv_heads
     gemms = OrderedDict()
 
     # Decode-specific GEMM shapes with KV-cache handling (always enabled)
 
     # QKV Projection: Only the new token (seq_len = 1)
-    gemms["qkv_proj"] = (batch_size, 1, d_model, 3 * d_model)
+    gemms["qkv_proj"] = (batch_size, 1, d_model, (2 * kv_heads + num_heads) * head_dim)
 
     # Attention Score: Q(new) @ K(cached+new)
     gemms["attention_score"] = (
-        batch_size * num_heads,
-        1,                    # query seq_len (new token only)
+        batch_size * kv_heads,
+        1 * shared_heads,      # query positions handled per KV head
         head_dim,
         current_seq_len,      # key seq_len (grows with decode steps)
     )
 
     # Attention Output: attention_weights @ V(cached+new)
     gemms["attention_output"] = (
-        batch_size * num_heads,
-        1,                    # output seq_len (new token only)
+        batch_size * kv_heads,
+        1 * shared_heads,      # output positions handled per KV head
         current_seq_len,      # attention weight dim (grows with decode)
         head_dim,
     )
@@ -299,18 +302,33 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
     return gemms
 
 
-def process_decode_gemm_shapes(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size,
-                              option="multiply_batch_into_m"):
+def process_decode_gemm_shapes(
+    batch_size,
+    current_seq_len,
+    d_model,
+    num_heads,
+    kv_heads,
+    ffn_dim,
+    vocab_size,
+    option="multiply_batch_into_m",
+):
     """
     Process decode GEMM shapes and reshape them into 3D.
 
-    Similar to process_gemm_shapes but for decode-specific patterns.
+    Similar to process_gemm_shapes but for decode-specific patterns. Handles grouped
+    query attention (GQA) by allowing kv_heads != num_heads.
 
     Integrates with existing DeepFlow GEMM processing infrastructure.
     """
     # Generate decode GEMM shapes in 4D
     gemm_shapes_4d = autoregressive_decoder_gemm(
-        batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size
+        batch_size=batch_size,
+        current_seq_len=current_seq_len,
+        d_model=d_model,
+        num_heads=num_heads,
+        kv_heads=kv_heads,
+        ffn_dim=ffn_dim,
+        vocab_size=vocab_size,
     )
 
     processed = OrderedDict()

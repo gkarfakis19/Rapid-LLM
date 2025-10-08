@@ -518,16 +518,28 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = cls._expand_gemm_descriptor(gemm)
         return batch, batch * m, k, n
     # def sequence
-    def get_tensor_reduction_time(self, size_bytes: int, kind: str, name: str ) -> float:
-        
+    def get_tensor_reduction_time(self, size_bytes: int, kind: str, name: str, participants: Optional[int] = None) -> float:
+        """Return collective time for tensor-parallel reductions.
+
+        `size_bytes` is expected to be the per-rank payload. Convert to total bytes so the
+        network model sees the same aggregate volume it assumes internally.
+        """
+        if not size_bytes:
+            return 0.0
+
+        if not participants:
+            participants = int(self.tp)
+
+        total_bytes = int(math.ceil(size_bytes * participants))
+
         reduction_time = self.network_model.collective(
-                kind=kind, 
-                size_bytes=size_bytes,#for each rank or total?
-                participants=int(self.tp),
-                ib=self.IBTP,
-                ll=self.LLTP,
-                local_bytes= 0, 
-                debug_label=name or "comm",
+            kind=kind,
+            size_bytes=total_bytes,
+            participants=participants,
+            ib=self.IBTP,
+            ll=self.LLTP,
+            local_bytes=0,
+            debug_label=name or "comm",
         )
         return reduction_time
         
@@ -588,8 +600,6 @@ class TimeCalculationLLM(TimeCalculation):
                 act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
             elif tensor_type == "row":
                 act_bytes = math.ceil(self.precision * m * n)
-            else:
-                act_bytes = math.ceil(self.precision * m * k / max(1, self.tp))
 
         gemm_time = grad_time_act + grad_time_wt
 
@@ -805,24 +815,25 @@ class TimeCalculationLLM(TimeCalculation):
         mem_bytes = self.precision * elements * 2
 
         if seq_degree > 1:  # all-gather after layernorm when sequence parallelism is used
-            size_bytes = self.precision * elements
+            per_rank_bytes = self.precision * elements
+            total_bytes = int(math.ceil(per_rank_bytes * seq_degree))
             reduction_time = self.network_model.collective(
-                kind="all_gather", 
-                size_bytes=size_bytes,#for each rank or total?
+                kind="all_gather",
+                size_bytes=total_bytes,
                 participants=int(seq_degree),
                 ib=self.IBTP,
-                ll=self.LLTP, #TODO fix the bandwidth and latency for sequence parallelism
-                local_bytes= 0, 
+                ll=self.LLTP,
+                local_bytes=0,
                 debug_label="layernorm_f_all_gather",
-        )
+            )
         else:
             reduction_time = 0.0
-            size_bytes = 0
+            total_bytes = 0
 
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
 
 
-        return compute_time, reduction_time, size_bytes
+        return compute_time, reduction_time, total_bytes
     
     
 
@@ -836,24 +847,25 @@ class TimeCalculationLLM(TimeCalculation):
         mem_bytes = self.precision * elements * 4
 
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
-        if seq_degree > 1:  # all-gather after layernorm when sequence parallelism is used
-            size_bytes = self.precision * elements
+        if seq_degree > 1:  # communication after layernorm when sequence parallelism is used
+            per_rank_bytes = self.precision * elements
+            total_bytes = int(math.ceil(per_rank_bytes * seq_degree))
             reduction_time = self.network_model.collective(
-                kind="all_gather", 
-                size_bytes=size_bytes,#for each rank or total?
+                kind="reduce_scatter",
+                size_bytes=total_bytes,
                 participants=int(seq_degree),
                 ib=self.IBTP,
                 ll=self.LLTP,
-                local_bytes= 0, 
-                debug_label="layernorm_b_all_gather",
-        )
+                local_bytes=0,
+                debug_label="layernorm_b_reduce_scatter",
+            )
             
         else:
             reduction_time = 0.0
-            size_bytes = 0
+            total_bytes = 0
 
 
-        return compute_time, reduction_time, size_bytes
+        return compute_time, reduction_time, total_bytes
     def get_linear_softmax_b(self, gemm):
         _, effective_m, k, n = self._effective_dims(gemm)
         gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
@@ -897,32 +909,6 @@ class TimeCalculationLLM(TimeCalculation):
 
         return
 
-    # This function should be deleted.
-    # def get_dp_overhead(self, d, ffn_dim, n_layers): #calculate the reduction time and apply_grad_time for data parallelism 
-
-    #     reduction_time = 0
-    #     apply_grad_time = 0
-
-    #     reduction_time += self.getR(Dim0=d, Dim1=3*d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="qkv_proj reduction") #get the reduction time between all nodes in one data parallel group
-    #     apply_grad_time += self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj grad")
-
-    #     reduction_time += self.getR(Dim0=d, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="output_proj reduction")
-    #     apply_grad_time += self.applyGrad(Dim0=d, Dim1=d, name="output_proj grad")
-
-    #     reduction_time += 2*self.getR(Dim0=ffn_dim, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="ffn reduction")
-    #     apply_grad_time += 2*self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn grad")
-    #     print(f"apply_grad_time: {apply_grad_time}")
-        
-    #     if self.all_reduce == "the end":
-    #         reduction_time *= n_layers
-    #         apply_grad_time *= n_layers
-    #     elif self.all_reduce == "every layer": #return the reduction time for each layer
-    #         pass
-    #     else:
-    #         sys.exit("Invalid all_reduce option")
-    #     return reduction_time , apply_grad_time
-    
-    
     def get_inter_layer_comm_latency_llm(self, batch_size, hidden_dim, seq_len): #calculate the cross-layer communication latency
         w = 0
         w_size = 0
@@ -1067,6 +1053,8 @@ class TimeCalculationLLM(TimeCalculation):
         # Compute GEMM times and organize in structured dict
         transformer_results = {}
         seq_degree = self._sequence_parallel_degree()
+        tp_degree = self.tp
+
         comm_kind_fwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
         comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
         # QKV Projection GEMM
@@ -1199,13 +1187,27 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_results['attention_output']['backward_gemm'] + transformer_results['output_proj']['backward_gemm'] +
             transformer_results['attention_scale_softmax']['backward']
         )
-        transformer_results['MHA'] = {'forward': mha_time_f, 'backward': mha_time_b, "forward_reduction": out_proj_reduction_f, "backward_reduction": qkv_proj_reduction_b, "comm_size_forward": out_proj_size, "comm_size_backward": qkv_proj_size_b }
+        transformer_results['MHA'] = {
+            'forward': mha_time_f,
+            'backward': mha_time_b,
+            "forward_reduction": out_proj_reduction_f,
+            "backward_reduction": qkv_proj_reduction_b,
+            "comm_size_forward": out_proj_size,
+            "comm_size_backward": qkv_proj_size_b,
+        }
 
         ffn_time_f = transformer_results['ffn1']['forward_gemm'] + transformer_results['ffn2']['forward_gemm'] + transformer_results['gelu']['forward']
         ffn_time_b = (
             transformer_results['ffn1']['backward_gemm'] + transformer_results['ffn2']['backward_gemm'] + transformer_results['gelu']['backward']
         )
-        transformer_results['MLP'] = {'forward': ffn_time_f, 'backward': ffn_time_b, "forward_reduction": ffn2_reduction_f, "backward_reduction": ffn1_reduction_b, "comm_size_forward": ffn2_size, "comm_size_backward": ffn1_size_b }
+        transformer_results['MLP'] = {
+            'forward': ffn_time_f,
+            'backward': ffn_time_b,
+            "forward_reduction": ffn2_reduction_f,
+            "backward_reduction": ffn1_reduction_b,
+            "comm_size_forward": ffn2_size,
+            "comm_size_backward": ffn1_size_b,
+        }
         # Calculate transformer times directly
         
         transformer_time_f = (
@@ -1217,13 +1219,13 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_results['layernorm1']['backward'] + transformer_results['layernorm1']['backward_reduction']+ transformer_results['layernorm2']['backward']+ transformer_results['layernorm2']['backward_reduction']
         )
         # Write results to file
-        output_file = os.path.join(self.output_dir, "Transformer_breakdown_results.txt")
-        with open(output_file, "w") as f:
-            f.write("Transformer Breakdown Results:\n")
-            for key, value in transformer_results.items():
-                f.write(f"{key}: {value}\n")
-            f.write(f"Total Transformer Forward Time: {transformer_time_f}\n")
-            f.write(f"Total Transformer Backward Time: {transformer_time_b}\n")
+        # output_file = os.path.join(self.output_dir, "Transformer_breakdown_results.txt")
+        # with open(output_file, "w") as f:
+        #     f.write("Transformer Breakdown Results:\n")
+        #     for key, value in transformer_results.items():
+        #         f.write(f"{key}: {value}\n")
+        #     f.write(f"Total Transformer Forward Time: {transformer_time_f}\n")
+        #     f.write(f"Total Transformer Backward Time: {transformer_time_b}\n")
 
 
         node_breakdown = {
@@ -1336,7 +1338,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif self.tp > 1 and seq_degree > 1:
             if entry['name'] in ['layernorm1', 'layernorm2']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, seq_degree, 'tp')
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, seq_degree, 'tp')
+                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
             elif entry['name'] in ['MHA', 'MLP']:
                 add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, seq_degree, 'tp')
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
@@ -1605,59 +1607,16 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_backward_root = transformer_backward_root
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
-        self.transformer_graph.save_graph(transformer_forward_root, "output_graph/", "transformer_graph_forward_initial")
+        # self.transformer_graph.save_graph(transformer_forward_root, "output_graph/", "transformer_graph_forward_initial")
         
-        self.transformer_graph.save_graph(transformer_backward_root, "output_graph/", "transformer_graph_backward_initial")
+        # self.transformer_graph.save_graph(transformer_backward_root, "output_graph/", "transformer_graph_backward_initial")
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
-        self.pipeline_graph.save_graph(graph_root, "output_graph/", "initial_pipeline_graph")
+        # self.pipeline_graph.save_graph(graph_root, "output_graph/", "initial_pipeline_graph")
         
         mode = self.execution_mode
-        # start = time.perf_counter()
-        # forward_graph, _ = self.pipeline_graph.extract_forward_graph(self.pipeline_root)
-        # backward_graph= self.pipeline_graph.extract_backward_graph(self.pipeline_root)
-        # elapsed = time.perf_counter() - start
-        # print(f"extracting forward graph took {elapsed:.3f}s")
-        # setattr(self, "forward_only_root", forward_graph)
-        # setattr(self, "backward_only_root", backward_graph)
-        # self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"forward_path_before_dispatcher_{mode.value.lower()}")
-        # self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"backward_path_before_dispacher_{mode.value.lower()}")
-        # dispather_forward = LLMExecutionDispatcher(
-        #     time_calc=self,
-        #     pipeline_graph=self.pipeline_graph,
-        #     pipeline_root=forward_graph,
-        #     interconnect_params=self.pipeline_interconnect,
-        #     transformer_graph=self.transformer_graph,
-        #     transformer_forward_root=self.transformer_forward_root,
-        #     transformer_backward_root=self.transformer_backward_root,
-        # )
-        # dispatcher_backward = LLMExecutionDispatcher(
-        #     time_calc=self,
-        #     pipeline_graph=self.pipeline_graph,
-        #     pipeline_root=backward_graph,
-        #     interconnect_params=self.pipeline_interconnect,
-        #     transformer_graph=self.transformer_graph,
-        #     transformer_forward_root=self.transformer_forward_root,
-        #     transformer_backward_root=self.transformer_backward_root,
-        # )
-        # result_forward = dispather_forward.run(self.execution_mode)
-        # # result_backward = dispatcher_backward.run(self.execution_mode)
-        # time_fw = result_forward.total_time
-        # time_bw = result_backward.total_time
-        # print(f"{self.execution_mode.value} pipeline forward execution time: {time_fw:.3f}s")
-        # print(f"{self.execution_mode.value} pipeline backward execution time: {time_bw:.3f}s")
-        # forward_graph = result_forward.graph_root
-        # backward_graph = result_backward.graph_root
-        
-        
-        # self.pipeline_graph.save_graph(forward_graph, "output_graph/", f"pipeline_graph_forward_{mode.value.lower()}")
-        # self.pipeline_graph.save_graph(backward_graph, "output_graph/", f"pipeline_graph_backward_{mode.value.lower()}")
-        
-
-        
-        
         
         dispatcher = LLMExecutionDispatcher(
             time_calc=self,
@@ -1681,11 +1640,6 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = pipeline_root
         self.pipeline_interconnect = dispatcher.interconnect_params
         
-
-        # start = time.perf_counter()
-        self.pipeline_graph.save_graph(pipeline_root, "output_graph/", f"pipeline_graph_{mode.value.lower()}")
-        # elapsed = time.perf_counter() - start
-        # print(f"save_graph took {elapsed:.3f}s")
 
         # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", f"pipeline_graph_{mode.value.lower()}")
         # debug helper. If set, print analytical transformer time and actual transformer time
@@ -2045,10 +1999,12 @@ class LLMExecutionDispatcher:
         seq_len: int,
         total_seq_len: int,
     ) -> Tuple[float, float]:
+        kv_heads = getattr(self, "kv_heads", None) or self.num_heads
         head_dim = self.hidden_dim // self.num_heads
+        shared_heads = max(1, self.num_heads // kv_heads)
         attention_score_shape = (
-            batch_size * self.num_heads,
-            1,
+            batch_size * kv_heads,
+            1 * shared_heads,
             head_dim,
             total_seq_len,
         )
@@ -2056,7 +2012,7 @@ class LLMExecutionDispatcher:
 
         token_bytes = LLM_util.kv_cache_token_bytes(
             batch_size=batch_size,
-            num_heads=self.num_heads,
+            kv_heads=kv_heads,
             head_dim=head_dim,
             precision_bytes=self.kv_cache_precision,
         )

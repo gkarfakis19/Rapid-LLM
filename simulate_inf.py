@@ -23,6 +23,7 @@ class InferenceConfig:
     decode_len: int  # number of decode steps
     hidden_dim: int
     num_heads: int
+    kv_heads: int
     ffn_dim: int
     vocab_size: int
     num_layers: int
@@ -91,6 +92,7 @@ class DecodeGraph(Graph):
                 current_seq_len=total_seq_len,
                 d_model=self.config.hidden_dim,
                 num_heads=self.config.num_heads,
+                kv_heads=self.config.kv_heads,
                 ffn_dim=self.config.ffn_dim,
                 vocab_size=self.config.vocab_size,
                 option="multiply_batch_into_m"

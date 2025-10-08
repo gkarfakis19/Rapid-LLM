@@ -1,5 +1,6 @@
 """LLM inference prefill time-calculation entry points."""
 
+import math
 import os
 from typing import Dict, List, Optional, Tuple
 from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM
@@ -23,17 +24,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float]]:
         """Construct transformer spec + node breakdown for a single decode step."""
         head_dim = self.hidden_dim // self.num_heads
-        attention_score_shape = (
-            batch_size * self.num_heads,
-            1,
-            head_dim,
-            total_seq_len,
-        )
-        attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
 
         token_bytes = LLM_util.kv_cache_token_bytes(
             batch_size=batch_size,
-            num_heads=self.num_heads,
+            kv_heads=self.kv_heads,
             head_dim=head_dim,
             precision_bytes=self.kv_cache_precision,
         )
@@ -49,6 +43,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         ) + self.O
 
         seq_degree = self._sequence_parallel_degree()
+        tp_degree = max(1, int(self.tp))
+        seq_mode = seq_degree > 1
+
+        def _tp_total_bytes(per_rank_bytes: int) -> int:
+            if not per_rank_bytes:
+                return 0
+            parts = seq_degree if seq_mode else tp_degree
+            return int(math.ceil(per_rank_bytes * parts))
+
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
 
         ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
@@ -57,6 +60,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             current_seq_len=total_seq_len,
             d_model=self.hidden_dim,
             num_heads=self.num_heads,
+            kv_heads=self.kv_heads,
             ffn_dim=ffn_dim,
             vocab_size=self.vocab_size,
             option="multiply_batch_into_m",
@@ -134,6 +138,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         gelu_f = self.get_gelu_f(gemm_ffn1)
 
+        attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
         mha_forward = (
             qkv_proj_time
             + attention_score_time
@@ -163,7 +168,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward": 0.0,
                 "forward_reduction": out_proj_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": out_proj_size,
+                "comm_size_forward": _tp_total_bytes(out_proj_size),
                 "comm_size_backward": 0,
             },
             "MLP": {
@@ -171,7 +176,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward": 0.0,
                 "forward_reduction": ffn2_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": ffn2_size,
+                "comm_size_forward": _tp_total_bytes(ffn2_size),
                 "comm_size_backward": 0,
             },
             "layernorm1": {
@@ -263,7 +268,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         head_dim = hidden_dim // num_heads
         token_bytes = LLM_util.kv_cache_token_bytes(
             batch_size=batch_size,
-            num_heads=num_heads,
+            kv_heads=self.kv_heads,
             head_dim=head_dim,
             precision_bytes=self.kv_cache_precision,
         )
@@ -356,6 +361,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_len=decode_len,
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
+            kv_heads=self.kv_heads,
             ffn_dim=self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim,
             vocab_size=self.vocab_size,
             num_layers=self.num_layers,
@@ -401,7 +407,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         head_dim = self.hidden_dim // self.num_heads
         token_bytes = LLM_util.kv_cache_token_bytes(
             batch_size=self._effective_transformer_batch(),
-            num_heads=self.num_heads,
+            kv_heads=self.kv_heads,
             head_dim=head_dim,
             precision_bytes=self.kv_cache_precision,
         )
