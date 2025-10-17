@@ -413,6 +413,7 @@ class TimeCalculation:
                 raise ValueError("Batch size must be divisible by micro-batch size")
             self.microB = math.ceil(self.miniB / self.mb) if self.lp > 1 else self.miniB # micro-batch size for each pipeline stage
             self.attention_type = self.model.attention_type
+            self.flash_attention = getattr(self.model, 'use_flashattention', False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, 'kv_heads') else self.num_heads
 
     def get_model_class(self, model_type):

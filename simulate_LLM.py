@@ -8,6 +8,7 @@ import os
 
 import graphviz_async
 debug = False
+BYTES_PER_GIB = 1024 ** 3
 
 class Node:
     def __init__(self, name, op_id, hw_id, duration, fwd=True, *, is_kv_cache=False):
@@ -1132,7 +1133,7 @@ class Graph:
                         self._log_paths[gpu_idx] = log_path
                         log_file = open(log_path, "w", encoding="utf-8")
                         log_file.write(
-                            "timestamp_s | action               | delta_gb    | current_gb  | peak_gb     | details\n"
+                            "timestamp_s | action               | delta_gib   | current_gib | peak_gib    | details\n"
                         )
                         self._log_files[gpu_idx] = log_file
 
@@ -1186,15 +1187,15 @@ class Graph:
             def summary(self) -> List[Dict[str, float]]:
                 summary: List[Dict[str, float]] = []
                 for idx in range(len(self.current)):
-                    static_gb = self.static[idx] / 1e9
-                    current_gb = self.current[idx] / 1e9
-                    peak_gb = self.peak[idx] / 1e9
+                    static_gib = self.static[idx] / BYTES_PER_GIB
+                    current_gib = self.current[idx] / BYTES_PER_GIB
+                    peak_gib = self.peak[idx] / BYTES_PER_GIB
                     summary.append(
                         {
                             "gpu_id": idx,
-                            "static_gb": static_gb,
-                            "current_gb": current_gb,
-                            "peak_gb": peak_gb,
+                            "static_gib": static_gib,
+                            "current_gib": current_gib,
+                            "peak_gib": peak_gib,
                         }
                     )
                 return summary
@@ -1218,15 +1219,15 @@ class Graph:
                 if log_file is None:
                     return
 
-                delta_gb = delta_bytes / 1e9
-                current_gb = self.current[gpu_id] / 1e9
-                peak_gb = self.peak[gpu_id] / 1e9
+                delta_gib = delta_bytes / BYTES_PER_GIB
+                current_gib = self.current[gpu_id] / BYTES_PER_GIB
+                peak_gib = self.peak[gpu_id] / BYTES_PER_GIB
                 line = "{:.6f} | {:<20} | {:>+.6f} | {:>+.6f} | {:>+.6f}".format(
                     timestamp,
                     action,
-                    delta_gb,
-                    current_gb,
-                    peak_gb,
+                    delta_gib,
+                    current_gib,
+                    peak_gib,
                 )
                 if details:
                     line = f"{line} | {details}"
@@ -1249,16 +1250,50 @@ class Graph:
                 return False
             return "transformer" in name.lower()
 
+        def _count_transformer_layers_per_device(root_obj: Any, num_devices: int) -> List[int]:
+            layer_sets: List[Set[Any]] = [set() for _ in range(num_devices)]
+            stack_local = list(root_obj if isinstance(root_obj, (list, tuple)) else [root_obj])
+            visited_local: Set[int] = set()
+            while stack_local:
+                current = stack_local.pop()
+                current_id = id(current)
+                if current_id in visited_local:
+                    continue
+                visited_local.add(current_id)
+
+                if isinstance(current, Node):
+                    hw_id = getattr(current, "hw_id", None)
+                    layer_idx = getattr(current, "layer_index", None)
+                    if (
+                        layer_idx is not None
+                        and isinstance(hw_id, int)
+                        and 0 <= hw_id < num_devices
+                        and _is_transformer_block(current)
+                        and getattr(current, "fwd", True)
+                    ):
+                        layer_sets[hw_id].add(layer_idx)
+
+                stack_local.extend(getattr(current, "children", []))
+            return [len(layer_set) for layer_set in layer_sets]
+
         memory_output_dir: Optional[str] = None
         if output_folder:
             memory_output_dir = os.path.join(output_folder, "memory-summary")
+
+        transformer_layers_per_device = _count_transformer_layers_per_device(root, base_devices)
+        static_per_layer = memory_data.get("static_mem_per_layer", 0)
+        total_tracked_layers = sum(transformer_layers_per_device)
+        if static_per_layer > 0 and total_tracked_layers == 0:
+            transformer_layers_per_device = [1 for _ in range(base_devices)]
 
         GPU_list = [True for _ in range(base_devices)]
         data_list = [False for _ in range(0, self.num_batch)]
         memory_snapshot = _MemorySnapshot(base_devices, memory_output_dir, filename)
         
         for idx in range(base_devices):
-            memory_snapshot.add_static(idx, memory_data.get("static_mem_per_layer", 0), timestamp=0.0)
+            static_bytes = static_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else static_per_layer
+            if static_bytes > 0:
+                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
         self.memory_monitor_snapshot = memory_snapshot
 
         heappush(event_queue, (root.duration, counter, root))
@@ -1361,7 +1396,7 @@ class Graph:
         summary = memory_snapshot.summary()
         memory_snapshot.close()
         self.memory_monitor_summary = summary
-        peak_mem = max(entry["peak_gb"] for entry in summary) if summary else 0.0
+        peak_mem = max(entry["peak_gib"] for entry in summary) if summary else 0.0
         return time, peak_mem
 
     def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):

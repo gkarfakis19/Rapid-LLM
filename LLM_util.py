@@ -120,13 +120,11 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     processed = OrderedDict()
     for key, shape in gemm_shapes_4d.items():
-        # print(f"Original shape for {key}: {shape}")
         
         if key in ATTENTION_GEMM_KEYS:
             processed[key] = tuple(shape)
         else:
             processed[key] = reshape_gemm_to_3d(shape, option)
-        # print(f"Processed shape for {key}: {processed[key]}")
 
     return processed
 
@@ -134,9 +132,9 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
     #Activations refer to output activations that need to be stored
     alpha = 16 + ffn_dim/hidden_dim #parameter need to be changed accordingly
     beta = 3
-    # d = 1# data parallelism degree
-    # t = 1 #tensor parallelism degree
-    attention_score_act = batch_size * n_heads * seq_len * seq_len
+    # d  data parallelism degree
+    # t  #tensor parallelism degree
+    
     act_memory_layer = seq_len * batch_size * hidden_dim * (34 / t + 5 * n_heads * seq_len/(hidden_dim * t) ) * precision / 2 #from https://arxiv.org/pdf/2205.05198
     transformer_param_layer = (4 ) * hidden_dim * hidden_dim + ffn_dim * 2 * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn1,ffn2
     optimizer_mem = 10 * transformer_param_layer * precision/ 2 / (t * d) 
@@ -202,8 +200,6 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
             precision=precision,
         )
     )
-    # print(f"transformer_mem per layer: {transformer_mem_layer/1e9:.2f} GB, act: {transformer_act_layer/1e9:.2f} GB, static: {transformer_static_layer/1e9:.2f} GB")
-    # print(f"gradient_mem per layer: {gradient_mem_layer/1e9:.2f} GB, optimizer_mem per layer: {optimizer_mem_layer/1e9:.2f} GB, weight_memory_layer per layer: {weight_memory_layer/1e9:.2f} GB")
     softmax_mem = getlinearSoftmaxMem(
         batch_size=batch_size,
         seq_len=seq_len,
@@ -226,9 +222,6 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
 
     tot_mem = transformer_mem_layer*n_layers + softmax_mem + embedding_mem
 
-    # wt_mem = (transformer_wt + softmax_wt + projection_wt + embedding_wt)
-    # act_mem = (transformer_act + softmax_act + projection_act + embedding_act)
-    # point_mem = (transformer_point + softmax_point + projection_point + embedding_point)
     
 
     return tot_mem, embedding_mem, transformer_mem_layer*n_layers,transformer_act_layer*n_layers,transformer_static_layer*n_layers, gradient_mem_layer*n_layers, optimizer_mem_layer*n_layers, weight_memory_layer*n_layers, softmax_mem#, projection_mem, wt_mem, act_mem, point_mem

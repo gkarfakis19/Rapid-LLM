@@ -397,6 +397,7 @@ class LLMAttentionConfig:
     attention_type: str
     num_heads: int
     kv_heads: Optional[int] = None
+    use_flashattention: bool = False
 
 
 @dataclass
@@ -418,6 +419,10 @@ class LLMConfig:
     @property
     def num_heads(self) -> int:
         return self.attention.num_heads
+
+    @property
+    def use_flashattention(self) -> bool:
+        return bool(getattr(self.attention, "use_flashattention", False))
 LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
@@ -715,10 +720,17 @@ def parse_config(filename, config_type):
                 f"model_param.attention.kv_heads={kv_heads} must divide num_heads={num_heads}"
             )
 
+        raw_flash_attention = attention_dict.get("use_flashattention", attention_dict.get("used_flash_attention", False))
+        if isinstance(raw_flash_attention, str):
+            flash_attention = raw_flash_attention.strip().lower() in ("1", "true", "yes", "y")
+        else:
+            flash_attention = bool(raw_flash_attention)
+
         attention_cfg = LLMAttentionConfig(
             attention_type=attn_type,
             num_heads=num_heads,
             kv_heads=kv_heads,
+            use_flashattention=flash_attention,
         )
 
         run_type = mp.pop("run_type", "training")

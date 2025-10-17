@@ -570,7 +570,22 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
         )
         return reduction_time
+    def flash_attention_kernal(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        """Return time for flash attention kernel."""
+        batch_size = self.microB
+        seq_len = self.seq_len
+        hidden_dim = self.hidden_dim
+        num_heads = self.num_heads
+        head_dim = hidden_dim // num_heads
 
+        # Forward pass
+        attn_score_time = self.getGEMMTime(seq_len, head_dim, head_dim, "attention_score")[0] * batch_size * num_heads
+        attn_scale_softmax_time = self.getSoftmaxTime(seq_len, seq_len, "attention_scale_softmax")[0] * batch_size * num_heads
+        attn_output_time = self.getGEMMTime(head_dim, seq_len, head_dim, "attention_output")[0] * batch_size * num_heads
+
+        # Backward pass
+        attn_score_grad_time = self.getGEMMTime(head_dim, seq_len, head_dim, "attention_score_grad")[0] * batch_size * num_heads
+        
     def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
@@ -1134,17 +1149,6 @@ class TimeCalculationLLM(TimeCalculation):
             print("(gr) Embedding_mem: {:,}".format(int(embedding_mem / 1e9)))
         return embedding_mem_time
     
-    def check_memory(self, hw_config, model_config): #check whether memory usage exceeds capacity
-        """Check memory usage."""
-        total_mem_capacity = self.memory_capacity # in bytes
-        print(f"Total Memory Capacity: {total_mem_capacity / 1e9} GB")
-        total_mem = LLM_util.getTotMemReq(hw_config, model_config)[0]
-        print(f"Total Memory Usage estimation: {total_mem / 1e9} GB")
-        if total_mem > total_mem_capacity:
-            print("Warning: Total memory usage exceeds memory capacity!")
-            sys.exit("Program terminated due to memory capacity exceeded.")
-
-        return
 
     def get_inter_layer_comm_latency_llm(self, batch_size, hidden_dim, seq_len): #calculate the cross-layer communication latency
         w = 0
@@ -1193,7 +1197,7 @@ class TimeCalculationLLM(TimeCalculation):
             'total_local': qkv_local + output_local + ffn_local
         }
 
-    def get_data_parallel_reduction_llm(self, d, ffn_dim):
+    def get_data_parallel_reduction_llm(self, d, ffn_dim): 
         # If no data parallelism, still apply gradients locally but no cross-device reduction
         if not getattr(self, "dp", 1) or self.dp <= 1:
             apply_grad_time = 0.0
@@ -1302,31 +1306,40 @@ class TimeCalculationLLM(TimeCalculation):
             'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b,
             'comm_size_forward': qkv_proj_size_f, 'comm_size_backward': qkv_proj_size_b
         }
+        if self.flash_attention is False:
+            # Attention Score GEMM
+            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f = self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", tensor_type="attention_score")
+            attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", tensor_type="attention_score")
+            attention_score_f = attn_score_gemm_f + attn_score_reduction_f
+            attention_score_b = attn_score_gemm_b + attn_score_reduction_b
+            transformer_results['attention_score'] = {
+                'forward': attention_score_f, 'backward': attention_score_b,
+                'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
+                'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b,
+                'comm_size_forward': attn_score_size_f, 'comm_size_backward': attn_score_size_b
+                
+            }
+            attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
+            attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
+            transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
-        # Attention Score GEMM
-        attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f = self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", tensor_type="attention_score")
-        attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", tensor_type="attention_score")
-        attention_score_f = attn_score_gemm_f + attn_score_reduction_f
-        attention_score_b = attn_score_gemm_b + attn_score_reduction_b
-        transformer_results['attention_score'] = {
-            'forward': attention_score_f, 'backward': attention_score_b,
-            'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
-            'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b,
-            'comm_size_forward': attn_score_size_f, 'comm_size_backward': attn_score_size_b
-            
-        }
+            # Attention Output GEMM
+            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f = self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", tensor_type="attention_output")
+            attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", tensor_type="attention_output")
+            attention_output_f = attn_out_gemm_f + attn_out_reduction_f
+            attention_output_b = attn_out_gemm_b + attn_out_reduction_b
+            transformer_results['attention_output'] = {
+                'forward': attention_output_f, 'backward': attention_output_b,
+                'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
+                'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b,
+                'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b
+            }
+        elif self.flash_attention is True:
+            attention_score_result, attention_scale_softmax_result, attention_output_result = self.flash_attention_kernal()
+            # pass #to be implemented
 
-        # Attention Output GEMM
-        attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f = self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", tensor_type="attention_output")
-        attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", tensor_type="attention_output")
-        attention_output_f = attn_out_gemm_f + attn_out_reduction_f
-        attention_output_b = attn_out_gemm_b + attn_out_reduction_b
-        transformer_results['attention_output'] = {
-            'forward': attention_output_f, 'backward': attention_output_b,
-            'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
-            'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b,
-            'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b
-        }
+        else:
+            raise ValueError("flash_attention should be either True or False")
 
         # Output Projection GEMM
         out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f = self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", tensor_type="out_proj")
@@ -1373,9 +1386,7 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_b = self.get_embedding_b()
         transformer_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
 
-        attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
-        attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
-        transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
+
 
         residual1_f = self.get_residual_f(tensor_shape=gemm_output_proj)
         residual1_b = self.get_residual_b(tensor_shape=gemm_output_proj)
@@ -1892,7 +1903,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
         
-        _, _, peak_mem = self._simulate_with_memory(graph_root, memory_data)
+        _, peak_mem = self._simulate_with_memory(graph_root, memory_data)
         mode = self.execution_mode
         
         dispatcher = LLMExecutionDispatcher(
@@ -1942,13 +1953,12 @@ class TimeCalculationLLM(TimeCalculation):
             # f.write("Total Time: {0:.8f}\n".format(TC.getTime()))
 
         return time_fw_bw
-    def _simulate_with_memory(
+    def _simulate_with_memory( 
         self,
         graph_root: Any,
         memory_data: Dict[str, Any],
-    ) -> Tuple[float, float, float]:
-        """Run both unconstrained and memory-aware simulations, reporting peak usage."""
-        time_no_memory = self.pipeline_graph.simulate(graph_root)
+    ) -> Tuple[float, float]:
+        """Run memory-aware simulation and report duration plus peak usage."""
 
         time_with_memory, peak_mem = self.pipeline_graph.simulate_memory(
             graph_root,
@@ -1965,22 +1975,23 @@ class TimeCalculationLLM(TimeCalculation):
                 object(),
             )
             hardware_mem_bytes = getattr(hardware_mem_bytes, "size", None)
+        hardware_mem_bytes = hardware_mem_bytes * self.tp * self.cp  # total memory across all devices in the lp group
 
         if hardware_mem_bytes is not None:
-            hardware_mem_gb = float(hardware_mem_bytes) / (1024 ** 3)
-            self.memory_capacity_per_device_gb = hardware_mem_gb
-            mem_delta = hardware_mem_gb - peak_mem
+            hardware_mem_gib = float(hardware_mem_bytes) / (1024 ** 3)
+            self.memory_capacity_per_device_gb = hardware_mem_gib
+            mem_delta = hardware_mem_gib - peak_mem
             self.memory_headroom_gb = mem_delta
             memory_dir = os.path.join(self.output_dir, "memory-summary")
             os.makedirs(memory_dir, exist_ok=True)
             info_lines = [
-                f"Hardware memory capacity (per device): {hardware_mem_gb:.6f} GB",
-                f"Simulated peak memory usage: {peak_mem:.6f} GB",
+                f"Hardware memory capacity (per lp group): {hardware_mem_gib:.6f} GiB",
+                f"Simulated peak memory usage(per lp group): {peak_mem:.6f} GiB",
             ]
             if mem_delta < 0:
-                info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GB")
+                info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")
             else:
-                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GB")
+                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GiB")
             info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
             with open(info_path, "w", encoding="utf-8") as info_file:
                 info_file.write("\n".join(info_lines) + "\n")
@@ -1988,7 +1999,7 @@ class TimeCalculationLLM(TimeCalculation):
             self.memory_capacity_per_device_gb = None
             self.memory_headroom_gb = None
 
-        return time_no_memory, time_with_memory, peak_mem
+        return time_with_memory, peak_mem
     def get_time(self):
         return self.tot_time
 

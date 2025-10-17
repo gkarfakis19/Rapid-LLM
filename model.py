@@ -35,6 +35,7 @@ class Model_LLM:
       self.run_type         = exp_config.model_config.run_type
       self.attention_type  = exp_config.model_config.attention.attention_type
       self.kv_heads        = exp_config.model_config.attention.kv_heads if hasattr(exp_config.model_config.attention, 'kv_heads') else None
+      self.use_flashattention = getattr(exp_config.model_config.attention, 'use_flashattention', False)
       
       inference_cfg = getattr(exp_config, 'inference_config', None)
       if inference_cfg is not None:
