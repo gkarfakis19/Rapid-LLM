@@ -1081,7 +1081,7 @@ class Graph:
 
         return time
     
-    def simulate_memory(self, root, memory_data,output_folder = "output_graph/", filename="memory_graph"):
+    def simulate_memory(self, root, memory_data, mode = "training", output_folder = "output_graph/", filename="memory_graph"):
         time = 0
         counter = 0
         event_queue = []
@@ -1148,11 +1148,14 @@ class Graph:
                     "static_allocate",
                     size_bytes,
                     timestamp,
-                    details="static_mem_per_layer",
+                    details="static_mem",
                 )
 
             def allocate_activation(self, gpu_id: int, node: Any, timestamp: float) -> None:
-                size_bytes = memory_data.get("activation_mem_per_layer", 0) 
+                if mode != "training":
+                    size_bytes = memory_data.get("activation_mem_per_layer_inference", 0)
+                else:
+                    size_bytes = memory_data.get("activation_mem_per_layer", 0) 
                 node_identifier = getattr(node, "op_id", None)
                 if node_identifier is None:
                     node_identifier = id(node)
@@ -1281,9 +1284,10 @@ class Graph:
             memory_output_dir = os.path.join(output_folder, "memory-summary")
 
         transformer_layers_per_device = _count_transformer_layers_per_device(root, base_devices)
-        static_per_layer = memory_data.get("static_mem_per_layer", 0)
+        static_mem_per_layer = memory_data.get("static_mem_per_layer", 0)
+        weight_mem_per_layer = memory_data.get("weight_mem_per_layer", 0)
         total_tracked_layers = sum(transformer_layers_per_device)
-        if static_per_layer > 0 and total_tracked_layers == 0:
+        if total_tracked_layers == 0:
             transformer_layers_per_device = [1 for _ in range(base_devices)]
 
         GPU_list = [True for _ in range(base_devices)]
@@ -1291,9 +1295,16 @@ class Graph:
         memory_snapshot = _MemorySnapshot(base_devices, memory_output_dir, filename)
         
         for idx in range(base_devices):
-            static_bytes = static_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else static_per_layer
-            if static_bytes > 0:
+            
+            if mode == "inference":
+                static_bytes = weight_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else weight_mem_per_layer
                 memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+            elif mode == "training":
+                static_bytes = static_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else static_mem_per_layer
+                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+            else:
+                raise ValueError(f"Invalid mode '{mode}' for memory simulation")
+            
         self.memory_monitor_snapshot = memory_snapshot
 
         heappush(event_queue, (root.duration, counter, root))
@@ -1329,12 +1340,18 @@ class Graph:
                 if not getattr(event, "is_kv_cache", False):
                     GPU_list[event.hw_id] = True
                 is_transformer_block = _is_transformer_block(event) #TODO: embedding and softmax layers
-                if not event.fwd:
-                    if is_transformer_block:
-                        memory_snapshot.release_activation(event.hw_id, event, time)
-                elif event.fwd:
-                    if is_transformer_block:
-                        memory_snapshot.allocate_activation(event.hw_id, event, time)
+                if mode == "training":
+                    if not event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.release_activation(event.hw_id, event, time)
+                    elif event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.allocate_activation(event.hw_id, event, time)
+                elif mode == "inference":
+                    if event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.allocate_activation(event.hw_id, event, time)
+                            memory_snapshot.release_activation(event.hw_id, event, time)
 
                 
             for event in ready_list[:]:

@@ -570,21 +570,91 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
         )
         return reduction_time
-    def flash_attention_kernal(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    def flash_attention_kernel_forward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         """Return time for flash attention kernel."""
+        #TODO gqa support
         batch_size = self.microB
         seq_len = self.seq_len
         hidden_dim = self.hidden_dim
         num_heads = self.num_heads
-        head_dim = hidden_dim // num_heads
-
-        # Forward pass
-        attn_score_time = self.getGEMMTime(seq_len, head_dim, head_dim, "attention_score")[0] * batch_size * num_heads
-        attn_scale_softmax_time = self.getSoftmaxTime(seq_len, seq_len, "attention_scale_softmax")[0] * batch_size * num_heads
-        attn_output_time = self.getGEMMTime(head_dim, seq_len, head_dim, "attention_output")[0] * batch_size * num_heads
-
-        # Backward pass
-        attn_score_grad_time = self.getGEMMTime(head_dim, seq_len, head_dim, "attention_score_grad")[0] * batch_size * num_heads
+        shard_seq = math.ceil(seq_len / max(1, self.cp)) 
+        d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
+        Bc = self.attention_tile_size
+        Br = min(Bc, d)
+        Tr = math.ceil(shard_seq / Br) #number of row tiles
+        Tc =  math.ceil(shard_seq / Bc) #number of column tiles
+        print(f"Flash Attention: Br={Br}, Tr={Tr}, d={d}, Bc={Bc}, Tc={Tc}")
+        #TODO load 3 tiled gemm inputs and 1 output from HBM to SRAM
+        
+        #TODO disable HBM access
+        attention_forward_reduction_time = 0
+        attention_size_f = 0
+        
+        attn_score_time = self.getGEMMTime(Br, d, Bc, "attention_score_f")[0] * Tc * Tr #attention score gemm time for one head
+        number_flops =  Br * Bc * d * Tc * Tr * batch_size * num_heads
+        print(f"Flash Attention: attention score gemm flops={number_flops/1e9} GFLOPS")
+         
+        # Softmax time
+        elements = Br * Bc
+        flops = 7 * elements  #exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
+        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
+        attn_output_time *= batch_size * num_heads / max(1, self.tp)
+        
+        attention_forward_gemm_time = attn_score_time + attn_scale_softmax_time + attn_output_time
+        
+        attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
+        attention_size_f = 0
+        
+        return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f
+    
+    
+    def flash_attention_kernel_backward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        """Return time for flash attention kernel."""
+        #TODO gqa support
+        batch_size = self.microB
+        seq_len = self.seq_len
+        hidden_dim = self.hidden_dim
+        num_heads = self.num_heads
+        shard_seq = math.ceil(seq_len / max(1, self.cp)) 
+        d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
+        Bc = self.attention_tile_size
+        Br = min(Bc, d)
+        Tr = math.ceil(shard_seq / Br) #number of row tiles
+        Tc =  math.ceil(shard_seq / Bc) #number of column tiles
+        print(f"Flash Attention: Br={Br}, Tr={Tr}, d={d}, Bc={Bc}, Tc={Tc}")
+        #TODO load 3 tiled gemm inputs and 1 output from HBM to SRAM
+        
+        #TODO disable HBM access
+        attention_forward_reduction_time = 0
+        attention_size_f = 0
+        
+        attn_score_time = self.getGEMMTime(Br, d, Bc, "attention_score_f")[0] * Tc * Tr #attention score gemm time for one head
+        number_flops =  Br * Bc * d * Tc * Tr * batch_size * num_heads
+        print(f"Flash Attention: attention score gemm flops={number_flops/1e9} GFLOPS")
+         
+        # Softmax time
+        elements = Br * Bc
+        flops = 7 * elements  #exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
+        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
+        attn_output_time *= batch_size * num_heads / max(1, self.tp)
+        
+        attention_forward_gemm_time = attn_score_time + attn_scale_softmax_time + attn_output_time
+        
+        attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
+        attention_size_f = 0
+        
+    
+        return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f
+        
+        
+        
+        
         
     def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
@@ -616,6 +686,8 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if tensor_type == "attention_score" or tensor_type == "attention_output" :#attention gemm
             gemm_time = self.getGEMMTime( m, k, n, name)[0] * batch
+            number_flops =  m * n * k * batch
+            print(f"Single GPU Attention GEMM: {name} flops={number_flops/1e9} GFLOPS")
         else :
             gemm_time = self.getGEMMTime( m, k, n, name)[0]
         return gemm_time, 0, 0
@@ -1334,9 +1406,34 @@ class TimeCalculationLLM(TimeCalculation):
                 'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b,
                 'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b
             }
+            attention_f = attention_score_f + attention_scale_softmax_f + attention_output_f
+            attention_b = attention_score_b + attention_scale_softmax_b + attention_output_b
+            attention_gemm_f = attn_score_gemm_f + attn_out_gemm_f + attention_scale_softmax_f
+            attention_reduction_f = attn_score_reduction_f + attn_out_reduction_f
+            attention_gemm_b = attn_score_gemm_b + attn_out_gemm_b + attention_scale_softmax_b
+            attention_reduction_b = attn_score_reduction_b + attn_out_reduction_b
+            attention_size_f = attn_score_size_f + attn_out_size_f
+            attention_size_b = attn_score_size_b + attn_out_size_b
+            transformer_results["attention"] = {
+                'forward': attention_f,
+                'backward': attention_b,
+                "forward_gemm": attention_gemm_f,
+                "forward_reduction": attention_reduction_f,
+                "backward_gemm": attention_gemm_b,
+                "backward_reduction": attention_reduction_b,
+                "comm_size_forward": attention_size_f,
+                "comm_size_backward": attention_size_b
+            }
         elif self.flash_attention is True:
-            attention_score_result, attention_scale_softmax_result, attention_output_result = self.flash_attention_kernal()
-            # pass #to be implemented
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(attn_score_gemm=gemm_attention_score, attn_out_gemm=gemm_attention_output)
+            attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
+            transformer_results['attention'] = {
+                'forward': attention_f, 'backward': attention_b,
+                'forward_gemm': attention_gemm_f, 'forward_reduction': attention_reduction_f,
+                'backward_gemm': attention_gemm_b, 'backward_reduction': attention_reduction_b,
+                'comm_size_forward': attention_size_f, 'comm_size_backward': attention_size_b
+            }
+            
 
         else:
             raise ValueError("flash_attention should be either True or False")
@@ -1414,24 +1511,20 @@ class TimeCalculationLLM(TimeCalculation):
 
         # Calculate MHA and FFN times directly from results dict
         mha_time_f = ( 
-            transformer_results['qkv_proj']['forward'] + transformer_results['attention_score']['forward'] +
-            transformer_results['attention_output']['forward'] + transformer_results['output_proj']['forward'] +
-            transformer_results['attention_scale_softmax']['forward']
+            transformer_results['qkv_proj']['forward'] + transformer_results['attention']['forward'] + transformer_results['output_proj']['forward'] 
         )
         
         
         mha_time_b = ( 
-            transformer_results['qkv_proj']['backward'] + transformer_results['attention_score']['backward'] +
-            transformer_results['attention_output']['backward'] + transformer_results['output_proj']['backward'] +
-            transformer_results['attention_scale_softmax']['backward']
+            transformer_results['qkv_proj']['backward'] + transformer_results['attention']['backward'] + transformer_results['output_proj']['backward'] 
         )
         transformer_results['MHA'] = {
             'forward': mha_time_f,
             'backward': mha_time_b,
-            "forward_reduction": qkv_proj_reduction_f + attn_score_reduction_f + attn_out_reduction_f + out_proj_reduction_f,
-            "backward_reduction": qkv_proj_reduction_b + attn_score_reduction_b + attn_out_reduction_b + out_proj_reduction_b,
-            "comm_size_forward": qkv_proj_size_f + attn_score_size_f + attn_out_size_f + out_proj_size_f,
-            "comm_size_backward": qkv_proj_size_b + attn_score_size_b + attn_out_size_b + out_proj_size_b,
+            "forward_reduction": qkv_proj_reduction_f + attention_reduction_f + out_proj_reduction_f,
+            "backward_reduction": qkv_proj_reduction_b + attention_reduction_b + out_proj_reduction_b,
+            "comm_size_forward": qkv_proj_size_f + attention_size_f + out_proj_size_f,
+            "comm_size_backward": qkv_proj_size_b + attention_size_b + out_proj_size_b,
         }
 
         ffn_time_f = transformer_results['ffn1']['forward'] + transformer_results['ffn2']['forward'] + transformer_results['gelu']['forward']
@@ -1586,7 +1679,7 @@ class TimeCalculationLLM(TimeCalculation):
                     add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
         elif parallelism_mode == ParallelismMode.CONTEXT:
             
-            if entry['name'] in ['attention_score']:
+            if entry['name'] in ['attention']:
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
             elif entry['name'] in ['output_proj']:
                 add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.cp, 'tp')
@@ -1600,7 +1693,7 @@ class TimeCalculationLLM(TimeCalculation):
             elif entry['name'] in [ 'MLP']:
                 add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.tp, 'tp')
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
-            elif entry['name'] in ['attention_score']:
+            elif entry['name'] in ['attention']:
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'cp')
             
             elif entry['name'] in ['output_proj']:
@@ -1836,8 +1929,8 @@ class TimeCalculationLLM(TimeCalculation):
 
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim )
         #get the memory for one transformer layer per gpu in tp-sp node, actvation memory is for per micro-batch, weight, gradient and optimizer memory is consatnt 
-        transformer_mem_layer, transformer_act_layer, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
-            LLM_util.getTransformerMem_layer( 
+        transformer_mem_layer, transformer_act_layer,transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
+            LLM_util.getTransformerMem_layer( #return memory per layer per gpu in one lp group
                 d = self.dp,
                 t = self.tp,
                 batch_size=batch_size,
@@ -1850,6 +1943,7 @@ class TimeCalculationLLM(TimeCalculation):
     )
         memory_data = {
             'activation_mem_per_layer': transformer_act_layer,
+            'activation_mem_per_layer_inference': transformer_act_layer_inf, # prefill max activation memory per layer per gpu
             'weight_mem_per_layer': weight_memory_layer,
             'gradient_mem_per_layer': gradient_mem_layer,
             'optimizer_mem_per_layer': optimizer_mem_layer,
@@ -1902,8 +1996,13 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
-        
-        _, peak_mem = self._simulate_with_memory(graph_root, memory_data)
+        forward_root, backward_root = self.pipeline_graph.extract_forward_graph(graph_root)
+        self.pipeline_graph.save_graph(
+            forward_root,
+            filename="llm_pipeline_forward_graph",
+        )
+        _, peak_mem_inf = self._simulate_with_memory(forward_root, memory_data, mode="inference")
+        # _, peak_mem = self._simulate_with_memory(graph_root, memory_data, mode="training")
         mode = self.execution_mode
         
         dispatcher = LLMExecutionDispatcher(
@@ -1957,13 +2056,16 @@ class TimeCalculationLLM(TimeCalculation):
         self,
         graph_root: Any,
         memory_data: Dict[str, Any],
+        mode: str = "training" #training or inference
     ) -> Tuple[float, float]:
         """Run memory-aware simulation and report duration plus peak usage."""
 
         time_with_memory, peak_mem = self.pipeline_graph.simulate_memory(
             graph_root,
             memory_data,
+            mode,
             self.output_dir,
+            
         )
         self.memory_peak_gb = peak_mem
 
@@ -1975,7 +2077,6 @@ class TimeCalculationLLM(TimeCalculation):
                 object(),
             )
             hardware_mem_bytes = getattr(hardware_mem_bytes, "size", None)
-        hardware_mem_bytes = hardware_mem_bytes * self.tp * self.cp  # total memory across all devices in the lp group
 
         if hardware_mem_bytes is not None:
             hardware_mem_gib = float(hardware_mem_bytes) / (1024 ** 3)
@@ -1985,8 +2086,9 @@ class TimeCalculationLLM(TimeCalculation):
             memory_dir = os.path.join(self.output_dir, "memory-summary")
             os.makedirs(memory_dir, exist_ok=True)
             info_lines = [
-                f"Hardware memory capacity (per lp group): {hardware_mem_gib:.6f} GiB",
-                f"Simulated peak memory usage(per lp group): {peak_mem:.6f} GiB",
+                f"Simulation mode: {mode}",
+                f"Hardware memory capacity (per gpu): {hardware_mem_gib:.6f} GiB",
+                f"Simulated peak memory usage(per gpu): {peak_mem:.6f} GiB",
             ]
             if mem_delta < 0:
                 info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")

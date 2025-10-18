@@ -136,6 +136,7 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
     # t  #tensor parallelism degree
     
     act_memory_layer = seq_len * batch_size * hidden_dim * (34 / t + 5 * n_heads * seq_len/(hidden_dim * t) ) * precision / 2 #from https://arxiv.org/pdf/2205.05198
+    act_memory_layer_inf = seq_len * batch_size * ffn_dim / t * precision  #inference max activation memory, no need to store for backpropagation
     transformer_param_layer = (4 ) * hidden_dim * hidden_dim + ffn_dim * 2 * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn1,ffn2
     optimizer_mem = 10 * transformer_param_layer * precision/ 2 / (t * d) 
     weight_memory_layer = 2 * transformer_param_layer * precision / t / 2  # assuming stored in a 16-bit floating point according to paper
@@ -146,7 +147,7 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
     layer_mem = (act_memory_layer + weight_memory_layer)
     #cross entropy not included
 
-    return layer_mem, act_memory_layer, static_memory_layer, gradient_mem, optimizer_mem, weight_memory_layer
+    return layer_mem, act_memory_layer, act_memory_layer_inf, static_memory_layer, gradient_mem, optimizer_mem, weight_memory_layer
 
 def getlinearSoftmaxMem(batch_size, seq_len, hidden_dim, vocab_size, precision, t):
     # t = 1

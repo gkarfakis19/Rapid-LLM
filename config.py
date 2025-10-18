@@ -398,6 +398,7 @@ class LLMAttentionConfig:
     num_heads: int
     kv_heads: Optional[int] = None
     use_flashattention: bool = False
+    attention_tile_size: Optional[int] = None
 
 
 @dataclass
@@ -726,11 +727,15 @@ def parse_config(filename, config_type):
         else:
             flash_attention = bool(raw_flash_attention)
 
+        tile_size_field = attention_dict.get("attention_tile_size")
+        attention_tile_size = int(tile_size_field) if tile_size_field is not None else None
+
         attention_cfg = LLMAttentionConfig(
             attention_type=attn_type,
             num_heads=num_heads,
             kv_heads=kv_heads,
             use_flashattention=flash_attention,
+            attention_tile_size=attention_tile_size,
         )
 
         run_type = mp.pop("run_type", "training")

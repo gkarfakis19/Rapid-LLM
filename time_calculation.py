@@ -415,6 +415,7 @@ class TimeCalculation:
             self.attention_type = self.model.attention_type
             self.flash_attention = getattr(self.model, 'use_flashattention', False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, 'kv_heads') else self.num_heads
+            self.attention_tile_size = getattr(self.model, 'attention_tile_size', None)
 
     def get_model_class(self, model_type):
         """Return the appropriate model class based on the model type."""
