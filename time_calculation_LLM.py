@@ -52,6 +52,13 @@ class ExecutionMode(Enum):
     HYBRID = "hybrid"
     FULL_ASTRASIM_HIERARCHICAL = "full_astrasim_hierarchical"
     FULL_ASTRASIM_FLATTENED = "full_astrasim_flattened"
+    
+class ParallelismMode(Enum):
+    TENSOR = "tensor"
+    TENSOR_SEQUENCE = "tensor_sequence"
+    CONTEXT = "context"
+    TENSOR_CONTEXT_HYBRID = "tensor_context_hybrid"
+    SINGLE = "single"
 
 
 @dataclass
@@ -91,10 +98,6 @@ class PipelineGraphFlattener:
 
         self._clone_cache: Dict[int, Any] = {}
         self._op_id_counter: int = 0
-
-    @property
-    def tp_degree(self) -> int:
-        return self._par_degree
 
     def build(self, root: Any) -> Any:
         """Return a flattened clone of the provided pipeline root."""
@@ -488,15 +491,15 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_parallelism_mode(self):
         if self.tp_sp and self.tp > 1 and self.cp == 1:
-            return "tp-sp"
+            return ParallelismMode.TENSOR_SEQUENCE
         elif self.tp > 1 and self.cp == 1:
-            return "tp"
+            return ParallelismMode.TENSOR
         elif self.cp > 1 and self.tp == 1:
-            return "cp"
+            return ParallelismMode.CONTEXT
         elif self.cp > 1 and self.tp > 1:
-            return "tp-cp"
+            return ParallelismMode.TENSOR_CONTEXT_HYBRID
         else:
-            return "single"
+            return ParallelismMode.SINGLE
 
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
@@ -570,26 +573,30 @@ class TimeCalculationLLM(TimeCalculation):
 
     def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
-        if parallelism_mode == "tp" or parallelism_mode == "tp-sp":
+        if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
             return self._tensor_parallelism_gemm_forward(gemm, name, tensor_type)
-        elif parallelism_mode == "cp":
+        elif parallelism_mode == ParallelismMode.CONTEXT:
             return self._context_parallelism_gemm_forward(gemm, name, tensor_type)
-        elif parallelism_mode == "tp-cp":
+        elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             return self._tensor_context_hybrid_gemm_forward(gemm, name, tensor_type)
-        else:
+        elif parallelism_mode == ParallelismMode.SINGLE:
             return self.single_gpu_gemm_forward(gemm, name, tensor_type)
+        else:
+            raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
     def parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
-        if parallelism_mode == "tp" or parallelism_mode == "tp-sp":
+        if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
             return self._tensor_parallelism_gemm_backward(gemm, name, tensor_type)
-        elif parallelism_mode == "cp":
+        elif parallelism_mode == ParallelismMode.CONTEXT:
             return self._context_parallelism_gemm_backward(gemm, name, tensor_type)
-        elif parallelism_mode == "tp-cp":
+        elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             return self._tensor_context_hybrid_gemm_backward(gemm, name, tensor_type)
 
-        else:
+        elif parallelism_mode == ParallelismMode.SINGLE:
             return self.single_gpu_gemm_backward(gemm, name, tensor_type)
+        else:
+            raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
     def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if tensor_type == "attention_score" or tensor_type == "attention_output" :#attention gemm
@@ -727,7 +734,7 @@ class TimeCalculationLLM(TimeCalculation):
         communication happens after out projection and ffn2 gemm
         """
         tp_mode = self.get_parallelism_mode()
-        comm_kind_fwd = "all_reduce" if tp_mode == "tp" else "reduce_scatter"
+        comm_kind_fwd = "all_reduce" if tp_mode == ParallelismMode.TENSOR else "reduce_scatter"
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         size_bytes = 0
         total_bytes = 0
@@ -1057,16 +1064,16 @@ class TimeCalculationLLM(TimeCalculation):
     def get_layernorm_f(self, batch, seq_len, d_model, comm_after=False):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
-        if tp_mode == 'tp-cp':
+        if tp_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model / self.tp
-        elif tp_mode == 'tp-sp':
+        elif tp_mode == ParallelismMode.TENSOR_SEQUENCE:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model
         else:
             elements = batch * seq_len * d_model
         compute_flops = elements * 7
         mem_bytes = self.precision * elements * 2
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
-        if tp_mode == 'tp-sp' or tp_mode == "tp-cp":  # all-gather after layernorm 
+        if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # all-gather after layernorm
             per_rank_bytes = self.precision * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
@@ -1089,7 +1096,7 @@ class TimeCalculationLLM(TimeCalculation):
     def get_layernorm_b(self, batch, seq_len, d_model, comm_after=False):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
-        if tp_mode == 'tp-cp':
+        if tp_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model / self.tp
         else:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model
@@ -1097,7 +1104,7 @@ class TimeCalculationLLM(TimeCalculation):
         mem_bytes = self.precision * elements * 4
 
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
-        if tp_mode == 'tp-sp' or tp_mode =="tp-cp":  # communication after layernorm
+        if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # communication after layernorm
             per_rank_bytes = self.precision * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
@@ -1553,8 +1560,8 @@ class TimeCalculationLLM(TimeCalculation):
             entry[direction]['comm_keys'].append(unique_key)
 
         seq_degree = self._sequence_parallel_degree()
-        ParallelismMode = self.get_parallelism_mode()
-        if ParallelismMode in ['tp', 'tp-sp']:
+        parallelism_mode = self.get_parallelism_mode()
+        if parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE):
             if self.tp > 1 and seq_degree == 1:
                 #TODO: correct the communication type here
                 add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
@@ -1566,7 +1573,7 @@ class TimeCalculationLLM(TimeCalculation):
                 elif entry['name'] in ['MHA', 'MLP']:
                     add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, seq_degree, 'tp')
                     add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
-        elif ParallelismMode == 'cp':
+        elif parallelism_mode == ParallelismMode.CONTEXT:
             
             if entry['name'] in ['attention_score']:
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
@@ -1575,7 +1582,7 @@ class TimeCalculationLLM(TimeCalculation):
             else:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.cp, 'tp') #FIXME: interconnect type should be 'cp'
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
-        elif ParallelismMode == 'tp-cp':
+        elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             if entry['name'] in ['layernorm1', 'layernorm2']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.tp, 'tp')
                 add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.tp, 'tp')
@@ -1591,10 +1598,6 @@ class TimeCalculationLLM(TimeCalculation):
             elif entry['name'] in ['qkv_proj']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.cp, 'tp')
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
-            
-                
-
-        
 
     def _build_interconnect_params(self) -> Dict[str, Tuple[float, float]]:
         return {
@@ -1603,10 +1606,6 @@ class TimeCalculationLLM(TimeCalculation):
             'tp': (self.IBTP, self.LLTP),
             'cp': (self.IBTP, self.LLTP),
         }
-
-
-    def _tp_degree(self) -> int:
-        return max(1, int(self.tp))
 
     def _prepare_execution_graphs(
         self,
@@ -1662,7 +1661,7 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         parallelism_mode = self.get_parallelism_mode()
-        if parallelism_mode == "cp" or parallelism_mode == "tp-cp":
+        if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
             for key in ("layernorm1", "qkv_proj", "attention_score",  "attention_scale_softmax", "attention_output", "output_proj", "layernorm2", "MLP"):
                 spec = transformer_results[key]
                 fwd_time = spec['forward_gemm'] if 'forward_gemm' in spec else spec['forward_compute'] if 'forward_compute' in spec else spec['forward']
@@ -1698,7 +1697,7 @@ class TimeCalculationLLM(TimeCalculation):
             
             
             
-        elif parallelism_mode in ["tp", "tp-sp" ,"single"]:
+        elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
             for key in ("layernorm1", "MHA", "layernorm2", "MLP"):
                 spec = transformer_results[key]
                 fwd_time = spec['forward']
