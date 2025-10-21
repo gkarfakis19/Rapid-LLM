@@ -50,7 +50,7 @@ def reshape_gemm_to_3d(arg,options=None):
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
 
-def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
+def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
 
@@ -88,7 +88,11 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
         head_dim,
     )
     gemms["output_proj"] = (batch_size, seq_len, d_model, d_model)
-    gemms["ffn1"] = (batch_size, seq_len, d_model, ffn_dim)
+    if str(model_type).lower() == "llama":
+        projected_dim = 2 * ffn_dim
+    else:
+        projected_dim = ffn_dim
+    gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
     gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model)
     gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
 
@@ -116,6 +120,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
         kv_heads=kv_heads,
         ffn_dim=ffn_dim,
         vocab_size=vocab_size,
+        model_type=self.model_type,
     )
 
     processed = OrderedDict()
@@ -128,7 +133,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     return processed
 
-def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
+def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
     #Activations refer to output activations that need to be stored
     alpha = 16 + ffn_dim/hidden_dim #parameter need to be changed accordingly
     beta = 3
@@ -137,7 +142,8 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
     
     act_memory_layer = seq_len * batch_size * hidden_dim * (34 / t + 5 * n_heads * seq_len/(hidden_dim * t) ) * precision / 2 #from https://arxiv.org/pdf/2205.05198
     act_memory_layer_inf = seq_len * batch_size * ffn_dim / t * precision  #inference max activation memory, no need to store for backpropagation
-    transformer_param_layer = (4 ) * hidden_dim * hidden_dim + ffn_dim * 2 * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn1,ffn2
+    ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
+    transformer_param_layer = (4 ) * hidden_dim * hidden_dim + ffn_dim * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
     optimizer_mem = 10 * transformer_param_layer * precision/ 2 / (t * d) 
     weight_memory_layer = 2 * transformer_param_layer * precision / t / 2  # assuming stored in a 16-bit floating point according to paper
     gradient_mem = 4 * transformer_param_layer * precision / t / 2  # assuming stored in a 16-bit floating point according to paper
@@ -199,6 +205,7 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
             ffn_dim=ffn_dim,
             n_heads=n_heads,
             precision=precision,
+            model_type=exp_model_config.model_config.model_type,
         )
     )
     softmax_mem = getlinearSoftmaxMem(
@@ -237,7 +244,7 @@ def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
     return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
-def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
+def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
@@ -289,7 +296,8 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
 
     # Output projection & FFNs only process the new token
     gemms["output_proj"] = (batch_size, 1, d_model, d_model)
-    gemms["ffn1"] = (batch_size, 1, d_model, ffn_dim)
+    projected_dim = 2 * ffn_dim if str(model_type).lower() == "llama" else ffn_dim
+    gemms["ffn1"] = (batch_size, 1, d_model, projected_dim)
     gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
 
     return gemms
@@ -304,6 +312,7 @@ def process_decode_gemm_shapes(
     ffn_dim,
     vocab_size,
     option="multiply_batch_into_m",
+    model_type="gpt",
 ):
     """
     Process decode GEMM shapes and reshape them into 3D.
@@ -322,6 +331,7 @@ def process_decode_gemm_shapes(
         kv_heads=kv_heads,
         ffn_dim=ffn_dim,
         vocab_size=vocab_size,
+        model_type=model_type,
     )
 
     processed = OrderedDict()

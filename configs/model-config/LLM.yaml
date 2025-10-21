@@ -1,7 +1,8 @@
 model_param:
     mode: "LLM"  # Mode of operation
     run_type: "training"
-    batch_size: 20  # Batch size
+    model_type: "gpt"  # gpt assumes dense-style architecture with GELU; llama assumes llama-style architecture with SwiGLU
+    batch_size: 1024  # Batch size
     seq_len: 16384
     decode_len: 1024           # Number of autoregressive decode steps.
     hidden_dim: 8192
@@ -14,7 +15,7 @@ model_param:
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size
-    num_layers: 3  
+    num_layers: 16
     n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"
 

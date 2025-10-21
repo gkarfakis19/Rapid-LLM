@@ -38,6 +38,11 @@ class ParallelismMode(Enum):
     TENSOR_CONTEXT_HYBRID = "tensor_context_hybrid"
     SINGLE = "single"
 
+# TODO: verify all 4 of these
+SWIGLU_SILU_FORWARD_FLOPS_PER_ELEMENT = 10 
+SWIGLU_SILU_BACKWARD_FLOPS_PER_ELEMENT = 20
+GELU_FORWARD_FLOPS_PER_ELEMENT = 10
+GELU_BACKWARD_FLOPS_PER_ELEMENT = 20
 
 # Map each parallelism mode to operation-level collective specs used across the
 # metadata pipeline. Each spec records the collective kind, the participant
@@ -144,6 +149,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
         
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
+        self.model_type = self.model.model_type
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
@@ -230,6 +236,8 @@ class TimeCalculationLLM(TimeCalculation):
     def _effective_dims(cls, gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         batch, m, k, n = cls._expand_gemm_descriptor(gemm) 
         return batch, batch * m, k, n
+    def _ffn1_output_dim(self, ffn_dim: int) -> int:
+        return 2 * ffn_dim if self.model_type == "llama" else ffn_dim
     # def sequence
     def get_tensor_reduction_time(self, total_bytes: int, kind: str, name: str, participants: Optional[int] = None) -> float:
         """Return collective time for tensor-parallel reductions.
@@ -827,7 +835,7 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_gelu_f(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
-        compute_flops = elements * hidden * 40  # approx 40 flops per element for GELU
+        compute_flops = elements * hidden * GELU_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * hidden * 2  # read, write
 
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f") + 2 * self.O
@@ -843,7 +851,7 @@ class TimeCalculationLLM(TimeCalculation):
         return time
     def get_gelu_b(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
-        compute_flops = elements * hidden * 80  # approx 80 flops per element for GELU backward
+        compute_flops = elements * hidden * GELU_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * hidden * 3  # read grad, read forward, write grad
 
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b") + 3 * self.O
@@ -855,8 +863,51 @@ class TimeCalculationLLM(TimeCalculation):
                 )
             )
             print("GELU (b) time: {:,}\n".format(time))
-
         return time
+
+    def get_swiglu_f(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+        gate_hidden = max(hidden // 2, 1)
+        compute_flops = elements * (
+            gate_hidden * SWIGLU_SILU_FORWARD_FLOPS_PER_ELEMENT + gate_hidden
+        )
+        reads = 2 * gate_hidden  # gate and up activations
+        writes = gate_hidden  # SwiGLU output
+        mem_bytes = self.precision * elements * (reads + writes)
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f") + 2 * self.O
+        if self.debug:
+            print(
+                "SwiGLU (f) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int((elements * gate_hidden) / 1e6),
+                    int(compute_flops / 1e9),
+                    int(mem_bytes / 1e9),
+                )
+            )
+            print("SwiGLU (f) time: {:,}\n".format(time))
+        return time
+
+    def get_swiglu_b(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+        gate_hidden = max(hidden // 2, 1)
+        compute_flops = elements * (
+            gate_hidden * SWIGLU_SILU_BACKWARD_FLOPS_PER_ELEMENT + 2 * gate_hidden
+        )
+        reads = 2 * gate_hidden  # gate and up activations
+        reads += gate_hidden  # upstream gradient
+        writes = 2 * gate_hidden  # gradients for gate and up projections
+        mem_bytes = self.precision * elements * (reads + writes)
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b") + 3 * self.O
+        if self.debug:
+            print(
+                "SwiGLU (b) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int((elements * gate_hidden) / 1e6),
+                    int(compute_flops / 1e9),
+                    int(mem_bytes / 1e9),
+                )
+            )
+            print("SwiGLU (b) time: {:,}\n".format(time))
+        return time
+
     def get_layernorm_f(self, batch, seq_len, d_model, comm_after=False):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
@@ -955,13 +1006,15 @@ class TimeCalculationLLM(TimeCalculation):
         # Calculate sizes only (no timing)
         qkv_size = math.ceil(self.precision * d * 3 * d)
         output_size = math.ceil(self.precision * d * d)
-        ffn_size = math.ceil(self.precision * ffn_dim * d)
-        total_size = qkv_size + output_size + 2 * ffn_size  # FFN appears twice
+        ffn1_dim = self._ffn1_output_dim(ffn_dim)
+        ffn1_size = math.ceil(self.precision * ffn1_dim * d)
+        ffn2_size = math.ceil(self.precision * ffn_dim * d)
+        total_size = qkv_size + output_size + ffn1_size + ffn2_size  # FFN appears twice
 
         return {
             'qkv_size': qkv_size,
             'output_size': output_size,
-            'ffn_size': ffn_size,
+            'ffn_size': ffn1_size + ffn2_size,
             'total_size': total_size
         }
 
@@ -969,7 +1022,11 @@ class TimeCalculationLLM(TimeCalculation):
         """Calculate local computation times for apply_grad operations."""
         qkv_local = self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
         output_local = self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-        ffn_local = 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+        ffn1_dim = self._ffn1_output_dim(ffn_dim)
+        ffn_local = (
+            self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
+            + self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+        )
 
         return {
             'qkv_local': qkv_local,
@@ -984,7 +1041,9 @@ class TimeCalculationLLM(TimeCalculation):
             apply_grad_time = 0.0
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-            apply_grad_time += 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
+            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
             if self.debug:
                 print(f"(dp=1) apply_grad_time: {apply_grad_time}")
             return apply_grad_time
@@ -1018,17 +1077,30 @@ class TimeCalculationLLM(TimeCalculation):
         )
         apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
-        total_bytes = math.ceil(self.precision * ffn_dim * d)
-        reduction_time += 2 * self.network_model.collective(
+        ffn1_dim = self._ffn1_output_dim(ffn_dim)
+        total_bytes = math.ceil(self.precision * ffn1_dim * d)
+        reduction_time += self.network_model.collective(
             kind="all_reduce",
             size_bytes=total_bytes,
             participants=int(self.dp),
             ib=self.IBD,
             ll=self.LLD,
             local_bytes=0.0,
-            debug_label="ffn reduction",
+            debug_label="ffn1 reduction",
         )
-        apply_grad_time += 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+        apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
+
+        total_bytes = math.ceil(self.precision * ffn_dim * d)
+        reduction_time += self.network_model.collective(
+            kind="all_reduce",
+            size_bytes=total_bytes,
+            participants=int(self.dp),
+            ib=self.IBD,
+            ll=self.LLD,
+            local_bytes=0.0,
+            debug_label="ffn2 reduction",
+        )
+        apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
 
         if self.debug:
             print(f"apply_grad_time: {apply_grad_time}")
@@ -1207,9 +1279,13 @@ class TimeCalculationLLM(TimeCalculation):
         layernorm2_b, layernorm_reduction_b, LN2_comm_bytes_b = self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
         transformer_results['layernorm2'] = {'forward': layernorm2_f + residual2_f + layernorm_reduction_f, "forward_compute": layernorm2_f + residual2_f, 'forward_reduction':layernorm_reduction_f,'backward': layernorm2_b + residual2_b + layernorm_reduction_b, "backward_compute":layernorm2_b + residual2_b, 'backward_reduction': layernorm_reduction_b, 'comm_size_forward': LN2_comm_bytes_f, 'comm_size_backward': LN2_comm_bytes_b}
         
-        gelu_f = self.get_gelu_f(tensor_shape=gemm_ffn1)
-        gelu_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
-        transformer_results['gelu'] = {'forward': gelu_f, 'backward': gelu_b}
+        if self.model_type == "llama":
+            act_f = self.get_swiglu_f(tensor_shape=gemm_ffn1)
+            act_b = self.get_swiglu_b(tensor_shape=gemm_ffn1)
+        else:
+            act_f = self.get_gelu_f(tensor_shape=gemm_ffn1)
+            act_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
+        transformer_results['gelu'] = {'forward': act_f, 'backward': act_b}
 
         linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
@@ -1465,7 +1541,12 @@ class TimeCalculationLLM(TimeCalculation):
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
             for key in ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP"):
-                spec = transformer_results[key]
+                try:
+                    spec = transformer_results[key]
+                except KeyError:
+                    print(f"Key {key} not found in transformer_results")
+                    print(transformer_results)
+                    exit()
                 fwd_time = spec['forward_gemm'] if 'forward_gemm' in spec else spec['forward_compute'] if 'forward_compute' in spec else spec['forward']
                 bwd_time = spec['backward_gemm'] if 'backward_gemm' in spec else spec['backward_compute'] if 'backward_compute' in spec else spec['backward']
                 fwd_red = spec.get('forward_reduction', 0.0)
@@ -1631,6 +1712,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ffn_dim=ffn_dim,
                 n_heads=num_heads,
                 precision=self.precision,
+                model_type=self.model_type,
         )
     )
         memory_data = {

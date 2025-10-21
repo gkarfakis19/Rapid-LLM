@@ -1,6 +1,7 @@
 model_param:
   mode: "LLM"
   run_type: "inference"
+  model_type: "llama"  # gpt assumes dense-style architecture with GELU; llama assumes llama-style architecture with SwiGLU
   batch_size: 1
   seq_len: 2048
   decode_len: 1024

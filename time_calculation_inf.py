@@ -56,6 +56,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             ffn_dim=ffn_dim,
             vocab_size=self.vocab_size,
             option="multiply_batch_into_m",
+            model_type=self.model_type,
         )
 
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
@@ -65,13 +66,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         gemm_ffn1 = gemm_shapes["ffn1"]
         gemm_ffn2 = gemm_shapes["ffn2"]
 
-        qkv_proj_time, _, _ = self._tensor_parallelism_gemm_forward(
+        qkv_proj_time, qkv_proj_reduction, qkv_proj_size = self._tensor_parallelism_gemm_forward(
             gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
         )
-        attention_score_time, _, _ = self._tensor_parallelism_gemm_forward(
+        attention_score_time, attention_score_reduction, attention_score_size = self._tensor_parallelism_gemm_forward(
             gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
         )
-        attention_output_time, _, _ = self._tensor_parallelism_gemm_forward(
+        attention_output_time, attention_output_reduction, attention_output_size = self._tensor_parallelism_gemm_forward(
             gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
         )
         out_proj_time, _, out_proj_size = self._tensor_parallelism_gemm_forward(
@@ -83,7 +84,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             else 0.0
         )
 
-        ffn1_time, _, _ = self._tensor_parallelism_gemm_forward(
+        ffn1_time, ffn1_reduction, ffn1_size = self._tensor_parallelism_gemm_forward(
             gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1
         )
         ffn2_time, _, ffn2_size = self._tensor_parallelism_gemm_forward(
@@ -128,26 +129,35 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
         linear_softmax_f = self.get_linear_softmax_f(linear_shape)
 
-        gelu_f = self.get_gelu_f(gemm_ffn1)
+        if self.model_type == "llama":
+            act_f = self.get_swiglu_f(gemm_ffn1)
+        else:
+            act_f = self.get_gelu_f(gemm_ffn1)
 
         attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
-        mha_forward = (
-            qkv_proj_time
-            + attention_score_time
-            + attention_scale_softmax_f
-            + attention_output_time
-            + out_proj_time
+        # Preserve the same per-op structure and collective accounting used in the training path.
+        # Most decode ops (qkv projection, attention score/output, ffn1) still have zero-sized
+        # reductions under tensor parallelism - we pass through the values returned by the shared
+        # helpers so the context/tensor-context graph builder sees the exact same semantics.
+        qkv_proj_forward = qkv_proj_time + qkv_proj_reduction
+        attention_reduction = attention_score_reduction + attention_output_reduction
+        attention_comm_bytes = attention_score_size + attention_output_size
+        attention_forward = (
+            attention_score_time + attention_scale_softmax_f + attention_output_time + attention_reduction
         )
-        mlp_forward = ffn1_time + gelu_f + ffn2_time
+        out_proj_forward = out_proj_time + out_proj_reduction
+        mha_forward = qkv_proj_forward + attention_forward + out_proj_forward
+
+        ffn1_forward = ffn1_time + ffn1_reduction
+        ffn2_forward = ffn2_time + ffn2_reduction
+        mlp_forward = ffn1_forward + act_f + ffn2_forward
 
         layernorm1_forward = residual1_f + layernorm1_f
         layernorm2_forward = residual2_f + layernorm2_f
 
         transformer_forward = (
             mha_forward
-            + out_proj_reduction
             + mlp_forward
-            + ffn2_reduction
             + layernorm1_forward
             + layernorm1_reduction
             + layernorm2_forward
@@ -155,20 +165,80 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
 
         transformer_results = {
+            "qkv_proj": {
+                "forward": qkv_proj_time + qkv_proj_reduction,
+                "backward": 0.0,
+                "forward_gemm": qkv_proj_time,
+                "forward_reduction": qkv_proj_reduction,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": qkv_proj_size,
+                "comm_size_backward": 0,
+            },
+            "attention": {
+                "forward": attention_forward,
+                "backward": 0.0,
+                "forward_gemm": attention_score_time + attention_output_time + attention_scale_softmax_f,
+                "forward_reduction": attention_reduction,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": attention_comm_bytes,
+                "comm_size_backward": 0,
+            },
+            "output_proj": {
+                "forward": out_proj_time + out_proj_reduction,
+                "backward": 0.0,
+                "forward_gemm": out_proj_time,
+                "forward_reduction": out_proj_reduction,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": out_proj_size,
+                "comm_size_backward": 0,
+            },
             "MHA": {
                 "forward": mha_forward,
                 "backward": 0.0,
-                "forward_reduction": out_proj_reduction,
+                "forward_reduction": qkv_proj_reduction + attention_reduction + out_proj_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": out_proj_size,
+                "comm_size_forward": qkv_proj_size + attention_comm_bytes + out_proj_size,
+                "comm_size_backward": 0,
+            },
+            "ffn1": {
+                "forward": ffn1_forward,
+                "backward": 0.0,
+                "forward_gemm": ffn1_time,
+                "forward_reduction": ffn1_reduction,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": ffn1_size,
+                "comm_size_backward": 0,
+            },
+            "ffn2": {
+                "forward": ffn2_forward,
+                "backward": 0.0,
+                "forward_gemm": ffn2_time,
+                "forward_reduction": ffn2_reduction,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": ffn2_size,
                 "comm_size_backward": 0,
             },
             "MLP": {
                 "forward": mlp_forward,
                 "backward": 0.0,
-                "forward_reduction": ffn2_reduction,
+                "forward_reduction": ffn1_reduction + ffn2_reduction,
                 "backward_reduction": 0.0,
-                "comm_size_forward": ffn2_size,
+                "comm_size_forward": ffn1_size + ffn2_size,
+                "comm_size_backward": 0,
+            },
+            "gelu": {
+                "forward": act_f,
+                "backward": 0.0,
+                "forward_gemm": act_f,
+                "forward_reduction": 0.0,
+                "backward_gemm": 0.0,
+                "backward_reduction": 0.0,
+                "comm_size_forward": 0,
                 "comm_size_backward": 0,
             },
             "layernorm1": {
@@ -221,7 +291,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch_size=batch_size,
             seq_len=total_seq_len,
             hidden_dim=self.hidden_dim,
-            num_heads=self.num_heads,
             ffn_dim=ffn_dim,
             vocab_size=self.vocab_size,
             include_pipeline_backward=False,
@@ -286,7 +355,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch_size=batch_size,
             seq_len=prefill_len,
             hidden_dim=hidden_dim,
-            num_heads=num_heads,
             ffn_dim=ffn_dim,
             vocab_size=vocab_size,
             include_pipeline_backward=False,

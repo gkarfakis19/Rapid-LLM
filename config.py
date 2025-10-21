@@ -405,6 +405,7 @@ class LLMAttentionConfig:
 class LLMConfig:
     mode: str
     run_type: str
+    model_type: str
     num_layers: int
     hidden_dim: int
     batch_size: int
@@ -739,6 +740,12 @@ def parse_config(filename, config_type):
         )
 
         run_type = mp.pop("run_type", "training")
+        model_type_raw = mp.pop("model_type", "gpt")
+        model_type = str(model_type_raw).strip().lower()
+        if model_type not in {"gpt", "llama"}:
+            raise ValueError(
+                f"model_param.model_type must be either 'gpt' or 'llama' (got {model_type_raw!r})"
+            )
         decode_len = mp.pop("decode_len", None)
         inference_dict = dict(config_dict.get("inference_param", {}) or {})
         inference_config = LLMInferenceConfig(
@@ -747,6 +754,7 @@ def parse_config(filename, config_type):
         model_config = LLMConfig(
             mode=mp.pop("mode"),
             run_type=run_type,
+            model_type=model_type,
             num_layers=mp.pop("num_layers"),
             hidden_dim=mp.pop("hidden_dim"),
             batch_size=mp.pop("batch_size"),
