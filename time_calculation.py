@@ -754,70 +754,55 @@ class TimeCalculation:
 
             self.network.printStats(f)
 
-    def roofline(self, flop, mem_access_, name="", info=False):
+    def roofline(self, flop, mem_access_, name="", info=False, mem_level=None):
         # print("Roofline: entered {}".format(name))
-        mem_access = []
+
+        # Parse mem_access_ into consistent format
         if isinstance(mem_access_, int):
-            mem_access.append(mem_access_)
+            mem_access = [mem_access_]
         elif isinstance(mem_access_, float):
-            mem_access.append(int(mem_access_))
+            mem_access = [int(mem_access_)]
         elif isinstance(mem_access_, list):
             mem_access = mem_access_
         else:
             print(mem_access_)
-            print("mem_access_ should be inetger or list, wrong input", flush=True)
+            print("mem_access_ should be integer or list, wrong input", flush=True)
             sys.exit(0)
 
-        num_level = len(mem_access)
-        time = [0] * num_level
-        comp_int = [0] * num_level
-        inflection_point = [0] * num_level
-
-        try:
-            assert mem_access[num_level - 1] > 0, "last_level_mem = 0"
-        except Exception as e:
-            print(
-                "{}: Number of accesses to the last level of memory hierarchy cannot be zero:\n {}".format(
-                    name, e
-                ),
-                flush=True,
-            )
-            sys.exit(0)
-
-        for i in range(0, num_level):
-            time[i] = 0
-            mem_bw = self.memLayer[i].getThroughput()
-            mem_latency = self.memLayer[i].getLatency()
-            num_mem = mem_access[i]
-            inflection_point[i] = float("inf") if mem_bw == 0 else self.th / mem_bw
-            comp_int[i] = 0 if num_mem == 0 else flop / num_mem
-
-            if comp_int[i] < inflection_point[i]:  # mem-bound
-                time[i] = (
-                    float("inf")
-                    if (mem_bw == 0 or num_mem == 0)
-                    else (num_mem / mem_bw)
-                ) + mem_latency
-            else:  # compute-bound
-                time[i] = float("inf") if (self.th == 0) else (flop / self.th)
-
-        max_time = max(time)
-
-        if info:
-            print(f"--- {name}: {(max_time * 1e3):.2f} ms, {flop:,} ---")
-            for i in range(0, num_level):
-                compare = ("memory", "<") if comp_int[i] < inflection_point[i] else ("compute", ">")
-                print(f"L{i}: {comp_int[i]:.2f} {compare[1]} {inflection_point[i]} [{compare[0]}-bound]")
-                print(f"time: {time[i] * 1e3} ms")
+        # Determine which levels to compute
+        if mem_level is not None:
+            # Single level mode
+            levels_to_compute = [(mem_level, mem_access[0])]
+        else:
+            # Multi-level mode (original behavior)
+            num_level = len(mem_access)
+            try:
+                assert mem_access[num_level - 1] > 0, "last_level_mem = 0"
+            except Exception as e:
                 print(
-                    "Throughput = ",
-                    self.th,
-                    "BW = ",
-                    self.memLayer[i].getThroughput(),
-                    "mem_latency=",
-                    self.memLayer[i].getLatency(),
-                )  ################
-                print()
+                    "{}: Number of accesses to the last level of memory hierarchy cannot be zero:\n {}".format(
+                        name, e
+                    ),
+                    flush=True,
+                )
+                sys.exit(0)
+            levels_to_compute = [(i, mem_access[i]) for i in range(num_level)]
+
+        # Compute roofline time for each level
+        times = []
+        for level_idx, num_mem in levels_to_compute:
+            mem_bw = self.memLayer[level_idx].getThroughput()
+            mem_latency = self.memLayer[level_idx].getLatency()
+            inflection_point = float("inf") if mem_bw == 0 else self.th / mem_bw
+            comp_int = 0 if num_mem == 0 else flop / num_mem
+            if comp_int < inflection_point:  # mem-bound
+                level_time = (float("inf") if (mem_bw == 0 or num_mem == 0) else (num_mem / mem_bw)) + mem_latency
+            else:  # compute-bound
+                level_time = float("inf") if (self.th == 0) else (flop / self.th)
+
+            times.append(level_time)
+
+        max_time = max(times)
 
         # print("Roofline: exited {}".format(name))
         return max_time

@@ -1071,9 +1071,12 @@ def run_astra_simulation_only_onepath(
 
         # Generate AstraSim configuration files using actual hardware config
         print(f"[AstraSim] Generating configuration files...")
-        astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
         comm_groups_dp = dp_count if dp_override is not None else user_dp
         comm_groups_path = _write_comm_groups_json(work_dir, comm_groups_dp, rank_ids)
+        if os.environ.get("DEEPFLOW_ASTRA_SKIP_EXEC"):
+            print("[AstraSim] DEEPFLOW_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
+            exit()
+        astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
 
         # Run AstraSim simulation on forward graph (cached via manifest)
         print(f"[AstraSim] Executing forward simulation with {rank_count} ranks...")

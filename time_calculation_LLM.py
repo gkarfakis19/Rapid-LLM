@@ -41,8 +41,8 @@ class ParallelismMode(Enum):
 # TODO: verify all 4 of these
 SWIGLU_SILU_FORWARD_FLOPS_PER_ELEMENT = 10
 SWIGLU_SILU_BACKWARD_FLOPS_PER_ELEMENT = 20
-GELU_FORWARD_FLOPS_PER_ELEMENT = 40
-GELU_BACKWARD_FLOPS_PER_ELEMENT = 80
+GELU_FORWARD_FLOPS_PER_ELEMENT = 10
+GELU_BACKWARD_FLOPS_PER_ELEMENT = 20
 LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT = 7
 LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT = 14
 LAYER_NORM_FORWARD_MEM_ACCESSES = 2
@@ -297,7 +297,7 @@ class TimeCalculationLLM(TimeCalculation):
         # Softmax time
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  # exponentiation + subtract max + dropout
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
         attn_score_time *= batch_size * num_heads / max(1, self.tp)
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
@@ -339,7 +339,7 @@ class TimeCalculationLLM(TimeCalculation):
         # Softmax time
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  # exponentiation + subtract max + dropout
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
         attn_score_time *= batch_size * num_heads / max(1, self.tp)
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
@@ -694,7 +694,12 @@ class TimeCalculationLLM(TimeCalculation):
         """
         batch = self._effective_transformer_batch()
         embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision
-        embedding_time = self.roofline(0, embedding_mem, name="embedding_f") + self.O
+        embedding_time = self.roofline(
+            0,
+            embedding_mem,
+            name="embedding_f",
+            mem_level=self.num_levels - 1,
+        ) + self.O
         if self.h2d_bandwidth and self.h2d_bandwidth > 0:
             embedding_transfer_time = embedding_mem / self.h2d_bandwidth
         else:
@@ -717,10 +722,12 @@ class TimeCalculationLLM(TimeCalculation):
 
         point_flop = effective_m * (3 * n - 1)
         point_mem = self.precision * effective_m * (SOFTMAX_FORWARD_MEM_ACCESSES * n)
-        point_time = (
-            self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-f")
-            + 4 * self.O
-        )
+        point_time = self.roofline(
+            point_flop,
+            point_mem,
+            name="pointwise-linear-softmax-f",
+            mem_level=self.num_levels - 1,
+        ) + 4 * self.O
 
         if self.debug:
             print(
@@ -742,10 +749,12 @@ class TimeCalculationLLM(TimeCalculation):
         point_flop = effective_m * n * 6
         point_mem = self.precision * effective_m * n * 10
 
-        point_time = (
-            self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-b")
-            + 4 * self.O
-        )
+        point_time = self.roofline(
+            point_flop,
+            point_mem,
+            name="pointwise-linear-softmax-b",
+            mem_level=self.num_levels - 1,
+        ) + 4 * self.O
 
         if self.debug:
             print(
@@ -784,14 +793,18 @@ class TimeCalculationLLM(TimeCalculation):
         softmax_flop = effective_m * n * 6
         softmax_mem = self.precision * effective_m * n * 10
 
-        scale_time = (
-            self.roofline(scale_flop, scale_mem, name="pointwise-scale-b")
-            + self.O
-        )
-        softmax_time = (
-            self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-b")
-            + 4 * self.O
-        )
+        scale_time = self.roofline(
+            scale_flop,
+            scale_mem,
+            name="pointwise-scale-b",
+            mem_level=self.num_levels - 1,
+        ) + self.O
+        softmax_time = self.roofline(
+            softmax_flop,
+            softmax_mem,
+            name="pointwise-softmax-b",
+            mem_level=self.num_levels - 1,
+        ) + 4 * self.O
 
         if self.debug:
             print(
@@ -808,12 +821,16 @@ class TimeCalculationLLM(TimeCalculation):
             print("Softmax (b) time: {:,}\n".format(softmax_time))
 
         return scale_time + softmax_time
+        
     def get_residual_f(self, tensor_shape):
-        _, elements, _, _ = self._effective_dims(tensor_shape)
+        # Residual operates on full tensor, not just GEMM output dimension
+        # TODO: double check!
+        batch, m, _, n = self._expand_gemm_descriptor(tensor_shape)
+        elements = batch * m * n
+
         flops = 2 * elements  # add + bias
         mem = self.precision * elements * 3  # read main, read residual, write out
-
-        time = self.roofline(flops, mem, name="pointwise-residual-f") + self.O
+        time = self.roofline(flops, mem, name="pointwise-residual-f", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
             print(
@@ -826,11 +843,14 @@ class TimeCalculationLLM(TimeCalculation):
         return time
 
     def get_residual_b(self, tensor_shape):
-        _, elements, _, _ = self._effective_dims(tensor_shape)
+        # Residual operates on full tensor, not just GEMM output dimension
+        # TODO: double check!
+        batch, m, _, n = self._expand_gemm_descriptor(tensor_shape)
+        elements = batch * m * n
+
         flops = elements  # dL/dx = dL/dy passthrough
         mem = self.precision * elements * 3  # read grad, read forward residual, write grad
-
-        time = self.roofline(flops, mem, name="pointwise-residual-b") + self.O
+        time = self.roofline(flops, mem, name="pointwise-residual-b", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
             print(
@@ -847,7 +867,7 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * hidden * GELU_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * hidden * 2  # read, write
 
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f") + 2 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f", mem_level=self.num_levels - 1) + 2 * self.O
 
         if self.debug:
             print(
@@ -863,7 +883,7 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * hidden * GELU_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * hidden * 3  # read grad, read forward, write grad
 
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b") + 3 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b", mem_level=self.num_levels - 1) + 3 * self.O
 
         if self.debug:
             print(
@@ -883,7 +903,7 @@ class TimeCalculationLLM(TimeCalculation):
         reads = 2 * gate_hidden  # gate and up activations
         writes = gate_hidden  # SwiGLU output
         mem_bytes = self.precision * elements * (reads + writes)
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f") + 2 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f", mem_level=self.num_levels - 1) + 2 * self.O
         if self.debug:
             print(
                 "SwiGLU (f) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
@@ -905,7 +925,7 @@ class TimeCalculationLLM(TimeCalculation):
         reads += gate_hidden  # upstream gradient
         writes = 2 * gate_hidden  # gradients for gate and up projections
         mem_bytes = self.precision * elements * (reads + writes)
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b") + 3 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b", mem_level=self.num_levels - 1) + 3 * self.O
         if self.debug:
             print(
                 "SwiGLU (b) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
@@ -928,7 +948,12 @@ class TimeCalculationLLM(TimeCalculation):
             elements = batch * seq_len * d_model
         compute_flops = elements * LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
-        compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
+        compute_time = self.roofline(
+            compute_flops,
+            mem_bytes,
+            name="pointwise-layernorm-f",
+            mem_level=self.num_levels - 1,
+        ) + 3 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # all-gather after layernorm
             per_rank_bytes = self.precision * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
@@ -959,7 +984,12 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
 
-        compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
+        compute_time = self.roofline(
+            compute_flops,
+            mem_bytes,
+            name="pointwise-layernorm-b",
+            mem_level=self.num_levels - 1,
+        ) + 4 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # communication after layernorm
             per_rank_bytes = self.precision * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
@@ -984,7 +1014,12 @@ class TimeCalculationLLM(TimeCalculation):
     def get_embedding_b(self):
         batch = self._effective_transformer_batch()
         embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision
-        embedding_mem_time = self.roofline(0, embedding_mem, name="embedding_b") + self.O
+        embedding_mem_time = self.roofline(
+            0,
+            embedding_mem,
+            name="embedding_b",
+            mem_level=self.num_levels - 1,
+        ) + self.O
 
         if self.debug:
             print("(gr) Embedding_mem: {:,}".format(int(embedding_mem / 1e9)))
@@ -997,10 +1032,11 @@ class TimeCalculationLLM(TimeCalculation):
         if self.lp > 1:
             w_size = self.precision * batch_size * hidden_dim * seq_len
             transfer_time = w_size / self.IBL + self.LLL
-            mem_time = self.roofline(0, 2 * w_size, name="inter_layer")
+            mem_time = self.roofline(0, 2 * w_size, name="inter_layer", mem_level=self.num_levels - 1)
             # 2: read from memory of previous layer and write to the memory of the next layer
             w = mem_time + transfer_time
         return w, w_size
+
     def get_data_parallel_reduction_sizes(self, d, ffn_dim):
         """Calculate communication sizes for data parallel reductions (no timing)."""
         if not getattr(self, "dp", 1) or self.dp <= 1:
