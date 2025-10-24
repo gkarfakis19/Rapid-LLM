@@ -145,12 +145,10 @@ class TimeCalculationLLM(TimeCalculation):
         os.makedirs(self.output_dir, exist_ok=True)
         self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
+        self._debug_memory = _env_flag("DEEPFLOW_DEBUG_MEMORY")
+        self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
         inference_cfg = getattr(hw_config, "inference_config", None)
-        if inference_cfg and getattr(inference_cfg, "kvcache_precision", None) is not None:
-            self.kv_cache_precision = inference_cfg.kvcache_precision
-        else:
-            self.kv_cache_precision = self.precision
         self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
         self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
         
@@ -202,7 +200,7 @@ class TimeCalculationLLM(TimeCalculation):
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
         total_elements = 2 * self.seq_len * self.microB * self.hidden_dim / self.num_heads * self.kv_heads
-        return total_elements * self.precision
+        return total_elements * self.precision.kv_cache
 
     @staticmethod
     def _derive_execution_mode(hw_config) -> ExecutionMode:
@@ -412,7 +410,7 @@ class TimeCalculationLLM(TimeCalculation):
         
     def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         """
-        Megatron-LM style TP×CP hybrid forward GEMM behavior.
+        Megatron-LM style TPxCP hybrid forward GEMM behavior.
 
         Sharding:
         • CP shards the token (sequence) dimension M: shard_m = ceil(M / cp).
@@ -460,12 +458,12 @@ class TimeCalculationLLM(TimeCalculation):
             participants = self.cp # all gather K V for each cp group
         elif gemm_type == GemmType.OUT_PROJ:
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * n)
+            total_bytes = math.ceil(self.precision.activations * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp # reduce scatter output activation for each tp group
         elif gemm_type == GemmType.FFN2:  # row wise
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * n)
+            total_bytes = math.ceil(self.precision.activations * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp  # reduce scatter output activation for each tp group
         elif gemm_type == GemmType.FFN1:  # column wise
@@ -486,7 +484,7 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time, reduction_time, total_bytes
     def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         """
-        Megatron-LM style TP×CP hybrid backward GEMM behavior.
+        Megatron-LM style TPxCP hybrid backward GEMM behavior.
 
         Sharding:
         • CP shards tokens (M): shard_m = ceil(M / cp).
@@ -523,7 +521,7 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch / max(1, self.tp)
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch / max(1, self.tp)
-            total_bytes = self.precision * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
+            total_bytes = self.precision.grad_communication * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
             kind = "reduce_scatter"
             participants = self.cp
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
@@ -532,7 +530,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif gemm_type == GemmType.QKV:  # column wise
             grad_time_act = self.getGEMMTime(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, shard_n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * k)
+            total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
         elif gemm_type == GemmType.OUT_PROJ:
@@ -548,13 +546,13 @@ class TimeCalculationLLM(TimeCalculation):
             
             grad_time_act = self.getGEMMTime(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, shard_n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * k)
+            total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
         elif gemm_type == GemmType.LINEAR_SOFTMAX:
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
+            total_bytes = math.ceil(self.precision.grad_communication * shard_m * shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
             kind = "all_gather"
             participants = self.cp * self.tp
         else:
@@ -617,12 +615,12 @@ class TimeCalculationLLM(TimeCalculation):
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
             gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
-            size_bytes = math.ceil(self.precision * m * n)
+            size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp
         elif gemm_type == GemmType.LINEAR_SOFTMAX: #assuming linear softmax is always column wise sharded
             shard_n = math.ceil(n / max(1, self.tp * self.cp ))
             gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
-            size_bytes = math.ceil(self.precision * m * n)
+            size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
@@ -680,7 +678,7 @@ class TimeCalculationLLM(TimeCalculation):
             shard_n = math.ceil(n / max(1, self.tp))
             grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
-            act_bytes = math.ceil(self.precision * m * k)
+            act_bytes = math.ceil(self.precision.grad_communication * m * k)
             participants = self.tp
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
@@ -690,7 +688,7 @@ class TimeCalculationLLM(TimeCalculation):
             shard_n = math.ceil(n / max(1, self.tp * self.cp))
             grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
-            act_bytes = math.ceil(self.precision * m * k)
+            act_bytes = math.ceil(self.precision.grad_communication * m * k)
             participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
@@ -768,7 +766,7 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type == GemmType.ATTENTION_SCORE:
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch 
-            total_bytes = self.precision * k * n * batch * 2 # account for both Q and K
+            total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both Q and K
             kind = "reduce_scatter"
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
@@ -803,7 +801,7 @@ class TimeCalculationLLM(TimeCalculation):
         Calculates the total time required for embedding operations, including computation and data transfer.
         """
         batch = self._effective_transformer_batch()
-        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision
+        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision.activations
         embedding_time = self.roofline(
             0,
             embedding_mem,
@@ -833,7 +831,9 @@ class TimeCalculationLLM(TimeCalculation):
             
 
         point_flop = effective_m * (3 * n - 1)
-        point_mem = self.precision * effective_m * (SOFTMAX_FORWARD_MEM_ACCESSES * n)
+        # TODO:
+        # unsure if should be precision.activations or precision.stats
+        point_mem = self.precision.activations * effective_m * (SOFTMAX_FORWARD_MEM_ACCESSES * n)
         point_time = self.roofline(
             point_flop,
             point_mem,
@@ -859,7 +859,9 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX)
 
         point_flop = effective_m * n * 6
-        point_mem = self.precision * effective_m * n * 10
+        # TODO:
+        # same here, unsure if should be precision.activations or precision.stats
+        point_mem = self.precision.activations * effective_m * n * 10
 
         point_time = self.roofline(
             point_flop,
@@ -899,11 +901,11 @@ class TimeCalculationLLM(TimeCalculation):
         shard_m = math.ceil(effective_m / max(1, self.cp))
         elements = shard_m * n / self.tp
         scale_flop = elements * 3
-        scale_mem = self.precision * elements * 3
+        scale_mem = self.precision.activations * elements * 3
 
         # Backward softmax uses forward probabilities and gradient accumulation (≈6 ops/elt)
         softmax_flop = effective_m * n * 6
-        softmax_mem = self.precision * effective_m * n * 10
+        softmax_mem = self.precision.activations * effective_m * n * 10
 
         scale_time = self.roofline(
             scale_flop,
@@ -941,7 +943,7 @@ class TimeCalculationLLM(TimeCalculation):
         elements = batch * m * n
 
         flops = 2 * elements  # add + bias
-        mem = self.precision * elements * 3  # read main, read residual, write out
+        mem = self.precision.activations * elements * 3  # read main, read residual, write out
         time = self.roofline(flops, mem, name="pointwise-residual-f", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
@@ -961,7 +963,7 @@ class TimeCalculationLLM(TimeCalculation):
         elements = batch * m * n
 
         flops = elements  # dL/dx = dL/dy passthrough
-        mem = self.precision * elements * 3  # read grad, read forward residual, write grad
+        mem = self.precision.gradients * elements * 3  # read grad, read forward residual, write grad
         time = self.roofline(flops, mem, name="pointwise-residual-b", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
@@ -977,7 +979,7 @@ class TimeCalculationLLM(TimeCalculation):
     def get_gelu_f(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
         compute_flops = elements * hidden * GELU_FORWARD_FLOPS_PER_ELEMENT
-        mem_bytes = self.precision * elements * hidden * 2  # read, write
+        mem_bytes = self.precision.activations * elements * hidden * 2  # read, write
 
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f", mem_level=self.num_levels - 1) + 2 * self.O
 
@@ -993,7 +995,7 @@ class TimeCalculationLLM(TimeCalculation):
     def get_gelu_b(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
         compute_flops = elements * hidden * GELU_BACKWARD_FLOPS_PER_ELEMENT
-        mem_bytes = self.precision * elements * hidden * 3  # read grad, read forward, write grad
+        mem_bytes = self.precision.gradients * elements * hidden * 3  # read grad, read forward, write grad
 
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b", mem_level=self.num_levels - 1) + 3 * self.O
 
@@ -1014,7 +1016,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         reads = 2 * gate_hidden  # gate and up activations
         writes = gate_hidden  # SwiGLU output
-        mem_bytes = self.precision * elements * (reads + writes)
+        mem_bytes = self.precision.activations * elements * (reads + writes)
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f", mem_level=self.num_levels - 1) + 2 * self.O
         if self.debug:
             print(
@@ -1036,7 +1038,7 @@ class TimeCalculationLLM(TimeCalculation):
         reads = 2 * gate_hidden  # gate and up activations
         reads += gate_hidden  # upstream gradient
         writes = 2 * gate_hidden  # gradients for gate and up projections
-        mem_bytes = self.precision * elements * (reads + writes)
+        mem_bytes = self.precision.gradients * elements * (reads + writes)
         time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b", mem_level=self.num_levels - 1) + 3 * self.O
         if self.debug:
             print(
@@ -1059,7 +1061,7 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             elements = batch * seq_len * d_model
         compute_flops = elements * LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT
-        mem_bytes = self.precision * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
+        mem_bytes = self.precision.stats * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
         compute_time = self.roofline(
             compute_flops,
             mem_bytes,
@@ -1067,7 +1069,7 @@ class TimeCalculationLLM(TimeCalculation):
             mem_level=self.num_levels - 1,
         ) + 3 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # all-gather after layernorm
-            per_rank_bytes = self.precision * elements
+            per_rank_bytes = self.precision.activations * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
                 kind="all_gather",
@@ -1094,7 +1096,7 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model
         compute_flops = elements * LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT
-        mem_bytes = self.precision * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
+        mem_bytes = self.precision.stats * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
 
         compute_time = self.roofline(
             compute_flops,
@@ -1103,7 +1105,7 @@ class TimeCalculationLLM(TimeCalculation):
             mem_level=self.num_levels - 1,
         ) + 4 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # communication after layernorm
-            per_rank_bytes = self.precision * elements
+            per_rank_bytes = self.precision.grad_communication * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
                 kind="all_gather",
@@ -1125,7 +1127,7 @@ class TimeCalculationLLM(TimeCalculation):
     
     def get_embedding_b(self):
         batch = self._effective_transformer_batch()
-        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision
+        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision.gradients
         embedding_mem_time = self.roofline(
             0,
             embedding_mem,
@@ -1142,7 +1144,7 @@ class TimeCalculationLLM(TimeCalculation):
         w = 0
         w_size = 0
         if self.lp > 1:
-            w_size = self.precision * batch_size * hidden_dim * seq_len
+            w_size = self.precision.activations * batch_size * hidden_dim * seq_len
             transfer_time = w_size / self.IBL + self.LLL
             mem_time = self.roofline(0, 2 * w_size, name="inter_layer", mem_level=self.num_levels - 1)
             # 2: read from memory of previous layer and write to the memory of the next layer
@@ -1161,11 +1163,11 @@ class TimeCalculationLLM(TimeCalculation):
             }
 
         # Calculate sizes only (no timing)
-        qkv_size = math.ceil(self.precision * d * 3 * d)
-        output_size = math.ceil(self.precision * d * d)
+        qkv_size = math.ceil(self.precision.grad_communication * d * 3 * d)
+        output_size = math.ceil(self.precision.grad_communication * d * d)
         ffn1_dim = self._ffn1_output_dim(ffn_dim)
-        ffn1_size = math.ceil(self.precision * ffn1_dim * d)
-        ffn2_size = math.ceil(self.precision * ffn_dim * d)
+        ffn1_size = math.ceil(self.precision.grad_communication * ffn1_dim * d)
+        ffn2_size = math.ceil(self.precision.grad_communication * ffn_dim * d)
         total_size = qkv_size + output_size + ffn1_size + ffn2_size  # FFN appears twice
 
         return {
@@ -1210,7 +1212,7 @@ class TimeCalculationLLM(TimeCalculation):
         reduction_time = 0.0
         apply_grad_time = 0.0
 
-        total_bytes = math.ceil(self.precision * d * 3 * d)
+        total_bytes = math.ceil(self.precision.grad_communication * d * 3 * d)
         reduction_time += self.network_model.collective(
             kind="all_reduce",
             size_bytes=total_bytes,
@@ -1222,7 +1224,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
 
-        total_bytes = math.ceil(self.precision * d * d)
+        total_bytes = math.ceil(self.precision.grad_communication * d * d)
         reduction_time += self.network_model.collective(
             kind="all_reduce",
             size_bytes=total_bytes,
@@ -1235,7 +1237,7 @@ class TimeCalculationLLM(TimeCalculation):
         apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
         ffn1_dim = self._ffn1_output_dim(ffn_dim)
-        total_bytes = math.ceil(self.precision * ffn1_dim * d)
+        total_bytes = math.ceil(self.precision.grad_communication * ffn1_dim * d)
         reduction_time += self.network_model.collective(
             kind="all_reduce",
             size_bytes=total_bytes,
@@ -1247,7 +1249,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
 
-        total_bytes = math.ceil(self.precision * ffn_dim * d)
+        total_bytes = math.ceil(self.precision.grad_communication * ffn_dim * d)
         reduction_time += self.network_model.collective(
             kind="all_reduce",
             size_bytes=total_bytes,
@@ -1676,9 +1678,9 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
             local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
-
-        embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
-        softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
+        # these are used for dp all-reduce so use grad_comm size.
+        embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim)
+        softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
         # Below, we fix pipeline comm sizes for decode
         attn_shape = (gemm_shapes or {}).get("attention_score")
         pipeline_seq_len = max(1, int(attn_shape[1])) if attn_shape and len(attn_shape) > 1 else seq_len
@@ -1882,6 +1884,19 @@ class TimeCalculationLLM(TimeCalculation):
             'total_mem_per_layer': transformer_mem_layer,
         }
 
+        if self._debug_memory:
+            layers_per_device = max(1, math.ceil(self.num_layers / max(1, self.lp)))
+            to_gib = lambda bytes_val: float(bytes_val) / float(1024 ** 3)
+            self._memory_breakdown_debug = {
+                "layers_per_device": layers_per_device,
+                "activation_gib": to_gib(transformer_act_layer * layers_per_device),
+                "weight_gib": to_gib(weight_memory_layer * layers_per_device),
+                "gradient_gib": to_gib(gradient_mem_layer * layers_per_device),
+                "optimizer_gib": to_gib(optimizer_mem_layer * layers_per_device),
+                "static_gib": to_gib(transformer_static_layer * layers_per_device),
+                "total_layer_gib": to_gib(transformer_mem_layer * layers_per_device),
+            }
+
     
 
         if self.debug:
@@ -2011,7 +2026,7 @@ class TimeCalculationLLM(TimeCalculation):
             hardware_mem_bytes = getattr(hardware_mem_bytes, "size", None)
 
         if hardware_mem_bytes is not None:
-            hardware_mem_gib = float(hardware_mem_bytes) / (1024 ** 3)
+            hardware_mem_gib = float(hardware_mem_bytes) / float(1024 ** 3)
             self.memory_capacity_per_device_gb = hardware_mem_gib
             mem_delta = hardware_mem_gib - peak_mem
             self.memory_headroom_gb = mem_delta
@@ -2019,8 +2034,8 @@ class TimeCalculationLLM(TimeCalculation):
             os.makedirs(memory_dir, exist_ok=True)
             info_lines = [
                 f"Simulation mode: {mode}",
-                f"Hardware memory capacity (per gpu): {hardware_mem_gib:.6f} GiB",
-                f"Simulated peak memory usage(per gpu): {peak_mem:.6f} GiB",
+                f"Hardware memory capacity (per gpu): {hardware_mem_gib:.2f} GiB",
+                f"Simulated peak memory usage(per gpu): {peak_mem:.2} GiB",
             ]
             if mem_delta < 0:
                 info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")
@@ -2031,9 +2046,28 @@ class TimeCalculationLLM(TimeCalculation):
             info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
             with open(info_path, "w", encoding="utf-8") as info_file:
                 info_file.write("\n".join(info_lines) + "\n")
+            if self._debug_memory:
+                breakdown = self._memory_breakdown_debug or {}
+                print("[DEEPFLOW] Memory summary (per device):")
+                print("  Capacity: {:.2f} GiB".format(hardware_mem_gib))
+                print("  Simulated peak usage: {:.2f} GiB".format(peak_mem))
+                print("  Headroom: {:.2f} GiB".format(mem_delta))
+                if breakdown:
+                    print("  Layers per device: {}".format(breakdown.get("layers_per_device")))
+                    print("  Breakdown (GiB, approx per device):")
+                    # print("    Activations: {:.2f}".format(breakdown.get("activation_gib", 0.0)))
+                    print("    Weights: {:.2f}".format(breakdown.get("weight_gib", 0.0)))
+                    print("    Gradients: {:.2f}".format(breakdown.get("gradient_gib", 0.0)))
+                    print("    Optimizer: {:.2f}".format(breakdown.get("optimizer_gib", 0.0)))
+                    print("    Static buffers: {:.2f}".format(breakdown.get("static_gib", 0.0)))
+                    # print("    Total (layer-based): {:.2f}".format(breakdown.get("total_layer_gib", 0.0)))
         else:
             self.memory_capacity_per_device_gb = None
             self.memory_headroom_gb = None
+            if self._debug_memory:
+                print("[DEEPFLOW] Memory summary (per device):")
+                print("  Capacity: unknown")
+                print("  Simulated peak usage: {:.6f} GiB".format(peak_mem))
 
         return time_with_memory, peak_mem
 
