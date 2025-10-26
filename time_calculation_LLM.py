@@ -198,8 +198,13 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             return ParallelismMode.SINGLE
 
-    def _param_stats_per_rank(self, hidden_dim: int, ffn_dim: int, vocab_size: int) -> Tuple[float, float]:
-        """Return per-device parameter statistics for DP collectives."""
+    def _param_stats_per_rank(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        vocab_size: int,
+    ) -> Tuple[float, float, float, float, float]:
+        """Return detailed per-rank parameter counts used for ZeRO modeling."""
 
         tp = max(1, self.tp)
         lp = max(1, self.lp)
@@ -225,8 +230,14 @@ class TimeCalculationLLM(TimeCalculation):
             # Pipeline splits embeddings/output across stages. Approximate their contribution by spreading across stages.
             total_params_per_rank = transformer_params_local + (embedding_params / lp) + (output_params / lp)
 
-        max_layer_params = max(params_per_layer_per_rank, embedding_params)
-        return total_params_per_rank, max_layer_params
+        max_layer_params = max(params_per_layer_per_rank, embedding_params, output_params)
+        return (
+            total_params_per_rank,
+            max_layer_params,
+            params_per_layer_per_rank,
+            embedding_params,
+            output_params,
+        )
 
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
@@ -1240,10 +1251,14 @@ class TimeCalculationLLM(TimeCalculation):
 
         reduction_sizes = self.get_data_parallel_reduction_sizes(d, ffn_dim)
         grad_bytes = int(reduction_sizes['total_size'])
-        total_params_per_rank, _ = self._param_stats_per_rank(d, ffn_dim, self.vocab_size)
+        (
+            total_params_per_rank,
+            _,
+            _,
+            _,
+            _,
+        ) = self._param_stats_per_rank(d, ffn_dim, self.vocab_size)
         param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
-        zero2_param_bytes = param_bytes if self.zero_stage >= 2 else 0
-        zero3_param_bytes = param_bytes if self.zero_stage >= 3 else 0
         grad_shard = self.dp if self.zero_stage >= 2 else 1
 
         if grad_shard > 1: # ZeRO stages >= 2: gradients are sharded via reduce-scatter and parameters are gathered.
@@ -1267,25 +1282,16 @@ class TimeCalculationLLM(TimeCalculation):
             )
 
             gather_time = 0.0
-            if zero2_param_bytes:
+            if self.zero_stage == 2:
+                gather_bytes = int(math.ceil(param_bytes))
                 gather_time += self.network_model.collective(
                     kind="all_gather",
-                    size_bytes=zero2_param_bytes,
+                    size_bytes=gather_bytes,
                     participants=int(self.dp),
                     ib=self.IBD,
                     ll=self.LLD,
                     local_bytes=0.0,
                     debug_label="dp_zero_param_gather_zero2",
-                )
-            if zero3_param_bytes and zero3_param_bytes != zero2_param_bytes:
-                gather_time += self.network_model.collective(
-                    kind="all_gather",
-                    size_bytes=zero3_param_bytes,
-                    participants=int(self.dp),
-                    ib=self.IBD,
-                    ll=self.LLD,
-                    local_bytes=0.0,
-                    debug_label="dp_zero_param_gather_zero3",
                 )
             if self.debug:
                 print(f"apply_grad_time (ZeRO-{self.zero_stage}): {apply_grad_time}")
@@ -1617,10 +1623,12 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_size: int,
         softmax_size: int,
         cross_layer_bytes: int,
-        zero2_embedding_gather_bytes: int = 0,
-        zero2_transformer_gather_bytes: int = 0,
-        zero2_softmax_gather_bytes: int = 0,
-        zero3_param_gather_bytes: int = 0,
+        zero2_embedding_gather_bytes: float = 0.0,
+        zero2_transformer_gather_bytes: float = 0.0,
+        zero2_softmax_gather_bytes: float = 0.0,
+        zero3_embedding_gather_bytes: float = 0.0,
+        zero3_transformer_gather_bytes: float = 0.0,
+        zero3_softmax_gather_bytes: float = 0.0,
     ) -> Dict[str, Dict[str, Any]]:
         grad_collective = 'reduce_scatter' if (self.zero_stage >= 2 and self.dp > 1) else 'all_reduce'
         metadata = {
@@ -1655,7 +1663,7 @@ class TimeCalculationLLM(TimeCalculation):
         }
         if zero2_embedding_gather_bytes:
             metadata['zero2_embedding_gather'] = {
-                'size': zero2_embedding_gather_bytes,
+                'size': int(math.ceil(zero2_embedding_gather_bytes)),
                 'type': 'all_gather',
                 'participants': self.dp,
                 'interconnect_type': 'dp',
@@ -1663,7 +1671,7 @@ class TimeCalculationLLM(TimeCalculation):
             }
         if zero2_transformer_gather_bytes:
             metadata['zero2_transformer_gather'] = {
-                'size': zero2_transformer_gather_bytes,
+                'size': int(math.ceil(zero2_transformer_gather_bytes)),
                 'type': 'all_gather',
                 'participants': self.dp,
                 'interconnect_type': 'dp',
@@ -1671,15 +1679,31 @@ class TimeCalculationLLM(TimeCalculation):
             }
         if zero2_softmax_gather_bytes:
             metadata['zero2_softmax_gather'] = {
-                'size': zero2_softmax_gather_bytes,
+                'size': int(math.ceil(zero2_softmax_gather_bytes)),
                 'type': 'all_gather',
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
             }
-        if zero3_param_gather_bytes:
-            metadata['zero3_param_gather'] = {
-                'size': zero3_param_gather_bytes,
+        if zero3_embedding_gather_bytes:
+            metadata['zero3_embedding_gather'] = {
+                'size': int(math.ceil(zero3_embedding_gather_bytes)),
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        if zero3_transformer_gather_bytes:
+            metadata['zero3_transformer_gather'] = {
+                'size': int(math.ceil(zero3_transformer_gather_bytes)),
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        if zero3_softmax_gather_bytes:
+            metadata['zero3_softmax_gather'] = {
+                'size': int(math.ceil(zero3_softmax_gather_bytes)),
                 'type': 'all_gather',
                 'participants': self.dp,
                 'interconnect_type': 'dp',
@@ -1779,7 +1803,12 @@ class TimeCalculationLLM(TimeCalculation):
         include_pipeline_backward: bool,
         include_transformer_backward: bool,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,  # optional override (decode only)
-        zero3_param_gather_bytes: int = 0,
+        zero2_embedding_gather_bytes: float = 0.0,
+        zero2_transformer_gather_bytes: float = 0.0,
+        zero2_softmax_gather_bytes: float = 0.0,
+        zero3_embedding_gather_bytes: float = 0.0,
+        zero3_transformer_gather_bytes: float = 0.0,
+        zero3_softmax_gather_bytes: float = 0.0,
     ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
         """Build pipeline/transformer graphs shared across training and inference."""
 
@@ -1811,20 +1840,18 @@ class TimeCalculationLLM(TimeCalculation):
 
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, pipeline_seq_len)[1]
 
-        zero2_embedding_bytes = embedding_size if (self.dp > 1 and self.zero_stage >= 2) else 0
-        zero2_transformer_bytes = reduction_sizes['total_size'] if (self.dp > 1 and self.zero_stage >= 2) else 0
-        zero2_softmax_bytes = softmax_size if (self.dp > 1 and self.zero_stage >= 2) else 0
-
         comm_metadata = self._build_comm_metadata(
             reduction_sizes=reduction_sizes,
             local_comp=local_comp, 
             embedding_size=embedding_size,
             softmax_size=softmax_size,
             cross_layer_bytes=cross_layer_bytes,
-            zero2_embedding_gather_bytes=zero2_embedding_bytes,
-            zero2_transformer_gather_bytes=zero2_transformer_bytes,
-            zero2_softmax_gather_bytes=zero2_softmax_bytes,
-            zero3_param_gather_bytes=zero3_param_gather_bytes,
+            zero2_embedding_gather_bytes=zero2_embedding_gather_bytes,
+            zero2_transformer_gather_bytes=zero2_transformer_gather_bytes,
+            zero2_softmax_gather_bytes=zero2_softmax_gather_bytes,
+            zero3_embedding_gather_bytes=zero3_embedding_gather_bytes,
+            zero3_transformer_gather_bytes=zero3_transformer_gather_bytes,
+            zero3_softmax_gather_bytes=zero3_softmax_gather_bytes,
         )
 
         transformer_operation_entries: List[Dict[str, Any]] = []
@@ -1994,14 +2021,36 @@ class TimeCalculationLLM(TimeCalculation):
         #   stage 3 – shard optimizer, gradients, and parameters (grad RS + two param AG, per-layer materialization)
         self.readjust_type()
 
-        total_params_per_rank, max_layer_params = self._param_stats_per_rank(
-            hidden_dim, ffn_dim, vocab_size
-        )
-        param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
-        if self.dp > 1:
-            zero3_param_gather_bytes = param_bytes if self.zero_stage >= 3 else 0
+        (
+            total_params_per_rank,
+            max_layer_params,
+            params_per_layer_per_rank,
+            embedding_params_per_rank,
+            output_params_per_rank,
+        ) = self._param_stats_per_rank(hidden_dim, ffn_dim, vocab_size)
+
+        param_bytes = total_params_per_rank * self.precision.parameters
+        transformer_param_layer_bytes = params_per_layer_per_rank * self.precision.parameters
+        embedding_param_bytes = embedding_params_per_rank * self.precision.parameters
+        softmax_param_bytes = output_params_per_rank * self.precision.parameters
+
+        if self.zero_stage == 2 and self.dp > 1:
+            zero2_embedding_gather_bytes = embedding_param_bytes
+            zero2_transformer_gather_bytes = transformer_param_layer_bytes
+            zero2_softmax_gather_bytes = softmax_param_bytes
         else:
-            zero3_param_gather_bytes = 0
+            zero2_embedding_gather_bytes = 0.0
+            zero2_transformer_gather_bytes = 0.0
+            zero2_softmax_gather_bytes = 0.0
+
+        if self.zero_stage >= 3 and self.dp > 1:
+            zero3_embedding_gather_bytes = embedding_param_bytes
+            zero3_transformer_gather_bytes = transformer_param_layer_bytes
+            zero3_softmax_gather_bytes = softmax_param_bytes
+        else:
+            zero3_embedding_gather_bytes = 0.0
+            zero3_transformer_gather_bytes = 0.0
+            zero3_softmax_gather_bytes = 0.0
 
         # zero stage 3 creates a need for materialization of parameters per layer. This is the peak memory requirement.
         # these bytes are 'ephemeral' as they get discarded after, but still need to accounted for in the memory sim.
@@ -2038,6 +2087,12 @@ class TimeCalculationLLM(TimeCalculation):
             'static_mem_per_layer': transformer_static_layer,
             'total_mem_per_layer': transformer_mem_layer,
             'zero3_ephemeral_peak_bytes': self.zero3_ephemeral_peak_bytes,
+            'zero2_embedding_gather_bytes': int(math.ceil(zero2_embedding_gather_bytes)) if zero2_embedding_gather_bytes else 0,
+            'zero2_transformer_gather_bytes': int(math.ceil(zero2_transformer_gather_bytes)) if zero2_transformer_gather_bytes else 0,
+            'zero2_softmax_gather_bytes': int(math.ceil(zero2_softmax_gather_bytes)) if zero2_softmax_gather_bytes else 0,
+            'zero3_embedding_gather_bytes': int(math.ceil(zero3_embedding_gather_bytes)) if zero3_embedding_gather_bytes else 0,
+            'zero3_transformer_gather_bytes': int(math.ceil(zero3_transformer_gather_bytes)) if zero3_transformer_gather_bytes else 0,
+            'zero3_softmax_gather_bytes': int(math.ceil(zero3_softmax_gather_bytes)) if zero3_softmax_gather_bytes else 0,
         }
         # NOTE: simulate_memory currently ignores the ZeRO-specific entries above. It needs to be updated to handle them.
 
@@ -2094,7 +2149,12 @@ class TimeCalculationLLM(TimeCalculation):
             vocab_size=vocab_size,
             include_pipeline_backward=True,
             include_transformer_backward=True,
-            zero3_param_gather_bytes=zero3_param_gather_bytes,
+            zero2_embedding_gather_bytes=zero2_embedding_gather_bytes,
+            zero2_transformer_gather_bytes=zero2_transformer_gather_bytes,
+            zero2_softmax_gather_bytes=zero2_softmax_gather_bytes,
+            zero3_embedding_gather_bytes=zero3_embedding_gather_bytes,
+            zero3_transformer_gather_bytes=zero3_transformer_gather_bytes,
+            zero3_softmax_gather_bytes=zero3_softmax_gather_bytes,
         )
 
         self.transformer_graph = transformer_graph

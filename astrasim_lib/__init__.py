@@ -22,6 +22,7 @@ from .et_utils import (
     new_send_node,
     write_et_node,
 )
+from .graph_debug import build_debug_view, debug_view_to_json
 from .executor import (
     convert_deepflow_graph_to_chakra_et,
     run_astra_simulation_only_onepath,
@@ -44,6 +45,8 @@ __all__ = [
     "new_recv_node",
     "new_send_node",
     "write_et_node",
+    "build_debug_view",
+    "debug_view_to_json",
     "convert_deepflow_graph_to_chakra_et",
     "run_astra_simulation_only_onepath",
 ]

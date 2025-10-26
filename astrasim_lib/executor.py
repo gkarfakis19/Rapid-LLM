@@ -427,6 +427,7 @@ def convert_deepflow_graph_to_chakra_et(
     Prefer changes *anywhere* else in the codebase if possible."""
 
     os.makedirs(output_dir, exist_ok=True)
+    debug_enabled = _env_truthy("DEEPFLOW_DUMP_CONVERTER_DEBUG")
 
     def collect_objects(root) -> List[Any]:
         visited: Set[int] = set()
@@ -480,6 +481,13 @@ def convert_deepflow_graph_to_chakra_et(
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
 
+    # in all objects, if they have no hw_id, convert local_hw_id to hw_id
+    # for obj in all_objects:
+    #     if getattr(obj, "hw_id", None) is None:
+    #         local_hw = getattr(obj, "local_hw_id", None)
+    #         if local_hw is not None:
+    #             obj.hw_id = local_hw
+
     collectives_by_parent: Dict[Any, List[Any]] = defaultdict(list)
     edge_stage: Dict[Any, int] = {}
     for obj in all_objects:
@@ -498,7 +506,19 @@ def convert_deepflow_graph_to_chakra_et(
                         stage = candidate.hw_id
                         break
             if stage is None:
-                continue
+                local_hw = getattr(obj, "local_hw_id", None)
+                stage = local_hw
+
+            if stage is None:
+                # print children and parents
+                children = getattr(obj, "children", [])
+                parents = getattr(obj, "parents", [])
+                for child in children:
+                    print(f"Child: {child.name}")
+                for parent in parents:
+                    print(f"Parent: {parent.name}")
+
+                raise ValueError(f"Stage not found for object {obj.name}")
             edge_stage[obj] = stage
             if parent is not None:
                 collectives_by_parent[parent].append(obj)
@@ -512,53 +532,166 @@ def convert_deepflow_graph_to_chakra_et(
         collective_deps: Set[Any] = set()
         visited: Set[Tuple[int, bool]] = set()
         stack: List[Tuple[Any, bool]] = [(parent, False) for parent in getattr(node, "parents", [])]
-
+        debug_en = node.name == "transformer_layer0"
+        
+        if debug_en:
+            print(f"\n=== DEBUG: analyze_for_compute for node '{node.name}' ===")
+            print(f"Node stage: {stage}")
+            print(f"Initial parents: {[getattr(p, 'name', str(id(p))) for p in getattr(node, 'parents', [])]}")
+            print(f"Initial stack size: {len(stack)}")
+            print()
+        
+        iteration = 0
         while stack:
+            iteration += 1
             cur, via_collective = stack.pop()
             key = (id(cur), via_collective)
+            
+            if debug_en:
+                print(f"--- Iteration {iteration} ---")
+                print(f"Processing: {getattr(cur, 'name', str(id(cur)))}")
+                print(f"via_collective: {via_collective}")
+                print(f"key: {key}")
+                print(f"Stack size before pop: {len(stack) + 1}")
+            
             if key in visited:
+                if debug_en:
+                    print(f"Already visited, skipping")
+                    print()
                 continue
             visited.add(key)
 
             hw = getattr(cur, "hw_id", None)
+            if debug_en:
+                print(f"hw_id: {hw}")
+            
             if hw is not None and hw >= 0:
+                if debug_en:
+                    print(f"Node has valid hw_id: {hw}")
+                    print(f"Comparing with stage: {stage}")
+                
                 if hw == stage:
                     if not via_collective:
+                        if debug_en:
+                            print(f"Adding to stage_deps: {getattr(cur, 'name', str(id(cur)))}")
                         stage_deps.add(cur)
+                    else:
+                        if debug_en:
+                            print(f"Same stage but via_collective=True, not adding to stage_deps")
                 else:
+                    if debug_en:
+                        print(f"Different stage, adding to pipeline_deps: {getattr(cur, 'name', str(id(cur)))}")
                     pipeline_deps.add(cur)
                     pipeline_edge_map.setdefault((cur, node), None)
+                
+                if debug_en:
+                    print(f"Continuing to next iteration")
+                    print()
                 continue
 
             comm = getattr(cur, "comm_type", None)
+            if debug_en:
+                print(f"comm_type: {comm}")
+            
             if comm:
                 if comm == "pipeline":
+                    if debug_en:
+                        print(f"Processing pipeline comm")
+
+                    # compute sources vvv
                     srcs = [p for p in cur.parents if getattr(p, "hw_id", None) is not None and p.hw_id >= 0]
+                    # also collect dp-collective sources (they have local_hw_id)
+                    coll_srcs = [p for p in cur.parents if getattr(p, "local_hw_id", None) is not None and p.local_hw_id >= 0]
+                    if debug_en:
+                        print(f"Pipeline sources: {[getattr(s, 'name', str(id(s))) for s in srcs]}")
+                        print(f"DP-collective sources: {[getattr(s, 'name', str(id(s))) for s in coll_srcs]}")
+                    
                     if srcs:
                         for src in srcs:
+                            if debug_en:
+                                print(f"  Processing src: {getattr(src, 'name', str(id(src)))} (hw_id: {src.hw_id})")
+                            
                             if src.hw_id == stage:
                                 if not via_collective:
+                                    if debug_en:
+                                        print(f"    Adding pipeline src to stage_deps: {getattr(src, 'name', str(id(src)))}")
                                     stage_deps.add(src)
+                                else:
+                                    if debug_en:
+                                        print(f"    Same stage pipeline src but via_collective=True, not adding")
                             else:
+                                if debug_en:
+                                    print(f"    Adding pipeline src to pipeline_deps: {getattr(src, 'name', str(id(src)))}")
                                 pipeline_deps.add(src)
                                 pipeline_edge_map[(src, node)] = cur
-                        continue
+
+                    if coll_srcs:
+                        for src in coll_srcs:
+                            if debug_en:
+                                print(f"  Processing coll_src: {getattr(src, 'name', str(id(src)))} (local_hw_id: {src.local_hw_id})")
+                            if src.local_hw_id == stage:
+                                if not via_collective:
+                                    if debug_en:
+                                        print(f"    Adding dp-collective src to stage_deps: {getattr(src, 'name', str(id(src)))}")
+                                    collective_deps.add(src)
+                            else:
+                                # for now we do not support cross-pipeline dp collective deps so ignore.
+                                if debug_en:
+                                    print(f"    Ignoring cross-pipeline dp collective src: {getattr(src, 'name', str(id(src)))}")
+                                
+                    if debug_en:
+                        print(f"Pipeline processing complete, continuing")
+                        print()
+                    continue
                 else:
+                    if debug_en:
+                        print(f"Processing non-pipeline collective: {comm}")
+                        print(f"Adding to collective_deps: {getattr(cur, 'name', str(id(cur)))}")
                     collective_deps.add(cur)
-                    for parent in getattr(cur, "parents", []):
+                    parents_to_add = getattr(cur, "parents", [])
+                    if debug_en:
+                        print(f"Adding collective parents to stack: {[getattr(p, 'name', str(id(p))) for p in parents_to_add]}")
+                    for parent in parents_to_add:
                         stack.append((parent, True))
+                    
+                    if debug_en:
+                        print(f"Collective processing complete, continuing")
+                        print()
                     continue
 
-            for parent in getattr(cur, "parents", []):
+            parents_to_add = getattr(cur, "parents", [])
+            if debug_en:
+                print(f"No comm_type or hw_id, adding regular parents to stack: {[getattr(p, 'name', str(id(p))) for p in parents_to_add]}")
+            for parent in parents_to_add:
                 stack.append((parent, via_collective))
+            
+            if debug_en:
+                print(f"Stack size after adding parents: {len(stack)}")
+                print()
 
+        if debug_en:
+            print(f"=== FINAL RESULTS ===")
+            print(f"stage_deps before discard: {[getattr(d, 'name', str(id(d))) for d in stage_deps]}")
+            
         stage_deps.discard(node)
+        
+        if debug_en:
+            print(f"stage_deps after discard: {[getattr(d, 'name', str(id(d))) for d in stage_deps]}")
+            print(f"pipeline_deps: {[getattr(d, 'name', str(id(d))) for d in pipeline_deps]}")
+            print(f"collective_deps: {[getattr(d, 'name', str(id(d))) for d in collective_deps]}")
+            print(f"pipeline_edge_map entries added: {len(pipeline_edge_map)}")
+            for (src, dst), edge in pipeline_edge_map.items():
+                if dst == node:
+                    print(f"  {getattr(src, 'name', str(id(src)))} -> {getattr(dst, 'name', str(id(dst)))} via {getattr(edge, 'name', str(id(edge))) if edge else 'None'}")
+            print(f"=== END DEBUG ===")
+        
         return stage_deps, pipeline_deps, collective_deps
 
-    def analyze_for_collective(edge: Any) -> Tuple[Set[Any], Set[Any]]:
+    def analyze_for_collective(edge: Any) -> Tuple[Set[Any], Set[Any], Set[Any]]:
         stage = edge_stage[edge]
         stage_deps: Set[Any] = set()
         pipeline_deps: Set[Any] = set()
+        collective_deps: Set[Any] = set()
         visited: Set[Tuple[int, bool]] = set()
         stack: List[Tuple[Any, bool]] = [(parent, False) for parent in getattr(edge, "parents", [])]
 
@@ -570,6 +703,8 @@ def convert_deepflow_graph_to_chakra_et(
             visited.add(key)
 
             hw = getattr(cur, "hw_id", None)
+            if hw is None:
+                hw = getattr(cur, "local_hw_id", None)
             if hw is not None and hw >= 0:
                 if hw == stage:
                     if not via_collective:
@@ -582,6 +717,7 @@ def convert_deepflow_graph_to_chakra_et(
             comm = getattr(cur, "comm_type", None)
             if comm == "pipeline":
                 srcs = [p for p in cur.parents if getattr(p, "hw_id", None) is not None and p.hw_id >= 0]
+                coll_srcs = [p for p in cur.parents if getattr(p, "local_hw_id", None) is not None and getattr(p, "local_hw_id") >= 0]
                 if srcs:
                     for src in srcs:
                         if src.hw_id == stage:
@@ -590,8 +726,13 @@ def convert_deepflow_graph_to_chakra_et(
                         else:
                             pipeline_deps.add(src)
                             pipeline_edge_map[(src, edge)] = cur
-                    continue
+                if coll_srcs:
+                    for src in coll_srcs:
+                        if src.local_hw_id == stage and not via_collective:
+                            collective_deps.add(src)
+                continue
             elif comm:
+                collective_deps.add(cur)
                 for parent in getattr(cur, "parents", []):
                     stack.append((parent, True))
                 continue
@@ -599,7 +740,7 @@ def convert_deepflow_graph_to_chakra_et(
             for parent in getattr(cur, "parents", []):
                 stack.append((parent, via_collective))
 
-        return stage_deps, pipeline_deps
+        return stage_deps, pipeline_deps, collective_deps
 
     compute_info: Dict[Any, Dict[str, Any]] = {}
     for node in compute_nodes:
@@ -614,11 +755,12 @@ def convert_deepflow_graph_to_chakra_et(
 
     collective_info: Dict[Any, Dict[str, Any]] = {}
     for edge, stage in edge_stage.items():
-        stage_deps, pipeline_deps = analyze_for_collective(edge)
+        stage_deps, pipeline_deps, collective_deps = analyze_for_collective(edge)
         collective_info[edge] = {
             "stage": stage,
             "stage_deps": stage_deps,
             "pipeline_deps": pipeline_deps,
+            "collective_deps": collective_deps,
             "size": int(getattr(edge, "comm_size_bytes", 0)),
             "comm_type": get_collective_type(edge.comm_type),
             "name": edge.name,
@@ -626,6 +768,28 @@ def convert_deepflow_graph_to_chakra_et(
             "participants": int(getattr(edge, "participants", 0) or 0),
         }
 
+    if debug_enabled:
+        print("[ConverterDebug] === COMPUTE INFO (stage deps / pipeline deps / collectives) ===")
+        for node, info in compute_info.items():
+            name = getattr(node, "name", str(id(node)))
+            stage_names = [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]]
+            pipe_names = [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]]
+            coll_names = [getattr(dep, "name", str(id(dep))) for dep in info["collective_deps"]]
+            print(
+                f"[ConverterDebug] compute {name}: stage={info['stage']}"
+                f" stage_deps={stage_names} pipeline_deps={pipe_names} collectives={coll_names}"
+            )
+
+        print("[ConverterDebug] === COLLECTIVE INFO (stage deps / pipeline deps / collectives) ===")
+        for edge, info in collective_info.items():
+            name = getattr(edge, "name", str(id(edge)))
+            stage_names = [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]]
+            pipe_names = [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]]
+            coll_names = [getattr(dep, "name", str(id(dep))) for dep in info["collective_deps"]]
+            print(
+                f"[ConverterDebug] collective {name}: stage={info['stage']}"
+                f" stage_deps={stage_names} pipeline_deps={pipe_names} collectives={coll_names}"
+            )
     tp_collective_groups: Dict[str, List[Any]] = defaultdict(list)
     for edge, info in collective_info.items():
         interconnect_type = info.get("interconnect_type")
@@ -693,6 +857,11 @@ def convert_deepflow_graph_to_chakra_et(
             if dep in stage_tasks.get(stage, set()):
                 stage_adj[stage][dep].add(edge)
                 stage_indegree[stage][edge] += 1
+        for dep in info.get("collective_deps", set()):
+            dep_stage = collective_info.get(dep, {}).get("stage")
+            if dep_stage == stage:
+                stage_adj[stage][dep].add(edge)
+                stage_indegree[stage][edge] += 1
 
 
     stage_order: Dict[int, List[Any]] = {}
@@ -708,8 +877,78 @@ def convert_deepflow_graph_to_chakra_et(
                 if indeg[neighbor] == 0:
                     queue.append(neighbor)
         if len(order) != len(tasks):
+            if debug_enabled:
+                print(f"[ConverterDebug] cycle stage {stage}")
+                for task in tasks:
+                    name = getattr(task, "name", str(id(task)))
+                    deps = [
+                        getattr(src, "name", str(id(src)))
+                        for src in stage_adj[stage]
+                        if task in stage_adj[stage][src]
+                    ]
+                    print(
+                        f"[ConverterDebug]   task {name}: indegree={indeg.get(task)} deps={deps}"
+                    )
             raise RuntimeError(f"Cycle detected in stage {stage} while scheduling")
         stage_order[stage] = order
+
+    if debug_enabled:
+        print("[ConverterDebug] === STAGE ORDER ===")
+        for stage, order in stage_order.items():
+            names = [getattr(task, "name", str(id(task))) for task in order]
+            print(f"[ConverterDebug] stage {stage}: {names}")
+
+        compute_debug = []
+        for node, info in compute_info.items():
+            compute_debug.append(
+                {
+                    "name": getattr(node, "name", str(id(node))),
+                    "stage": info["stage"],
+                    "type": node.__class__.__name__,
+                    "stage_deps": [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]],
+                    "pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]],
+                    "collective_deps": [getattr(dep, "name", str(id(dep))) for dep in info["collective_deps"]],
+                }
+            )
+
+        collective_debug = []
+        for edge, info in collective_info.items():
+            collective_debug.append(
+                {
+                    "name": getattr(edge, "name", str(id(edge))),
+                    "stage": info["stage"],
+                    "type": edge.__class__.__name__,
+                    "stage_deps": [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]],
+                    "pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]],
+                }
+            )
+
+        pipeline_debug = []
+        for obj in all_objects:
+            if getattr(obj, "comm_type", None) == "pipeline":
+                sources = [getattr(src, "name", str(id(src))) for src in getattr(obj, "parents", [])]
+                targets = [getattr(dst, "name", str(id(dst))) for dst in getattr(obj, "children", [])]
+                pipeline_debug.append(
+                    {
+                        "name": getattr(obj, "name", str(id(obj))),
+                        "sources": sources,
+                        "targets": targets,
+                    }
+                )
+
+        debug_payload = {
+            "compute": compute_debug,
+            "collectives": collective_debug,
+            "pipeline_edges": pipeline_debug,
+            "stage_order": {stage: [getattr(task, "name", str(id(task))) for task in order] for stage, order in stage_order.items()},
+        }
+
+        debug_path = os.path.join(output_dir, "converter_debug.json")
+        try:
+            with open(debug_path, "w", encoding="utf-8") as fh:
+                json.dump(debug_payload, fh, indent=2)
+        except Exception:
+            pass
 
     compute_et_ids: Dict[Tuple[Any, int], int] = {}
     collective_et_ids: Dict[Tuple[Any, int], int] = {}
@@ -797,19 +1036,34 @@ def convert_deepflow_graph_to_chakra_et(
         pipeline_recv_cache[key] = recv_id
         return recv_id
 
-
+    from pprint import pprint
+    print("Stage order:")
+    pprint(stage_order)
     for stage in stage_order:
         order = stage_order[stage]
+        pprint(f"Stage {stage}: {order}")
         for task in order:
+            print(f"Task: {task}")
             if task in collective_info:
                 info = collective_info[task]
+                print(f"Collective info")
+                pprint(info)
                 # Skip stage collectives entirely when dp_count <= 1
                 if dp_count <= 1 and task not in tp_collective_labels:
                     continue
                 for dp_idx, rank in enumerate(stage_to_ranks[stage]):
                     trace = rank_traces[rank]
                     deps: List[int] = []
+                    print(f"Stage deps: {[getattr(dep, 'name', str(id(dep))) for dep in info['stage_deps']]}")
+                    print(f"Collective deps: {[getattr(dep, 'name', str(id(dep))) for dep in info.get('collective_deps', set())]}")
                     for dep in info["stage_deps"]:
+                        if dep in collective_info:
+                            deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
+                        else:
+                            print(f"Dep: {dep.name} is not in collective_info")
+
+                            deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
+                    for dep in info.get("collective_deps", set()):
                         if dep in collective_info:
                             deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
                         else:

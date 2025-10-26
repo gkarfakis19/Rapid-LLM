@@ -82,7 +82,8 @@ class PipelineGraphFlattener:
             return self._clone_cache[obj_id]
 
         if isinstance(obj, simulate_LLM.Node):
-            if obj.name in {"transformer", "transformer_b"}:
+            base_name = str(getattr(obj, "name", "") or "")
+            if base_name.startswith("transformer_layer"):
                 expanded = self._expand_transformer_node(obj)
                 self._clone_cache[obj_id] = expanded
                 return expanded
@@ -722,10 +723,12 @@ class LLMExecutionDispatcher:
         visited.add(node_id)
 
         if isinstance(node, simulate_LLM.Node):
-            if node.name == "transformer":
-                node.duration = forward_value
-            elif node.name == "transformer_b":
-                node.duration = backward_value
+            base_name = str(getattr(node, "name", "") or "")
+            if base_name.startswith("transformer_layer"):
+                if getattr(node, "fwd", True):
+                    node.duration = forward_value
+                else:
+                    node.duration = backward_value
 
         for child in getattr(node, "children", []):
             self._assign_transformer_durations(child, visited, forward_value, backward_value)

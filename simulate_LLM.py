@@ -153,6 +153,11 @@ class Graph:
             comm_interconnect_type=comm_data['interconnect_type'],
             is_dp=is_dp,
         )
+        if local_hw_id is not None:
+            try:
+                comm_edge.local_hw_id = int(local_hw_id)
+            except (TypeError, ValueError):
+                comm_edge.local_hw_id = local_hw_id
 
         # If there's local computation time, create local node after edge
         local_comp_time = comm_data.get('local_comp_time', 0)
@@ -589,7 +594,7 @@ class Graph:
 
             for l in range(self.num_layer):
                 hw_id = min(l // self.layer_per_device , self.lp - 1)#assign hw_id for transformer
-                transformer_node = Node("transformer", op_id, hw_id, transformer_f_time)
+                transformer_node = Node(f"transformer_layer{l}", op_id, hw_id, transformer_f_time)
                 transformer_node.micro_batch_index = b
                 transformer_node.layer_index = l
                 transformer_node.direction = "forward"
@@ -730,7 +735,7 @@ class Graph:
             for l in reversed(range(self.num_layer)):
 
                 hw_id = min(l // self.layer_per_device , self.lp - 1)
-                transformer_node_b = Node("transformer_b", op_id, hw_id, transformer_b_time, fwd=False)
+                transformer_node_b = Node(f"transformer_layer{l}_b", op_id, hw_id, transformer_b_time, fwd=False)
                 transformer_node_b.micro_batch_index = b
                 transformer_node_b.layer_index = l
                 transformer_node_b.direction = "backward"
@@ -769,7 +774,20 @@ class Graph:
             layernorm_Softmax.add_child(prev_layer_norm2)
                 
 
-            # all-reduce
+        def attach_parallel_edge(target, gather_edge):
+            parents = list(getattr(target, "parents", []))
+            for parent in parents:
+                if hasattr(parent, "children") and gather_edge not in parent.children:
+                    parent.add_child(gather_edge)
+            children = list(getattr(target, "children", []))
+            for child in children:
+                if gather_edge not in getattr(child, "parents", []):
+                    gather_edge.add_child(child)
+
+        root_forward_entry = embedding_node[0]
+
+        for b in range(self.num_batch):
+            # Data parallel collectives (all reduce for DDP/ZeRO-1, reduce-scatter + all-gather for ZeRO-2/3)
             if self.dp > 1:
                 zero2_embedding_key = "zero2_embedding_gather"
                 zero2_transformer_key = "zero2_transformer_gather"
@@ -782,23 +800,49 @@ class Graph:
                 )
                 R_edge[b].append(embedding_edge)
                 op_id += 1
-                if zero2_embedding_key in self.comm_metadata:
+                postfix = ""
+                if zero2_embedding_key in self.comm_metadata: # ZeRO-2/3, use reduce-scatter.
+                    postfix = "_reduce_scatter"
                     gather_edge = self.create_comm_edge(
                         zero2_embedding_key,
                         op_id,
                         zero2_embedding_key,
                         is_dp=True,
+                        local_hw_id=embedding_node[b].hw_id,
                     )
                     op_id += 1
                     embedding_edge.add_child(gather_edge)
+                else: # No ZeRO-2/3, use all-reduce.
+                    postfix = "_all_reduce"
 
-                for i in range(self.num_layer):
+                zero3_embedding_key = "zero3_embedding_gather"
+                zero3_transformer_key = "zero3_transformer_gather"
+                zero3_softmax_key = "zero3_softmax_gather"
+                if zero3_embedding_key in self.comm_metadata:
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_embedding_key}_b{b}_fwd",
+                        op_id,
+                        zero3_embedding_key,
+                        is_dp=True,
+                        local_hw_id=embedding_node[b].hw_id,
+                    )
+                    op_id += 1
+                    if embedding_node[b] in data_batch_node[b].children:
+                        data_batch_node[b].children.remove(embedding_node[b])
+                    if data_batch_node[b] in getattr(embedding_node[b], "parents", []):
+                        embedding_node[b].parents.remove(data_batch_node[b])
+                    data_batch_node[b].add_child(gather_edge)
+                    gather_edge.add_child(embedding_node[b])
+                    if b == 0:
+                        root_forward_entry = gather_edge
+
+                for layer_idx in range(self.num_layer):
                     reducer = self.create_comm_edge(
-                        "transformer",
+                        f"transformer_b{b}_layer{layer_idx}"+postfix,
                         op_id,
                         "transformer",
                         is_dp=True,
-                        local_hw_id=transformer_nodes_b[b][i].hw_id,
+                        local_hw_id=transformer_nodes_b[b][layer_idx].hw_id,
                     )
                     R_edge[b].append(reducer)
                     op_id += 1
@@ -809,9 +853,32 @@ class Graph:
                             op_id,
                             zero2_transformer_key,
                             is_dp=True,
+                            local_hw_id=transformer_nodes_b[b][layer_idx].hw_id,
                         )
                         op_id += 1
                         reducer.add_child(gather_edge)
+
+                if zero3_transformer_key in self.comm_metadata:
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_transformer_key}_b{b}_layer0_fwd",
+                        op_id,
+                        zero3_transformer_key,
+                        is_dp=True,
+                        local_hw_id=embedding_node[b].hw_id,
+                    )
+                    op_id += 1
+                    attach_parallel_edge(embedding_node[b], gather_edge)
+                    for layer_idx in range(1, self.num_layer):
+                        host = transformer_nodes[b][layer_idx - 1]
+                        gather_edge = self.create_comm_edge(
+                            f"{zero3_transformer_key}_b{b}_layer{layer_idx}_fwd",
+                            op_id,
+                            zero3_transformer_key,
+                            is_dp=True,
+                            local_hw_id=host.hw_id,
+                        )
+                        op_id += 1
+                        attach_parallel_edge(host, gather_edge)
 
                 softmax_edge = self.create_comm_edge(
                     "softmax",
@@ -827,14 +894,27 @@ class Graph:
                         op_id,
                         zero2_softmax_key,
                         is_dp=True,
+                        local_hw_id=softmax_node[b].hw_id,
                     )
                     op_id += 1
                     softmax_edge.add_child(gather_edge)
 
+                if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+                    host = transformer_nodes[b][self.num_layer - 1]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_softmax_key}_b{b}_fwd",
+                        op_id,
+                        zero3_softmax_key,
+                        is_dp=True,
+                        local_hw_id=host.hw_id,
+                    )
+                    op_id += 1
+                    attach_parallel_edge(host, gather_edge)
+
                 softmax_node_b[b].add_child(R_edge[b][-1])
                 embedding_node_b[b].add_child(R_edge[b][0])
-                for i in range(self.num_layer):
-                    transformer_nodes_b[b][i].add_child(R_edge[b][i + 1])
+                for layer_idx in range(self.num_layer):
+                    transformer_nodes_b[b][layer_idx].add_child(R_edge[b][layer_idx + 1])
 
 
         last_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
@@ -873,7 +953,48 @@ class Graph:
             # if first_transformer_layer:
             embedding_node_b[b].add_child(transformer_nodes_b[b-1][first_transformer_layer[0]])  # Add dependency edge
 
-        return embedding_node[0]
+        zero3_embedding_key = "zero3_embedding_gather"
+        zero3_transformer_key = "zero3_transformer_gather"
+        zero3_softmax_key = "zero3_softmax_gather"
+        for b in range(self.num_batch):
+            if zero3_transformer_key in self.comm_metadata and self.num_layer > 0:
+                for layer_idx in reversed(range(self.num_layer)):
+                    host = softmax_node_b[b] if layer_idx == self.num_layer - 1 else transformer_nodes_b[b][layer_idx + 1]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_transformer_key}_b{b}_layer{layer_idx}_bwd",
+                        op_id,
+                        zero3_transformer_key,
+                        is_dp=True,
+                        local_hw_id=host.hw_id,
+                    )
+                    op_id += 1
+                    attach_parallel_edge(host, gather_edge)
+
+            if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+                host = softmax_node[b]
+                gather_edge = self.create_comm_edge(
+                    f"{zero3_softmax_key}_b{b}_bwd",
+                    op_id,
+                    zero3_softmax_key,
+                    is_dp=True,
+                    local_hw_id=host.hw_id,
+                )
+                op_id += 1
+                attach_parallel_edge(host, gather_edge)
+
+            if zero3_embedding_key in self.comm_metadata and self.num_layer > 0:
+                host = transformer_nodes_b[b][0]
+                gather_edge = self.create_comm_edge(
+                    f"{zero3_embedding_key}_b{b}_bwd",
+                    op_id,
+                    zero3_embedding_key,
+                    is_dp=True,
+                    local_hw_id=host.hw_id,
+                )
+                op_id += 1
+                attach_parallel_edge(host, gather_edge)
+
+        return root_forward_entry
 
     def construct_transformer_graph(self, direction: str = "both"):
         transformer_cfg = self.transformer_cfg
