@@ -15,7 +15,5 @@ model_param:
   ffn_mult: null
   vocab_size: 128256
   num_layers: 32
-  n_tokens: null
-  all_reduce: "every layer"
 inference_param:
   sample_every: -1

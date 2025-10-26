@@ -119,8 +119,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
             "ffn_mult": None,
             "vocab_size": int(vocab_size),
             "num_layers": int(num_layers),
-            "n_tokens": None,
-            "all_reduce": "every layer"
         },
         "inference_param": {
             "sample_every": -1

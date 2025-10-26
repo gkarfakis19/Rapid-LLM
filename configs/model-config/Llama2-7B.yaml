@@ -16,8 +16,6 @@ model_param:
   ffn_mult: null
   vocab_size: 32000
   num_layers: 32
-  n_tokens: null
-  all_reduce: "every layer"
 inference_param:
   sample_every: -1
 # No GQA; KV heads = 32. FlashDecoding++ BS=1, input=32K reference.

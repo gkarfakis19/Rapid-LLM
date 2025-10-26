@@ -194,6 +194,7 @@ class TimeCalculation:
         # TimeCalculation only uses activations precision for everything
         # If we want proper backported LSTM support we need to fix this at *some* point.
         self.h2d_bandwidth = getattr(hw_config.sw_config, "h2d_bandwidth", -1)
+        self.zero_stage = getattr(hw_config.sw_config, "dp_zero_stage", 0)
         self.attached = True
 
         # Hardware Parameters

@@ -33,7 +33,7 @@ class Model_LLM:
       self.ffn_dim          = exp_config.model_config.ffn_dim
       self.ffn_mult        = exp_config.model_config.ffn_mult
       self.n_tokens         = exp_config.model_config.n_tokens
-      self.all_reduce       = exp_config.model_config.all_reduce
+      self.all_reduce       = "every layer"
       self.run_type         = exp_config.model_config.run_type
       self.attention_type  = exp_config.model_config.attention.attention_type
       self.kv_heads        = exp_config.model_config.attention.kv_heads if hasattr(exp_config.model_config.attention, 'kv_heads') else None

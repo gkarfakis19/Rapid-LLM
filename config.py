@@ -544,7 +544,9 @@ LLMInferenceConfig = _namedtuple(
         "sample_every",
     ],
 )
-SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])
+SWConfig = _namedtuple(
+    "sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth", "dp_zero_stage"]
+)
 
 SchedulingConfig = _namedtuple(
     "scheduling_param",
@@ -725,10 +727,12 @@ def parse_config(filename, config_type):
         precision_config = _parse_precision_block(precision_spec)
         kernel_launch_overhead = sw_block["kernel_launch_overhead"]
         h2d_bandwidth = sw_block["h2d_bandwidth"]
+        dp_zero_stage = sw_block["dp_zero_stage"]
         sw_config = SWConfig(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
             h2d_bandwidth=h2d_bandwidth,
+            dp_zero_stage=dp_zero_stage,
         )
         sch_params = dict(config_dict["scheduling_param"])
         if "tp" not in sch_params:
@@ -885,8 +889,8 @@ def parse_config(filename, config_type):
             ffn_dim=mp.pop("ffn_dim", None),
             ffn_mult=mp.pop("ffn_mult", None),
             vocab_size=mp.pop("vocab_size"),
-            n_tokens=mp.pop("n_tokens"),
-            all_reduce=mp.pop("all_reduce"),
+            n_tokens=0, # not used for now.
+            all_reduce="every layer", # hard set for now.
             attention=attention_cfg,
         )
         config = MODELConfig(model_config=model_config, inference_config=inference_config)

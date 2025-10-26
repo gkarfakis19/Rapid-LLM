@@ -120,7 +120,7 @@ class PipelineGraphFlattener:
                 obj.name,
                 self._next_op_id(),
                 obj.duration,
-                is_all_reduce=getattr(obj, "is_all_reduce", False),
+                is_dp=getattr(obj, "is_dp", False),
                 comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
                 comm_type=getattr(obj, "comm_type", None),
                 participants=getattr(obj, "participants", 1),
@@ -285,7 +285,7 @@ class PipelineGraphFlattener:
                         name=f"{getattr(child, 'name', '')}_rank{r}",
                         op_id=self._next_op_id(),
                         duration=0,
-                        is_all_reduce=False,
+                        is_dp=False,
                         comm_size_bytes=per_rank_bytes,
                         comm_type="pipeline",
                         participants=2,
@@ -340,13 +340,13 @@ class PipelineGraphFlattener:
         tp_rank: int,
     ) -> simulate_LLM.Edge:
         comm_info = self.transformer_graph.comm_metadata.get(comm_key, {})
-        is_all_reduce = comm_info.get("type") == "all_reduce"
+        is_dp_edge = comm_info.get("interconnect_type") == "dp"
 
         comm_edge = self.transformer_graph.create_comm_edge(
             name=comm_key,
             op_id=self._next_op_id(),
             comm_key=comm_key,
-            is_all_reduce=is_all_reduce,
+            is_dp=is_dp_edge,
             local_hw_id=hw_id,
         )
         comm_edge.stage_id = stage_id

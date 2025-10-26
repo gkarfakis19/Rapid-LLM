@@ -1,5 +1,8 @@
 sw_param:
   kernel_launch_overhead: 9e-6
+  # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
+  # only used if data parallelism (dp) > 1
+  dp_zero_stage: 2
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -191,7 +194,7 @@ scheduling_param:
 
 
 execution_backend:
-  model: analytical # analytical | astra
+  model: astra # analytical | astra
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

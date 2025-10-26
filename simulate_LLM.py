@@ -54,7 +54,7 @@ class Data_batch:
         self.children = []
 
 class Edge:
-  def __init__(self, name, op_id, duration, is_all_reduce=False, comm_size_bytes=0, comm_type=None, participants=1, comm_interconnect_type=None):
+  def __init__(self, name, op_id, duration, is_dp=False, comm_size_bytes=0, comm_type=None, participants=1, comm_interconnect_type=None):
     self.name = name
     self.op_id = op_id
     self.duration = duration
@@ -62,7 +62,7 @@ class Edge:
     self.finish_time = -1
     self.parents = [] 
     self.children = []
-    self.is_all_reduce = is_all_reduce
+    self.is_dp = is_dp
     self.scheduled = False
     self.comm_size_bytes = comm_size_bytes
     self.comm_type = comm_type
@@ -118,7 +118,7 @@ class Graph:
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
         self.layer_per_device = max(1, math.ceil(self.num_layer / self.lp)) if self.lp else self.num_layer
-        self.all_reduce = self.misc_metadata.get("all_reduce", "the end")
+        self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
 
         self.transformer_cfg = self.comp_times.get("transformer", {})
         self.T_grad_transformer = self.comp_times.get("grad_transformer", 0.0)
@@ -127,7 +127,7 @@ class Graph:
         value = self.comp_times.get(key)
         return float(value) if value is not None else default
 
-    def create_comm_edge(self, name, op_id, comm_key, is_all_reduce=False, local_hw_id=None):
+    def create_comm_edge(self, name, op_id, comm_key, is_dp=False, local_hw_id=None):
         """Create a communication edge with optional local computation node.
 
         Args:
@@ -142,6 +142,7 @@ class Graph:
 
         # Create communication edge with metadata
         # print(f"Creating edge with name: {name}, size: {comm_data['size']}, type: {comm_data['type']}")
+
         comm_edge = Edge(
             name=name,
             op_id=op_id,
@@ -150,7 +151,7 @@ class Graph:
             comm_type=comm_data['type'],
             participants=comm_data['participants'],
             comm_interconnect_type=comm_data['interconnect_type'],
-            is_all_reduce=is_all_reduce
+            is_dp=is_dp,
         )
 
         # If there's local computation time, create local node after edge
@@ -217,7 +218,7 @@ class Graph:
                     obj.name,
                     obj.op_id,
                     obj.duration,
-                    is_all_reduce=getattr(obj, "is_all_reduce", False),
+                    is_dp=getattr(obj, "is_dp", False),
                     comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
                     comm_type=getattr(obj, "comm_type", None),
                     participants=getattr(obj, "participants", 1),
@@ -394,7 +395,7 @@ class Graph:
                     obj.name,
                     obj.op_id,
                     obj.duration,
-                    is_all_reduce=getattr(obj, "is_all_reduce", False),
+                    is_dp=getattr(obj, "is_dp", False),
                     comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
                     comm_type=getattr(obj, "comm_type", None),
                     participants=getattr(obj, "participants", 1),
@@ -770,55 +771,72 @@ class Graph:
 
             # all-reduce
             if self.dp > 1:
-                R_edge[b].append(self.create_comm_edge("embedding", op_id, "embedding", is_all_reduce=True))
+                zero2_embedding_key = "zero2_embedding_gather"
+                zero2_transformer_key = "zero2_transformer_gather"
+                zero2_softmax_key = "zero2_softmax_gather"
+                embedding_edge = self.create_comm_edge(
+                    "embedding",
+                    op_id,
+                    "embedding",
+                    is_dp=True,
+                )
+                R_edge[b].append(embedding_edge)
                 op_id += 1
-                if self.all_reduce == "the end":
-                    R_edge[b].append(
-                        self.create_comm_edge(
-                            "transformer",
-                            op_id,
-                            "transformer",
-                            is_all_reduce=True,
-                            local_hw_id=transformer_nodes_b[b][-1].hw_id,
-                        )
+                if zero2_embedding_key in self.comm_metadata:
+                    gather_edge = self.create_comm_edge(
+                        zero2_embedding_key,
+                        op_id,
+                        zero2_embedding_key,
+                        is_dp=True,
                     )
                     op_id += 1
+                    embedding_edge.add_child(gather_edge)
 
-                    R_edge[b].append(self.create_comm_edge("softmax", op_id, "softmax", is_all_reduce=True))
+                for i in range(self.num_layer):
+                    reducer = self.create_comm_edge(
+                        "transformer",
+                        op_id,
+                        "transformer",
+                        is_dp=True,
+                        local_hw_id=transformer_nodes_b[b][i].hw_id,
+                    )
+                    R_edge[b].append(reducer)
                     op_id += 1
-                # Attach All-Reduce Edges
-                    softmax_node_b[b].add_child(R_edge[b][-1])
-                    embedding_node_b[b].add_child(R_edge[b][0])
-                    transformer_nodes_b[b][0].add_child(R_edge[b][1])
 
-                elif self.all_reduce == "every layer":
-                    for i in range(0, self.num_layer):
-                        R_edge[b].append(
-                            self.create_comm_edge(
-                                "transformer",
-                                op_id,
-                                "transformer",
-                                is_all_reduce=True,
-                                local_hw_id=transformer_nodes_b[b][i].hw_id,
-                            )
+                    if zero2_transformer_key in self.comm_metadata:
+                        gather_edge = self.create_comm_edge(
+                            zero2_transformer_key,
+                            op_id,
+                            zero2_transformer_key,
+                            is_dp=True,
                         )
                         op_id += 1
-                        # G_edge[b].append(Gradient("Grad_transformer", op_id, transformer_nodes_b[b][-1].hw_id, self.T_grad_transformer))
-                        # op_id += 1
-                        # R_edge[b][-1].add_child(G_edge[b][-1])
+                        reducer.add_child(gather_edge)
 
-                    R_edge[b].append(self.create_comm_edge("softmax", op_id, "softmax", is_all_reduce=True))
+                softmax_edge = self.create_comm_edge(
+                    "softmax",
+                    op_id,
+                    "softmax",
+                    is_dp=True,
+                )
+                R_edge[b].append(softmax_edge)
+                op_id += 1
+                if zero2_softmax_key in self.comm_metadata:
+                    gather_edge = self.create_comm_edge(
+                        zero2_softmax_key,
+                        op_id,
+                        zero2_softmax_key,
+                        is_dp=True,
+                    )
                     op_id += 1
-                # Attach All-Reduce Edges
-                    softmax_node_b[b].add_child(R_edge[b][-1])
-                    embedding_node_b[b].add_child(R_edge[b][0])
-                    for i in range(0, self.num_layer):
-                        transformer_nodes_b[b][i].add_child(R_edge[b][i + 1])
-                else:
-                    sys.exit("Invalid all_reduce option")
-                    
-                
-                
+                    softmax_edge.add_child(gather_edge)
+
+                softmax_node_b[b].add_child(R_edge[b][-1])
+                embedding_node_b[b].add_child(R_edge[b][0])
+                for i in range(self.num_layer):
+                    transformer_nodes_b[b][i].add_child(R_edge[b][i + 1])
+
+
         last_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
         first_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
 
@@ -899,12 +917,11 @@ class Graph:
                         comm_key = comm_key[0]
                         if comm_key not in self.comm_metadata:
                             raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                        comm_type = self.comm_metadata[comm_key]['type']
                         comm_edge = self.create_comm_edge(
                             name=comm_key,
                             op_id=op_id,
                             comm_key=comm_key,
-                            is_all_reduce=(comm_type == 'all_reduce'),
+                            is_dp=False,
                             local_hw_id=rank,
                         )
                         op_id += 1
@@ -933,12 +950,11 @@ class Graph:
                     for comm_idx, comm_key in enumerate(backward_cfg.get("comm_keys", [])):
                         if comm_key not in self.comm_metadata:
                             raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                        comm_type = self.comm_metadata[comm_key]['type']
                         comm_edge = self.create_comm_edge(
                             name=comm_key,
                             op_id=op_id,
                             comm_key=comm_key,
-                            is_all_reduce=(comm_type == 'all_reduce'),
+                            is_dp=False,
                             local_hw_id=rank,
                         )
                         op_id += 1
@@ -1489,7 +1505,7 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
         color = "gray"
     elif isinstance(root, Edge):
         root_type = "Edge"
-        if root.is_all_reduce == True:
+        if root.is_dp == True:
             color = "green"
         else:
             color = "yellow"
@@ -1541,7 +1557,7 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
             child_color = "lightcoral"
         elif isinstance(child, Data_batch):
             child_color = "gray"
-        elif isinstance(child, Edge) and child.is_all_reduce:
+        elif isinstance(child, Edge) and child.is_dp:
             child_color = "green"
         else:
             child_color = "white"

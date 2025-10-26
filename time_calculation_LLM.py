@@ -4,7 +4,7 @@ import json
 from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List
 import simulate_LLM
-from LLM_excution import ExecutionMode, LLMExecutionDispatcher
+from LLM_execution import ExecutionMode, LLMExecutionDispatcher
 from simulate_LLM import Graph
 import LLM_util
 from time_calculation import TimeCalculation
@@ -152,11 +152,12 @@ class TimeCalculationLLM(TimeCalculation):
         self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
         self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
         
-        self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
+        self.all_reduce = "every layer"
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
+        self.zero3_ephemeral_peak_bytes = 0.0
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
@@ -196,6 +197,36 @@ class TimeCalculationLLM(TimeCalculation):
             return ParallelismMode.TENSOR_CONTEXT_HYBRID
         else:
             return ParallelismMode.SINGLE
+
+    def _param_stats_per_rank(self, hidden_dim: int, ffn_dim: int, vocab_size: int) -> Tuple[float, float]:
+        """Return per-device parameter statistics for DP collectives."""
+
+        tp = max(1, self.tp)
+        lp = max(1, self.lp)
+
+        ffn_proj_factor = 3 if str(self.model_type).lower() == "llama" else 2
+        transformer_param_layer = 4 * hidden_dim * hidden_dim + ffn_dim * ffn_proj_factor * hidden_dim
+        params_per_layer_per_rank = transformer_param_layer / tp
+
+        total_transformer_params = params_per_layer_per_rank * self.num_layers
+        if lp == 1:
+            transformer_params_local = total_transformer_params
+        else:
+            layers_per_stage = math.ceil(self.num_layers / lp)
+            transformer_params_local = params_per_layer_per_rank * layers_per_stage
+            transformer_params_local = min(transformer_params_local, total_transformer_params)
+
+        embedding_params = vocab_size * hidden_dim / tp
+        output_params = 0.0 if self.tied_embeddings else embedding_params
+
+        if lp == 1:
+            total_params_per_rank = transformer_params_local + embedding_params + output_params
+        else:
+            # Pipeline splits embeddings/output across stages. Approximate their contribution by spreading across stages.
+            total_params_per_rank = transformer_params_local + (embedding_params / lp) + (output_params / lp)
+
+        max_layer_params = max(params_per_layer_per_rank, embedding_params)
+        return total_params_per_rank, max_layer_params
 
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
@@ -1162,13 +1193,13 @@ class TimeCalculationLLM(TimeCalculation):
                 'total_size': 0
             }
 
-        # Calculate sizes only (no timing)
+        # Calculate sizes only
         qkv_size = math.ceil(self.precision.grad_communication * d * 3 * d)
         output_size = math.ceil(self.precision.grad_communication * d * d)
         ffn1_dim = self._ffn1_output_dim(ffn_dim)
         ffn1_size = math.ceil(self.precision.grad_communication * ffn1_dim * d)
         ffn2_size = math.ceil(self.precision.grad_communication * ffn_dim * d)
-        total_size = qkv_size + output_size + ffn1_size + ffn2_size  # FFN appears twice
+        total_size = qkv_size + output_size + ffn1_size + ffn2_size
 
         return {
             'qkv_size': qkv_size,
@@ -1196,7 +1227,7 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_data_parallel_reduction_llm(self, d, ffn_dim): 
         # If no data parallelism, still apply gradients locally but no cross-device reduction
-        if not getattr(self, "dp", 1) or self.dp <= 1:
+        if self.dp <= 1:
             apply_grad_time = 0.0
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
@@ -1207,64 +1238,116 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"(dp=1) apply_grad_time: {apply_grad_time}")
             return apply_grad_time
 
+        reduction_sizes = self.get_data_parallel_reduction_sizes(d, ffn_dim)
+        grad_bytes = int(reduction_sizes['total_size'])
+        total_params_per_rank, _ = self._param_stats_per_rank(d, ffn_dim, self.vocab_size)
+        param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
+        zero2_param_bytes = param_bytes if self.zero_stage >= 2 else 0
+        zero3_param_bytes = param_bytes if self.zero_stage >= 3 else 0
+        grad_shard = self.dp if self.zero_stage >= 2 else 1
 
+        if grad_shard > 1: # ZeRO stages >= 2: gradients are sharded via reduce-scatter and parameters are gathered.
+            apply_grad_time = 0.0
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3 * d, name="qkv_proj reduction")
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
+            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
+            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            # divide by dp to get the time per device 
+            apply_grad_time /= grad_shard
 
-        reduction_time = 0.0
-        apply_grad_time = 0.0
+            reduction_time = self.network_model.collective(
+                kind="reduce_scatter",
+                size_bytes=grad_bytes,
+                participants=int(self.dp),
+                ib=self.IBD,
+                ll=self.LLD,
+                local_bytes=0.0,
+                debug_label="dp_zero_gradients",
+            )
 
-        total_bytes = math.ceil(self.precision.grad_communication * d * 3 * d)
-        reduction_time += self.network_model.collective(
-            kind="all_reduce",
-            size_bytes=total_bytes,
-            participants=int(self.dp),
-            ib=self.IBD,
-            ll=self.LLD,
-            local_bytes=0.0,
-            debug_label="qkv_proj reduction",
-        )
-        apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
+            gather_time = 0.0
+            if zero2_param_bytes:
+                gather_time += self.network_model.collective(
+                    kind="all_gather",
+                    size_bytes=zero2_param_bytes,
+                    participants=int(self.dp),
+                    ib=self.IBD,
+                    ll=self.LLD,
+                    local_bytes=0.0,
+                    debug_label="dp_zero_param_gather_zero2",
+                )
+            if zero3_param_bytes and zero3_param_bytes != zero2_param_bytes:
+                gather_time += self.network_model.collective(
+                    kind="all_gather",
+                    size_bytes=zero3_param_bytes,
+                    participants=int(self.dp),
+                    ib=self.IBD,
+                    ll=self.LLD,
+                    local_bytes=0.0,
+                    debug_label="dp_zero_param_gather_zero3",
+                )
+            if self.debug:
+                print(f"apply_grad_time (ZeRO-{self.zero_stage}): {apply_grad_time}")
+            # TODO(ZeRO): revisit optimizer FLOPs once ZeRO-3 materialization is finalized.
+            return reduction_time + gather_time + apply_grad_time
+        else: # legacy path for zero stages <= 2.
+            reduction_time = 0.0
+            apply_grad_time = 0.0
 
-        total_bytes = math.ceil(self.precision.grad_communication * d * d)
-        reduction_time += self.network_model.collective(
-            kind="all_reduce",
-            size_bytes=total_bytes,
-            participants=int(self.dp),
-            ib=self.IBD,
-            ll=self.LLD,
-            local_bytes=0.0,
-            debug_label="output_proj reduction",
-        )
-        apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
+            total_bytes = math.ceil(self.precision.grad_communication * d * 3 * d)
+            reduction_time += self.network_model.collective(
+                kind="all_reduce",
+                size_bytes=total_bytes,
+                participants=int(self.dp),
+                ib=self.IBD,
+                ll=self.LLD,
+                local_bytes=0.0,
+                debug_label="qkv_proj reduction",
+            )
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
 
-        ffn1_dim = self._ffn1_output_dim(ffn_dim)
-        total_bytes = math.ceil(self.precision.grad_communication * ffn1_dim * d)
-        reduction_time += self.network_model.collective(
-            kind="all_reduce",
-            size_bytes=total_bytes,
-            participants=int(self.dp),
-            ib=self.IBD,
-            ll=self.LLD,
-            local_bytes=0.0,
-            debug_label="ffn1 reduction",
-        )
-        apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
+            total_bytes = math.ceil(self.precision.grad_communication * d * d)
+            reduction_time += self.network_model.collective(
+                kind="all_reduce",
+                size_bytes=total_bytes,
+                participants=int(self.dp),
+                ib=self.IBD,
+                ll=self.LLD,
+                local_bytes=0.0,
+                debug_label="output_proj reduction",
+            )
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
-        total_bytes = math.ceil(self.precision.grad_communication * ffn_dim * d)
-        reduction_time += self.network_model.collective(
-            kind="all_reduce",
-            size_bytes=total_bytes,
-            participants=int(self.dp),
-            ib=self.IBD,
-            ll=self.LLD,
-            local_bytes=0.0,
-            debug_label="ffn2 reduction",
-        )
-        apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            total_bytes = math.ceil(self.precision.grad_communication * ffn1_dim * d)
+            reduction_time += self.network_model.collective(
+                kind="all_reduce",
+                size_bytes=total_bytes,
+                participants=int(self.dp),
+                ib=self.IBD,
+                ll=self.LLD,
+                local_bytes=0.0,
+                debug_label="ffn1 reduction",
+            )
+            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
 
-        if self.debug:
-            print(f"apply_grad_time: {apply_grad_time}")
+            total_bytes = math.ceil(self.precision.grad_communication * ffn_dim * d)
+            reduction_time += self.network_model.collective(
+                kind="all_reduce",
+                size_bytes=total_bytes,
+                participants=int(self.dp),
+                ib=self.IBD,
+                ll=self.LLD,
+                local_bytes=0.0,
+                debug_label="ffn2 reduction",
+            )
+            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
 
-        return reduction_time + apply_grad_time
+            if self.debug:
+                print(f"apply_grad_time: {apply_grad_time}")
+
+            return reduction_time + apply_grad_time
     
     
     # TODO TODO:
@@ -1534,25 +1617,30 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_size: int,
         softmax_size: int,
         cross_layer_bytes: int,
+        zero2_embedding_gather_bytes: int = 0,
+        zero2_transformer_gather_bytes: int = 0,
+        zero2_softmax_gather_bytes: int = 0,
+        zero3_param_gather_bytes: int = 0,
     ) -> Dict[str, Dict[str, Any]]:
-        return {
+        grad_collective = 'reduce_scatter' if (self.zero_stage >= 2 and self.dp > 1) else 'all_reduce'
+        metadata = {
             'transformer': {
                 'size': reduction_sizes['total_size'],
-                'type': 'all_reduce',
+                'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': local_comp['total_local']
             },
             'embedding': {
                 'size': embedding_size,
-                'type': 'all_reduce',
+                'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0
             },
             'softmax': {
                 'size': softmax_size,
-                'type': 'all_reduce',
+                'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0
@@ -1565,6 +1653,39 @@ class TimeCalculationLLM(TimeCalculation):
                 'local_comp_time': 0
             }
         }
+        if zero2_embedding_gather_bytes:
+            metadata['zero2_embedding_gather'] = {
+                'size': zero2_embedding_gather_bytes,
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        if zero2_transformer_gather_bytes:
+            metadata['zero2_transformer_gather'] = {
+                'size': zero2_transformer_gather_bytes,
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        if zero2_softmax_gather_bytes:
+            metadata['zero2_softmax_gather'] = {
+                'size': zero2_softmax_gather_bytes,
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        if zero3_param_gather_bytes:
+            metadata['zero3_param_gather'] = {
+                'size': zero3_param_gather_bytes,
+                'type': 'all_gather',
+                'participants': self.dp,
+                'interconnect_type': 'dp',
+                'local_comp_time': 0,
+            }
+        return metadata
 
     def _populate_transformer_comm_metadata(
         self,
@@ -1657,7 +1778,8 @@ class TimeCalculationLLM(TimeCalculation):
         vocab_size: int,
         include_pipeline_backward: bool,
         include_transformer_backward: bool,
-        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None, # optional override, decode only.
+        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,  # optional override (decode only)
+        zero3_param_gather_bytes: int = 0,
     ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
         """Build pipeline/transformer graphs shared across training and inference."""
 
@@ -1678,7 +1800,9 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
             local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
-        # these are used for dp all-reduce so use grad_comm size.
+
+        # these are used for dp all-reduce/reduce-scatter.
+        # TODO: check the embedding_size below. I think only the first term is needed.
         embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim)
         softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
         # Below, we fix pipeline comm sizes for decode
@@ -1687,12 +1811,20 @@ class TimeCalculationLLM(TimeCalculation):
 
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, pipeline_seq_len)[1]
 
+        zero2_embedding_bytes = embedding_size if (self.dp > 1 and self.zero_stage >= 2) else 0
+        zero2_transformer_bytes = reduction_sizes['total_size'] if (self.dp > 1 and self.zero_stage >= 2) else 0
+        zero2_softmax_bytes = softmax_size if (self.dp > 1 and self.zero_stage >= 2) else 0
+
         comm_metadata = self._build_comm_metadata(
             reduction_sizes=reduction_sizes,
-            local_comp=local_comp, #when doing all_reduce between dp nodes, there is local computation on each node to apply gradients
+            local_comp=local_comp, 
             embedding_size=embedding_size,
             softmax_size=softmax_size,
             cross_layer_bytes=cross_layer_bytes,
+            zero2_embedding_gather_bytes=zero2_embedding_bytes,
+            zero2_transformer_gather_bytes=zero2_transformer_bytes,
+            zero2_softmax_gather_bytes=zero2_softmax_bytes,
+            zero3_param_gather_bytes=zero3_param_gather_bytes,
         )
 
         transformer_operation_entries: List[Dict[str, Any]] = []
@@ -1813,7 +1945,8 @@ class TimeCalculationLLM(TimeCalculation):
         misc_metadata = {
             "num_batch": self.mb,
             "num_layer": self.num_layers,
-            "all_reduce": getattr(self, "all_reduce", "the end"),
+            "all_reduce": "every_layer",
+            "dp_zero_stage": self.zero_stage,
         }
         if getattr(self, "kv_cache_fetch_overlap", False):
             misc_metadata["kv_cache_fetch_overlap"] = True
@@ -1854,41 +1987,66 @@ class TimeCalculationLLM(TimeCalculation):
         attention_type = self.attention_type
         kv_heads = self.kv_heads
         
-        # Adjust types and calculate node latencies
+        # ZeRO data-parallel stages:
+        #   stage 0 – identical to DDP (replicated params/grads/optimizer)
+        #   stage 1 – shard optimizer state only (communication unchanged)
+        #   stage 2 – shard optimizer and gradients (grad RS + one param AG)
+        #   stage 3 – shard optimizer, gradients, and parameters (grad RS + two param AG, per-layer materialization)
         self.readjust_type()
 
-        # Get structured transformer results and node breakdown in one efficient call
+        total_params_per_rank, max_layer_params = self._param_stats_per_rank(
+            hidden_dim, ffn_dim, vocab_size
+        )
+        param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
+        if self.dp > 1:
+            zero3_param_gather_bytes = param_bytes if self.zero_stage >= 3 else 0
+        else:
+            zero3_param_gather_bytes = 0
 
-        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim )
-        #get the memory for one transformer layer per gpu in tp-sp node, actvation memory is for per micro-batch, weight, gradient and optimizer memory is consatnt 
-        transformer_mem_layer, transformer_act_layer,transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
-            LLM_util.get_transformer_mem_layer( #return memory per layer per gpu in one lp group
-                d = self.dp,
-                t = self.tp,
+        # zero stage 3 creates a need for materialization of parameters per layer. This is the peak memory requirement.
+        # these bytes are 'ephemeral' as they get discarded after, but still need to accounted for in the memory sim.
+        self.zero3_ephemeral_peak_bytes = (
+            max_layer_params * self.precision.parameters if self.zero_stage >= 3 else 0.0
+        )
+
+        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
+            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim
+        )
+
+        # transformer mem layer considers zero stage internally
+        transformer_mem_layer, transformer_act_layer, transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
+            LLM_util.get_transformer_mem_layer(
+                dp=self.dp,
+                tp=self.tp,
                 batch_size=batch_size,
                 hidden_dim=hidden_dim,
-                seq_len=seq_len/self.cp, #in cp, seq_len is divided by cp
+                seq_len=seq_len / self.cp,
                 ffn_dim=ffn_dim,
                 n_heads=num_heads,
                 precision=self.precision,
                 model_type=self.model_type,
+                zero_stage=self.zero_stage,
+            )
         )
-    )
+
         memory_data = {
             'activation_mem_per_layer': transformer_act_layer,
-            'activation_mem_per_layer_inference': transformer_act_layer_inf, # prefill max activation memory per layer per gpu
+            'activation_mem_per_layer_inference': transformer_act_layer_inf,
             'weight_mem_per_layer': weight_memory_layer,
             'gradient_mem_per_layer': gradient_mem_layer,
             'optimizer_mem_per_layer': optimizer_mem_layer,
             'static_mem_per_layer': transformer_static_layer,
             'total_mem_per_layer': transformer_mem_layer,
+            'zero3_ephemeral_peak_bytes': self.zero3_ephemeral_peak_bytes,
         }
+        # NOTE: simulate_memory currently ignores the ZeRO-specific entries above. It needs to be updated to handle them.
 
         if self._debug_memory:
             layers_per_device = max(1, math.ceil(self.num_layers / max(1, self.lp)))
             to_gib = lambda bytes_val: float(bytes_val) / float(1024 ** 3)
             self._memory_breakdown_debug = {
                 "layers_per_device": layers_per_device,
+                "zero_stage": self.zero_stage,
                 "activation_gib": to_gib(transformer_act_layer * layers_per_device),
                 "weight_gib": to_gib(weight_memory_layer * layers_per_device),
                 "gradient_gib": to_gib(gradient_mem_layer * layers_per_device),
@@ -1896,6 +2054,10 @@ class TimeCalculationLLM(TimeCalculation):
                 "static_gib": to_gib(transformer_static_layer * layers_per_device),
                 "total_layer_gib": to_gib(transformer_mem_layer * layers_per_device),
             }
+            if self.zero_stage >= 3 and self.zero3_ephemeral_peak_bytes:
+                self._memory_breakdown_debug["zero3_ephemeral_gib"] = to_gib(
+                    self.zero3_ephemeral_peak_bytes
+                )
 
     
 
@@ -1908,6 +2070,7 @@ class TimeCalculationLLM(TimeCalculation):
                     self.dp, self.lp, self.batch_size, self.miniB, self.microB
                 )
             )
+            print("data-parallel zero stage:", self.zero_stage)
             print("total number of workers: {}".format(self.num_workers))
             print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
             print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
@@ -1931,6 +2094,7 @@ class TimeCalculationLLM(TimeCalculation):
             vocab_size=vocab_size,
             include_pipeline_backward=True,
             include_transformer_backward=True,
+            zero3_param_gather_bytes=zero3_param_gather_bytes,
         )
 
         self.transformer_graph = transformer_graph
@@ -2037,6 +2201,12 @@ class TimeCalculationLLM(TimeCalculation):
                 f"Hardware memory capacity (per gpu): {hardware_mem_gib:.2f} GiB",
                 f"Simulated peak memory usage(per gpu): {peak_mem:.2} GiB",
             ]
+            if self.zero_stage >= 3 and self.zero3_ephemeral_peak_bytes:
+                info_lines.append(
+                    "ZeRO-3 ephemeral param gather (per gpu): {:.2f} GiB".format(
+                        self.zero3_ephemeral_peak_bytes / float(1024 ** 3)
+                    )
+                )
             if mem_delta < 0:
                 info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")
                 self.memory_capacity_exceeded = True
