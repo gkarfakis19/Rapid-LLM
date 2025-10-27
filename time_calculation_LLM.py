@@ -149,9 +149,7 @@ class TimeCalculationLLM(TimeCalculation):
         self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
         inference_cfg = getattr(hw_config, "inference_config", None)
-        self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
-        self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
-        
+
         self.all_reduce = "every layer"
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
@@ -1964,8 +1962,6 @@ class TimeCalculationLLM(TimeCalculation):
             "linear_softmax_b": node_breakdown.get('linear_softmax_b', 0.0) if include_pipeline_backward else 0.0,
             "transformer_f": node_breakdown.get('transformer_time_f', 0.0),
             "transformer_b": node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0,
-            "kv_cache_fetch": node_breakdown.get('kv_cache_fetch', 0.0),
-            "kv_cache_store": node_breakdown.get('kv_cache_store', 0.0),
             "cross_layer_f": 0.0,
             "cross_layer_b": 0.0,
         }
@@ -1975,8 +1971,6 @@ class TimeCalculationLLM(TimeCalculation):
             "all_reduce": "every_layer",
             "dp_zero_stage": self.zero_stage,
         }
-        if getattr(self, "kv_cache_fetch_overlap", False):
-            misc_metadata["kv_cache_fetch_overlap"] = True
 
         pipeline_graph_obj = simulate_LLM.Graph(
             mode="pipeline",

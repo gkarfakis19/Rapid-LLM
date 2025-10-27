@@ -11,7 +11,7 @@ debug = False
 BYTES_PER_GIB = 1024 ** 3
 
 class Node:
-    def __init__(self, name, op_id, hw_id, duration, fwd=True, *, is_kv_cache=False):
+    def __init__(self, name, op_id, hw_id, duration, fwd=True):
         self.name = name
         self.op_id = op_id
         self.hw_id = hw_id
@@ -23,7 +23,6 @@ class Node:
         self.memory = 0  # memory usage
         self.fwd = fwd  # forward or backward
         self.scheduled = False
-        self.is_kv_cache = is_kv_cache
 
     def add_child(self, obj):
         self.children.append(obj)
@@ -520,7 +519,6 @@ class Graph:
         transformer_nodes = [[] for _ in range(self.num_batch)]  # transformer compute nodes per layer
         layer_entry_nodes = [[] for _ in range(self.num_batch)]  # lists of entry nodes per layer
         layer_exit_nodes = [[] for _ in range(self.num_batch)]   # transformer nodes per layer
-        fetch_nodes = [[] for _ in range(self.num_batch)]        # kv-fetch nodes per layer
 
         embedding_b_time = self._time("embedding_b")
         linear_softmax_b_time = self._time("linear_softmax_b")
@@ -532,10 +530,6 @@ class Graph:
         embedding_f_time = self._time("embedding_f")
         embedding_b_time = self._time("embedding_b")
         cross_layer_time = self._time("cross_layer_f")
-        kv_cache_fetch_time = self._time("kv_cache_fetch")
-        kv_cache_store_time = self._time("kv_cache_store")
-        fetch_overlap_enabled = bool(self.misc_metadata.get("kv_cache_fetch_overlap", False))
-
 
         if include_backward:
             embedding_node_b = [[] for _ in range(self.num_batch)]
@@ -570,7 +564,6 @@ class Graph:
             transformer_nodes[b] = []
             layer_entry_nodes[b] = []
             layer_exit_nodes[b] = []
-            fetch_nodes[b] = []
 
             for l in range(self.num_layer):
                 hw_id = min(l // self.layer_per_device , self.lp - 1)#assign hw_id for transformer
@@ -580,52 +573,10 @@ class Graph:
                 transformer_node.direction = "forward"
                 transformer_node.stage_id = hw_id
                 op_id += 1
-
-                fetch_node = None
-                if kv_cache_fetch_time > 0:
-                    fetch_node = Node(
-                        f"kv_cache_fetch_b{b}_l{l}",
-                        op_id,
-                        hw_id,
-                        kv_cache_fetch_time,
-                        fwd=True,
-                        is_kv_cache=True,
-                    )
-                    fetch_node.micro_batch_index = b
-                    fetch_node.layer_index = l
-                    fetch_node.direction = "forward"
-                    fetch_node.stage_id = hw_id
-                    op_id += 1
-
-                store_node = None
-                if kv_cache_store_time > 0:
-                    store_node = Node(
-                        f"kv_cache_store_b{b}_l{l}",
-                        op_id,
-                        hw_id,
-                        kv_cache_store_time,
-                        fwd=True,
-                        is_kv_cache=True,
-                    )
-                    store_node.micro_batch_index = b
-                    store_node.layer_index = l
-                    store_node.direction = "forward"
-                    store_node.stage_id = hw_id
-                    op_id += 1
-                    transformer_node.add_child(store_node)
-
-                if fetch_overlap_enabled and fetch_node is not None:
-                    entry_nodes = [fetch_node, transformer_node]
-                elif fetch_node is not None:
-                    fetch_node.add_child(transformer_node)
-                    entry_nodes = [fetch_node]
-                else:
-                    entry_nodes = [transformer_node]
-
                 transformer_nodes[b].append(transformer_node)
+                entry_nodes = [transformer_node]
                 layer_entry_nodes[b].append(entry_nodes)
                 layer_exit_nodes[b].append(transformer_node)
-                fetch_nodes[b].append(fetch_node)
 
             for l in range(1, self.num_layer):
 
@@ -633,7 +584,6 @@ class Graph:
                 curr_node  = transformer_nodes[b][l]            # current layer compute node
                 prev_exit = layer_exit_nodes[b][l-1]
                 curr_entries = layer_entry_nodes[b][l]
-                prev_fetch = fetch_nodes[b][l-1]
 
 
                 if prev_node.hw_id == curr_node.hw_id:
@@ -645,8 +595,7 @@ class Graph:
                 prev_exit.add_child(edge)
                 for entry in curr_entries:
                     edge.add_child(entry)
-                if fetch_overlap_enabled and prev_fetch is not None:
-                    prev_fetch.add_child(edge)
+
 
             first_entries = layer_entry_nodes[b][0]   # first layer entry nodes list
             primary_entry = first_entries[0]
@@ -668,9 +617,6 @@ class Graph:
             op_id += 1
             last_exit.add_child(node_Softmax) #connect last layer and softmax layer
             node_Softmax.add_child(softmax_node[b])
-            last_fetch = fetch_nodes[b][-1]
-            if fetch_overlap_enabled and last_fetch is not None:
-                last_fetch.add_child(node_Softmax)
 
             #add dependency edges
         for b in range(self.num_batch - 1):
@@ -690,7 +636,6 @@ class Graph:
                         next_entries = layer_entry_nodes[b+1][first_transformer_layer[gpu_index-1]]
                         for entry in next_entries:
                             layer_exit_nodes[b][l].add_child(entry)
-                        # fetch nodes already connected to cross-layer edges above when overlap is enabled
 
             next_entries = layer_entry_nodes[b+1][first_transformer_layer[-1]]
             for entry in next_entries:
@@ -1135,8 +1080,7 @@ class Graph:
                         print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
-                if not getattr(event, "is_kv_cache", False):
-                    GPU_list[event.hw_id] = True
+                GPU_list[event.hw_id] = True
 
                 
 
@@ -1158,26 +1102,16 @@ class Graph:
                     ready_list.remove(event)
 
                 elif isinstance(event, Node): 
-                    if getattr(event, "is_kv_cache", False):
+                    if GPU_list[event.hw_id] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
                         enqueued = True
                         if debug:
-                            print("{}.{} (kv_cache) enqueued at time {}".format(event.name, event.op_id, time))
+                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
+                        GPU_list[event.hw_id] = False
                         ready_list.remove(event)
-                    else:
-                        if GPU_list[event.hw_id] == True:
-                            new_time = time + event.duration
-                            heappush(event_queue, (new_time, counter, event))
-                            event.scheduled = True
-                            enqueued = True
-                            if debug:
-                                print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
-                            counter = counter + 1
-                            GPU_list[event.hw_id] = False
-                            ready_list.remove(event)
                 elif isinstance(event, Edge): 
                     new_time = time + event.duration
                     heappush(event_queue, (new_time, counter, event))
@@ -1447,8 +1381,7 @@ class Graph:
                         print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
-                if not getattr(event, "is_kv_cache", False):
-                    GPU_list[event.hw_id] = True
+                GPU_list[event.hw_id] = True
                 is_transformer_block = _is_transformer_block(event) #TODO: embedding and softmax layers
                 if mode == "training":
                     if not event.fwd:
@@ -1480,26 +1413,16 @@ class Graph:
                     ready_list.remove(event)
 
                 elif isinstance(event, Node): 
-                    if getattr(event, "is_kv_cache", False):
+                    if GPU_list[event.hw_id] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
                         enqueued = True
                         if debug:
-                            print("{}.{} (kv_cache) enqueued at time {}".format(event.name, event.op_id, time))
+                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
+                        GPU_list[event.hw_id] = False
                         ready_list.remove(event)
-                    else:
-                        if GPU_list[event.hw_id] == True:
-                            new_time = time + event.duration
-                            heappush(event_queue, (new_time, counter, event))
-                            event.scheduled = True
-                            enqueued = True
-                            if debug:
-                                print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
-                            counter = counter + 1
-                            GPU_list[event.hw_id] = False
-                            ready_list.remove(event)
                 elif isinstance(event, Edge): 
                     new_time = time + event.duration
                     heappush(event_queue, (new_time, counter, event))

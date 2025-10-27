@@ -34,7 +34,7 @@ class InferenceConfig:
     tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
-    kv_cache_fetch_overlap: bool = False
+
 @dataclass
 class DecodeSample:
     """Represents a sampled decode step with execution results."""
@@ -303,7 +303,6 @@ class InferenceEngine:
             comp_times={},
             comm_metadata={},
             misc_metadata={
-                "kv_cache_fetch_overlap": self.config.kv_cache_fetch_overlap,
                 "sequence_parallel": self.config.tp_sp,
             },
             hw_config=self.hw_config,

@@ -96,7 +96,6 @@ class PipelineGraphFlattener:
                     self._hw_id_for_rank(obj.hw_id, 0),
                     obj.duration,
                     fwd=obj.fwd,
-                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
             else:
                 cloned = simulate_LLM.Node(
@@ -105,7 +104,6 @@ class PipelineGraphFlattener:
                     obj.hw_id,
                     obj.duration,
                     fwd=obj.fwd,
-                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
 
             self._clone_cache[obj_id] = cloned
@@ -354,7 +352,6 @@ class PipelineGraphFlattener:
             "direction",
             "stage_id",
             "tp_rank",
-            "is_kv_cache",
         ):
             if hasattr(source, attr):
                 setattr(target, attr, getattr(source, attr))

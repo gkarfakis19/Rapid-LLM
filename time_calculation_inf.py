@@ -31,17 +31,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             head_dim=head_dim,
             precision_bytes=self.precision.kv_cache,
         )
-        kv_cache_fetch_time = self.roofline(
-            0,
-            token_bytes * total_seq_len,
-            name="kv_cache_fetch",
-        ) + self.O
-        kv_cache_store_time = self.roofline(
-            0,
-            token_bytes,
-            name="kv_cache_store",
-        ) + self.O
-
         seq_degree = self._sequence_parallel_degree()
 
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
@@ -265,8 +254,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "linear_softmax_b": 0.0,
             "embedding_f": 0.0,
             "embedding_b": 0.0,
-            "kv_cache_fetch": kv_cache_fetch_time,
-            "kv_cache_store": kv_cache_store_time,
         }
 
         return transformer_results, node_breakdown
@@ -332,14 +319,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             head_dim=head_dim,
             precision_bytes=self.precision.kv_cache,
         )
-        prefill_store_time = self.roofline(
-            0,
-            token_bytes * prefill_len,
-            name="kv_cache_store_prefill",
-        ) + self.O
-
-        node_breakdown["kv_cache_store"] = prefill_store_time
-        node_breakdown["kv_cache_fetch"] = 0.0
 
         (
             pipeline_graph,
@@ -429,7 +408,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             tp=self.tp,
             tp_sp=self.tp_sp,
             sample_every=sample_every,
-            kv_cache_fetch_overlap=self.kv_cache_fetch_overlap,
         )
 
 
