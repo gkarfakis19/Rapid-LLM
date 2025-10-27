@@ -481,7 +481,6 @@ def convert_deepflow_graph_to_chakra_et(
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
 
-    collectives_by_parent: Dict[Any, List[Any]] = defaultdict(list)
     edge_stage: Dict[Any, int] = {}
     for obj in all_objects:
         comm = getattr(obj, "comm_type", None)
@@ -505,6 +504,11 @@ def convert_deepflow_graph_to_chakra_et(
                                 break
 
 
+            children = getattr(obj, "children", [])
+            parents = getattr(obj, "parents", [])
+            if len(children) == 0 and len(parents) == 0:
+                raise ValueError(f"Object {obj.name} has no children or parents")
+
             if stage is None:
                 # print children and parents
                 children = getattr(obj, "children", [])
@@ -516,8 +520,6 @@ def convert_deepflow_graph_to_chakra_et(
 
                 raise ValueError(f"Stage not found for object {obj.name}")
             edge_stage[obj] = stage
-            if parent is not None:
-                collectives_by_parent[parent].append(obj)
 
     pipeline_edge_map: Dict[Tuple[Any, Any], Any] = {}
 
@@ -727,6 +729,9 @@ def convert_deepflow_graph_to_chakra_et(
                         if src.local_hw_id == stage:
                             if not via_collective:
                                 collective_deps.add(src)
+                        # else:
+                        #     pipeline_deps.add(src)
+                        #     pipeline_edge_map[(src, edge)] = cur
                 continue
             elif comm:
                 collective_deps.add(cur)
@@ -1029,20 +1034,22 @@ def convert_deepflow_graph_to_chakra_et(
             try:
                 send_node.ctrl_deps.append(collective_et_ids[(parent, src_rank)])
             except KeyError as e:
-                print(f"Current dict state:")
+                print(f"Collective dict state:")
                 print(f"Keys")
                 for key, value in collective_et_ids.items():
                     print(f"Key: {key}")
                 raise e
-        else:
+        elif parent in compute_info:
             try:
                 send_node.ctrl_deps.append(compute_et_ids[(parent, src_rank)])
             except KeyError as e:
-                print(f"Current dict state:")
+                print(f"Compute dict state:")
                 print(f"Keys")
                 for key, value in compute_et_ids.items():
                     print(f"Key: {key}")
                 raise e
+        else:
+            raise ValueError(f"Parent {parent} not found in collective_info or compute_info")
 
         send_trace.append_node(send_node)
 
@@ -1161,10 +1168,15 @@ def convert_deepflow_graph_to_chakra_et(
                 # Ensure SEND/RECV nodes exist and collect RECV ids local to this rank
                 recv_ids: List[int] = []
                 for parent in info["pipeline_deps"]:
+                    if parent not in collective_info and parent not in compute_info:
+                        # orphaned parent, ignore
+                        # TODO: debug and make sure this never happens?!??!?!
+                        continue
                     try:
                         recv_ids.append(ensure_pipeline(parent, task, dp_idx))
                     except Exception as e:
                         print(f"Attempted to map parent {parent} to task {task} for dp_idx {dp_idx}")
+                        print(f"Info: {info}")
                         raise e
 
                 # Deduplicate
