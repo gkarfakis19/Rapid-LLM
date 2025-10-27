@@ -81,8 +81,7 @@ class PipelineGraphFlattener:
         edge: simulate_LLM.Edge,
         rank_heads = None,
         rank_tails = None,
-        hw_ids = None,
-        base_anchor = None,
+        hw_ids = None
     ) -> List[simulate_LLM.Edge]:
 
         transformer_mode = ""
@@ -96,13 +95,13 @@ class PipelineGraphFlattener:
                 wire_anchors = rank_heads
             iterable = wire_anchors
             transformer_mode = True
-        elif hw_ids and base_anchor:
+        elif hw_ids:
             # this is used for softmax embedding edges for raw cloning.
             iterable = hw_ids
             transformer_mode = False
 
         if transformer_mode == "":
-            raise Exception("Invalid _ensure_zero3_per_rank_edges call. At least one of (rank_tails,rank_heads) or (hw_ids,base_anchor) must be provided.")
+            raise Exception("Invalid _ensure_zero3_per_rank_edges call. At least one of (rank_tails,rank_heads) or (hw_ids) must be provided.")
          
         for r, item in enumerate(iterable):
             base_bytes = getattr(edge, "comm_size_bytes", 0)
@@ -132,9 +131,8 @@ class PipelineGraphFlattener:
                     gather_edge.add_child(child)
             else:
                 gather_edge.local_hw_id = item
-                # has the same children as base anchor
-                for child in getattr(base_anchor, "children", []):
-                    gather_edge.add_child(child)
+                # we cannot attach children here as we don't have them yet.
+
 
             per_rank_edges.append(gather_edge)
 
@@ -182,26 +180,36 @@ class PipelineGraphFlattener:
                 )
 
             # following _expand_transformer_node logic, we need to find siblings that are zero3 tp_shard=True.
-            # zero3_attachments: List[simulate_LLM.Edge] = []
-            # for parent in getattr(obj, "parents", []):
-            #     for sibling in getattr(parent, "children", []):
-            #         if sibling is obj:
-            #             continue
-            #         if self._should_shard_zero3_transformer(sibling):
-            #             zero3_attachments.append(sibling)
+            zero3_attachments: List[simulate_LLM.Edge] = []
+            for parent in getattr(obj, "parents", []):
+                for sibling in getattr(parent, "children", []):
+                    if sibling is obj:
+                        continue
+                    if self._should_shard_zero3_transformer(sibling):
+                        zero3_attachments.append(sibling)
 
 
-            # hw_ids = []
-            # for tp_rank in range(self._par_degree):
-            #     hw_ids.append(self._hw_id_for_rank(obj.hw_id, tp_rank))
-            # for zero3_attachment in zero3_attachments:
-            #     per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_attachment, rank_heads=None, rank_tails=None, hw_ids=hw_ids, base_anchor=obj)
+            hw_ids = []
+            for tp_rank in range(self._par_degree):
+                hw_ids.append(self._hw_id_for_rank(obj.hw_id, tp_rank))
+
+            per_rank_edges: List[simulate_LLM.Edge] = []
+            for zero3_attachment in zero3_attachments:
+                per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_attachment, rank_heads=None, rank_tails=None, hw_ids=hw_ids)
+                self._clone_cache[id(zero3_attachment)] = per_rank_edges
 
             self._clone_cache[obj_id] = cloned
             self._copy_metadata(obj, cloned)
             for child in getattr(obj, "children", []):
                 child_clone = self._clone(child)
                 if child_clone is not None:
+                    # Don't attach children to the sharded allgather edges.
+                    # They should be attached for a proper flattned graph.
+                    # but this creates extremely weird pipeline dependencies.
+                    # The graph is assumed to be accurate enough regardless. The collectives still fire.
+                    if per_rank_edges:
+                        for per_rank_edge in per_rank_edges:
+                            self._attach(per_rank_edge, child_clone)
                     self._attach(cloned, child_clone)
             return cloned
 
@@ -420,9 +428,9 @@ class PipelineGraphFlattener:
             self._attach(downstream_parents, child_clone)
 
         for zero3_edge in zero3_attachments:
-            per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_edge, rank_heads, rank_tails, hw_ids=None, base_anchor=None)
+            per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_edge, rank_heads, rank_tails, hw_ids=None)
             self._clone_cache[id(zero3_edge)] = per_rank_edges
-            
+
         heads_tuple = tuple(rank_heads)
         self._clone_cache[node_id] = heads_tuple
         return heads_tuple

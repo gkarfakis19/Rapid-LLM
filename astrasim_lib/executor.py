@@ -488,19 +488,22 @@ def convert_deepflow_graph_to_chakra_et(
         if comm and comm != "pipeline":
             stage = None
             parent = None
-            for candidate in getattr(obj, "parents", []):
-                if getattr(candidate, "hw_id", None) is not None and candidate.hw_id >= 0:
-                    stage = candidate.hw_id
-                    parent = candidate
-                    break
-            if stage is None:
-                for candidate in getattr(obj, "children", []):
-                    if getattr(candidate, "hw_id", None) is not None and candidate.hw_id >= 0:
-                        stage = candidate.hw_id
-                        break
             if stage is None:
                 local_hw = getattr(obj, "local_hw_id", None)
-                stage = local_hw
+                if local_hw is not None:
+                    stage = local_hw
+                else:
+                    for candidate in getattr(obj, "parents", []):
+                        if getattr(candidate, "hw_id", None) is not None and candidate.hw_id >= 0:
+                            stage = candidate.hw_id
+                            parent = candidate
+                            break
+                    if stage is None:
+                        for candidate in getattr(obj, "children", []):
+                            if getattr(candidate, "hw_id", None) is not None and candidate.hw_id >= 0:
+                                stage = candidate.hw_id
+                                break
+
 
             if stage is None:
                 # print children and parents
@@ -721,8 +724,9 @@ def convert_deepflow_graph_to_chakra_et(
                             pipeline_edge_map[(src, edge)] = cur
                 if coll_srcs:
                     for src in coll_srcs:
-                        if src.local_hw_id == stage and not via_collective:
-                            collective_deps.add(src)
+                        if src.local_hw_id == stage:
+                            if not via_collective:
+                                collective_deps.add(src)
                 continue
             elif comm:
                 collective_deps.add(cur)
@@ -977,6 +981,10 @@ def convert_deepflow_graph_to_chakra_et(
 
     def ensure_pipeline(parent: Any, target: Any, dp_idx: int) -> int:
         parent_stage = getattr(parent, "hw_id", None)
+        if parent_stage == None:
+            parent_stage = getattr(parent, "local_hw_id", None)
+        if parent_stage == None:
+            raise ValueError(f"Stage not found for parent {parent}")
         target_stage = collective_info[target]["stage"] if target in collective_info else compute_info[target]["stage"]
         if parent_stage == target_stage:
             if parent in collective_info:
@@ -1006,7 +1014,7 @@ def convert_deepflow_graph_to_chakra_et(
         send_trace = rank_traces[src_rank]
         recv_trace = rank_traces[dst_rank]
         is_control = False
-        if size == 0:
+        if size == 0 or edge_obj.comm_type != "pipeline":
             # control dependancy
             size = 1 # has to be at least 1 byte for astrasim.
             is_control = True
@@ -1017,7 +1025,25 @@ def convert_deepflow_graph_to_chakra_et(
         else:
             send_name = f"{getattr(edge_obj, 'name', 'pipeline')}_send_dp{dp_idx}"
         send_node = new_send_node(send_id, send_name, size, dst_rank, tag)
-        send_node.ctrl_deps.append(compute_et_ids[(parent, src_rank)])
+        if parent in collective_info:
+            try:
+                send_node.ctrl_deps.append(collective_et_ids[(parent, src_rank)])
+            except KeyError as e:
+                print(f"Current dict state:")
+                print(f"Keys")
+                for key, value in collective_et_ids.items():
+                    print(f"Key: {key}")
+                raise e
+        else:
+            try:
+                send_node.ctrl_deps.append(compute_et_ids[(parent, src_rank)])
+            except KeyError as e:
+                print(f"Current dict state:")
+                print(f"Keys")
+                for key, value in compute_et_ids.items():
+                    print(f"Key: {key}")
+                raise e
+
         send_trace.append_node(send_node)
 
         recv_id = recv_trace.next_id
@@ -1120,7 +1146,6 @@ def convert_deepflow_graph_to_chakra_et(
                     # above to avoid duplication. Here we only reference them
                     # via dependencies when needed.
 
-
     # Attach cross-stage (pipeline) dependencies after all nodes are created.
     for stage, order in stage_order.items():
         for task in order:
@@ -1136,7 +1161,11 @@ def convert_deepflow_graph_to_chakra_et(
                 # Ensure SEND/RECV nodes exist and collect RECV ids local to this rank
                 recv_ids: List[int] = []
                 for parent in info["pipeline_deps"]:
-                    recv_ids.append(ensure_pipeline(parent, task, dp_idx))
+                    try:
+                        recv_ids.append(ensure_pipeline(parent, task, dp_idx))
+                    except Exception as e:
+                        print(f"Attempted to map parent {parent} to task {task} for dp_idx {dp_idx}")
+                        raise e
 
                 # Deduplicate
                 unique_recv_ids: List[int] = []

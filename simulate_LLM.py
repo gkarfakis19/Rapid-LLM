@@ -829,10 +829,11 @@ class Graph:
                              
 
                 softmax_edge = self.create_comm_edge(
-                    "softmax",
+                    "softmax"+postfix,
                     op_id,
                     "softmax",
                     is_dp=True,
+                    local_hw_id=softmax_node[b].hw_id,
                 )
                 R_edge[b].append(softmax_edge)
                 op_id += 1
