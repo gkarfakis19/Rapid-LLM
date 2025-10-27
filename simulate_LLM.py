@@ -76,25 +76,7 @@ class Edge:
   def __repr__(self):
       return f"Edge({self.name},op={self.op_id},{round(self.duration, 2)})"
       
-class Gradient:
-  def __init__(self, name, op_id, hw_id, duration):
-    self.name = name
-    self.op_id = op_id
-    self.hw_id = hw_id
-    self.duration = duration
-  # "dp", "lp", "kp1", "kp2"
-    self.done = False
-    self.finish_time = -1
-    self.parents = [] 
-    self.children = []
-    self.scheduled = False
-
-  def add_child(self, obj):
-      self.children.append(obj)
-      obj.parents.append(self)
-
 class Graph:
-
     def __init__(
         self,
         mode: str,
@@ -231,8 +213,7 @@ class Graph:
                 )
             elif isinstance(obj, Data_batch):
                 clone = Data_batch(obj.name, obj.batch_id, obj.duration)
-            elif isinstance(obj, Gradient):
-                clone = Gradient(obj.name, obj.op_id, obj.hw_id, obj.duration)
+
             else:
                 raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
 
@@ -408,8 +389,7 @@ class Graph:
                 )
             elif isinstance(obj, Data_batch):
                 clone = Data_batch(obj.name, obj.batch_id, obj.duration)
-            elif isinstance(obj, Gradient):
-                clone = Gradient(obj.name, obj.op_id, obj.hw_id, obj.duration)
+
             else:
                 raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
 
@@ -774,13 +754,15 @@ class Graph:
             layernorm_Softmax.add_child(prev_layer_norm2)
                 
 
-        def attach_parallel_edge(target, gather_edge):
+        def attach_parallel_edge(target, gather_edge, exclude_children=None):
             parents = list(getattr(target, "parents", []))
             for parent in parents:
                 if hasattr(parent, "children") and gather_edge not in parent.children:
                     parent.add_child(gather_edge)
             children = list(getattr(target, "children", []))
             for child in children:
+                if exclude_children and child in exclude_children:
+                    continue
                 if gather_edge not in getattr(child, "parents", []):
                     gather_edge.add_child(child)
 
@@ -1205,16 +1187,7 @@ class Graph:
                     enqueued = True
                     counter = counter + 1
                     ready_list.remove(event)
-                elif isinstance(event, Gradient):
-                    # print("Gradient event")
-                    new_time = time + event.duration
-                    heappush(event_queue, (new_time, counter, event))
-                    event.scheduled = True
-                    enqueued = True
-                    if debug:
-                        print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
-                    counter = counter + 1
-                    ready_list.remove(event)
+
 
         return time
     
@@ -1536,16 +1509,7 @@ class Graph:
                     enqueued = True
                     counter = counter + 1
                     ready_list.remove(event)
-                elif isinstance(event, Gradient):
-                    # print("Gradient event")
-                    new_time = time + event.duration
-                    heappush(event_queue, (new_time, counter, event))
-                    event.scheduled = True
-                    enqueued = True
-                    if debug:
-                        print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
-                    counter = counter + 1
-                    ready_list.remove(event)
+
 
         summary = memory_snapshot.summary()
         memory_snapshot.close()
@@ -1563,132 +1527,71 @@ class Graph:
 
         graphviz_async.submit(f"{filename}.png", _render_graph, print_message=printstr)
 
-# dedeepyo : 27-May-25 : Print DFS traversal of the graph.
-def print_graph(root_nodes, visited=None):
-    if visited is None:
-        visited = set()
 
-    for node in root_nodes:
-        if node in visited:
-            continue
-        visited.add(node)
+def visualize_graph(roots, filename="graph"):
+    _ = filename  # unused, kept for backwards compatibility with callers
 
-        node_type = "Node" if isinstance(node, Node) else "Edge" if isinstance(node, Edge) else "Data_batch" if isinstance(node, Data_batch) else "Gradient" if isinstance(node, Gradient) else "Unknown"
-        print(f"{node_type}: {node.name}, op_id: {node.op_id}, hw_id: {node.hw_id}, duration: {node.duration}")
+    dot = Digraph(comment="Computation Graph")
+    visited = set()
 
-        for child in node.children:
-            child_type = "Node" if isinstance(child, Node) else "Edge" if isinstance(child, Edge) else "Data_batch" if isinstance(child, Data_batch) else "Gradient" if isinstance(child, Gradient) else "Unknown"
-            print(f"  --> {child_type}: {child.name}, op_id: {child.op_id}")
-
-        # Recursively print the children
-        print_graph(node.children, visited)
-
-def total_duration(root, visited=None):
-    if visited is None:
-        visited = set()
-    if root in visited:
-        return 0
-    visited.add(root)
-
-    # Only add duration if it's a Node (not a Stage)
-    duration = root.compute_time if isinstance(root, Node) else 0
-
-    for child in root.children:
-        duration += total_duration(child, visited)
-
-    return duration
-
-def visualize_graph(root, filename="graph", visited=None, dot=None):
-    if visited is None:
-        visited = set()
-    if dot is None:
-        dot = Digraph(comment='Computation Graph')
-
-    if root in visited:
-        return dot
-    visited.add(root)
     def _format_duration(value: float) -> str:
         ms = value * 1e3
         if abs(ms) > 1000:
             return f"{value:.2f}s"
         return f"{ms:.2f}ms"
 
-    if isinstance(root, Node):
-        root_type = "Node"
-        if getattr(root, "is_kv_cache", False):
-            color = "mediumorchid"
-        elif root.fwd:
-            color = "lightblue"
-        else:
-            color = "lightcoral"
-    elif isinstance(root, Data_batch):
-        root_type = "Data_batch"
-        color = "gray"
-    elif isinstance(root, Edge):
-        root_type = "Edge"
-        if root.is_dp == True:
-            color = "green"
-        else:
-            color = "yellow"
-    elif isinstance(root, Gradient):
-        root_type = "Gradient"
-        color = "white"
-
-    node_id = str(id(root))
-    if isinstance(root, Data_batch):
-            label = f"{root.name}\n( batch_id={root.batch_id}, dur={_format_duration(root.duration)})"
-    elif isinstance(root, Node):
-            label = (
-                f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, "
-                f"dur={_format_duration(root.duration)})"
-            )
-    elif isinstance(root, Edge):
-            if getattr(root, "local_hw_id", None) is not None:
-                label = f"{root.name}\n(op_id={root.op_id}, local_hw_id={root.local_hw_id}, dur={_format_duration(root.duration)})"
+    def _node_color(node) -> str:
+        if isinstance(node, Node):
+            return "lightblue" if node.fwd else "lightcoral"
+        if isinstance(node, Data_batch):
+            return "gray"
+        if isinstance(node, Edge):
+            if getattr(node, "is_dp", False):
+                return "green"
             else:
-                label = f"{root.name}\n(op_id={root.op_id}, dur={_format_duration(root.duration)})"
-    elif isinstance(root, Gradient):
-            label = (
-                f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, "
-                f"dur={_format_duration(root.duration)})"
+                if getattr(node, "comm_type", None) == "pipeline":
+                    return "yellow"
+                else:
+                    return "white"
+        return "mediumorchid"
+
+    def _node_label(node) -> str:
+        if isinstance(node, Data_batch):
+            return f"{node.name}\n(batch_id={node.batch_id}, dur={_format_duration(node.duration)})"
+        if isinstance(node, Node):
+            return (
+                f"{node.name}\n(op_id={node.op_id}, hw_id={node.hw_id}, "
+                f"dur={_format_duration(node.duration)})"
             )
-    # color = "lightblue" if isinstance(root, Node) else "gray" if isinstance(root, Data_batch) else "lightgreen"
+        if isinstance(node, Edge):
+            if getattr(node, "local_hw_id", None) is not None:
+                return (
+                    f"{node.name}\n(op_id={node.op_id}, local_hw_id={node.local_hw_id}, "
+                    f"dur={_format_duration(node.duration)})"
+                )
+            return f"{node.name}\n(op_id={node.op_id}, dur={_format_duration(node.duration)})"
+        return str(node)
 
-    dot.node(node_id, label=label, style='filled', fillcolor=color, shape='box')
+    def _visit(node):
+        if node in visited:
+            return
 
-    for child in root.children:
-        child_id = str(id(child))
-        if isinstance(child, Data_batch):
-            child_label = f"{child.name}\n( batch_id={child.batch_id}, dur={_format_duration(child.duration)})"
-        elif isinstance(child, Edge):
-            child_label = f"{child.name}\n(op_id={child.op_id}, dur={_format_duration(child.duration)})"
-        elif isinstance(child, Node):
-            child_label = (
-                f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, "
-                f"dur={_format_duration(child.duration)})"
-            )
-        elif isinstance(child, Gradient):
-            child_label = (
-                f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, "
-                f"dur={_format_duration(child.duration)})"
-            )
+        visited.add(node)
+        node_id = str(id(node))
+        dot.node(node_id, label=_node_label(node), style="filled", fillcolor=_node_color(node), shape="box")
 
-        if isinstance(child, Node) and getattr(child, "is_kv_cache", False):
-            child_color = "mediumorchid"
-        elif isinstance(child, Node) and child.fwd:
-            child_color = "lightblue"
-        elif isinstance(child, Node) and not child.fwd:
-            child_color = "lightcoral"
-        elif isinstance(child, Data_batch):
-            child_color = "gray"
-        elif isinstance(child, Edge) and child.is_dp:
-            child_color = "green"
-        else:
-            child_color = "white"
+        for child in getattr(node, "children", []):
+            child_id = str(id(child))
+            dot.edge(node_id, child_id)
+            _visit(child)
 
-        dot.node(child_id, label=child_label, style='filled', fillcolor=child_color, shape='box')
-        dot.edge(node_id, child_id)
-        visualize_graph(child, filename, visited, dot)
+    if isinstance(roots, (list, tuple, set)):
+        iterable = roots
+    else:
+        iterable = [roots]
+
+    for root in iterable:
+        _visit(root)
 
     return dot
 

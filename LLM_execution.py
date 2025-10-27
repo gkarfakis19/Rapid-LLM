@@ -144,16 +144,6 @@ class PipelineGraphFlattener:
                     self._attach(cloned_batch, child_clone)
             return cloned_batch
 
-        if isinstance(obj, simulate_LLM.Gradient):
-            cloned_grad = simulate_LLM.Gradient(obj.name, self._next_op_id(), obj.hw_id, obj.duration)
-            self._clone_cache[obj_id] = cloned_grad
-            self._copy_metadata(obj, cloned_grad)
-            for child in getattr(obj, "children", []):
-                child_clone = self._clone(child)
-                if child_clone is not None:
-                    self._attach(cloned_grad, child_clone)
-            return cloned_grad
-
         raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
 
     def _expand_transformer_node(self, node: simulate_LLM.Node) -> Tuple[Any, ...]:
