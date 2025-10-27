@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List, Set
 
 import simulate_LLM
-from astrasim_lib.executor import run_astra_simulation_only_onepath
+from astrasim_lib import run_astra_simulation_only_onepath
 from simulate_LLM import Graph
 
 
@@ -203,10 +203,6 @@ class PipelineGraphFlattener:
             for child in getattr(obj, "children", []):
                 child_clone = self._clone(child)
                 if child_clone is not None:
-                    # Don't attach children to the sharded allgather edges.
-                    # They should be attached for a proper flattned graph.
-                    # but this creates extremely weird pipeline dependencies.
-                    # The graph is assumed to be accurate enough regardless. The collectives still fire.
                     if per_rank_edges:
                         for per_rank_edge in per_rank_edges:
                             self._attach(per_rank_edge, child_clone)

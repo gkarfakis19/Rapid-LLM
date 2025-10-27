@@ -461,8 +461,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_len * prefill_len + decode_len * (decode_len + 1) // 2
         )
 
-        def _to_gib(byte_val: int) -> float:
-            return byte_val / (1024 ** 3)
+        def _to_gib(byte_val: int) -> str:
+            gib_val = byte_val / (1024 ** 3)
+            if gib_val > 1024:
+                tib_val = gib_val / 1024
+                return f"{tib_val:.1f} TiB"
+            return f"{gib_val:.1f} GiB"
 
         if decode_samples:
             # do NOT use effective_transformer_batch here
@@ -471,14 +475,14 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_rates = None
 
         print(
-            f"[prefill] time: {prefill_time:.6f}s, "
-            f"[decode] time: {decode_time:.6f}s, "
-            f"[total] time: {total_time:.6f}s"
+            f"[prefill] time: {prefill_time:.4f}s, "
+            f"[decode] time: {decode_time:.4f}s, "
+            f"[total] time: {total_time:.4f}s"
         )
         print(
-            f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes):.2f} GiB, "
-            f"decode_store={_to_gib(decode_store_bytes):.2f} GiB, "
-            f"decode_fetch={_to_gib(decode_fetch_bytes):.2f} GiB"
+            f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes)}, "
+            f"decode_store={_to_gib(decode_store_bytes)}, "
+            f"decode_fetch={_to_gib(decode_fetch_bytes)}"
         )
 
 

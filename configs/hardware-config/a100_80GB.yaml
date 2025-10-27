@@ -167,7 +167,7 @@ memory_hierarchy:
     type: DRAM
     scope: global
 scheduling_param:
-  auto: false
+  auto: false # Not supported for LLM mode.
   ### LLM PARAMS ###
   dp: 2 # acts as replica count during inference
   lp: 2 # pipeline stages 
@@ -211,5 +211,4 @@ execution_backend:
       preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
       
 inference:
-  kvcache_type: hbm_only
-  kvcache_fetch_overlap: false
+  kvcache_type: hbm_only # Only supported mode for now.

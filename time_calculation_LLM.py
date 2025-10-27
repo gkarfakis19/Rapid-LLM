@@ -1588,8 +1588,8 @@ class TimeCalculationLLM(TimeCalculation):
             'linear_softmax_b': transformer_results['linear_softmax']['backward']
         }
 
-        results_path = os.path.join(self.output_dir, "transformer_results.txt")
-        try:
+        if self._generate_graphs:
+            results_path = os.path.join(self.output_dir, "transformer_results.txt")
             with open(results_path, "w", encoding="utf-8") as results_file:
                 json.dump(
                     {
@@ -1600,9 +1600,6 @@ class TimeCalculationLLM(TimeCalculation):
                     indent=2,
                     sort_keys=True,
                 )
-        except OSError as exc:
-            if self.debug:
-                print(f"[WARN] Unable to write transformer results to {results_path}: {exc}")
 
         return transformer_results, node_breakdown
 
@@ -2153,10 +2150,6 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
         forward_root, backward_root = self.pipeline_graph.extract_forward_graph(graph_root)
-        self.pipeline_graph.save_graph(
-            forward_root,
-            filename="llm_pipeline_forward_graph",
-        )
         _, peak_mem_inf = self._simulate_with_memory(forward_root, memory_data, mode="inference")
         # _, peak_mem = self._simulate_with_memory(graph_root, memory_data, mode="training")
         mode = self.execution_mode
@@ -2194,18 +2187,6 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
         self.tot_time = time_fw_bw
-
-        output_file = os.path.join(self.output_dir, "LLM_time_results.txt")
-        
-        with open(output_file, "w") as f:
-            f.write("\n\n==============================================\n")
-            f.write("Performance Results\n")
-            f.write("==============================================\n")
-            # f.write("Forward Time: {0:.8f} {1}\n".format(time_fw * m, second))
-            # f.write("Backward Time: {0:.8f} {1}\n".format(time_bw * m, second))
-            f.write("Forward + Backward Time: {0:.8f} {1}\n".format(time_fw_bw * m, second))
-
-            # f.write("Total Time: {0:.8f}\n".format(TC.getTime()))
 
         return time_fw_bw
         

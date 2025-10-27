@@ -43,7 +43,7 @@ _program_start_time = time.perf_counter()
 def _report_total_wall_time() -> None:
     try:
         elapsed = time.perf_counter() - _program_start_time
-        print("Program wall-clock time: {:.3f}s".format(elapsed))
+        print("DeepFlow wall-clock time: {:.2f}s".format(elapsed))
     except Exception:
         # Best-effort only
         pass
@@ -235,17 +235,21 @@ def run_LLM(
 
 
 def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
-    output_file = os.path.join(exp_dir, "summary_LLM.txt")
+    output_file = os.path.join(exp_dir, "LLM_training_results.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
     total_time = tc_llm.calc_time_llm()
 
-    with open(output_file, "a+") as f:
-        f.write("\n\n==============================================\n")
-        f.write("Performance Results\n")
-        f.write("==============================================\n")
-        f.write("Total Time: {0:.8f}\n".format(total_time))
+    with open(output_file, "a+") as handle:
+        handle.write("\n\n==============================================\n")
+        handle.write("Performance Results\n")
+        handle.write("==============================================\n")
+        handle.write("Execution Mode: {}\n".format(tc_llm.execution_mode.value))
+        handle.write("Total Time: {0:.8f}\n".format(total_time))
+        handle.write("\n")
+        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh")
 
-    print("Total training time: {}".format(tc_llm.get_time()))
+    print("Training time for batch: {:.2f}s".format(tc_llm.get_time()))
+    print("LLM training results written to {}".format(output_file))
     warning_message = tc_llm.memory_capacity_warning()
     if warning_message:
         print(warning_message)
@@ -260,28 +264,13 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     total_time = inference_timing["total_inference_time"]
     decode_rates = inference_timing.get("decode_tokens_per_s") or {}
 
-    output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
-    os.makedirs(exp_dir, exist_ok=True)
-    with open(output_path, "w") as handle:
-        handle.write("\n\n==============================================\n")
-        handle.write("LLM Inference Results\n")
-        handle.write("==============================================\n")
-        handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
-        handle.write(f"Total Inference Time: {total_time:.8f}s\n")
-        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.8f}s\n")
-        handle.write(f"Decode Time: {inference_timing['decode_time']:.8f}s\n")
-        handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.8f}s\n")
-        dp_replicas = max(1, getattr(tc_inf, "dp", 1))
-        if dp_replicas > 1:
-            handle.write(f"Data Parallel Replicas: {dp_replicas}\n")
-
     print(
-        "LLM inference time: {:.6f}s (mode={})".format(
+        "LLM inference time: {:.2f}s (mode={})".format(
             total_time, tc_inf.execution_mode.value
         )
     )
     print(
-        "LLM time to first token: {:.6f}s".format(
+        "LLM time to first token: {:.2f}s".format(
             inference_timing["time_to_first_token"],
         )
     )
@@ -294,7 +283,7 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         end_rate = decode_rates.get("end", 0.0)
         mid_step = int(decode_rates.get("midpoint_step", 0.0))
         print(
-            "Decode throughput tok/s: start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+            "Decode throughput tok/s: start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
                 start_rate,
                 mid_step,
                 mid_rate,
@@ -303,7 +292,7 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         )
         if dp_replicas > 1:
             print(
-                "Aggregate decode throughput tok/s (dp={}): start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+                "Aggregate decode throughput tok/s (dp={}): start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
                     dp_replicas,
                     start_rate * dp_replicas,
                     mid_step,
@@ -311,6 +300,29 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
                     end_rate * dp_replicas,
                 )
             )
+
+    output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
+    os.makedirs(exp_dir, exist_ok=True)
+    with open(output_path, "w") as handle:
+        handle.write("\n\n==============================================\n")
+        handle.write("LLM Inference Results\n")
+        handle.write("==============================================\n")
+        handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
+        handle.write(f"Inference Time for batch: {total_time:.2f}s\n")
+        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.3f}s\n")
+        handle.write(f"Decode Time: {inference_timing['decode_time']:.3f}s\n")
+        dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+        if dp_replicas > 1:
+            handle.write(f"Data Parallel Replicas: {dp_replicas}\n")
+        handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.3f}s\n")
+        if dp_replicas > 1:
+            handle.write(f"Aggregate Decode Throughput Tok/s (dp={dp_replicas}): start={start_rate * dp_replicas:.2f}, mid(token {mid_step})={mid_rate * dp_replicas:.2f}, end={end_rate * dp_replicas:.2f}\n")
+        else:
+            handle.write(f"Decode Throughput Tok/s: start={start_rate:.2f}, mid(token {mid_step})={mid_rate:.2f}, end={end_rate:.2f}\n")
+        handle.write("\n")
+        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh")
+
+    print("LLM inference results written to {}".format(output_path))
     warning_message = tc_inf.memory_capacity_warning()
     if warning_message:
         print(warning_message)

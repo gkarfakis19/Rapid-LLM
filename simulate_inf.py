@@ -157,17 +157,18 @@ class DecodeGraph(Graph):
             mode="LLM",
             output_dir="./output_graph/",
         )
-
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
-        sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
-        root_dir = os.path.dirname(sample_dir)
-        if self._decode_sample_root is None:
-            self._decode_sample_root = root_dir
-            if self._should_cleanup_decode_samples() and os.path.isdir(root_dir):
-                shutil.rmtree(root_dir, ignore_errors=True)
-        os.makedirs(sample_dir, exist_ok=True)
-        prev_output_dir = temp_time_calc.output_dir
-        temp_time_calc.output_dir = sample_dir
+        sample_dir = None
+        if self._debug_graphs_enabled():
+            sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
+            root_dir = os.path.dirname(sample_dir)
+            if self._decode_sample_root is None:
+                self._decode_sample_root = root_dir
+                if os.path.isdir(root_dir):
+                    shutil.rmtree(root_dir, ignore_errors=True)
+            os.makedirs(sample_dir, exist_ok=True)
+            prev_output_dir = temp_time_calc.output_dir
+            temp_time_calc.output_dir = sample_dir
 
         (
             pipeline_graph,
@@ -193,11 +194,17 @@ class DecodeGraph(Graph):
         )
 
         result = dispatcher.run(temp_time_calc.execution_mode)
-        temp_time_calc.output_dir = prev_output_dir
-        print(
-            f"[decode] sample step {step_id:04d}: seq_len={total_seq_len}, "
-            f"time={result.total_time:.6f}s, artifacts={sample_dir}"
-        )
+        if sample_dir:
+            temp_time_calc.output_dir = prev_output_dir
+            print(
+                f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
+                f"time={result.total_time:.4f}s, artifacts={sample_dir}"
+            )
+        else:
+            print(
+                f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
+                f"time={result.total_time:.4f}s"
+            )
         return result.total_time
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
@@ -215,10 +222,11 @@ class DecodeGraph(Graph):
         for idx, sample in enumerate(samples):
             if idx == 0:
                 total_time += sample.execution_time
-                print(
-                    f"[decode] integration seed step {sample.step_id:04d}: "
-                    f"time={sample.execution_time:.6f}s"
-                )
+                if self._debug_graphs_enabled():
+                    print(
+                        f"[decode] integration seed step {sample.step_id:02d}: "
+                        f"time={sample.execution_time:.4f}s"
+                    )
                 continue
 
             prev_sample = samples[idx - 1]
@@ -230,8 +238,8 @@ class DecodeGraph(Graph):
             segment_time = midpoint * step_gap
             total_time += segment_time
             print(
-                f"[decode] integration segment {prev_sample.step_id:04d}->{sample.step_id:04d}: "
-                f"width={step_gap}, midpoint={midpoint:.6f}s, contribution={segment_time:.6f}s"
+                f"[decode] integration segment {prev_sample.step_id}->{sample.step_id}: "
+                f"width={step_gap}, midpoint={midpoint:.4f}s, contribution={segment_time:.4f}s"
             )
 
         last_sample = samples[-1]
@@ -240,18 +248,18 @@ class DecodeGraph(Graph):
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
             print(
-                f"[decode] integration tail from {last_sample.step_id:04d} covering {remaining_steps} steps: "
-                f"contribution={tail_time:.6f}s"
+                f"[decode] integration tail from {last_sample.step_id} covering {remaining_steps} steps: "
+                f"contribution={tail_time:.4f}s"
             )
 
         print(
-            f"[decode] total interpolated decode time: {total_time:.6f}s "
+            f"[decode] total interpolated decode time: {total_time:.4f}s "
             f"from {len(samples)} samples"
         )
 
         return total_time
 
-    def _should_cleanup_decode_samples(self) -> bool:
+    def _debug_graphs_enabled(self) -> bool:
         flag = os.environ.get("DEEPFLOW_VISUALIZE_GRAPHS")
         if flag is None:
             return False
