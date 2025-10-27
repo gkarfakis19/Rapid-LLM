@@ -2,7 +2,7 @@ sw_param:
   kernel_launch_overhead: 9e-6
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
-  dp_zero_stage: 3
+  dp_zero_stage: 2
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -140,7 +140,7 @@ perimeter_breakdown:
   intra_node: 0.33
   inter_node: 0.33
 system_hierarchy:
-  num_devices_per_node: 4
+  num_devices_per_node: 16
   num_nodes: 1
   inter_derate: 1
   intra_derate: 1
@@ -172,9 +172,9 @@ scheduling_param:
   dp: 2 # acts as replica count during inference
   lp: 2 # pipeline stages 
   mb: 2 # number of micro-batches
-  tp: 1 # tensor parallelism
-  tp_sp: false # tensor-sequence parallelism
-  cp : 1 # context parallelism
+  tp: 2 # tensor parallelism
+  tp_sp: true # tensor-sequence parallelism
+  cp : 2 # context parallelism
   ### LSTM/GEMM LEGACY PARAMS ###
   t: "CR"
   kp1: 1
@@ -197,7 +197,7 @@ execution_backend:
   model: astra # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
       # Note: if topology is 'switch' and value is 'auto', we default to 'halvingDoubling'.
