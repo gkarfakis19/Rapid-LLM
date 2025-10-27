@@ -62,9 +62,84 @@ class PipelineGraphFlattener:
         self._gemm_entries = list(gemm_entries)
         par_degree = transformer_graph.tp * transformer_graph.cp
         self._par_degree = max(1, int(par_degree))
+        self._zero_stage = int(getattr(transformer_graph, "misc_metadata", {}).get("dp_zero_stage", 0))
 
+        # Track original ZeRO-3 transformer gather edges -> per-rank clones
         self._clone_cache: Dict[int, Any] = {}
         self._op_id_counter: int = 0
+        
+    def _should_shard_zero3_transformer(self, edge: Any) -> bool:
+        if self._par_degree <= 1 or self._zero_stage < 3:
+            return False
+        if isinstance(edge, simulate_LLM.Edge):
+            if getattr(edge, "tp_shard", False):
+                return True
+        return False
+
+    def _ensure_zero3_per_rank_edges(
+        self,
+        edge: simulate_LLM.Edge,
+        rank_heads = None,
+        rank_tails = None,
+        hw_ids = None,
+        base_anchor = None,
+    ) -> List[simulate_LLM.Edge]:
+
+        transformer_mode = ""
+        per_rank_edges: List[simulate_LLM.Edge] = []
+        if rank_tails and rank_heads:
+            # this is used in expand_transformer_node
+            # use them as anchors
+            wire_anchors = rank_tails
+            direction = getattr(edge, "direction", None)
+            if direction and str(direction).lower() == "backward":
+                wire_anchors = rank_heads
+            iterable = wire_anchors
+            transformer_mode = True
+        elif hw_ids and base_anchor:
+            # this is used for softmax embedding edges for raw cloning.
+            iterable = hw_ids
+            transformer_mode = False
+
+        if transformer_mode == "":
+            raise Exception("Invalid _ensure_zero3_per_rank_edges call. At least one of (rank_tails,rank_heads) or (hw_ids,base_anchor) must be provided.")
+         
+        for r, item in enumerate(iterable):
+            base_bytes = getattr(edge, "comm_size_bytes", 0)
+            per_rank_bytes = int(base_bytes)
+            gather_edge = simulate_LLM.Edge(
+                name=f"{edge.name}_rank{r}",
+                op_id=self._next_op_id(),
+                duration=0,
+                is_dp=True,
+                comm_size_bytes=per_rank_bytes,
+                comm_type=getattr(edge, "comm_type", None),
+                participants=getattr(edge, "participants", 0),
+                comm_interconnect_type=getattr(edge, "comm_interconnect_type", None),
+            )
+            gather_edge.tp_rank = r
+            gather_edge.stage_id = getattr(edge, "stage_id", None)
+            gather_edge.micro_batch_index = getattr(edge, "micro_batch_index", None)
+            gather_edge.layer_index = getattr(edge, "layer_index", None)
+            gather_edge.direction = getattr(edge, "direction", None)
+            if transformer_mode:
+                if getattr(item, "hw_id", None) is not None:
+                    gather_edge.local_hw_id = item.hw_id
+                else:
+                    gather_edge.local_hw_id = getattr(item, "local_hw_id", None)
+                # has the same children as item
+                for child in getattr(item, "children", []):
+                    gather_edge.add_child(child)
+            else:
+                gather_edge.local_hw_id = item
+                # has the same children as base anchor
+                for child in getattr(base_anchor, "children", []):
+                    gather_edge.add_child(child)
+
+            per_rank_edges.append(gather_edge)
+
+        return per_rank_edges
+
 
     def build(self, root: Any) -> Any:
         """Return a flattened clone of the provided pipeline root."""
@@ -106,6 +181,22 @@ class PipelineGraphFlattener:
                     fwd=obj.fwd,
                 )
 
+            # following _expand_transformer_node logic, we need to find siblings that are zero3 tp_shard=True.
+            # zero3_attachments: List[simulate_LLM.Edge] = []
+            # for parent in getattr(obj, "parents", []):
+            #     for sibling in getattr(parent, "children", []):
+            #         if sibling is obj:
+            #             continue
+            #         if self._should_shard_zero3_transformer(sibling):
+            #             zero3_attachments.append(sibling)
+
+
+            # hw_ids = []
+            # for tp_rank in range(self._par_degree):
+            #     hw_ids.append(self._hw_id_for_rank(obj.hw_id, tp_rank))
+            # for zero3_attachment in zero3_attachments:
+            #     per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_attachment, rank_heads=None, rank_tails=None, hw_ids=hw_ids, base_anchor=obj)
+
             self._clone_cache[obj_id] = cloned
             self._copy_metadata(obj, cloned)
             for child in getattr(obj, "children", []):
@@ -125,6 +216,7 @@ class PipelineGraphFlattener:
                 participants=getattr(obj, "participants", 1),
                 comm_interconnect_type=getattr(obj, "comm_interconnect_type", None),
             )
+            cloned_edge.local_hw_id = getattr(obj, "local_hw_id", None)
             self._clone_cache[obj_id] = cloned_edge
             self._copy_metadata(obj, cloned_edge)
             for child in getattr(obj, "children", []):
@@ -144,6 +236,7 @@ class PipelineGraphFlattener:
 
         raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
 
+
     def _expand_transformer_node(self, node: simulate_LLM.Node) -> Tuple[Any, ...]:
         node_id = id(node)
         if node_id in self._clone_cache:
@@ -158,7 +251,6 @@ class PipelineGraphFlattener:
 
         rank_heads: List[Any] = []
         rank_tails: List[Any] = []
-        
 
         for tp_rank in range(self._par_degree):
             previous: Optional[Any] = None
@@ -218,6 +310,7 @@ class PipelineGraphFlattener:
 
         dp_children: List[Any] = []
         other_children: List[Any] = []
+        zero3_attachments: List[simulate_LLM.Edge] = []
 
         for child in getattr(node, "children", []):
             comm_type = getattr(child, "comm_interconnect_type", None)
@@ -226,6 +319,13 @@ class PipelineGraphFlattener:
             else:
                 other_children.append(child)
 
+        for parent in getattr(node, "parents", []):
+            for sibling in getattr(parent, "children", []):
+                if sibling is node:
+                    continue
+                if self._should_shard_zero3_transformer(sibling):
+                    zero3_attachments.append(sibling)
+
         # Keep the main trunk pointing to the per-rank compute tails.
         downstream_parents: List[Any] = list(rank_tails)
 
@@ -233,6 +333,9 @@ class PipelineGraphFlattener:
         # reparenting the trunk. This preserves the true cross-layer pipeline
         # edge between compute nodes for ET conversion.
         for child in dp_children:
+            if self._should_shard_zero3_transformer(child):
+                per_rank_edges = self._ensure_zero3_per_rank_edges(child, rank_heads, rank_tails)
+
             child_clone = self._clone(child)
             if child_clone is None:
                 continue
@@ -296,7 +399,8 @@ class PipelineGraphFlattener:
                         parents = getattr(cur, "parents", [])
                         cur = parents[-1] if parents else None
                     if compute_anchor is not None and compute_anchor is not edge_obj:
-                        compute_anchor.add_child(edge_obj)
+                        if compute_anchor != tail:
+                            compute_anchor.add_child(edge_obj)
 
                     # Connect to each cloned target, aligning ranks where possible
                     for tgt_clone in target_clones:
@@ -306,6 +410,7 @@ class PipelineGraphFlattener:
                             edge_obj.add_child(tgt_clone[idx])
                         else:
                             edge_obj.add_child(tgt_clone)
+
                 continue
 
             # Default path for non-pipeline children
@@ -314,6 +419,10 @@ class PipelineGraphFlattener:
                 continue
             self._attach(downstream_parents, child_clone)
 
+        for zero3_edge in zero3_attachments:
+            per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_edge, rank_heads, rank_tails, hw_ids=None, base_anchor=None)
+            self._clone_cache[id(zero3_edge)] = per_rank_edges
+            
         heads_tuple = tuple(rank_heads)
         self._clone_cache[node_id] = heads_tuple
         return heads_tuple
@@ -518,17 +627,19 @@ class LLMExecutionDispatcher:
             pipeline_graph=self.pipeline_graph,
             transformer_graph=self.transformer_graph,
         )
-        flattened_root = flattener.build(self.pipeline_root)
-        if flattened_root is None:
-            raise RuntimeError("Pipeline flattening produced an empty graph")
 
-        self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
                 "/pipeline_graph_pre_flatten",
             )
+        flattened_root = flattener.build(self.pipeline_root)
+        if flattened_root is None:
+            raise RuntimeError("Pipeline flattening produced an empty graph")
+
+        self.time_calc.flattened_pipeline_root = flattened_root
+        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             self.pipeline_graph.save_graph(
                 flattened_root,
                 self.time_calc.output_dir,

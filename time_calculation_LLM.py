@@ -306,6 +306,7 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
         )
         return reduction_time
+
     def flash_attention_kernel_forward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         #TODO: should be repleced with a modified version of getgemmtime that considers flash attention tiling
         """Return time for flash attention kernel."""
@@ -392,7 +393,6 @@ class TimeCalculationLLM(TimeCalculation):
         return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f
         
         
-    
     @staticmethod
     def _normalize_gemm_type(gemm_type: Optional[GemmType]) -> Optional[GemmType]:
         if gemm_type is None or isinstance(gemm_type, GemmType):
@@ -1698,6 +1698,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                'tp_shard': True,
             }
         if zero3_softmax_gather_bytes:
             metadata['zero3_softmax_gather'] = {
@@ -1893,9 +1894,6 @@ class TimeCalculationLLM(TimeCalculation):
 
                 transformer_operation_entries.append(entry)
             
-            
-            
-            
         elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
             for key in ("layernorm1", "MHA", "layernorm2", "MLP"):
                 spec = transformer_results[key]
@@ -1949,7 +1947,7 @@ class TimeCalculationLLM(TimeCalculation):
             cp=self.cp,
             comp_times=transformer_comp_times,
             comm_metadata=transformer_comm_metadata,
-            misc_metadata={},
+            misc_metadata={"dp_zero_stage": self.zero_stage},
         )
         transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
         if include_transformer_backward:
@@ -2081,14 +2079,8 @@ class TimeCalculationLLM(TimeCalculation):
             'static_mem_per_layer': transformer_static_layer,
             'total_mem_per_layer': transformer_mem_layer,
             'zero3_ephemeral_peak_bytes': self.zero3_ephemeral_peak_bytes,
-            'zero2_embedding_gather_bytes': int(math.ceil(zero2_embedding_gather_bytes)) if zero2_embedding_gather_bytes else 0,
-            'zero2_transformer_gather_bytes': int(math.ceil(zero2_transformer_gather_bytes)) if zero2_transformer_gather_bytes else 0,
-            'zero2_softmax_gather_bytes': int(math.ceil(zero2_softmax_gather_bytes)) if zero2_softmax_gather_bytes else 0,
-            'zero3_embedding_gather_bytes': int(math.ceil(zero3_embedding_gather_bytes)) if zero3_embedding_gather_bytes else 0,
-            'zero3_transformer_gather_bytes': int(math.ceil(zero3_transformer_gather_bytes)) if zero3_transformer_gather_bytes else 0,
-            'zero3_softmax_gather_bytes': int(math.ceil(zero3_softmax_gather_bytes)) if zero3_softmax_gather_bytes else 0,
         }
-        # NOTE: simulate_memory currently ignores the ZeRO-specific entries above. It needs to be updated to handle them.
+        # NOTE: simulate_memory currently ignores the ZeRO-specific entry above. It needs to be updated to handle them.
 
         if self._debug_memory:
             layers_per_device = max(1, math.ceil(self.num_layers / max(1, self.lp)))

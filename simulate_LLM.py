@@ -148,6 +148,9 @@ class Graph:
             # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
             local_comp_time = 0
 
+        if comm_data.get('tp_shard'):
+            comm_edge.tp_shard = True
+
         return comm_edge
 
     def extract_forward_graph(self, root: Any) -> Tuple[Any, Any]:
@@ -1510,9 +1513,9 @@ def visualize_graph(roots, filename="graph"):
                 return "green"
             else:
                 if getattr(node, "comm_type", None) == "pipeline":
-                    return "yellow"
-                else:
                     return "white"
+                else:
+                    return "yellow"
         return "mediumorchid"
 
     def _node_label(node) -> str:
