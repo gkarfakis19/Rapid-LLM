@@ -140,7 +140,7 @@ perimeter_breakdown:
   intra_node: 0.33
   inter_node: 0.33
 system_hierarchy:
-  num_devices_per_node: 16
+  num_devices_per_node: 8
   num_nodes: 1
   inter_derate: 1
   intra_derate: 1
@@ -171,10 +171,10 @@ scheduling_param:
   ### LLM PARAMS ###
   dp: 2 # acts as replica count during inference
   lp: 2 # pipeline stages 
-  mb: 2 # number of micro-batches
+  mb: 1 # number of micro-batches
   tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
-  cp : 2 # context parallelism
+  cp : 1 # context parallelism
   ### LSTM/GEMM LEGACY PARAMS ###
   t: "CR"
   kp1: 1
