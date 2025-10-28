@@ -275,7 +275,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             node_breakdown=node_breakdown,
             transformer_results=transformer_results,
             batch_size=batch_size,
-            seq_len=total_seq_len,
+            seq_len=1,
             hidden_dim=self.hidden_dim,
             ffn_dim=ffn_dim,
             vocab_size=self.vocab_size,

@@ -334,6 +334,13 @@ class TimeCalculation:
             self.kp1 = None
             self.kp2 = None
 
+        run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
+        if run_type == "inference" and self.cp > 1:
+            raise ValueError(
+                "Context parallelism (cp) is not supported for LLM inference. "
+                "Please set scheduling_param.cp to 1 for inference runs."
+            )
+
         if self.mode == "LLM":
             expected_workers = self.tp * self.cp * self.dp * self.lp
             label = f"tp({self.tp}) * cp({self.cp}) * dp({self.dp}) * lp({self.lp})"

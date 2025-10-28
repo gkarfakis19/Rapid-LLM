@@ -1816,11 +1816,7 @@ class TimeCalculationLLM(TimeCalculation):
         # TODO: check the embedding_size below. I think only the first term is needed.
         embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim)
         softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
-        # Below, we fix pipeline comm sizes for decode
-        attn_shape = (gemm_shapes or {}).get("attention_score")
-        pipeline_seq_len = max(1, int(attn_shape[1])) if attn_shape and len(attn_shape) > 1 else seq_len
-
-        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, pipeline_seq_len)[1]
+        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
 
         comm_metadata = self._build_comm_metadata(
             reduction_sizes=reduction_sizes,
