@@ -333,13 +333,15 @@ class TimeCalculation:
         else:
             self.kp1 = None
             self.kp2 = None
-
-        run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
-        if run_type == "inference" and self.cp > 1:
-            raise ValueError(
-                "Context parallelism (cp) is not supported for LLM inference. "
-                "Please set scheduling_param.cp to 1 for inference runs."
-            )
+        run_type = model_config.model_config.run_type
+        if run_type == "inference":
+            if self.cp > 1:
+                raise ValueError(
+                    "Context parallelism (cp) is not supported for LLM inference. "
+                    "Please set scheduling_param.cp to 1 for inference runs."
+                )
+            if self.mb > 1:
+                print(f"[WARNING]: LLM inference configured with mb={self.mb} (>1). \n Pipeline micro-batching is ill-defined for autoregressive decode and should be avoided.")
 
         if self.mode == "LLM":
             expected_workers = self.tp * self.cp * self.dp * self.lp
