@@ -300,7 +300,7 @@ class TimeCalculationLLM(TimeCalculation):
 
     def flash_attention_kernel_forward(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         """Return time for flash attention kernel."""
-        #TODO gqa support
+        
         shard_seq = math.ceil(seq_len / max(1, self.cp)) 
         num_units = 108 #number of units in a100
         d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
@@ -308,10 +308,11 @@ class TimeCalculationLLM(TimeCalculation):
         Br = min(Bc, d) # q tile size
         Tr = math.ceil(shard_seq / Br) #number of q tiles
         Tc =  math.ceil(shard_seq / Bc) #number of kv tiles
+        
 
         attention_forward_reduction_time = 0
         attention_size_f = 0
-        
+        # assuming key and value are preloaded into shared memory before attention computation
         load_kv_bytes = Bc * d * 2 * num_units * self.precision.activations #load key and value for one tile from HBM to SRAM
         initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
         initial_load_time_per_head = initial_load_time * math.ceil(Tc/ num_units)
@@ -332,7 +333,7 @@ class TimeCalculationLLM(TimeCalculation):
         attn_output_time_per_tile = self.getGEMMTime(Br, Bc, d, "attention_output", read_bytes_l2=output_bytes, write_bytes_l2=output_bytes, flashattn_enable=True)[0] 
         attn_output_time = attn_output_time_per_tile * Tc * Tr + self.O#attention output gemm time for one head
         
-        load_time = initial_load_time_per_head * batch_size * num_heads / max(1, self.tp)
+        load_time = initial_load_time_per_head * batch_size * kv_heads / max(1, self.tp) #load time for key and value are needed once per kv head
         attn_score_time *= batch_size * num_heads / max(1, self.tp)
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
         attn_output_time *= batch_size * num_heads / max(1, self.tp)
