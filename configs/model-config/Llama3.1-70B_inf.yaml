@@ -8,7 +8,7 @@ model_param:
   decode_len: 1024
   hidden_dim: 8192
   attention:
-    attention_type: "gqa"  # one of "mha","gqa","mla"
+    attention_type: "gqa"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
     num_heads: 64
     kv_heads: 8
     use_flashattention: false  # Whether to use flash attention

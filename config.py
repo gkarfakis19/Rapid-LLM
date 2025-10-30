@@ -842,9 +842,11 @@ def parse_config(filename, config_type):
             raise ValueError("model_param.attention.attention_type must be specified")
         attn_type_raw = attention_dict["attention_type"]
         attn_type = str(attn_type_raw).strip().lower()
-        if attn_type not in {"mha", "gqa", "mla"}:
+        if attn_type == "mla":
+            raise NotImplementedError("attention_type='mla' is not yet supported. Please use 'mha' or 'gqa'.")
+        if attn_type not in {"mha", "gqa"}:
             raise ValueError(
-                f"model_param.attention.attention_type must be one of {{'mha', 'gqa', 'mla'}} (got {attn_type_raw!r})"
+                f"model_param.attention.attention_type must be either 'mha' or 'gqa' (got {attn_type_raw!r})"
             )
 
         if "num_heads" not in attention_dict:
@@ -872,15 +874,8 @@ def parse_config(filename, config_type):
                     f"model_param.attention.kv_heads must be an integer when attention_type='gqa' (got {kv_heads_field!r})"
                 ) from exc
         else:
-            if kv_heads_field is None:
-                kv_heads = num_heads
-            else:
-                try:
-                    kv_heads = int(kv_heads_field)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"model_param.attention.kv_heads must be an integer (got {kv_heads_field!r})"
-                    ) from exc
+            # For MHA/MLA, ignore any provided kv_heads override and default to num_heads.
+            kv_heads = num_heads
 
         if kv_heads <= 0:
             raise ValueError("model_param.attention.kv_heads must be a positive integer")
@@ -896,13 +891,22 @@ def parse_config(filename, config_type):
             flash_attention = bool(raw_flash_attention)
 
         tile_size_field = attention_dict.get("attention_tile_size")
-        attention_tile_size = int(tile_size_field) if tile_size_field is not None else None
-        if attention_tile_size is not None and attention_tile_size <= 0:
-            raise ValueError("model_param.attention.attention_tile_size must be a positive integer when provided")
-        if flash_attention and attention_tile_size is None:
-            raise ValueError(
-                "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
-            )
+        if flash_attention:
+            if tile_size_field is None:
+                raise ValueError(
+                    "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
+                )
+            try:
+                attention_tile_size = int(tile_size_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.attention_tile_size must be an integer when flash attention is enabled (got {tile_size_field!r})"
+                ) from exc
+            if attention_tile_size <= 0:
+                raise ValueError("model_param.attention.attention_tile_size must be a positive integer when flash attention is enabled")
+        else:
+            # Flash attention disabled; tile size, if provided, is ignored.
+            attention_tile_size = None
 
         attention_cfg = LLMAttentionConfig(
             attention_type=attn_type,
@@ -972,11 +976,7 @@ def parse_config(filename, config_type):
             if decode_len is None:
                 raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
             inference_dict = dict(config_dict.get("inference_param", {}) or {})
-            if "sample_every" not in inference_dict:
-                raise ValueError(
-                    "inference_param.sample_every must be provided when model_param.run_type is 'inference'"
-                )
-            sample_every_raw = inference_dict["sample_every"]
+            sample_every_raw = inference_dict.get("sample_every", -1)
             try:
                 sample_every = int(sample_every_raw)
             except (TypeError, ValueError) as exc:

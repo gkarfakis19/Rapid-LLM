@@ -7,7 +7,7 @@ model_param:
     seq_len: 16384
     hidden_dim: 8192
     attention:
-        attention_type: "gqa"  # one of "mha","gqa","mla"
+        attention_type: "mha"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
         num_heads: 64
         kv_heads: 8  # set only when attention_type is "gqa"
         use_flashattention: false  # Whether to use flash attention

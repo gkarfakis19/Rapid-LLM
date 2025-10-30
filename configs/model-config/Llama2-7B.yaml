@@ -9,7 +9,7 @@ model_param:
   # prefill len = seq_len - decode_len
   hidden_dim: 4096
   attention:
-    attention_type: "mha"  # one of "mha","gqa","mla"
+    attention_type: "mha"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
     num_heads: 32
     kv_heads: null  # set only when attention_type is "gqa"
     use_flashattention: false  # Whether to use flash attention

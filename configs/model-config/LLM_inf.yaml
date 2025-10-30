@@ -9,9 +9,11 @@ model_param:
     # prefill_len = seq_len - decode_len (!!)
     hidden_dim: 8192
     attention:
-        attention_type: "mha"  # one of "mha","gqa","mla"
+        attention_type: "mha"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
         num_heads: 64
-        # kv_heads: 8  # set only when attention_type is "gqa"
+        kv_heads: 8  # set only when attention_type is "gqa"
+        use_flashattention: false  # Whether to use flash attention
+        attention_tile_size: 256  # Tile size for attention computation
     num_experts: 1  # Number of experts in MoE layers. Set to 1 to disable MoE.
     top_k: 1  # Top-k experts to use in MoE layers
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
