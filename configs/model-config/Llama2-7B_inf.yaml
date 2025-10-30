@@ -18,5 +18,3 @@ model_param:
   intermediate_size: 11008 # Output dimension of the first FFN layer (typically 4×hidden_dim)
   vocab_size: 32000  # Vocabulary size
   num_layers: 32 # Number of transformer layers
-inference_param:
-  sample_every: -1 # Sample decode steps every N steps for efficiency. -1 means only sample at start and end.
