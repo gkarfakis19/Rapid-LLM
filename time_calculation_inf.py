@@ -314,7 +314,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             raise ValueError(f"Prefill length is negative. Prefill len = seq_len ({self.seq_len}) - decode_len ({decode_len})")
 
         self.readjust_type()
-
+        num_SMs = self.hw_config.tech_config.core.num_bundles
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
             batch_size,
             vocab_size,
@@ -323,6 +323,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             num_heads,
             kv_heads,
             intermediate_size,
+            num_SMs,
         )
 
         head_dim = hidden_dim // num_heads

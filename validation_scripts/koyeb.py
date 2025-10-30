@@ -52,8 +52,18 @@ KOYEB_DATA: Dict[str, Dict[Tuple[int, int, int], Tuple[float, float]]] = {
     (11525, 449, 1): (5.97, 75.26),
     # From: (92608, 5923, 8) -> (11576, 740, 8)
     (11576, 740, 8): (13.67, 433.16),
-    # From: (370592, 640, 32) -> (11581, 20, 32)
-    (11581, 20, 32): (1.34, 477.82),
+
+    # The following data point is extremely noisy on the koyeb website.
+    # Koyeb reports that A100 PCIE is 2x faster than A100 SXM?? Also, output tokens are very low.
+    # So we're using the PCIE data instead for this one only. 
+    # If you want to use the SXM data, comment/uncomment the following lines:
+
+    ## SXM DATA FOR BATCH SIZE 32, "LARGE" (NOISY) ##
+    # # From: (370592, 640, 32) -> (11581, 20, 32)
+    # (11581, 20, 32): (1.34, 477.82),
+    ## PCIE DATA FOR BATCH SIZE 32, "LARGE" (CLEANER)""
+    # From: (369184, 21075, 32) --> (11537, 659, 32)
+    (11537, 659, 32): (25.06, 840.88),
   },
 }
 sns.set()
@@ -141,6 +151,7 @@ def run_all_and_plot() -> None:
   labels: List[str] = []
   expected_tokps: List[float] = []
   predicted_tokps: List[float] = []
+  percent_errors: List[float] = []
 
   for size, (prefill_len, decode_len, batch_size), (expected_decode_time_s, expected_tokps_agg) in experiments:
     label = f"{size} bs={batch_size}"
@@ -150,17 +161,42 @@ def run_all_and_plot() -> None:
       # Aggregate tokens per second using overall definition: total tokens / decode_time
       total_tokens_agg = int(decode_len) * int(batch_size)  # dp=1 for no-parallelism hardware config
       predicted_tokps_agg = float(total_tokens_agg) / float(decode_time_s) if decode_time_s > 0 else 0.0
+
+      # Calculate percentage error
+      if expected_tokps_agg > 0:
+        pct_error = (predicted_tokps_agg - expected_tokps_agg) / expected_tokps_agg * 100.0
+      else:
+        pct_error = float("nan")
+
       print(f"Predicted agg tok/s = {predicted_tokps_agg:.2f} (decode_time={decode_time_s:.2f}s)")
+      print(f"Expected agg tok/s  = {expected_tokps_agg:.2f}")
+      print(f"Error = {pct_error:+.2f}%")
     except Exception as e:
       print(f"ERROR running DeepFlow for {label}: {e}")
       predicted_tokps_agg = float("nan")
+      pct_error = float("nan")
 
     labels.append(label)
     expected_tokps.append(expected_tokps_agg)
     predicted_tokps.append(predicted_tokps_agg)
+    percent_errors.append(pct_error)
+
+  # Print summary statistics
+  print("\n" + "="*70)
+  print("SUMMARY")
+  print("="*70)
+  valid_errors = [e for e in percent_errors if not math.isnan(e)]
+  if valid_errors:
+    avg_error = sum(valid_errors) / len(valid_errors)
+    avg_abs_error = sum(abs(e) for e in valid_errors) / len(valid_errors)
+    print(f"Average error:          {avg_error:+.2f}%")
+    print(f"Average absolute error: {avg_abs_error:.2f}%")
+  else:
+    print("No valid error measurements.")
+  print("="*70)
 
   # Plot
-  plt.figure(figsize=(12, 5))
+  fig = plt.figure(figsize=(12, 6))
   x = list(range(len(labels)))
   plt.plot(x, predicted_tokps, marker="o", linestyle="-", color="#1f77b4", label="DeepFlow predicted tok/s (aggregate)")
   plt.plot(x, expected_tokps, marker="o", linestyle="--", color="#ff7f0e", alpha=0.7, label="Expected tok/s (Koyeb)")
@@ -170,10 +206,16 @@ def run_all_and_plot() -> None:
   plt.grid(True, linestyle=":", alpha=0.4)
   plt.legend()
 
+  # Add note about large bs=32 datapoint
+  note_text = ( "X-axis is prefill length + batch size following Koyebs format (small = 512x512, medium = 1024x1024, large = 4096x1024)\n"
+                "For large bs=32 datapoint, we use PCIE data point, as SXM data is very noisy \n"
+               "on the official website (it's 2x slower than PCIE). You can change this in the code.")
+  fig.text(0.5, 0.02, note_text, ha='center', fontsize=9, style='italic', color='#555555', wrap=True)
+
   out_dir = os.path.join(PROJECT_ROOT, "output", "validation")
   os.makedirs(out_dir, exist_ok=True)
   out_path = os.path.join(out_dir, "koyeb_a100_sxm_no_parallelism.png")
-  plt.tight_layout()
+  plt.tight_layout(rect=[0, 0.06, 1, 1])  # Leave space at bottom for note
   plt.savefig(out_path, dpi=160)
   print(f"Saved plot to: {out_path}")
 

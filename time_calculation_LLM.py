@@ -299,12 +299,11 @@ class TimeCalculationLLM(TimeCalculation):
         )
         return reduction_time
 
-    def flash_attention_kernel_forward(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    def flash_attention_kernel_forward(self, batch_size, hidden_dim, seq_len, num_heads, kv_heads, num_SMs) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         """Return time for flash attention kernel."""
         
         shard_seq = math.ceil(seq_len / max(1, self.cp)) 
-        num_units = 108 #number of units in a100
-        d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
+        d = hidden_dim // num_heads # gemm shape for one head is (seq_len, d) x (d, seq_len)
         Bc = self.attention_tile_size # kv tile size
         Br = min(Bc, d) # q tile size
         Tr = math.ceil(shard_seq / Br) #number of q tiles
@@ -314,9 +313,9 @@ class TimeCalculationLLM(TimeCalculation):
         attention_forward_reduction_time = 0
         attention_size_f = 0
         # assuming key and value are preloaded into shared memory before attention computation
-        load_kv_bytes = Bc * d * 2 * num_units * self.precision.activations #load key and value for one tile from HBM to SRAM
+        load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
         initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
-        initial_load_time_per_head = initial_load_time * math.ceil(Tc/ num_units)
+        initial_load_time_per_head = initial_load_time * math.ceil(Tc/ num_SMs)
         
         # attention score gemm
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
@@ -435,8 +434,8 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            grad_time_act = self.getGEMMTime(m, k, n, name)[0] * batch
-            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch
+            grad_time_act = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch + self.O
+            grad_time_wt = self.getGEMMTime(k, m, n, name, disable_overhead=True)[0] * batch + self.O
         elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
             grad_time_act = self.getGEMMTime(m, n, k, name)[0] * self.moe_num_experts
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * self.moe_num_experts
@@ -485,11 +484,10 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-context hybrid forward GEMM")
         
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
-            gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch / max(1, self.tp)
+            gemm_time = self.getGEMMTime(shard_m, k, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
-            gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch / max(1, self.tp)
+            gemm_time = self.getGEMMTime(shard_m, k, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
         elif gemm_type == GemmType.QKV:  # column wise
-
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
             total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
             kind = "all_gather"
@@ -557,8 +555,8 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-context hybrid backward GEMM")
         
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
-            grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch / max(1, self.tp)
-            grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch / max(1, self.tp)
+            grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
+            grad_time_wt = self.getGEMMTime(k, shard_m, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
             total_bytes = self.precision.grad_communication * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
             kind = "reduce_scatter"
             participants = self.cp
@@ -646,7 +644,7 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-parallel forward GEMM")
         
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch / max(1, self.tp)
+            gemm_time = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
         elif gemm_type in (GemmType.FFN1, GemmType.FFN2) and self.use_moe:
             # MoE FFN layers replicate experts across all TP ranks, so no TP sharding here.
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * self.moe_num_experts 
@@ -713,8 +711,8 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-parallel backward GEMM")
 
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
-            grad_time_act = self.getGEMMTime(m, n, k, name)[0] * batch / max(1, self.tp)
-            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch / max(1, self.tp)
+            grad_time_act = self.getGEMMTime(m, n, k, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
+            grad_time_wt = self.getGEMMTime(k, m, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             shard_n = math.ceil(n / max(1, self.tp))
             grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
@@ -762,7 +760,7 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for context-parallel forward GEMM")
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch 
+            gemm_time = self.getGEMMTime(shard_m, k, n, name, disable_overhead=True)[0] * batch + self.O
         elif gemm_type == GemmType.QKV:  # qkv gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0]
             total_bytes = self.get_kv_size_bytes()
@@ -805,13 +803,13 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for context-parallel backward GEMM")
         if gemm_type == GemmType.ATTENTION_SCORE:
-            grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
-            grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch 
+            grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
+            grad_time_wt = self.getGEMMTime(k, shard_m, n, name, disable_overhead=True)[0] * batch + self.O
             total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both Q and K
             kind = "reduce_scatter"
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
-            grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
-            grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch
+            grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
+            grad_time_wt = self.getGEMMTime(k, shard_m, n, name, disable_overhead=True)[0] * batch + self.O
         elif gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.FFN2):
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0]
@@ -1345,7 +1343,7 @@ class TimeCalculationLLM(TimeCalculation):
     # TODO TODO:
     # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
     # FIX at some point!
-    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size):
+    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs):
         """Compute latency for all GEMM operations and node breakdown times in one function."""
 
         # Process GEMM shapes
@@ -1437,7 +1435,8 @@ class TimeCalculationLLM(TimeCalculation):
                 "comm_size_backward": attention_size_b
             }
         elif self.flash_attention is True:
-            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size)
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size,hidden_dim, seq_len, num_heads, kv_heads, num_SMs)
+            # TODO WIP.
             attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
             transformer_results['attention'] = {
                 'forward': attention_f, 'backward': attention_b,
@@ -2028,8 +2027,9 @@ class TimeCalculationLLM(TimeCalculation):
             max_layer_params * self.precision.parameters if self.zero_stage >= 3 else 0.0
         )
 
+        num_SMs = self.hw_config.tech_config.core.num_bundles
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
-            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size
+            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs
         )
 
         # transformer mem layer considers zero stage internally
