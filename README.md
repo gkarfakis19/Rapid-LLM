@@ -210,3 +210,66 @@ DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSI
 
 - AstraSim backend caches runs by default in `./astra_cache/`. To disable caching, set the environment variable `DEEPFLOW_ASTRA_CACHE_MODE` to `NO_CACHE` or `CACHE_READONLY` (for multi-threaded runs). `NO_CACHE` (or manual cache flushing) is necessary if the AstraSim binary itself is modified.
 - Check the `configs` directory for architecture templates and technology node configurations.
+## Current Support
+
+### FlashAttention
+- **Current support:**
+  - Forward pass in **training**
+  - **Prefill** phase in inference
+- **Work in progress:**
+  - Attention tile size is currently manually defined; will add support for automatically determining the optimal tile size based on **SRAM size**
+  - For **decode** in inference, not supported for single-token scenarios; will support FlashAttention in **batched decode**
+  - **Backpropagation** in training mode is under development
+
+
+
+### Data Parallelism
+- **Supported:** training and inference  
+- Inference uses a **replica-count abstraction** to mirror weights across replicas
+
+
+
+### Tensor Parallelism
+- **Supported:** training and inference  
+- Implements **Megatron-LM–style tensor parallelism**, with **sequence parallelism** optionally enabled or disabled
+
+
+
+### Pipeline Parallelism
+- **Supported:** training and inference  
+- Each data batch is divided into **microbatches** that form pipeline bubbles  
+- Supports **GPipe-style pipeline parallelism** only  
+- Other pipeline styles are **work in progress**
+
+
+
+### Context Parallelism
+- **Supported:** training only  
+- **Inference path** is under development
+
+
+
+### Model Types
+- **Supported:** `gpt`, `llama`, `qwen2`, `phi3` for both training and inference  
+- **Note:** sliding-window attention configurations currently **fall back to dense attention**
+
+
+
+### Attention Types
+- **Supported:** dense **MHA** and **GQA** (`num_kv_heads`)  
+- **Work in progress:** sparse and **sliding-window** attention
+
+
+### Mixture of Experts (MoE)
+- **Supported:** single-GPU case in both training and inference  
+- **Work in progress:** multi-GPU expert parallelism 
+
+
+
+### Memory Estimation
+- **Status:** not enabled in the mainstream workflow  
+- **Supported:** transformer activation and static memory estimation with **hybrid parallelism** in training mode, and **inference** with **Tensor Parallelism**  
+- **Work in progress:** will be released after further refinement
+
+
+
