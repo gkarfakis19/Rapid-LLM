@@ -540,7 +540,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         def safe_rate(token_time: float) -> float:
             if token_time <= 0.0:
                 return 0.0
-            return (1.0 / token_time) * batch_size
+            return 1.0 / token_time
 
         last_step = max(decode_len - 1, 0)
         mid_step = decode_len // 2

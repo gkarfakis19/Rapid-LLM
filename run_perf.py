@@ -275,31 +275,37 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         )
     )
     dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+    batch_size = getattr(tc_inf, "batch_size", 1)
     if dp_replicas > 1:
         print(f"Data parallel replicas: {dp_replicas}")
     if decode_rates:
-        start_rate = decode_rates.get("start", 0.0)
-        mid_rate = decode_rates.get("midpoint", 0.0)
-        end_rate = decode_rates.get("end", 0.0)
+        # decode_rates are per-generation rates (tokens per second per generation)
+        start_gen_rate = decode_rates.get("start", 0.0)
+        mid_gen_rate = decode_rates.get("midpoint", 0.0)
+        end_gen_rate = decode_rates.get("end", 0.0)
         mid_step = int(decode_rates.get("midpoint_step", 0.0))
+        
+        # Print per-generation rates
         print(
-            "Decode throughput tok/s: start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
-                start_rate,
+            "Decode sequences/s: start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
+                start_gen_rate,
                 mid_step,
-                mid_rate,
-                end_rate,
+                mid_gen_rate,
+                end_gen_rate,
             )
         )
-        if dp_replicas > 1:
-            print(
-                "Aggregate decode throughput tok/s (dp={}): start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
-                    dp_replicas,
-                    start_rate * dp_replicas,
-                    mid_step,
-                    mid_rate * dp_replicas,
-                    end_rate * dp_replicas,
-                )
+
+        # Print aggregate decode throughput (with batch_size and dp multipliers)
+        print(
+            "Aggregate decode throughput tok/s (batch={}, dp={}): start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
+                batch_size,
+                dp_replicas,
+                start_gen_rate * batch_size * dp_replicas,
+                mid_step,
+                mid_gen_rate * batch_size * dp_replicas,
+                end_gen_rate * batch_size * dp_replicas,
             )
+        )
 
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
@@ -311,14 +317,17 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write(f"Inference Time for batch: {total_time:.2f}s\n")
         handle.write(f"Prefill Time: {inference_timing['prefill_time']:.3f}s\n")
         handle.write(f"Decode Time: {inference_timing['decode_time']:.3f}s\n")
-        dp_replicas = max(1, getattr(tc_inf, "dp", 1))
         if dp_replicas > 1:
             handle.write(f"Data Parallel Replicas: {dp_replicas}\n")
         handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.3f}s\n")
-        if dp_replicas > 1:
-            handle.write(f"Aggregate Decode Throughput Tok/s (dp={dp_replicas}): start={start_rate * dp_replicas:.2f}, mid(token {mid_step})={mid_rate * dp_replicas:.2f}, end={end_rate * dp_replicas:.2f}\n")
-        else:
-            handle.write(f"Decode Throughput Tok/s: start={start_rate:.2f}, mid(token {mid_step})={mid_rate:.2f}, end={end_rate:.2f}\n")
+        if decode_rates:
+            start_gen_rate = decode_rates.get("start", 0.0)
+            mid_gen_rate = decode_rates.get("midpoint", 0.0)
+            end_gen_rate = decode_rates.get("end", 0.0)
+            mid_step = int(decode_rates.get("midpoint_step", 0.0))
+            
+            handle.write(f"Decode Generations per Second: start={start_gen_rate:.2f}, mid(token {mid_step})={mid_gen_rate:.2f}, end={end_gen_rate:.2f}\n")
+            handle.write(f"Aggregate Decode Throughput Tok/s (batch={batch_size}, dp={dp_replicas}): start={start_gen_rate * batch_size * dp_replicas:.2f}, mid(token {mid_step})={mid_gen_rate * batch_size * dp_replicas:.2f}, end={end_gen_rate * batch_size * dp_replicas:.2f}\n")
         handle.write("\n")
         handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh")
 

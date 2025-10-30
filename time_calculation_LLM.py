@@ -144,6 +144,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.all_reduce = "every layer"
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
+
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0
@@ -320,9 +321,8 @@ class TimeCalculationLLM(TimeCalculation):
         # attention score gemm
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
         attn_score_time_per_tile = self.getGEMMTime(Br, d, Bc, "attention_score_f",read_bytes_l2=load_q_bytes, flashattn_enable=True)[0] 
-        attn_score_time = attn_score_time_per_tile * Tc * Tr + self.O #attention score gemm time for one head
+        attn_score_time = attn_score_time_per_tile * Tc * Tr #attention score gemm time for one head
 
-         
         # Softmax time
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
@@ -331,12 +331,12 @@ class TimeCalculationLLM(TimeCalculation):
         # attention output gemm
         output_bytes = Br * d * self.precision.activations #load value for one tile S is already in shared memory
         attn_output_time_per_tile = self.getGEMMTime(Br, Bc, d, "attention_output", read_bytes_l2=output_bytes, write_bytes_l2=output_bytes, flashattn_enable=True)[0] 
-        attn_output_time = attn_output_time_per_tile * Tc * Tr + self.O#attention output gemm time for one head
+        attn_output_time = attn_output_time_per_tile * Tc * Tr #attention output gemm time for one head
         
         load_time = initial_load_time_per_head * batch_size * kv_heads / max(1, self.tp) #load time for key and value are needed once per kv head
-        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        attn_score_time *= batch_size * num_heads / max(1, self.tp) + self.O
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
-        attn_output_time *= batch_size * num_heads / max(1, self.tp)
+        attn_output_time *= batch_size * num_heads / max(1, self.tp) + self.O
         
         attention_forward_gemm_time = load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
         attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
@@ -425,7 +425,7 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch
+            gemm_time = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch + self.O
         elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * self.moe_num_experts
         else :
@@ -624,7 +624,7 @@ class TimeCalculationLLM(TimeCalculation):
             
         • Sharding rules by gemm_type:
           - QKV, FFN1: **column-wise sharding** (split along output dimension N).
-            Each TP rank produces its local output columns independently — no communication needed.
+            Each TP rank produces its local output columns independently - no communication needed.
           - OUT_PROJ, FFN2: **row-wise sharding** (split along input dimension K).
             Each TP rank computes partial sums that must be combined across ranks via
             all-reduce or reduce-scatter.
@@ -695,7 +695,7 @@ class TimeCalculationLLM(TimeCalculation):
         • Row-wise sharded ops :
           - OUT_PROJ, FFN2:
             - Local backward GEMMs:
-                dX_i: [m, k/tp] via (dY @ W_i^T) — disjoint along K, no cross-rank sum
+                dX_i: [m, k/tp] via (dY @ W_i^T) - disjoint along K, no cross-rank sum
                 dW_i: [k/tp, n] via (X_i^T @ dY)
             -  no tensor reduction on dX for row-wise in backward.
 

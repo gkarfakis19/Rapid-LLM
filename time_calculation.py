@@ -825,7 +825,7 @@ class TimeCalculation:
         # print("Roofline: exited {}".format(name))
         return max_time
     def getGEMMTime(self, dim1, dim2, dim3, name, 
-                    flashattn_enable=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
+                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
@@ -860,8 +860,10 @@ class TimeCalculation:
                 mem_access_per_sm[1] = mem_access_per_sm[1] / eff_sm
 
             GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, flashattn_enable=flashattn_enable) 
-            if flashattn_enable == False:
-                GEMM_time = GEMM_time+ self.O
+            if flashattn_enable or disable_overhead:
+                pass
+            else:
+                GEMM_time = GEMM_time + self.O
      
             tile_dims = (
                 (gemm.l0_M, gemm.l0_K, gemm.l0_N),
