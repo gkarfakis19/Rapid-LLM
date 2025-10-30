@@ -412,7 +412,7 @@ class TimeCalculation:
             self.hidden_dim = self.model.hidden_dim
             self.seq_len = self.model.seq_len
             self.num_heads = self.model.num_heads
-            self.intermediate_dim = self.model.intermediate_dim
+            self.intermediate_size = self.model.intermediate_size
             self.n_tokens = self.model.n_tokens
             if self.batch_size % self.dp != 0:
                 raise ValueError("Batch size must be divisible by data parallelism degree")

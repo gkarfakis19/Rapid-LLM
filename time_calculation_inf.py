@@ -35,7 +35,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
 
-        intermediate_dim = self.intermediate_dim
+        intermediate_size = self.intermediate_size
         gemm_shapes = gemm_shapes or LLM_util.process_decode_gemm_shapes(
             self,
             batch_size=batch_size,
@@ -43,7 +43,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             d_model=self.hidden_dim,
             num_heads=self.num_heads,
             kv_heads=self.kv_heads,
-            intermediate_dim=intermediate_dim,
+            intermediate_size=intermediate_size,
             vocab_size=self.vocab_size,
             model_type=self.model_type,
         )
@@ -98,11 +98,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch=batch_size, seq_len=output_seq_len, d_model=self.hidden_dim
         )
 
-        intermediate_dim = self.intermediate_dim
+        intermediate_size = self.intermediate_size
         ffn2_shape = (
             batch_size,
             output_seq_len,
-            intermediate_dim,
+            intermediate_size,
             self.hidden_dim,
         )
         residual2_f = self.get_residual_f(ffn2_shape)
@@ -266,7 +266,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_seq_len: int,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
-        intermediate_dim = self.intermediate_dim
+        intermediate_size = self.intermediate_size
         transformer_results, node_breakdown = self._build_decode_transformer_results(
             batch_size=batch_size,
             total_seq_len=total_seq_len,
@@ -291,7 +291,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch_size=batch_size,
             seq_len=1,
             hidden_dim=self.hidden_dim,
-            intermediate_dim=intermediate_dim,
+            intermediate_size=intermediate_size,
             vocab_size=self.vocab_size,
             include_pipeline_backward=False,
             include_transformer_backward=False,
@@ -305,7 +305,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         prefill_len = self.seq_len - decode_len
         num_heads = self.num_heads
-        intermediate_dim = self.intermediate_dim
+        intermediate_size = self.intermediate_size
         kv_heads = self.kv_heads
         if prefill_len == 0:
             print("Skipping prefill")
@@ -322,7 +322,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             prefill_len,
             num_heads,
             kv_heads,
-            intermediate_dim,
+            intermediate_size,
         )
 
         head_dim = hidden_dim // num_heads
@@ -346,7 +346,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch_size=batch_size,
             seq_len=prefill_len,
             hidden_dim=hidden_dim,
-            intermediate_dim=intermediate_dim,
+            intermediate_size=intermediate_size,
             vocab_size=vocab_size,
             include_pipeline_backward=False,
             include_transformer_backward=False,
@@ -411,7 +411,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
             kv_heads=self.kv_heads,
-            intermediate_dim=self.intermediate_dim,
+            intermediate_size=self.intermediate_size,
             vocab_size=self.vocab_size,
             num_layers=self.num_layers,
             use_moe=self.use_moe,
