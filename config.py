@@ -525,7 +525,7 @@ class LLMConfig:
     batch_size: int
     seq_len: int
     decode_len: Optional[int]
-    ffn_dim: Optional[int]
+    intermediate_dim: Optional[int]
     vocab_size: int
     n_tokens: int
     all_reduce: str
@@ -1009,15 +1009,15 @@ def parse_config(filename, config_type):
         seq_len = _pop_required_int("seq_len")
         vocab_size = _pop_required_int("vocab_size")
 
-        ffn_dim = mp.pop("ffn_dim", None)
-        if ffn_dim is None:
-            raise ValueError("model_param.ffn_dim must be specified for LLM configs")
+        intermediate_dim = mp.pop("intermediate_dim", None)
+        if intermediate_dim is None:
+            raise ValueError("model_param.intermediate_dim must be specified for LLM configs")
         try:
-            ffn_dim = int(ffn_dim)
+            intermediate_dim = int(intermediate_dim)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"model_param.ffn_dim must be an integer (got {ffn_dim!r})") from exc
-        if ffn_dim <= 0:
-            raise ValueError("model_param.ffn_dim must be a positive integer")
+            raise ValueError(f"model_param.intermediate_dim must be an integer (got {intermediate_dim!r})") from exc
+        if intermediate_dim <= 0:
+            raise ValueError("model_param.intermediate_dim must be a positive integer")
 
         model_config = LLMConfig(
             mode=mode,
@@ -1029,7 +1029,7 @@ def parse_config(filename, config_type):
             batch_size=batch_size,
             seq_len=seq_len,
             decode_len=decode_len,
-            ffn_dim=ffn_dim,
+            intermediate_dim=intermediate_dim,
             vocab_size=vocab_size,
             n_tokens=0, # not used for now.
             all_reduce="every layer", # hard set for now.

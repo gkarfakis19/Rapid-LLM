@@ -30,7 +30,7 @@ class Model_LLM:
       self.tied_embeddings  = exp_config.model_config.tied_embeddings
       self.model_type       = exp_config.model_config.model_type
       # self.kv_heads       = exp_config.model_config.kv_heads  
-      self.ffn_dim          = exp_config.model_config.ffn_dim
+      self.intermediate_dim          = exp_config.model_config.intermediate_dim
       self.n_tokens         = exp_config.model_config.n_tokens
       self.all_reduce       = "every layer"
       self.run_type         = exp_config.model_config.run_type

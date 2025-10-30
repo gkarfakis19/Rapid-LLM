@@ -190,7 +190,7 @@ class TimeCalculationLLM(TimeCalculation):
     def _param_stats_per_rank(
         self,
         hidden_dim: int,
-        ffn_dim: int,
+        intermediate_dim: int,
         vocab_size: int,
     ) -> Tuple[float, float, float, float, float]:
         """Return detailed per-rank parameter counts used for ZeRO modeling."""
@@ -199,7 +199,7 @@ class TimeCalculationLLM(TimeCalculation):
         lp = max(1, self.lp)
 
         ffn_proj_factor = 3 if str(self.model_type).lower() == "llama" else 2
-        transformer_param_layer = 4 * hidden_dim * hidden_dim + ffn_dim * ffn_proj_factor * hidden_dim
+        transformer_param_layer = 4 * hidden_dim * hidden_dim + intermediate_dim * ffn_proj_factor * hidden_dim
         params_per_layer_per_rank = transformer_param_layer / tp
 
         total_transformer_params = params_per_layer_per_rank * self.num_layers
@@ -274,8 +274,8 @@ class TimeCalculationLLM(TimeCalculation):
     def _effective_dims(cls, gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         batch, m, k, n = cls._expand_gemm_descriptor(gemm) 
         return batch, batch * m, k, n
-    def _ffn1_output_dim(self, ffn_dim: int) -> int:
-        return 2 * ffn_dim if self.model_type == "llama" else ffn_dim
+    def _ffn1_output_dim(self, intermediate_dim: int) -> int:
+        return 2 * intermediate_dim if self.model_type == "llama" else intermediate_dim
     # def sequence
     def get_tensor_reduction_time(self, total_bytes: int, kind: str, name: str, participants: Optional[int] = None) -> float:
         """Return collective time for tensor-parallel reductions.
@@ -298,7 +298,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         return reduction_time
 
-    def flash_attention_kernel_forward(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    def flash_attention_kernel_forward(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_dim) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         """Return time for flash attention kernel."""
         
         shard_seq = math.ceil(seq_len / max(1, self.cp)) 
@@ -1179,7 +1179,7 @@ class TimeCalculationLLM(TimeCalculation):
             w = mem_time + transfer_time
         return w, w_size
 
-    def get_data_parallel_reduction_sizes(self, d, ffn_dim):
+    def get_data_parallel_reduction_sizes(self, d, intermediate_dim):
         """Calculate communication sizes for data parallel reductions (no timing)."""
         if not getattr(self, "dp", 1) or self.dp <= 1:
             # No communication needed for dp=1
@@ -1193,9 +1193,9 @@ class TimeCalculationLLM(TimeCalculation):
         # Calculate sizes only
         qkv_size = math.ceil(self.precision.grad_communication * d * 3 * d)
         output_size = math.ceil(self.precision.grad_communication * d * d)
-        ffn1_dim = self._ffn1_output_dim(ffn_dim)
+        ffn1_dim = self._ffn1_output_dim(intermediate_dim)
         ffn1_size = math.ceil(self.precision.grad_communication * ffn1_dim * d)
-        ffn2_size = math.ceil(self.precision.grad_communication * ffn_dim * d)
+        ffn2_size = math.ceil(self.precision.grad_communication * intermediate_dim * d)
         total_size = qkv_size + output_size + ffn1_size + ffn2_size
 
         return {
@@ -1205,14 +1205,14 @@ class TimeCalculationLLM(TimeCalculation):
             'total_size': total_size
         }
 
-    def get_data_parallel_local_computation(self, d, ffn_dim):
+    def get_data_parallel_local_computation(self, d, intermediate_dim):
         """Calculate local computation times for apply_grad operations."""
         qkv_local = self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
         output_local = self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-        ffn1_dim = self._ffn1_output_dim(ffn_dim)
+        ffn1_dim = self._ffn1_output_dim(intermediate_dim)
         ffn_local = (
             self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            + self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            + self.apply_grad(Dim0=intermediate_dim, Dim1=d, name="ffn2 reduction")
         )
 
         return {
@@ -1222,20 +1222,20 @@ class TimeCalculationLLM(TimeCalculation):
             'total_local': qkv_local + output_local + ffn_local
         }
 
-    def get_data_parallel_reduction_llm(self, d, ffn_dim): 
+    def get_data_parallel_reduction_llm(self, d, intermediate_dim): 
         # If no data parallelism, still apply gradients locally but no cross-device reduction
         if self.dp <= 1:
             apply_grad_time = 0.0
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            ffn1_dim = self._ffn1_output_dim(intermediate_dim)
             apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            apply_grad_time += self.apply_grad(Dim0=intermediate_dim, Dim1=d, name="ffn2 reduction")
             if self.debug:
                 print(f"(dp=1) apply_grad_time: {apply_grad_time}")
             return apply_grad_time
 
-        reduction_sizes = self.get_data_parallel_reduction_sizes(d, ffn_dim)
+        reduction_sizes = self.get_data_parallel_reduction_sizes(d, intermediate_dim)
         grad_bytes = int(reduction_sizes['total_size'])
         (
             total_params_per_rank,
@@ -1243,7 +1243,7 @@ class TimeCalculationLLM(TimeCalculation):
             _,
             _,
             _,
-        ) = self._param_stats_per_rank(d, ffn_dim, self.vocab_size)
+        ) = self._param_stats_per_rank(d, intermediate_dim, self.vocab_size)
         param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
         grad_shard = self.dp if self.zero_stage >= 2 else 1
 
@@ -1251,9 +1251,9 @@ class TimeCalculationLLM(TimeCalculation):
             apply_grad_time = 0.0
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=3 * d, name="qkv_proj reduction")
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            ffn1_dim = self._ffn1_output_dim(intermediate_dim)
             apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            apply_grad_time += self.apply_grad(Dim0=intermediate_dim, Dim1=d, name="ffn2 reduction")
             # divide by dp to get the time per device 
             apply_grad_time /= grad_shard
 
@@ -1311,7 +1311,7 @@ class TimeCalculationLLM(TimeCalculation):
             )
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
-            ffn1_dim = self._ffn1_output_dim(ffn_dim)
+            ffn1_dim = self._ffn1_output_dim(intermediate_dim)
             total_bytes = math.ceil(self.precision.grad_communication * ffn1_dim * d)
             reduction_time += self.network_model.collective(
                 kind="all_reduce",
@@ -1324,7 +1324,7 @@ class TimeCalculationLLM(TimeCalculation):
             )
             apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
 
-            total_bytes = math.ceil(self.precision.grad_communication * ffn_dim * d)
+            total_bytes = math.ceil(self.precision.grad_communication * intermediate_dim * d)
             reduction_time += self.network_model.collective(
                 kind="all_reduce",
                 size_bytes=total_bytes,
@@ -1334,7 +1334,7 @@ class TimeCalculationLLM(TimeCalculation):
                 local_bytes=0.0,
                 debug_label="ffn2 reduction",
             )
-            apply_grad_time += self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn2 reduction")
+            apply_grad_time += self.apply_grad(Dim0=intermediate_dim, Dim1=d, name="ffn2 reduction")
 
             if self.debug:
                 print(f"apply_grad_time: {apply_grad_time}")
@@ -1345,12 +1345,12 @@ class TimeCalculationLLM(TimeCalculation):
     # TODO TODO:
     # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
     # FIX at some point!
-    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim):
+    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_dim):
         """Compute latency for all GEMM operations and node breakdown times in one function."""
 
         # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
-            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size
+            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, intermediate_dim, vocab_size
         )
         if self.debug:
             print(
@@ -1364,8 +1364,8 @@ class TimeCalculationLLM(TimeCalculation):
                 num_heads,
                 "kv_heads:",
                 kv_heads,
-                "ffn_dim:",
-                ffn_dim,
+                "intermediate_dim:",
+                intermediate_dim,
             )
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
         gemm_attention_score = gemm_shapes["attention_score"]
@@ -1437,7 +1437,7 @@ class TimeCalculationLLM(TimeCalculation):
                 "comm_size_backward": attention_size_b
             }
         elif self.flash_attention is True:
-            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim)
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_dim)
             attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
             transformer_results['attention'] = {
                 'forward': attention_f, 'backward': attention_b,
@@ -1782,7 +1782,7 @@ class TimeCalculationLLM(TimeCalculation):
         batch_size: int,
         seq_len: int,
         hidden_dim: int,
-        ffn_dim: int,
+        intermediate_dim: int,
         vocab_size: int,
         include_pipeline_backward: bool,
         include_transformer_backward: bool,
@@ -1811,8 +1811,8 @@ class TimeCalculationLLM(TimeCalculation):
                 'total_local': 0.0,
             }
         else:
-            reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
-            local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
+            reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, intermediate_dim)
+            local_comp = self.get_data_parallel_local_computation(hidden_dim, intermediate_dim)
 
         # these are used for dp all-reduce/reduce-scatter.
         # TODO: check the embedding_size below. I think only the first term is needed.
@@ -1981,7 +1981,7 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim = self.hidden_dim
         seq_len = self.seq_len
         num_heads = self.num_heads
-        ffn_dim = self.ffn_dim
+        intermediate_dim = self.intermediate_dim
         kv_heads = self.kv_heads
         
         # ZeRO data-parallel stages:
@@ -1997,7 +1997,7 @@ class TimeCalculationLLM(TimeCalculation):
             params_per_layer_per_rank,
             embedding_params_per_rank,
             output_params_per_rank,
-        ) = self._param_stats_per_rank(hidden_dim, ffn_dim, vocab_size)
+        ) = self._param_stats_per_rank(hidden_dim, intermediate_dim, vocab_size)
 
         param_bytes = total_params_per_rank * self.precision.parameters
         transformer_param_layer_bytes = params_per_layer_per_rank * self.precision.parameters
@@ -2029,7 +2029,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
 
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
-            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim
+            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_dim
         )
 
         # transformer mem layer considers zero stage internally
@@ -2040,7 +2040,7 @@ class TimeCalculationLLM(TimeCalculation):
                 batch_size=batch_size,
                 hidden_dim=hidden_dim,
                 seq_len=seq_len / self.cp,
-                ffn_dim=ffn_dim,
+                intermediate_dim=intermediate_dim,
                 n_heads=num_heads,
                 precision=self.precision,
                 model_type=self.model_type,
@@ -2109,7 +2109,7 @@ class TimeCalculationLLM(TimeCalculation):
             seq_len=seq_len,
             hidden_dim=hidden_dim,
             # num_heads=num_heads,
-            ffn_dim=ffn_dim,
+            intermediate_dim=intermediate_dim,
             vocab_size=vocab_size,
             include_pipeline_backward=True,
             include_transformer_backward=True,

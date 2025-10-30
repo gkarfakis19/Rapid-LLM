@@ -24,7 +24,7 @@ class InferenceConfig:
     hidden_dim: int
     num_heads: int
     kv_heads: int
-    ffn_dim: int
+    intermediate_dim: int
     vocab_size: int
     num_layers: int
     use_moe: bool 
@@ -110,7 +110,7 @@ class DecodeGraph(Graph):
                 d_model=self.config.hidden_dim,
                 num_heads=self.config.num_heads,
                 kv_heads=self.config.kv_heads,
-                ffn_dim=self.config.ffn_dim,
+                intermediate_dim=self.config.intermediate_dim,
                 vocab_size=self.config.vocab_size,
                 model_type=self.model_config.model_config.model_type,
             )

@@ -31,7 +31,7 @@ def reshape_gemm_to_3d(arg):
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
 
-def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
+def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_heads, intermediate_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
 
@@ -40,7 +40,7 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
         seq_len (int): sequence length (S)
         d_model (int): hidden size (D)
         num_heads (int): number of attention heads (H)
-        ffn_dim (int): first FFN layer output dimension (typically 4 * D)
+        intermediate_dim (int): first FFN layer output dimension (typically 4 * D)
         vocab_size (int): vocabulary size (V)
         
         for a standard multi-head attention, kv_heads = num_heads
@@ -70,24 +70,24 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
     )
     gemms["output_proj"] = (batch_size, seq_len, d_model, d_model)
     if str(model_type).lower() == "llama":
-        projected_dim = 2 * ffn_dim
+        projected_dim = 2 * intermediate_dim
     else:
-        projected_dim = ffn_dim
+        projected_dim = intermediate_dim
     if self.use_moe:
         # assuming equal load balancing here
         num_experts = max(1, int(getattr(self, "moe_num_experts", 1)))
         top_k = max(1, int(getattr(self, "moe_top_k", 1)))
         gemms["ffn1"] = (batch_size, seq_len * top_k / num_experts, d_model, projected_dim ) #gemm shape per expert
-        gemms["ffn2"] = (batch_size, seq_len * top_k / num_experts, ffn_dim, d_model)
+        gemms["ffn2"] = (batch_size, seq_len * top_k / num_experts, intermediate_dim, d_model)
     else:
         gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
-        gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model) 
+        gemms["ffn2"] = (batch_size, seq_len, intermediate_dim, d_model) 
     gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
 
     return gemms
 
 
-def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
+def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads, intermediate_dim, vocab_size):
     """
     Process GEMM shapes, reshape them into 3d.
 
@@ -96,7 +96,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
         seq_len (int): Sequence length.
         d_model (int): Hidden size.
         num_heads (int): Number of attention heads.
-        ffn_dim (int): First FFN layer output dimension.
+        intermediate_dim (int): First FFN layer output dimension.
         vocab_size (int): Vocabulary size.
     """
     # Generate GEMM shapes in 4D
@@ -107,7 +107,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
         d_model=d_model,
         num_heads=num_heads,
         kv_heads=kv_heads,
-        ffn_dim=ffn_dim,
+        intermediate_dim=intermediate_dim,
         vocab_size=vocab_size,
         model_type=self.model_type,
     )
@@ -122,14 +122,14 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     return processed
 
-def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision, zero_stage, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
+def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, intermediate_dim, n_heads, precision, zero_stage, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     #Activations refer to output activations that need to be stored
     act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) #from https://arxiv.org/pdf/2205.05198
-    act_memory_layer_inf = seq_len * batch_size * ffn_dim / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
+    act_memory_layer_inf = seq_len * batch_size * intermediate_dim / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
     ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
     
     
-    transformer_param_layer = 4* hidden_dim * hidden_dim + ffn_dim * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
+    transformer_param_layer = 4* hidden_dim * hidden_dim + intermediate_dim * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
     optimizer_mem = 10 * transformer_param_layer / dp # zero1 style optimizer memory
     #TODO: which optimizer mem to use?
     optimizer_mem = 10 * transformer_param_layer * (precision.optimizer_states / 2) / tp # don't divide by dp for DDP
@@ -205,7 +205,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     n_heads                     = int(kwargs.get('num_heads', exp_model_config.model_config.num_heads))
     # projection          = exp_model_config.model_config.projection
     seq_len                   = int(kwargs.get('seq_len', exp_model_config.model_config.seq_len))
-    ffn_dim                   = int(kwargs.get('ffn_dim', exp_model_config.model_config.ffn_dim))
+    intermediate_dim                   = int(kwargs.get('intermediate_dim', exp_model_config.model_config.intermediate_dim))
     # G                   = exp_model_config.model_config.num_gates
     precision           = exp_hw_config.sw_config.precision
 
@@ -227,7 +227,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
             batch_size=microB,
             hidden_dim=hidden_dim,
             seq_len=seq_len,
-            ffn_dim=ffn_dim,
+            intermediate_dim=intermediate_dim,
             n_heads=n_heads,
             precision=precision,
             model_type=exp_model_config.model_config.model_type,
@@ -277,7 +277,7 @@ def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
     return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
-def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
+def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_heads, kv_heads, intermediate_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
@@ -292,7 +292,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         d_model (int): Hidden size (D)
         num_heads (int): Number of attention heads (H)
         kv_heads (int): Number of key/value heads (H_kv)
-        ffn_dim (int): First FFN layer output dimension (typically 4 * D)
+        intermediate_dim (int): First FFN layer output dimension (typically 4 * D)
         vocab_size (int): Vocabulary size (V)
 
     Returns:
@@ -329,7 +329,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
 
     # Output projection & FFNs only process the new token
     gemms["output_proj"] = (batch_size, 1, d_model, d_model)
-    projected_dim = 2 * ffn_dim if str(model_type).lower() == "llama" else ffn_dim
+    projected_dim = 2 * intermediate_dim if str(model_type).lower() == "llama" else intermediate_dim
     if self.use_moe:
         # assuming equal load balancing here
         num_experts = max(1, int(getattr(self, "num_experts", getattr(self, "moe_num_experts", 1))))
@@ -337,10 +337,10 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         effective_batch_size = math.ceil(batch_size * top_k / num_experts)
 
         gemms["ffn1"] = (effective_batch_size , 1, d_model, projected_dim ) #gemm shape per expert
-        gemms["ffn2"] = (effective_batch_size , 1, ffn_dim, d_model)
+        gemms["ffn2"] = (effective_batch_size , 1, intermediate_dim, d_model)
     else:
         gemms["ffn1"] = (batch_size, 1, d_model, projected_dim) 
-        gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
+        gemms["ffn2"] = (batch_size, 1, intermediate_dim, d_model)
 
     return gemms
 
@@ -352,7 +352,7 @@ def process_decode_gemm_shapes(
     d_model,
     num_heads,
     kv_heads,
-    ffn_dim,
+    intermediate_dim,
     vocab_size,
     model_type="gpt",
 ):
@@ -372,7 +372,7 @@ def process_decode_gemm_shapes(
         d_model=d_model,
         num_heads=num_heads,
         kv_heads=kv_heads,
-        ffn_dim=ffn_dim,
+        intermediate_dim=intermediate_dim,
         vocab_size=vocab_size,
         model_type=model_type,
     )
