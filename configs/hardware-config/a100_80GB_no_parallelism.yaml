@@ -152,8 +152,8 @@ system_hierarchy:
   tp_inter: false
 network_topology:
   # Allowed values: ring | fc | switch
-  inter_node: fc
-  intra_node: fc
+  inter_node: ring
+  intra_node: ring
 memory_hierarchy:
   l0:
     type: SRAM-R
@@ -195,7 +195,7 @@ scheduling_param:
 
 
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

@@ -23,7 +23,7 @@ If uv is installed, prefix each command with `uv run` to execute it within the u
 #### Option B: Using pip
 
 - `python3 -m venv [/path/to/new/virtual/environment]`
-- `source [/path/to/new/virtual/environment]/bin/activate.csh`
+- `source [/path/to/new/virtual/environment]/bin/activate`
 - `pip install --upgrade pip`
 - `pip install -r requirements.txt`
 
@@ -160,39 +160,6 @@ DeepFlow can generate and visualize graphs, and when using the AstraSim network 
 - Flattened execution mode: `output/LLM/astra_flat/`
 - Hierarchical/Hybrid modes: `output/LLM/astra_hier/`
 
-## Example case study: Tensor parallelism on inference runtime
-
-1. Start by creating a model config from Hugging Face. For example, to pull the Qwen/Qwen2.5-3B settings:
-
-```bash
-python configs/model-config/hf_to_config.py Qwen/Qwen2.5-3B --run-type inference --batch-size 32 --seq-len 65536 --decode-len 1024 --use-flashattention true --flash-tile-size 256 -o configs/model-config/Qwen2.5-3B.yaml
-```
- The config file for Qwen2.5-3B is now autamatically generated under `configs/model-config`
-
-2. Use the example A100 hardware file and set tensor parallel degree to 1:
-
-
-Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 1` while `scheduling_param.tp: 1`. This models inference on one GPU without tensor parallelism.
-
-Run the inference estimation using the example configs:
-
-```bash
-python run_perf.py --hardware_config configs/hardware-config/a100_80GB_example.yaml --model_config configs/model-config/Qwen2.5-3B.yaml
-```
-
-3. To see the tensor-parallelism effect, modify the hardware file, switch to two devices per node and enable tensor parallelism:
-
-Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 2` and `scheduling_param.tp: 2`. This models inference on one GPU with tensor parallelism degree of 2.
-
-Re-run the same inference command with the updated hardware config.
-
-Comparing the two runs will show how increasing tensor parallelism changes the predicted inference runtime for this model.
-
-DeepFlow should report the following runtimes:  
-- TP = 1 (single GPU): LLM inference time: 281.67s  
-- TP = 2 (tensor degree of 2): LLM inference time: 157.17s
-
-
 
 ### Generated Files
 
@@ -212,23 +179,51 @@ DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSI
 
 - AstraSim backend caches runs by default in `./astra_cache/`. To disable caching, set the environment variable `DEEPFLOW_ASTRA_CACHE_MODE` to `NO_CACHE` or `CACHE_READONLY` (for multi-threaded runs). `NO_CACHE` (or manual cache flushing) is necessary if the AstraSim binary itself is modified.
 - Check the `configs` directory for architecture templates and technology node configurations.
-## Current Support
+
+
+## Example case study: Tensor parallelism on inference runtime for a new LLM config
+
+This is a short step-by-step guide on how to use DeepFlow to estimate the inference runtime of a new LLM config with varying degrees of tensor parallelism on the default A100_80GB hardware config.
+
+1. Start by creating a model config yaml file. For this example, we will use the Qwen/Qwen2.5-3B model from HuggingFace, and the helper configs/model-config/hf_to_config.py script to generate the config file.
+
+```bash
+python configs/model-config/hf_to_config.py Qwen/Qwen2.5-3B --run-type inference --batch-size 32 --seq-len 65536 --decode-len 1024 --use-flashattention true --flash-tile-size 256 -o configs/model-config/Qwen2.5-3B.yaml
+```
+ The config file for Qwen2.5-3B is generated under `configs/model-config`
+
+2. Use the example A100 hardware file and set tensor parallel degree to 1:
+
+Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 1` while `scheduling_param.tp: 1`. This models one GPU without tensor parallelism.
+
+Run the inference estimation using the example configs:
+
+```bash
+python run_perf.py --hardware_config configs/hardware-config/a100_80GB_example.yaml --model_config configs/model-config/Qwen2.5-3B.yaml
+```
+
+3. To see the effects of tensor-parallelism, modify the hardware file, switching to two devices per node tp = 2.
+
+Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 2` and `scheduling_param.tp: 2`. This models two GPU-inference with tensor parallelism degree of 2.
+
+Re-run the same inference command with the updated hardware config.
+
+Comparing the two runs will show how increasing tensor parallelism changes the predicted inference runtime for this model. Total runtime decrease is expected to be around 45%.
+
+## Current Support and feature status
 
 ### FlashAttention
 - **Current support:**
   - Forward pass in **training**
   - **Prefill** phase in inference
 - **Work in progress:**
-  - Attention tile size is currently manually defined; will add support for automatically determining the optimal tile size based on **SRAM size**
-  - For **decode** in inference, not supported for single-token scenarios; will support FlashAttention in **batched decode**
-  - **Backpropagation** in training mode is under development
-
+  - Attention tile size is currently manually defined. We will add support for automatically determining the optimal tile size based on **SRAM size** as done in optimized GPU kernels.
+  - For inference **decode**, theoretically supported but not enabled/tested as memory-bound decode does not benefit from FlashAttention. Instead, FlashDecoding-style techniques are typically used (not implemented yet).
 
 
 ### Data Parallelism
 - **Supported:** training and inference  
-- Inference uses a **replica-count abstraction** to mirror weights across replicas
-
+- For inference, acts as **replica-count**, as separate data-parallel chains of replicas act as independent instances and do not communicate. Hence, only the final decode throughput is multiplied by the number of replicas. For training full DDP & ZeRO-style (stage 1,2 or 3) Data Parallelism is supported.
 
 
 ### Tensor Parallelism
@@ -236,45 +231,47 @@ DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSI
 - Implements **Megatron-LM–style tensor parallelism**, with **sequence parallelism** optionally enabled or disabled
 
 
-
 ### Pipeline Parallelism
 - **Supported:** training and inference  
-- Each data batch is divided into **microbatches** that form pipeline bubbles  
+- Each data batch is divided into **microbatches** (mb) that dictate pipeline
 - Supports **GPipe-style pipeline parallelism** only  
-- Other pipeline styles are **work in progress**
-
+- Other pipeline styles (e.g. PipeDream) are **work in progress**
 
 
 ### Context Parallelism
-- **Supported:** training only  
-- **Inference path** is under development
+- **Supported:** Deepspeed-style context parallelism (CP) for training only.
+- **Inference path** is under development (WIP)
 
-
+### Hybrid Parallelism
+- **Supported:** Hybrid parallelism is supported for both training and inference for all parallelism and model types.
 
 ### Model Types
 - **Supported:** `gpt`, `llama`, `qwen2`, `phi3` for both training and inference  
-- **Note:** sliding-window attention configurations currently **fall back to dense attention**
-
+- **Note:** optional sliding-window attention configurations (in `qwen2`, `phi3`) currently **fall back to dense attention**
 
 
 ### Attention Types
 - **Supported:** dense **MHA** and **GQA** (`num_kv_heads`)  
-- **Work in progress:** sparse and **sliding-window** attention
+- **Work in progress:** **MLA**, potentially **sliding-window** attention
 
 
 ### Mixture of Experts (MoE)
-- **Supported:** single-GPU case in both training and inference  
+- **Supported:** single-GPU case in both training and inference (not tested/validated)
 - **Work in progress:** multi-GPU expert parallelism 
 
 
-
 ### Memory Estimation
-- **Status:** not enabled in the mainstream workflow  
+- **Status:** not enabled in the mainstream workflow (WIP)
 - **Supported:** transformer activation and static memory estimation with **hybrid parallelism** in training mode, and **inference** with **Tensor Parallelism**  
 - **Work in progress:** will be released after further refinement
 
 
 ### Energy Estimation
-- **Supported** inference only with or without FlashAttention
-- energy due to prefill and decode is reported separately
+- **Supported:** Very rudimentary, non validated model. Inference only for now (Training is WIP). Energy due to prefill and decode is reported separately
+- **Work in progress:** Training support, and heavy refinement of current implementation.
 
+### Validation
+- **Status:** Validation scripts are under development. Limited inference and training validation has been performed.
+- **Supported:** For inference, we validate against Koyeb's single NVIDIA A100 data on LLama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`. Below is the resulting plot, comparing DeepFlow's predicted decode throughput with Koyeb's reported decode throughput, available at https://www.koyeb.com/docs/hardware/gpu-benchmarks.
+
+![Koyeb Validation](output/validation/koyeb_a100_sxm_no_parallelism.png)

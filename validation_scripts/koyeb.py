@@ -121,7 +121,7 @@ def _run_deepflow_with_temp_model(prefill_len: int, decode_len: int, batch_size:
       decode_time = float(m.group(1))
 
     if decode_time is None:
-      raise RuntimeError("Failed to parse decode time from DeepFlow output")
+      raise RuntimeError(f"Failed to parse decode time from DeepFlow output: {output}")
     return output, decode_time
   finally:
     try:
