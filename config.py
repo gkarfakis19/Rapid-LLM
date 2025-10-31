@@ -1,15 +1,129 @@
 from dataclasses import dataclass, field
 import ruamel as _ruamel
 import ruamel.yaml as _yaml
+from ruamel.yaml import YAMLError as _YAMLError
 import math
 from collections import namedtuple as _namedtuple
 from typing import Optional
+
+
+_PRECISION_DTYPE_BYTES = {
+    "fp8": 1.0,
+    "fp16": 2.0,
+    "half": 2.0,
+    "bf16": 2.0,
+    "fp32": 4.0,
+    "single": 4.0,
+}
+
+
+@dataclass(frozen=True)
+class PrecisionConfig:
+    tensor: float
+    mixed_precision: bool
+    param_storage_mode: str
+    kv_cache: float
+    parameters: float
+    gradients: float
+    grad_communication: float
+    optimizer_states: float
+    stats: float
+    master_parameters: float
+
+    @property
+    def activations(self) -> float:
+        return self.tensor
+
+    @property
+    def tensor_format(self) -> float:
+        return self.tensor
+
+    @property
+    def requires_master_copy(self) -> bool:
+        return self.master_parameters > 0.0
+
+def _coerce_precision_value(value, *, tensor_bytes: Optional[float] = None, allow_as_tensor: bool = False) -> float:
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            raise ValueError("precision byte size must be positive")
+        return float(value)
+
+    if not isinstance(value, str):
+        raise TypeError(f"Unsupported precision specification type: {type(value)!r}")
+
+    normalized = value.strip().lower()
+    if allow_as_tensor and normalized == "as_tensor_format":
+        return float(tensor_bytes)
+
+    if normalized in _PRECISION_DTYPE_BYTES:
+        return _PRECISION_DTYPE_BYTES[normalized]
+
+    parsed = float(normalized)
+    if parsed <= 0:
+        raise ValueError("precision byte size must be positive")
+    return parsed
+
+
+def _parse_precision_block(spec: dict) -> PrecisionConfig:
+    tensor_bytes = _coerce_precision_value(spec["tensor_format"])
+    mixed = bool(spec["mixed_precision"])
+
+    raw_mode = str(spec["param_storage_mode"]).strip().lower()
+    if raw_mode not in {"as_tensor_format", "tensor_plus_fp32_master", "fp32_params"}:
+        raise ValueError(
+            "sw_param.precision.param_storage_mode must be one of 'as_tensor_format', "
+            "'tensor_plus_fp32_master', or 'fp32_params'"
+        )
+    if raw_mode == "tensor_plus_fp32_master" and not mixed:
+        raise ValueError("tensor_plus_fp32_master requires mixed_precision=true")
+
+    kv_cache_bytes = _coerce_precision_value(
+        spec["kv_cache"],
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    if not mixed:
+        parameter_bytes = tensor_bytes
+        gradient_bytes = tensor_bytes
+        grad_comm_bytes = tensor_bytes
+        optimizer_bytes = tensor_bytes
+        stats_bytes = tensor_bytes
+        effective_mode = "as_tensor_format"
+        master_bytes = 0.0
+    else:
+        effective_mode = raw_mode
+        optimizer_bytes = 4.0 # FP32
+        stats_bytes = 4.0 # FP32
+        master_bytes = 4.0 if raw_mode == "tensor_plus_fp32_master" else 0.0
+        if raw_mode == "fp32_params":
+            parameter_bytes = 4.0 # FP32
+            gradient_bytes = 4.0 # FP32
+            grad_comm_bytes = 4.0 # FP32
+        else:
+            parameter_bytes = tensor_bytes
+            gradient_bytes = tensor_bytes
+            grad_comm_bytes = tensor_bytes
+
+    return PrecisionConfig(
+        tensor=tensor_bytes,
+        mixed_precision=mixed,
+        param_storage_mode=effective_mode,
+        kv_cache=kv_cache_bytes,
+        parameters=parameter_bytes,
+        gradients=gradient_bytes,
+        grad_communication=grad_comm_bytes,
+        optimizer_states=optimizer_bytes,
+        stats=stats_bytes,
+        master_parameters=master_bytes,
+    )
 
 
 @dataclass
 class CoreConfig:
     nominal_power_per_mcu: float
     nominal_flop_rate_per_mcu: float
+    nominal_energy_per_flop: float
     nominal_voltage: float
     threshold_voltage: float
     margin_voltage: float
@@ -26,12 +140,13 @@ class CoreConfig:
     @classmethod
     def from_dict(cls, core_config_dict):
         return cls(
-            nominal_power_per_mcu=core_config_dict["nominal_power_per_mcu"],
+            nominal_power_per_mcu=core_config_dict.get("nominal_power_per_mcu", 0.1),
             nominal_flop_rate_per_mcu=core_config_dict["nominal_flop_rate_per_mcu"],
-            nominal_voltage=core_config_dict["nominal_voltage"],
-            threshold_voltage=core_config_dict["threshold_voltage"],
-            margin_voltage=core_config_dict["margin_voltage"],
-            operating_area_per_mcu=core_config_dict["operating_area_per_mcu"],
+            nominal_energy_per_flop=core_config_dict["nominal_energy_per_flop"],
+            nominal_voltage=core_config_dict.get("nominal_voltage", 0.1),
+            threshold_voltage=core_config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=core_config_dict.get("margin_voltage", 0.1),
+            operating_area_per_mcu=core_config_dict.get("operating_area_per_mcu", 0.1),
             num_mcu_per_bundle=core_config_dict["num_mcu_per_bundle"],
             FMA_dims=(core_config_dict["FMA_d1"], core_config_dict["FMA_d2"]),
             dataflow=core_config_dict["dataflow"],
@@ -69,18 +184,18 @@ class DRAMConfig:
     def from_dict(cls, dram_config_dict):
         return cls(
             dynamic_energy_per_bit=dram_config_dict["dynamic_energy_per_bit"],
-            static_power_per_bit=dram_config_dict["static_power_per_bit"],
-            area_per_bit=dram_config_dict["area_per_bit"],
-            stack_capacity=dram_config_dict["stack_capacity"],
-            area_per_stack=dram_config_dict["area_per_stack"],
+            static_power_per_bit=dram_config_dict.get("static_power_per_bit", 0.1),
+            area_per_bit=dram_config_dict.get("area_per_bit", 0.1),
+            stack_capacity=dram_config_dict.get("stack_capacity", 0.1),
+            area_per_stack=dram_config_dict.get("area_per_stack", 0.1),
             latency=dram_config_dict["latency"],
-            mem_ctrl_area=dram_config_dict["mem_ctrl_area"],
-            nominal_voltage=dram_config_dict["nominal_voltage"],
-            threshold_voltage=dram_config_dict["threshold_voltage"],
-            margin_voltage=dram_config_dict["margin_voltage"],
-            num_links_per_mm=dram_config_dict["num_links_per_mm"],
-            num_links_per_stack=dram_config_dict["num_links_per_stack"],
-            max_voltage=dram_config_dict["max_voltage"],
+            mem_ctrl_area=dram_config_dict.get("mem_ctrl_area", 0.1),
+            nominal_voltage=dram_config_dict.get("nominal_voltage", 0.1),
+            threshold_voltage=dram_config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=dram_config_dict.get("margin_voltage", 0.1),
+            num_links_per_mm=dram_config_dict.get("num_links_per_mm", 1),
+            num_links_per_stack=dram_config_dict.get("num_links_per_stack", 1),
+            max_voltage=dram_config_dict.get("max_voltage", 0.1),
             util=dram_config_dict["util"],
             size=dram_config_dict.get("size", None),
             bandwidth=dram_config_dict.get("bandwidth", None),
@@ -107,12 +222,12 @@ class SRAMConfig:
     def from_dict(cls, sram_config_dict):
         return cls(
             dynamic_energy_per_bit=sram_config_dict["dynamic_energy_per_bit"],
-            static_power_per_bit=sram_config_dict["static_power_per_bit"],
-            area_per_bit=sram_config_dict["area_per_bit"],
-            bank_capacity=sram_config_dict["bank_capacity"],
-            controller_area_per_link=sram_config_dict["controller_area_per_link"],
+            static_power_per_bit=sram_config_dict.get("static_power_per_bit", 0.1),
+            area_per_bit=sram_config_dict.get("area_per_bit", 0.1),
+            bank_capacity=sram_config_dict.get("bank_capacity", 0.1),
+            controller_area_per_link=sram_config_dict.get("controller_area_per_link", 0.1),
             latency=sram_config_dict["latency"],
-            overhead=sram_config_dict["overhead"],
+            overhead=sram_config_dict.get("overhead", 0.1),
             util=sram_config_dict["util"],
             size=sram_config_dict.get("size", None),
             bandwidth=sram_config_dict.get("bandwidth", None),
@@ -130,19 +245,23 @@ class SubNetworkConfig:
     margin_voltage: float
     num_links_per_mm: int
     util: float
+    operating_frequency: float = None  # Optional: overrides voltage-scaled frequency
+    bandwidth: float = None  # Optional: master parameter that directly sets throughput
 
     @classmethod
     def from_dict(cls, config_dict):
         return cls(
             latency=config_dict["latency"],
-            nominal_freq=config_dict["nominal_frequency"],
-            nominal_voltage=config_dict["nominal_voltage"],
-            nominal_energy_per_link=config_dict["nominal_energy_per_link"],
-            nominal_area_per_link=config_dict["nominal_area_per_link"],
-            threshold_voltage=config_dict["threshold_voltage"],
-            margin_voltage=config_dict["margin_voltage"],
-            num_links_per_mm=config_dict["num_links_per_mm"],
+            nominal_freq=config_dict.get("nominal_frequency", 0.1),
+            nominal_voltage=config_dict.get("nominal_voltage", 0.1),
+            nominal_energy_per_link=config_dict.get("nominal_energy_per_link", 0.1),
+            nominal_area_per_link=config_dict.get("nominal_area_per_link", 0.1),
+            threshold_voltage=config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=config_dict.get("margin_voltage", 0.1),
+            num_links_per_mm=config_dict.get("num_links_per_mm", 1),
             util=config_dict["util"],
+            operating_frequency=config_dict.get("operating_frequency", None),
+            bandwidth=parse_bandwidth_string(config_dict.get("bandwidth", None)),
         )
 
 
@@ -280,6 +399,7 @@ class SystemHierarchyConfig:
     kp2_inter: float
     dp_inter: float
     lp_inter: float
+    tp_inter: float
     par2cross: dict
 
     @classmethod
@@ -291,17 +411,19 @@ class SystemHierarchyConfig:
                 system_config_dict["num_nodes"]
                 * system_config_dict["num_devices_per_node"]
             ),
-            inter_derate=system_config_dict["inter_derate"],
-            intra_derate=system_config_dict["intra_derate"],
+            inter_derate=system_config_dict.get("inter_derate", 1.0),
+            intra_derate=system_config_dict.get("intra_derate", 1.0),
             kp1_inter=system_config_dict["kp1_inter"],
             kp2_inter=system_config_dict["kp2_inter"],
             dp_inter=system_config_dict["dp_inter"],
             lp_inter=system_config_dict["lp_inter"],
+            tp_inter=system_config_dict["tp_inter"],
             par2cross={
                 "kp1": system_config_dict["kp1_inter"],
                 "kp2": system_config_dict["kp2_inter"],
                 "dp": system_config_dict["dp_inter"],
                 "lp": system_config_dict["lp_inter"],
+                "tp": system_config_dict["tp_inter"],
             },
         )
 
@@ -394,34 +516,49 @@ class LLMAttentionConfig:
     attention_type: str
     num_heads: int
     kv_heads: Optional[int] = None
+    use_flashattention: bool = False
+    attention_tile_size: Optional[int] = None
 
 
 @dataclass
 class LLMConfig:
     mode: str
     run_type: str
+    model_type: str
+    tied_embeddings: bool
     num_layers: int
     hidden_dim: int
     batch_size: int
     seq_len: int
     decode_len: Optional[int]
-    ffn_dim: Optional[int]
-    ffn_mult: Optional[float]
+    intermediate_size: Optional[int]
     vocab_size: int
     n_tokens: int
     all_reduce: str
     attention: LLMAttentionConfig
+    num_experts: int
+    top_k: int
 
     @property
     def num_heads(self) -> int:
         return self.attention.num_heads
+
+    @property
+    def use_flashattention(self) -> bool:
+        return bool(getattr(self.attention, "use_flashattention", False))
+
+    @property
+    def use_moe(self) -> bool:
+        return self.num_experts > 1
 LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
         "sample_every",
     ],
 )
-SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])
+SWConfig = _namedtuple(
+    "sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth", "dp_zero_stage"]
+)
 
 SchedulingConfig = _namedtuple(
     "scheduling_param",
@@ -443,6 +580,9 @@ SchedulingConfig = _namedtuple(
         "kp_embedding_type",
         "kp_projection_type",
         "t",
+        "tp",
+        "cp",
+        "tp_sp",
         "kp1",
         "kp2",
     ],
@@ -504,7 +644,6 @@ ExecutionBackend = _namedtuple(
 InferenceHWConfig = _namedtuple(
     "InferenceHWConfig",
     [
-        "kvcache_precision",
         "kvcache_type",
         "kvcache_fetch_overlap",
     ],
@@ -582,6 +721,56 @@ def convert(d):
                             d[key1][key2][key3] = new_val
 
 
+def parse_bandwidth_string(value):
+    """Parse bandwidth/size string (e.g., '300 GB', '1986 GB') to bytes.
+
+    This function uses the same logic as convert() to parse bandwidth strings.
+    Returns the numeric value if already a number, or None if value is None.
+    """
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return float(value)
+
+    digit = [int(s) for s in value.split() if s.isdigit()]
+    order = [str(s) for s in value.split() if not s.isdigit()]
+
+    if not order or not digit:
+        # If no units found, try to parse as float
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"Cannot parse bandwidth value: {value}")
+
+    assert len(order) >= 1
+    assert len(digit) >= 1
+
+    prefix = order[0][0]
+    bit = order[0][1] if len(order[0]) > 1 else 'B'  # Default to Bytes
+    mult = 1
+
+    if prefix == "K":
+        mult = 1024
+    elif prefix == "M":
+        mult = 1024 * 1024
+    elif prefix == "G":
+        mult = 1024 * 1024 * 1024
+    elif prefix == "T":
+        mult = 1024 * 1024 * 1024 * 1024
+    else:
+        raise ValueError(f"Unknown prefix: {prefix} in bandwidth value: {value}")
+
+    if bit == "b":
+        mult = mult / 8  # Convert bits to Bytes
+    elif bit == "B":
+        mult = mult
+    else:
+        raise ValueError(f"Unknown type: {bit} in bandwidth value: {value}")
+
+    return digit[0] * mult
+
+
 def parse_config(filename, config_type):
     """Parse a yaml configuration file for this experiment.
     Args:
@@ -591,20 +780,62 @@ def parse_config(filename, config_type):
             scheduling configurations
     """
     with open(filename, "r") as f:
-        config_dict = _yaml.load(f, Loader=_ruamel.yaml.Loader)
+        try:
+            config_dict = _yaml.load(f, Loader=_ruamel.yaml.Loader)
+        except _YAMLError as exc:
+            hint = (
+                f"Failed to parse YAML config '{filename}'. "
+                "Please check indentation and required sections like 'attention' and parameters such as 'num_experts'."
+            )
+            raise ValueError(hint) from exc
         # print(config_dict) 
         convert(config_dict)
     if config_type == "hardware":
-        sw_params = dict(config_dict["sw_param"])
-        sw_params.setdefault("h2d_bandwidth", 12.4 * 1024 * 1024 * 1024)
-        sw_config = SWConfig(**sw_params)
-        sch_config = SchedulingConfig(**config_dict["scheduling_param"])
-        tech_config = TechConfig.from_dict(config_dict["tech_param"])
-        power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
-        area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
-        perimeter_config = PerimeterBreakdownConfig.from_dict(
-            config_dict["perimeter_breakdown"]
+        sw_block = dict(config_dict["sw_param"])
+        precision_spec = sw_block["precision"]
+        precision_config = _parse_precision_block(precision_spec)
+        kernel_launch_overhead = sw_block["kernel_launch_overhead"]
+        h2d_bandwidth = sw_block["h2d_bandwidth"]
+        dp_zero_stage = sw_block["dp_zero_stage"]
+        sw_config = SWConfig(
+            kernel_launch_overhead=kernel_launch_overhead,
+            precision=precision_config,
+            h2d_bandwidth=h2d_bandwidth,
+            dp_zero_stage=dp_zero_stage,
         )
+        sch_params = dict(config_dict["scheduling_param"])
+        if "tp" not in sch_params:
+            sch_params["tp"] = None
+        if "cp" not in sch_params:
+            sch_params["cp"] = None
+        sch_config = SchedulingConfig(**sch_params)
+        tech_config = TechConfig.from_dict(config_dict["tech_param"])
+
+        # Optional breakdown configs (not needed for simplified configs)
+        if "power_breakdown" in config_dict:
+            power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
+        else:
+            # Create dummy power config with zeros
+            power_config = PowerBreakdownConfig(
+                TDP=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                network=NetworkPowerConfig(inter_node=1.0, intra_node=1.0)
+            )
+
+        if "area_breakdown" in config_dict:
+            area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
+        else:
+            # Create dummy area config with zeros
+            area_config = AreaBreakdownConfig(
+                proc_chip_area_budget=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                node_area_budget=1.0, network=NetworkAreaConfig(inter_node=1.0, intra_node=1.0)
+            )
+
+        if "perimeter_breakdown" in config_dict:
+            perimeter_config = PerimeterBreakdownConfig.from_dict(config_dict["perimeter_breakdown"])
+        else:
+            # Create dummy perimeter config with zeros
+            perimeter_config = PerimeterBreakdownConfig(DRAM=0.1, inter_node=0.1, intra_node=0.1)
+
         system_config = SystemHierarchyConfig.from_dict(config_dict["system_hierarchy"])
         memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
             config_dict["memory_hierarchy"]
@@ -649,7 +880,6 @@ def parse_config(filename, config_type):
 
         inference_dict = config_dict.get("inference", {}) or {}
         inference_cfg = InferenceHWConfig(
-            kvcache_precision=inference_dict.get("kvcache_precision", sw_config.precision),
             kvcache_type=inference_dict.get("kvcache_type", "hbm_only"),
             kvcache_fetch_overlap=bool(inference_dict.get("kvcache_fetch_overlap", False)),
         )
@@ -678,49 +908,211 @@ def parse_config(filename, config_type):
         config = MODELConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
-        attention_dict = mp.pop("attention", None)
+        if "attention" not in mp:
+            raise ValueError("model_param.attention section must be specified for LLM configs")
+        attention_dict = mp.pop("attention")
+        if not isinstance(attention_dict, dict):
+            raise ValueError("model_param.attention must be a mapping of attention parameters")
 
-        if attention_dict is None:
-            legacy_heads = mp.pop("num_heads", None)
-            if legacy_heads is None:
+        if "attention_type" not in attention_dict:
+            raise ValueError("model_param.attention.attention_type must be specified")
+        attn_type_raw = attention_dict["attention_type"]
+        attn_type = str(attn_type_raw).strip().lower()
+        if attn_type == "mla":
+            raise NotImplementedError("attention_type='mla' is not yet supported. Please use 'mha' or 'gqa'.")
+        if attn_type not in {"mha", "gqa"}:
+            raise ValueError(
+                f"model_param.attention.attention_type must be either 'mha' or 'gqa' (got {attn_type_raw!r})"
+            )
+
+        if "num_heads" not in attention_dict:
+            raise ValueError("model_param.attention.num_heads must be specified")
+        try:
+            num_heads = int(attention_dict["num_heads"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"model_param.attention.num_heads must be an integer (got {attention_dict['num_heads']!r})"
+            ) from exc
+        if num_heads <= 0:
+            raise ValueError("model_param.attention.num_heads must be a positive integer")
+
+        kv_heads_field = attention_dict.get("kv_heads")
+
+        if attn_type == "gqa":
+            if kv_heads_field is None:
                 raise ValueError(
-                    "model_param.attention section missing and no legacy num_heads provided"
+                    "model_param.attention.kv_heads must be specified when attention_type='gqa'"
                 )
-            attention_cfg = LLMAttentionConfig(
-                attention_type="mha",
-                num_heads=int(legacy_heads),
-            )
+            try:
+                kv_heads = int(kv_heads_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.kv_heads must be an integer when attention_type='gqa' (got {kv_heads_field!r})"
+                ) from exc
         else:
-            attn_type = str(attention_dict.get("attention_type", "mha")).lower()
-            if "num_heads" not in attention_dict:
-                raise ValueError("model_param.attention.num_heads must be specified")
-            kv_heads_raw = attention_dict.get("kv_heads") if attn_type == "gqa" else None
-            attention_cfg = LLMAttentionConfig(
-                attention_type=attn_type,
-                num_heads=int(attention_dict["num_heads"]),
-                kv_heads=int(kv_heads_raw) if kv_heads_raw is not None else None,
+            # For MHA/MLA, ignore any provided kv_heads override and default to num_heads.
+            kv_heads = num_heads
+
+        if kv_heads <= 0:
+            raise ValueError("model_param.attention.kv_heads must be a positive integer")
+        if num_heads % kv_heads != 0:
+            raise ValueError(
+                f"model_param.attention.kv_heads={kv_heads} must divide num_heads={num_heads}"
             )
 
-        run_type = mp.pop("run_type", "training")
-        decode_len = mp.pop("decode_len", None)
-        inference_dict = dict(config_dict.get("inference_param", {}) or {})
-        inference_config = LLMInferenceConfig(
-            sample_every=inference_dict["sample_every"],
+        raw_flash_attention = attention_dict.get("use_flashattention", attention_dict.get("used_flash_attention", False))
+        if isinstance(raw_flash_attention, str):
+            flash_attention = raw_flash_attention.strip().lower() in {"1", "true", "yes", "y"}
+        else:
+            flash_attention = bool(raw_flash_attention)
+
+        tile_size_field = attention_dict.get("attention_tile_size")
+        if flash_attention:
+            if tile_size_field is None:
+                raise ValueError(
+                    "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
+                )
+            try:
+                attention_tile_size = int(tile_size_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.attention_tile_size must be an integer when flash attention is enabled (got {tile_size_field!r})"
+                ) from exc
+            if attention_tile_size <= 0:
+                raise ValueError("model_param.attention.attention_tile_size must be a positive integer when flash attention is enabled")
+        else:
+            # Flash attention disabled; tile size, if provided, is ignored.
+            attention_tile_size = None
+
+        attention_cfg = LLMAttentionConfig(
+            attention_type=attn_type,
+            num_heads=num_heads,
+            kv_heads=kv_heads,
+            use_flashattention=flash_attention,
+            attention_tile_size=attention_tile_size,
         )
+
+        num_experts_field = mp.pop("num_experts", None)
+        if num_experts_field is None:
+            raise ValueError("model_param.num_experts must be specified for LLM configs")
+        try:
+            num_experts = int(num_experts_field)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"model_param.num_experts must be an integer (got {num_experts_field!r})"
+            ) from exc
+        if num_experts <= 0:
+            raise ValueError("model_param.num_experts must be a positive integer")
+
+        top_k_field = mp.pop("top_k", None)
+        if top_k_field is None:
+            top_k = 1
+        else:
+            try:
+                top_k = int(top_k_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.top_k must be an integer when provided (got {top_k_field!r})"
+                ) from exc
+            if top_k <= 0:
+                raise ValueError("model_param.top_k must be a positive integer when provided")
+        if top_k > num_experts:
+            raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
+
+        if "run_type" not in mp:
+            raise ValueError("model_param.run_type must be specified")
+        run_type_raw = mp.pop("run_type")
+        run_type = str(run_type_raw).strip().lower()
+        if run_type not in {"training", "inference"}:
+            raise ValueError(f"model_param.run_type must be either 'training' or 'inference' (got {run_type_raw!r})")
+        if "tied_embeddings" not in mp:
+            raise ValueError("model_param.tied_embeddings must be specified")
+        tied_embeddings_raw = mp.pop("tied_embeddings")
+        if isinstance(tied_embeddings_raw, str):
+            tied_embeddings = tied_embeddings_raw.strip().lower() in {"1", "true", "yes", "y"}
+        else:
+            tied_embeddings = bool(tied_embeddings_raw)
+        if "model_type" not in mp:
+            raise ValueError("model_param.model_type must be specified")
+        model_type_raw = mp.pop("model_type")
+        model_type = str(model_type_raw).strip().lower()
+        if model_type not in {"gpt", "llama"}:
+            raise ValueError(
+                f"model_param.model_type must be either 'gpt' or 'llama' (got {model_type_raw!r})"
+            )
+        decode_len = mp.pop("decode_len", None)
+        if decode_len is not None:
+            try:
+                decode_len = int(decode_len)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.decode_len must be an integer when provided (got {decode_len!r})") from exc
+
+        inference_config = None
+        if run_type == "inference":
+            if decode_len is None:
+                raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
+            inference_dict = dict(config_dict.get("inference_param", {}) or {})
+            sample_every_raw = inference_dict.get("sample_every", -1)
+            try:
+                sample_every = int(sample_every_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"inference_param.sample_every must be an integer (got {sample_every_raw!r})"
+                ) from exc
+            inference_config = LLMInferenceConfig(sample_every=sample_every)
+
+        if "mode" not in mp:
+            raise ValueError("model_param.mode must be specified")
+        mode_raw = mp.pop("mode")
+        mode = str(mode_raw).strip().upper()
+        if mode != "LLM":
+            raise ValueError(f"model_param.mode must be 'LLM' for LLM configs (got {mode_raw!r})")
+
+        def _pop_required_int(field: str) -> int:
+            if field not in mp:
+                raise ValueError(f"model_param.{field} must be specified")
+            raw_value = mp.pop(field)
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.{field} must be an integer (got {raw_value!r})") from exc
+            if value <= 0:
+                raise ValueError(f"model_param.{field} must be a positive integer")
+            return value
+
+        num_layers = _pop_required_int("num_layers")
+        hidden_dim = _pop_required_int("hidden_dim")
+        batch_size = _pop_required_int("batch_size")
+        seq_len = _pop_required_int("seq_len")
+        vocab_size = _pop_required_int("vocab_size")
+
+        intermediate_size = mp.pop("intermediate_size", None)
+        if intermediate_size is None:
+            raise ValueError("model_param.intermediate_size must be specified for LLM configs")
+        try:
+            intermediate_size = int(intermediate_size)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"model_param.intermediate_size must be an integer (got {intermediate_size!r})") from exc
+        if intermediate_size <= 0:
+            raise ValueError("model_param.intermediate_size must be a positive integer")
+
         model_config = LLMConfig(
-            mode=mp.pop("mode"),
+            mode=mode,
             run_type=run_type,
-            num_layers=mp.pop("num_layers"),
-            hidden_dim=mp.pop("hidden_dim"),
-            batch_size=mp.pop("batch_size"),
-            seq_len=mp.pop("seq_len"),
+            model_type=model_type,
+            tied_embeddings=tied_embeddings,
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            batch_size=batch_size,
+            seq_len=seq_len,
             decode_len=decode_len,
-            ffn_dim=mp.pop("ffn_dim", None),
-            ffn_mult=mp.pop("ffn_mult", None),
-            vocab_size=mp.pop("vocab_size"),
-            n_tokens=mp.pop("n_tokens"),
-            all_reduce=mp.pop("all_reduce"),
+            intermediate_size=intermediate_size,
+            vocab_size=vocab_size,
+            n_tokens=0, # not used for now.
+            all_reduce="every layer", # hard set for now.
             attention=attention_cfg,
+            num_experts=num_experts,
+            top_k=top_k,
         )
         config = MODELConfig(model_config=model_config, inference_config=inference_config)
     else:

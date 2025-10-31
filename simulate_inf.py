@@ -23,23 +23,30 @@ class InferenceConfig:
     decode_len: int  # number of decode steps
     hidden_dim: int
     num_heads: int
-    ffn_dim: int
+    kv_heads: int
+    intermediate_size: int
     vocab_size: int
     num_layers: int
+    use_moe: bool 
+    num_experts: int
+    top_k: int
+
+    
     dp: int = 1  # data parallel (acts as replica count during inference)
     lp: int = 1  # layer parallel
-    kp1: int = 1  # tensor parallel dim 1
-    kp2: int = 1  # tensor parallel dim 2
-    tp_mode: str = "row_col"
+    tp: int = 1  # tensor parallel degree
+    cp: int = 1  # context parallel degree
+    tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
-    kv_cache_fetch_overlap: bool = False
+
 @dataclass
 class DecodeSample:
     """Represents a sampled decode step with execution results."""
     step_id: int
     current_seq_len: int
     execution_time: float
+    execution_energy: float
     graph_root: Any
     kv_cache_tokens: int
 
@@ -58,6 +65,9 @@ class DecodeGraph(Graph):
         hw_config,
         model_config,
         time_calc_cls: Callable[..., Any],
+        use_moe,
+        num_experts,
+        top_k,
         *args,
         **kwargs,
     ):
@@ -67,6 +77,13 @@ class DecodeGraph(Graph):
         self.model_config = model_config
         self.time_calc_cls = time_calc_cls
         self._decode_sample_root: Optional[str] = None
+        self.use_moe = config.use_moe
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k
+        # # Mirror MoE configuration expected by shared GEMM utilities
+        # self.use_moe = bool(getattr(config, "use_moe", False))
+        # self.num_experts = getattr(config, "num_experts", 1) or 1
+        # self.top_k = getattr(config, "top_k", 1) or 1
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -88,16 +105,18 @@ class DecodeGraph(Graph):
             total_seq_len = self.config.seq_len + generated_tokens
 
             gemm_shapes = LLM_util.process_decode_gemm_shapes(
+                self,
                 batch_size=self.config.batch_size,
                 current_seq_len=total_seq_len,
                 d_model=self.config.hidden_dim,
                 num_heads=self.config.num_heads,
-                ffn_dim=self.config.ffn_dim,
+                kv_heads=self.config.kv_heads,
+                intermediate_size=self.config.intermediate_size,
                 vocab_size=self.config.vocab_size,
-                option="multiply_batch_into_m"
+                model_type=self.model_config.model_config.model_type,
             )
 
-            sample_time = self._execute_decode_step(
+            sample_time, sample_energy = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
@@ -108,14 +127,15 @@ class DecodeGraph(Graph):
                     step_id=step_id,
                     current_seq_len=total_seq_len,
                     execution_time=sample_time,
+                    execution_energy=sample_energy,
                     graph_root=None,
                     kv_cache_tokens=total_seq_len,
                 )
             )
 
-        total_decode_time = self._integrate_decode_samples(decode_samples)
+        total_decode_time, total_decode_energy = self._integrate_decode_samples(decode_samples)
 
-        return total_decode_time, decode_samples
+        return total_decode_time, total_decode_energy, decode_samples
 
     def _generate_sample_points(self) -> List[int]:
         """Generate decode step sample points based on sampling configuration."""
@@ -153,54 +173,25 @@ class DecodeGraph(Graph):
             hw_config=self.hw_config,
             model_config=self.model_config,
             mode="LLM",
-            output_dir="./output_graph/",
+            output_dir="./output/LLM/",
         )
 
-        def measure_gemm(name: str, shape: Tuple[int, ...]) -> Dict[str, float]:
-            if len(shape) == 3:
-                gemm_args = shape
-            elif len(shape) == 4:
-                batch, seq_len, k_dim, n_dim = shape
-                gemm_args = (batch * seq_len, k_dim, n_dim)
-            else:
-                raise ValueError(f"Invalid GEMM shape for {name}: {shape}")
-
-            gemm_time, reduction_time = temp_time_calc._distributed_gemm_forward(
-                gemm_args,
-                f"decode_{name}_f",
-            )
-
-            return {
-                "forward": gemm_time + reduction_time,
-                "backward": 0.0,
-                "forward_gemm": gemm_time,
-                "forward_reduction": reduction_time,
-                "backward_gemm": 0.0,
-                "backward_reduction": 0.0,
-            }
-
-        gemm_results = {
-            name: measure_gemm(name, gemm_shapes[name])
-            for name in (
-                "qkv_proj",
-                "attention_score",
-                "attention_output",
-                "output_proj",
-                "ffn1",
-                "ffn2",
-            )
-        }
-
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
-        sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
-        root_dir = os.path.dirname(sample_dir)
-        if self._decode_sample_root is None:
-            self._decode_sample_root = root_dir
-            if self._should_cleanup_decode_samples() and os.path.isdir(root_dir):
-                shutil.rmtree(root_dir, ignore_errors=True)
-        os.makedirs(sample_dir, exist_ok=True)
-        prev_output_dir = temp_time_calc.output_dir
-        temp_time_calc.output_dir = sample_dir
+        sample_dir = None
+        if self._debug_graphs_enabled():
+            sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
+            root_dir = os.path.dirname(sample_dir)
+            if self._decode_sample_root is None:
+                self._decode_sample_root = root_dir
+                if os.path.isdir(root_dir):
+                    shutil.rmtree(root_dir, ignore_errors=True)
+            os.makedirs(sample_dir, exist_ok=True)
+            gemm_shapes_file = os.path.join(sample_dir, "decode_gemm_shapes.txt")
+            with open(gemm_shapes_file, "w", encoding="utf-8") as f:
+                for key, shape in gemm_shapes.items():
+                    f.write(f"{key}: {shape}\n")
+            prev_output_dir = temp_time_calc.output_dir
+            temp_time_calc.output_dir = sample_dir
 
         (
             pipeline_graph,
@@ -209,8 +200,7 @@ class DecodeGraph(Graph):
             transformer_forward_root,
             transformer_backward_root,
             interconnect_params,
-        ) = temp_time_calc.prepare_decode_graphs(
-            gemm_results=gemm_results,
+        ), energy = temp_time_calc.prepare_decode_graphs(
             batch_size=self.config.batch_size,
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
@@ -227,12 +217,18 @@ class DecodeGraph(Graph):
         )
 
         result = dispatcher.run(temp_time_calc.execution_mode)
-        temp_time_calc.output_dir = prev_output_dir
-        print(
-            f"[decode] sample step {step_id:04d}: seq_len={total_seq_len}, "
-            f"time={result.total_time:.6f}s, artifacts={sample_dir}"
-        )
-        return result.total_time
+        if sample_dir:
+            temp_time_calc.output_dir = prev_output_dir
+            print(
+                f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
+                f"time={result.total_time:.4f}s, artifacts={sample_dir}"
+            )
+        else:
+            print(
+                f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
+                f"time={result.total_time:.4f}s"
+            )
+        return result.total_time, energy
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
         """
@@ -245,14 +241,17 @@ class DecodeGraph(Graph):
             raise ValueError("No decode samples available for integration")
 
         total_time = 0.0
+        total_energy = 0.0
 
         for idx, sample in enumerate(samples):
             if idx == 0:
                 total_time += sample.execution_time
-                print(
-                    f"[decode] integration seed step {sample.step_id:04d}: "
-                    f"time={sample.execution_time:.6f}s"
-                )
+                total_energy += sample.execution_energy
+                if self._debug_graphs_enabled():
+                    print(
+                        f"[decode] integration seed step {sample.step_id:02d}: "
+                        f"time={sample.execution_time:.4f}s, energy={sample.execution_energy:.4f}J"
+                    )
                 continue
 
             prev_sample = samples[idx - 1]
@@ -263,9 +262,14 @@ class DecodeGraph(Graph):
             midpoint = 0.5 * (prev_sample.execution_time + sample.execution_time)
             segment_time = midpoint * step_gap
             total_time += segment_time
+
+            midpoint_energy = 0.5 * (prev_sample.execution_energy + sample.execution_energy)
+            segment_energy = midpoint_energy * step_gap
+            total_energy += segment_energy
+
             print(
-                f"[decode] integration segment {prev_sample.step_id:04d}->{sample.step_id:04d}: "
-                f"width={step_gap}, midpoint={midpoint:.6f}s, contribution={segment_time:.6f}s"
+                f"[decode] integration segment {prev_sample.step_id}->{sample.step_id}: "
+                f"width={step_gap}, midpoint={midpoint:.4f}s, contribution={segment_time:.4f}s"
             )
 
         last_sample = samples[-1]
@@ -273,19 +277,20 @@ class DecodeGraph(Graph):
         if remaining_steps > 0:
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
+            total_energy += remaining_steps * last_sample.execution_energy
             print(
-                f"[decode] integration tail from {last_sample.step_id:04d} covering {remaining_steps} steps: "
-                f"contribution={tail_time:.6f}s"
+                f"[decode] integration tail from {last_sample.step_id} covering {remaining_steps} steps: "
+                f"contribution={tail_time:.4f}s"
             )
 
         print(
-            f"[decode] total interpolated decode time: {total_time:.6f}s "
+            f"[decode] total interpolated decode time: {total_time:.4f}s, energy: {total_energy:.4f}J "
             f"from {len(samples)} samples"
         )
 
-        return total_time
+        return total_time, total_energy
 
-    def _should_cleanup_decode_samples(self) -> bool:
+    def _debug_graphs_enabled(self) -> bool:
         flag = os.environ.get("DEEPFLOW_VISUALIZE_GRAPHS")
         if flag is None:
             return False
@@ -332,15 +337,19 @@ class InferenceEngine:
             mode="inference",
             dp=self.config.dp,
             lp=self.config.lp,
-            kp1=self.config.kp1,
-            kp2=self.config.kp2,
-            tp_mode=self.config.tp_mode,
+            tp=self.config.tp,
+            cp=self.config.cp,
             comp_times={},
             comm_metadata={},
-            misc_metadata={"kv_cache_fetch_overlap": self.config.kv_cache_fetch_overlap},
+            misc_metadata={
+                "sequence_parallel": self.config.tp_sp,
+            },
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,
+            use_moe=self.config.use_moe,
+            num_experts=self.config.num_experts,
+            top_k=self.config.top_k,
         )
 
         return self.decode_graph.build_decode_graph()

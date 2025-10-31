@@ -313,7 +313,8 @@ class Projection():
         par2cross = {"kp1": False, 
                      "kp2": False, 
                      "dp": False,
-                     "lp": False} 
+                     "lp": False,
+                     "tp": False} 
         
         for i in range(0, lp):
           for j in range(0, dp):

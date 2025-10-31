@@ -1,8 +1,6 @@
 import math
 import sys
 import os
-from joblib import Memory
-
 import config
 
 core=1
@@ -16,24 +14,6 @@ DF_CACHE_DIR = "./cache"
 
 def printError(message):
   sys.exit(message)
-
-def disk_cache_function(func=None,*,ignore=()):
-  """Decorator for functions. Does not work for methods."""
-  def decorate(f):
-    return Memory(location=DF_CACHE_DIR, verbose=0).cache(func, ignore=list(ignore))
-  return decorate(func) if func else decorate
-
-def disk_cache_method(*, ignore=()):
-    """Decorator for instance methods (keeps 'self' binding)."""
-    def decorate(f):
-        class _CachedDescriptor:
-            def __get__(self, obj, objtype=None):
-                if obj is None:
-                    return self
-                bound = f.__get__(obj, objtype)          # bind 'self'
-                return Memory(location=DF_CACHE_DIR, verbose=0).cache(bound, ignore=list(ignore))
-        return _CachedDescriptor()
-    return decorate
 
 def getHiddenMem(L, Dim1, Dim2, Dim3, S, precision):
     #Activations refer to output activations that need to be stored
@@ -87,7 +67,7 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
     projection          = exp_model_config.model_config.projection 
     S                   = int(kwargs.get('seq_len', exp_model_config.model_config.seq_len))
     G                   = exp_model_config.model_config.num_gates
-    precision           = exp_hw_config.sw_config.precision
+    precision           = exp_hw_config.sw_config.precision.activations
    
     #MiniBatch
     dp                  = int(kwargs.get('dp', exp_hw_config.sch_config.dp))
@@ -137,7 +117,7 @@ def getMemUsagePerCore(exp_hw_config, exp_model_config, **kwargs):
     projection          = exp_model_config.model_config.projection 
     S                   = int(kwargs.get('seq_len', exp_model_config.model_config.seq_len))
     G                   = exp_model_config.model_config.num_gates
-    precision           = exp_hw_config.sw_config.precision
+    precision           = exp_hw_config.sw_config.precision.activations
 
     #Parallelism Params
     dp                  = int(kwargs.get('dp', exp_hw_config.sch_config.dp))
