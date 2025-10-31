@@ -15,7 +15,8 @@ class System:
 class Base:
     def __init__(self, exp_config):
         self.exp_config = exp_config
-        self.precision = exp_config.sw_config.precision
+        self._precision_cfg = exp_config.sw_config.precision
+        self.precision = self._precision_cfg.activations
         self.proc_chip_area_budget = exp_config.area_breakdown.proc_chip_area_budget
         self.TDP = exp_config.power_breakdown.TDP
         self.throughput = -1
@@ -192,6 +193,7 @@ class Core(Base):
         self.dataflow = exp_config.tech_config.core.dataflow
 
         self.nominal_flop_rate_per_mcu = exp_config.tech_config.core.nominal_flop_rate_per_mcu # TODO: Define it as a function of precision
+        self.nominal_energy_per_flop = exp_config.tech_config.core.nominal_energy_per_flop
         self.nominal_power_per_mcu = exp_config.tech_config.core.nominal_power_per_mcu
         self.util = exp_config.tech_config.core.util
 
@@ -376,7 +378,7 @@ class DRAM(Memory):
         elif exp_config.tech_config.DRAM.operating_frequency:
             self.nominal_freq = exp_config.tech_config.DRAM.operating_frequency
         else:
-            raise NotImplementedError()
+            self.nominal_freq = 0.1
 
         self.nominal_voltage = exp_config.tech_config.DRAM.nominal_voltage
         self.threshold_voltage = exp_config.tech_config.DRAM.threshold_voltage
@@ -755,6 +757,8 @@ class SubNetwork(Base):
         self.margin_voltage = net_config.margin_voltage
         self.num_links_per_mm = net_config.num_links_per_mm
         self.util = net_config.util
+        self.config_operating_frequency = net_config.operating_frequency  # Master parameter
+        self.config_bandwidth = net_config.bandwidth  # Master parameter - overrides all
         self.inter = True if netLevel == "inter" else False
         self.intra = True if netLevel == "intra" else False
 
@@ -772,13 +776,30 @@ class SubNetwork(Base):
         self.throughput = 0
         self.operating_freq = 0
         self.operating_voltage = 0
-        if self.num_links > 0:
+
+        # If bandwidth is explicitly set, use it directly (master parameter - overrides everything)
+        if self.config_bandwidth:
+            self.throughput = self.config_bandwidth * self.util
+            # Set nominal values when bandwidth is overridden (actual freq/voltage don't matter)
+            self.operating_freq = self.nominal_freq
+            self.operating_voltage = self.nominal_voltage
+        elif self.num_links > 0:
             self.calcOperatingVoltageFrequency()
-            self.throughput = self.calcThroughput()
+            # Calculate throughput based on topology
+            # 4 edges for intra (mesh), 1 edge for inter (mesh extension)
+            degree = 4 if self.intra else 1
+            self.throughput = (self.num_links * self.operating_freq * self.util) / (8 * degree)
 
         # self.energy_per_bit             = self.calcEnergyPerBit()
 
     def calcOperatingVoltageFrequency(self):
+        # If operating_frequency is explicitly set, use it directly (master parameter)
+        if self.config_operating_frequency:
+            self.operating_freq = self.config_operating_frequency
+            self.operating_voltage = self.nominal_voltage  # Assume nominal voltage when freq is overridden
+            return
+
+        # Otherwise, calculate from voltage scaling based on power constraints
         self.nominal_power = (
             self.nominal_energy_per_link * self.num_links * self.nominal_freq
         )
@@ -823,12 +844,7 @@ class SubNetwork(Base):
 
     # Return P2P bw
     def calcThroughput(self):
-        # TODO: update this to support other network topology
-        # 4 edges comes out of each node on wafer since we assume a mesh topology
-        # 1 edges for cross-wafer as each node is connected to only one node on the other wafer (mesh extension)
-        degree = 4 if self.intra else 1
-        throughput = (self.num_links * self.operating_freq * self.util) / (8 * degree)
-        return throughput
+        return self.throughput
 
     def printStats(self, f, name):
         self.calcEnergyPerBit()

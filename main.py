@@ -6,7 +6,7 @@ import re
 import math
 from deviceMapping import Projection
 
-par2cross_default = {'kp1':False, 'kp2':False, 'dp':False, 'lp':False}
+par2cross_default = {'kp1':False, 'kp2':False, 'dp':False, 'lp':False, 'tp':False}
 
 def run_command(exp_config, exp_dir, mode = 'standalone', debug=False, no_launch=False, index=0, dp=1, lp=1, kp_type=-1, kp1=1, kp2=1, batch_size=256, hidden_dim=19968, data_scale=1, inter_derate=1, intra_derate=1, par2cross=par2cross_default, wafer_dim=1):
     command = create_sbatch_enqueue_command(exp_config, 
@@ -73,7 +73,7 @@ def create_sbatch_enqueue_command(exp_config, exp_dir, mode, index, batch_size=2
         exp_name = 'perf'
     else:
         script='GD_search.py'
-        script_args = '--exp_config {exp_config} --exp_dir {tmp_dir} --debug {debug} --index {index} --batch_size {batch_size} --hidden_dim {hidden_dim} --data_scale {data_scale} --dp {dp} --lp {lp} --kp_type {kp_type} --kp1 {kp1} --kp2 {kp2} --inter_derate {inter_derate} --intra_derate {intra_derate} --kp1_inter {kp1_inter} --kp2_inter {kp2_inter} --dp_inter {dp_inter} --lp_inter {lp_inter} --wafer_dim {wafer_dim}'.format(exp_config=exp_config, tmp_dir=tmp_dir, debug=debug, index=index, batch_size=batch_size, hidden_dim=hidden_dim, data_scale=data_scale, dp=dp, lp=lp, kp1=kp1, kp2=kp2, kp_type=kp_type, inter_derate=inter_derate, intra_derate=intra_derate, kp1_inter=par2cross['kp1'], kp2_inter=par2cross['kp2'], dp_inter=par2cross['dp'], lp_inter=par2cross['lp'], wafer_dim=wafer_dim)
+        script_args = '--exp_config {exp_config} --exp_dir {tmp_dir} --debug {debug} --index {index} --batch_size {batch_size} --hidden_dim {hidden_dim} --data_scale {data_scale} --dp {dp} --lp {lp} --kp_type {kp_type} --kp1 {kp1} --kp2 {kp2} --inter_derate {inter_derate} --intra_derate {intra_derate} --kp1_inter {kp1_inter} --kp2_inter {kp2_inter} --dp_inter {dp_inter} --lp_inter {lp_inter} --tp_inter {tp_inter} --wafer_dim {wafer_dim}'.format(exp_config=exp_config, tmp_dir=tmp_dir, debug=debug, index=index, batch_size=batch_size, hidden_dim=hidden_dim, data_scale=data_scale, dp=dp, lp=lp, kp1=kp1, kp2=kp2, kp_type=kp_type, inter_derate=inter_derate, intra_derate=intra_derate, kp1_inter=par2cross['kp1'], kp2_inter=par2cross['kp2'], dp_inter=par2cross['dp'], lp_inter=par2cross['lp'], tp_inter=par2cross['tp'], wafer_dim=wafer_dim)
         exp_name = 'GD_search'
 
     command = (

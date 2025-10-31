@@ -1,10 +1,17 @@
 import math
 from heapq import heappush, heappop
+import sys
+from collections import deque
+from typing import Any, Dict, List, Optional, Set, Tuple
 from graphviz import Digraph
 import os
-class Node:
 
-    def __init__(self, name, op_id, hw_id, duration):
+import graphviz_async
+debug = False
+BYTES_PER_GIB = 1024 ** 3
+
+class Node:
+    def __init__(self, name, op_id, hw_id, duration, fwd=True):
         self.name = name
         self.op_id = op_id
         self.hw_id = hw_id
@@ -13,360 +20,1093 @@ class Node:
         self.finish_time = -1
         self.parents = []
         self.children = []
+        self.memory = 0  # memory usage
+        self.fwd = fwd  # forward or backward
+        self.scheduled = False
 
     def add_child(self, obj):
         self.children.append(obj)
         obj.parents.append(self)
 
+    def __repr__(self):
+        return f"Node({self.name},op={self.op_id},hw={self.hw_id},{round(self.duration, 2)})"
+    
+class Data_batch:
+    def __init__(self, name, batch_id, duration):
+        self.name = name
+        self.batch_id = batch_id
+        self.duration = duration
+        self.done = False
+        self.finish_time = -1
+        self.parents = []
+        self.children = []
+        self.scheduled = False
+        # self.memory = 0  # memory usage
+
+    def add_child(self, obj):
+        self.children.append(obj)
+        obj.parents.append(self)
+
+    def remove_self_from_children(self):
+        for child in self.children:
+            child.parents.remove(self)
+        self.children = []
 
 class Edge:
-  def __init__(self, name, op_id, hw_id, duration):
+  def __init__(self, name, op_id, duration, is_dp=False, comm_size_bytes=0, comm_type=None, participants=1, comm_interconnect_type=None):
     self.name = name
     self.op_id = op_id
-    self.hw_id = hw_id
     self.duration = duration
     self.done = False
     self.finish_time = -1
     self.parents = [] 
     self.children = []
-  
+    self.is_dp = is_dp
+    self.scheduled = False
+    self.comm_size_bytes = comm_size_bytes
+    self.comm_type = comm_type
+    self.participants = participants
+    self.comm_interconnect_type = comm_interconnect_type
+
   def add_child(self, obj):
       self.children.append(obj)
+      obj.parents.append(self)
 
+  def __repr__(self):
+      return f"Edge({self.name},op={self.op_id},{round(self.duration, 2)})"
+      
 class Graph:
-
     def __init__(
         self,
-        num_seq,
-        num_layer,
-        T_qkv_projection_f,
-        T_qkv_projection_b,
-        T_attention_score_f,
-        T_attention_score_b,
-        T_attention_scale_softmax_f,  # Add softmax timing
-        T_attention_scale_softmax_b,  # Add softmax timing
-        T_attention_output_f,
-        T_attention_output_b,
-        T_out_proj_f,
-        T_out_proj_b,
-        T_ffn1_f,
-        T_ffn1_b,
-        T_ffn2_f,
-        T_ffn2_b,
-        T_residual1_f,          # Add residual timing
-        T_residual1_b,  
-        T_layer_norm1_f,        # Add layer norm timing
-        T_layer_norm1_b,      # Add layer norm timing
-        T_residual2_f,          # Add residual timing
-        T_residual2_b,
-        T_layer_norm2_f,        # Add layer norm timing
-        T_layer_norm2_b,      # Add layer norm timing
-        T_linear_softmax_f,     # Add linear softmax timing
-        T_linear_softmax_b,     # Add linear softmax timing
-        lp,
-        T_embedding_f,
-        # Cf,
-        
-        Tf,
-        T_embedding_b,
-        # Cb,
-        
-        Tb,
-        T_reduction_transformer,
-        T_reduction_embedding,
-        T_reduction_linear_softmax,
+        mode: str,
+        dp: int,
+        lp: int,
+        tp: int,
+        cp: int,
+        comp_times: Dict[str, Any],
+        comm_metadata: Dict[str, Any],
+        misc_metadata: Dict[str, Any],
+    ) -> None:
+        self.mode = mode
+        self.dp = int(dp)
+        self.lp = int(lp)
+        self.tp = int(tp)
+        self.cp = int(cp)
+        self.comp_times = comp_times or {}
+        self.comm_metadata = comm_metadata or {}
+        self.misc_metadata = misc_metadata or {}
 
-    ):
-        self.num_seq = num_seq
-        self.num_layer = num_layer
-        self.lp = lp
-        self.T_qkv_f = T_qkv_projection_f
-        self.T_qkv_b = T_qkv_projection_b
-        self.T_attn_score_f= T_attention_score_f
-        self.T_attn_score_b = T_attention_score_b
-        self.T_attn_S_f = T_attention_scale_softmax_f
-        self.T_attn_S_b = T_attention_scale_softmax_b
-        self.T_attn_out_f = T_attention_output_f
-        self.T_attn_out_b = T_attention_output_b
-        self.T_out_f = T_out_proj_f
-        self.T_out_b = T_out_proj_b
-        self.T_ffn1_f = T_ffn1_f
-        self.T_ffn1_b = T_ffn1_b
-        self.T_ffn2_f = T_ffn2_f
-        self.T_ffn2_b = T_ffn2_b
-        self.T_residual1_f = T_residual1_f
-        self.T_residual1_b = T_residual1_b
-        self.T_layer_norm1_f = T_layer_norm1_f
-        self.T_layer_norm1_b = T_layer_norm1_b
-        self.T_residual2_f = T_residual2_f
-        self.T_residual2_b = T_residual2_b
-        self.T_layer_norm2_f = T_layer_norm2_f
-        self.T_layer_norm2_b = T_layer_norm2_b
-        self.T_linear_softmax_f = T_linear_softmax_f
-        self.T_linear_softmax_b = T_linear_softmax_b
-        hlp = lp
-        if lp > 2:
-            hlp = lp - 2
-        self.layer_per_device = math.ceil(num_layer / hlp)
-        self.T_embedding_f = T_embedding_f
-        # self.Cf = Cf
-        # self.Sf = Sf
-        self.Tf = Tf
-        self.T_embedding_b = T_embedding_b
-        # self.Cb = Cb
-        # self.Sb = Sb
-        self.Tb = Tb
-        self.T_reduction_transformer = T_reduction_transformer
-        self.T_reduction_embedding = T_reduction_embedding
-        self.T_reduction_linear_softmax = T_reduction_linear_softmax
+        self.num_batch = self.misc_metadata.get("num_batch", 0)
+        self.num_layer = self.misc_metadata.get("num_layer", 0)
+        self.layer_per_device = max(1, math.ceil(self.num_layer / self.lp)) if self.lp else self.num_layer
+        self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
 
-    def construct_fwd_graph(self):
-        embedding_node = []
-        # softmax_node = []
+        self.transformer_cfg = self.comp_times.get("transformer", {})
+        self.T_grad_transformer = self.comp_times.get("grad_transformer", 0.0)
 
-        #######
-        xform_node = []  # 
-        edge_list = []
+    def _time(self, key: str, default: float = 0.0) -> float:
+        value = self.comp_times.get(key)
+        return float(value) if value is not None else default
 
-        op_id = 0  # operation ID, used to distinguish nodes and edges
-        # ① Create ONE embedding node
-        emb = Node("embeddding", op_id, 0, self.T_embedding_f)      # hw_id = 0
-        op_id += 1
-        embedding_node = [emb]      # 
-        linear_softmax = Node("linear_softmax", op_id, self.lp-1, self.T_linear_softmax_f); op_id += 1
+    def create_comm_edge(self, name, op_id, comm_key, is_dp=False, local_hw_id=None):
+        """Create a communication edge with optional local computation node.
 
-        # ② Create ONE softmax node (batch × sequence)
-        # soft = Node("softmax", op_id, self.lp - 1, self.Sf)  # hw_id = lp-1
-        # op_id += 1
-        softmax_node = [linear_softmax]      
-        for l in range(self.num_layer):
-            xform_node.append([])
+        Args:
+            name: Edge name
+            op_id: Operation ID
+            comm_key: Key into self.comm_metadata dict
 
-            hw_id = min(l // self.layer_per_device + 1, self.lp - 1)
+        Returns:
+            The communication edge (connection point for graph building)
+        """
+        comm_data = self.comm_metadata[comm_key]
 
-            # for t in range(self.num_seq):
-            # 6 gemm nodes
-            qkv_proj  = Node("qkv_proj",  op_id, hw_id, self.T_qkv_f);  op_id += 1
-            attn_score = Node("attn_score", op_id, hw_id, self.T_attn_score_f); op_id += 1
-            attn_scale_softmax = Node("attn_scale_softmax", op_id, hw_id, self.T_attn_S_f); op_id += 1  # Add softmax node
-            attn_out  = Node("attn_out", op_id, hw_id, self.T_attn_out_f); op_id += 1
-            output_proj = Node("output_proj", op_id, hw_id, self.T_out_f); op_id += 1
-            residual1 = Node("residual1", op_id, hw_id, self.T_residual1_f); op_id += 1  # Add residual node
-            layer_norm1 = Node("layer_norm1", op_id, hw_id, self.T_layer_norm1_f); op_id += 1  # Add layer norm node
+        # Create communication edge with metadata
+        # print(f"Creating edge with name: {name}, size: {comm_data['size']}, type: {comm_data['type']}")
 
-            ffn1 = Node("ffn1", op_id, hw_id, self.T_ffn1_f); op_id += 1
-            ffn2 = Node("ffn2", op_id, hw_id, self.T_ffn2_f); op_id += 1
-            residual2 = Node("residual2", op_id, hw_id, self.T_residual2_f); op_id += 1  # Add residual node
-            layer_norm2 = Node("layer_norm2", op_id, hw_id, self.T_layer_norm2_f); op_id += 1
+        comm_edge = Edge(
+            name=name,
+            op_id=op_id,
+            duration=0,  # Will be filled in second pass
+            comm_size_bytes=comm_data['size'],
+            comm_type=comm_data['type'],
+            participants=comm_data['participants'],
+            comm_interconnect_type=comm_data['interconnect_type'],
+            is_dp=is_dp,
+        )
+        if local_hw_id is not None:
+            try:
+                comm_edge.local_hw_id = int(local_hw_id)
+            except (TypeError, ValueError):
+                comm_edge.local_hw_id = local_hw_id
 
-            qkv_proj.add_child(attn_score)  ; edge_list.append((qkv_proj, attn_score))
-            attn_score.add_child(attn_scale_softmax) ; edge_list.append((attn_score, attn_scale_softmax))
-            attn_scale_softmax.add_child(attn_out) ; edge_list.append((attn_scale_softmax, attn_out))
-            attn_out.add_child(output_proj) ; edge_list.append((attn_out, output_proj))
-            output_proj.add_child(residual1) ; edge_list.append((output_proj, residual1))
-            residual1.add_child(layer_norm1) ; edge_list.append((residual1, layer_norm1))
-            layer_norm1.add_child(ffn1) ; edge_list.append((layer_norm1, ffn1))
-            ffn1.add_child(ffn2) ; edge_list.append((ffn1, ffn2))
-            ffn2.add_child(residual2) ; edge_list.append((ffn2, residual2))
-            residual2.add_child(layer_norm2) ; edge_list.append((residual2, layer_norm2))
-            # layer_norm2.add_child(linear_softmax) ; edge_list.append((layer_norm2, linear_softmax))
+        # If there's local computation time, create local node after edge
+        local_comp_time = comm_data.get('local_comp_time', 0)
+        if local_comp_time > 0:
+            # TODO TODO TODO
+            # We want to ignore this in the future. Skipping it directly so that we match astrasim for now.
+            # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
+            local_comp_time = 0
 
-            xform_node[l].append([qkv_proj, attn_score, attn_scale_softmax, attn_out, output_proj, residual1, layer_norm1, ffn1, ffn2, residual2, layer_norm2])
+        if comm_data.get('tp_shard'):
+            comm_edge.tp_shard = True
 
-        for l in range(1, self.num_layer):
-            # for t in range(self.num_seq):
-            prev_ffn2 = xform_node[l-1][0][-1]        # previous layer's ffn2
-            curr_qkv  = xform_node[l][0][0]            # current layer's qkv_proj
+        return comm_edge
 
-            if prev_ffn2.hw_id == curr_qkv.hw_id:
-                edge = Edge("cross_layer", op_id, -1, 0)  
+    def extract_forward_graph(self, root: Any) -> Tuple[Any, Any]:
+        """Detach backward branches and return separate forward/backward clones."""
+
+        if root is None:
+            return None, None
+
+        clone_cache: Dict[str, Dict[int, Any]] = {"forward": {}, "backward": {}}
+        creation_order: Dict[str, List[Any]] = {"forward": [], "backward": []}
+        visited: Set[int] = set()
+
+        def is_backward(node: Any) -> bool:
+            direction = getattr(node, "direction", None)
+            if direction is not None and str(direction).lower() == "backward":
+                return True
+            if hasattr(node, "fwd"):
+                return bool(getattr(node, "fwd") is False)
+            return False
+
+        def classify(node: Any) -> str:
+            return "backward" if is_backward(node) else "forward"
+
+        def copy_optional_attrs(source: Any, target: Any) -> None:
+            for attr in (
+                "stage_id",
+                "micro_batch_index",
+                "layer_index",
+                "direction",
+                "tp_rank",
+                "flatten_placeholder",
+                "comm_interconnect_type",
+                "comm_type",
+                "comm_size_bytes",
+                "participants",
+                "is_cross_layer",
+                "local_hw_id",
+            ):
+                if hasattr(source, attr):
+                    setattr(target, attr, getattr(source, attr))
+
+        def ensure_clone(obj: Any, cls: str) -> Any:
+            obj_id = id(obj)
+            cache = clone_cache[cls]
+            cached = cache.get(obj_id)
+            if cached is not None:
+                return cached
+
+            if isinstance(obj, Node):
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone.memory = getattr(obj, "memory", 0)
+            elif isinstance(obj, Edge):
+                clone = Edge(
+                    obj.name,
+                    obj.op_id,
+                    obj.duration,
+                    is_dp=getattr(obj, "is_dp", False),
+                    comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
+                    comm_type=getattr(obj, "comm_type", None),
+                    participants=getattr(obj, "participants", 1),
+                    comm_interconnect_type=getattr(obj, "comm_interconnect_type", None),
+                )
+            elif isinstance(obj, Data_batch):
+                clone = Data_batch(obj.name, obj.batch_id, obj.duration)
+
             else:
-                edge = Edge("cross_layer", op_id, -1, self.Tf)  
-            op_id += 1
+                raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
 
-            prev_ffn2.add_child(edge); edge.add_child(curr_qkv)
+            copy_optional_attrs(obj, clone)
+            cache[obj_id] = clone
+            creation_order[cls].append(clone)
+            return clone
 
-        qkv_0_t = xform_node[0][0][0]     # first layer's qkv_proj
-        if qkv_0_t.hw_id == emb.hw_id:
-            edge = Edge("Emb_qkv0", op_id, -1, 0)
+        def traverse(obj: Any) -> None:
+            if obj is None:
+                return
+
+            if isinstance(obj, (list, tuple)):
+                for item in obj:
+                    traverse(item)
+                return
+
+            obj_id = id(obj)
+            cls = classify(obj)
+            current_clone = ensure_clone(obj, cls)
+
+            for child in getattr(obj, "children", []):
+                child_cls = classify(child)
+                child_clone = ensure_clone(child, child_cls)
+                if cls == child_cls:
+                    if child_clone not in current_clone.children:
+                        current_clone.add_child(child_clone)
+
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+
+            for child in getattr(obj, "children", []):
+                traverse(child)
+
+        traverse(root)
+
+        def clone_structure(obj: Any) -> Any:
+            if obj is None:
+                return None
+            if isinstance(obj, (list, tuple)):
+                cloned_items: List[Any] = []
+                for item in obj:
+                    cloned = clone_structure(item)
+                    if cloned is not None:
+                        cloned_items.append(cloned)
+                if not cloned_items:
+                    return None
+                return tuple(cloned_items) if isinstance(obj, tuple) else cloned_items
+
+            cls = classify(obj)
+            if cls != "forward":
+                return None
+            return ensure_clone(obj, cls)
+
+        forward_root = clone_structure(root)
+        if forward_root is None:
+            forward_root = ensure_clone(root, classify(root))
+
+        candidates: List[Any] = []
+        seen: Set[int] = set()
+        for clone in creation_order["backward"]:
+            clone_id = id(clone)
+            if clone_id in seen:
+                continue
+            seen.add(clone_id)
+            backward_parents = [p for p in getattr(clone, "parents", []) if classify(p) == "backward"]
+            if backward_parents:
+                continue
+            candidates.append(clone)
+
+        if not candidates:
+            backward_root: Optional[Any] = None
+        elif len(candidates) == 1:
+            backward_root = candidates[0]
         else:
-            edge = Edge("Emb_qkv0", op_id, -1, self.Tf)
-        op_id += 1
-        emb.add_child(edge)
-        edge.add_child(qkv_0_t)
+            backward_root = Data_batch("backward_root", -1, 0.0)
+            for candidate in candidates:
+                backward_root.add_child(candidate)
 
-        # for t in range(self.num_seq):
+        return forward_root, backward_root
 
-        prev_ffn2 = xform_node[-1][0][-1]  # last layer's ffn2
-        if prev_ffn2.hw_id == softmax_node[0].hw_id:
-            ffn2_Softmax = Edge("ffn2_Softmax", op_id, -1, 0)  # same GPU
+    def extract_backward_graph(self, root: Any) -> Any:
+        """Return a backward-only clone of the provided graph root."""
+
+        if root is None:
+            return None
+
+        def is_backward(node):
+            direction = getattr(node, "direction", None)
+            if direction is not None:
+                return str(direction).lower() == "backward"
+            if hasattr(node, "fwd"):
+                return bool(getattr(node, "fwd") is False)
+            for child in getattr(node, "children", []):
+                if getattr(child, "direction", None) == "backward" or getattr(child, "fwd", True) is False:
+                    return True
+            return False
+
+
+        visited: Set[int] = set()
+        all_objects: List[Any] = []
+
+        def collect(obj: Any) -> None:
+            if obj is None:
+                return
+            obj_id = id(obj)
+            if obj_id in visited:
+                return
+            visited.add(obj_id)
+
+            if isinstance(obj, (list, tuple)):
+                for item in obj:
+                    collect(item)
+                return
+
+            all_objects.append(obj)
+            for child in getattr(obj, "children", []):
+                collect(child)
+
+        collect(root)
+
+        backward_objects = [obj for obj in all_objects if is_backward(obj)]
+        if not backward_objects:
+            return None
+
+        included_ids = {id(obj) for obj in backward_objects}
+
+        def should_include(obj: Any) -> bool:
+            if is_backward(obj):
+                return True
+            if getattr(obj, "comm_type", None):
+                return True
+            name = getattr(obj, "name", "")
+            if isinstance(obj, Node) and "local_comp" in name:
+                return True
+            return False
+
+        queue = deque(backward_objects)
+        while queue:
+            current = queue.popleft()
+            for child in getattr(current, "children", []):
+                child_id = id(child)
+                if child_id in included_ids:
+                    continue
+                if should_include(child):
+                    included_ids.add(child_id)
+                    backward_objects.append(child)
+                    queue.append(child)
+
+        backward_ids = included_ids
+        clone_cache: Dict[int, Any] = {}
+
+        def ensure_clone(obj: Any) -> Any:
+            obj_id = id(obj)
+            cached = clone_cache.get(obj_id)
+            if cached is not None:
+                return cached
+
+            if isinstance(obj, Node):
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone.memory = getattr(obj, "memory", 0)
+            elif isinstance(obj, Edge):
+                clone = Edge(
+                    obj.name,
+                    obj.op_id,
+                    obj.duration,
+                    is_dp=getattr(obj, "is_dp", False),
+                    comm_size_bytes=getattr(obj, "comm_size_bytes", 0),
+                    comm_type=getattr(obj, "comm_type", None),
+                    participants=getattr(obj, "participants", 1),
+                    comm_interconnect_type=getattr(obj, "comm_interconnect_type", None),
+                )
+            elif isinstance(obj, Data_batch):
+                clone = Data_batch(obj.name, obj.batch_id, obj.duration)
+
+            else:
+                raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
+
+            for attr in (
+                "stage_id",
+                "micro_batch_index",
+                "layer_index",
+                "direction",
+                "tp_rank",
+                "flatten_placeholder",
+                "comm_interconnect_type",
+                "comm_type",
+                "comm_size_bytes",
+                "participants",
+                "is_cross_layer",
+                "local_hw_id",
+            ):
+                if hasattr(obj, attr):
+                    setattr(clone, attr, getattr(obj, attr))
+
+            clone_cache[obj_id] = clone
+            return clone
+
+        for obj in backward_objects:
+            ensure_clone(obj)
+
+        for obj in backward_objects:
+            clone = clone_cache[id(obj)]
+            for child in getattr(obj, "children", []):
+                if id(child) not in backward_ids:
+                    continue
+                child_clone = ensure_clone(child)
+                if child_clone not in clone.children:
+                    clone.add_child(child_clone)
+
+        root_candidates: List[Any] = []
+        for obj in backward_objects:
+            parents = [p for p in getattr(obj, "parents", []) if id(p) in backward_ids]
+            if parents:
+                continue
+            root_candidates.append(clone_cache[id(obj)])
+
+        if not root_candidates:
+            return None
+        # if len(root_candidates) == 1:
+        #     return root_candidates[0]
+
+        # backward_root = Data_batch("backward_root", -1, 0.0)
+        # for candidate in root_candidates:
+            # backward_root.add_child(candidate)
+        return root_candidates[0]
+
+    @staticmethod
+    def _reset_execution_state(root: Any) -> None:
+        """Clear scheduling metadata so the graph can be re-simulated."""
+        if root is None:
+            return
+
+        visited: Set[int] = set()
+        if isinstance(root, (list, tuple, set)):
+            stack: List[Any] = list(root)
         else:
-            ffn2_Softmax = Edge("ffn2_Softmax", op_id, -1, self.Tf)
-        op_id += 1
-        prev_ffn2.add_child(ffn2_Softmax)
-        ffn2_Softmax.add_child(softmax_node[0])
+            stack = [root]
 
-        return embedding_node
-    def construct_bwd_graph(self):
+        while stack:
+            obj = stack.pop()
+            obj_id = id(obj)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            if hasattr(obj, "done"):
+                setattr(obj, "done", False)
+            if hasattr(obj, "scheduled"):
+                setattr(obj, "scheduled", False)
+            if hasattr(obj, "finish_time"):
+                setattr(obj, "finish_time", -1)
+
+            stack.extend(getattr(obj, "children", []))
+
+    def convert_comm_sizes_to_times(self, roots, network_model, interconnect_params):
+        """
+        Args:
+            network_model: NetworkModel instance for collective timing
+            interconnect_params: Dict with bandwidth/latency for each type
+                                {'dp': (ib, ll), 'lp': (ib, ll), 'kp1': (ib, ll), 'kp2': (ib, ll)}
+        """
+        def traverse_and_convert(node, visited=None):
+            if visited is None:
+                visited = set()
+            if id(node) in visited:
+                return
+            visited.add(id(node))
+
+            # Process children (edges and nodes)
+            for child in node.children:
+                # If it's an edge with communication size, convert to time
+                if hasattr(child, 'comm_size_bytes') and child.comm_size_bytes > 0:
+                    # Get the appropriate bandwidth/latency for this interconnect type
+                    interconnect_type = child.comm_interconnect_type
+                    if interconnect_type and interconnect_type in interconnect_params:
+                        ib, ll = interconnect_params[interconnect_type]
+                    else:
+                        raise ValueError(f"Invalid interconnect type: {interconnect_type}") 
+
+                    child.duration = network_model.collective(
+                        kind=child.comm_type,
+                        size_bytes=child.comm_size_bytes,
+                        participants=child.participants,
+                        ib=ib,
+                        ll=ll,
+                        local_bytes=0.0,
+                        local_ops=0.0,
+                        debug_label=f"{child.name}_conversion"
+                    )
+                    # print(f"Converted {child.name} size {child.comm_size_bytes} bytes to duration {child.duration:.6f} sec using {interconnect_type} (ib={ib}, ll={ll})")
+
+                # Recursively process this child
+                traverse_and_convert(child, visited)
+
+        traverse_and_convert(roots)
+        return roots
+
+    def construct_fwd_bwd_graph(self, include_backward: bool = True):
         embedding_node = []
+        data_batch_node = []
         softmax_node = []
+        transformer_nodes = [[] for _ in range(self.num_batch)]  # transformer compute nodes per layer
+        layer_entry_nodes = [[] for _ in range(self.num_batch)]  # lists of entry nodes per layer
+        layer_exit_nodes = [[] for _ in range(self.num_batch)]   # transformer nodes per layer
 
-        #######
-        xform_node = []  # 
-        edge_list = []
+        embedding_b_time = self._time("embedding_b")
+        linear_softmax_b_time = self._time("linear_softmax_b")
+        transformer_b_time = self._time("transformer_b")
+        linear_softmax_f_time = self._time("linear_softmax_f")
+        linear_softmax_b_time = self._time("linear_softmax_b")
+        transformer_f_time = self._time("transformer_f")
+        transformer_b_time = self._time("transformer_b")
+        embedding_f_time = self._time("embedding_f")
+        embedding_b_time = self._time("embedding_b")
+        cross_layer_time = self._time("cross_layer_f")
+
+        def attach_parallel_edge(target, gather_edge, skip_non_comm_children=None, skip_comm_children=None):
+            parents = list(getattr(target, "parents", []))
+            for parent in parents:
+                if hasattr(parent, "children") and gather_edge not in parent.children:
+                    parent.add_child(gather_edge)
+            children = list(getattr(target, "children", []))
+            for child in children:
+                if skip_non_comm_children:
+                    if getattr(child, "comm_type", None) != "pipeline":
+                        continue
+                if skip_comm_children:
+                    if getattr(child, "comm_type", None) == "pipeline":
+                        continue
+                if gather_edge not in getattr(child, "parents", []):
+                    gather_edge.add_child(child)
+
+        if include_backward:
+            embedding_node_b = [[] for _ in range(self.num_batch)]
+            softmax_node_b = [[] for _ in range(self.num_batch)]
+            R_edge = [[] for _ in range(self.num_batch)]
+            G_edge = [[] for _ in range(self.num_batch)]
+
+            transformer_nodes_b = [[] for _ in range(self.num_batch)]  #
+            for b in range(self.num_batch):
+                transformer_nodes_b[b] = [[] for _ in range(self.num_layer)]
 
         op_id = 0  # operation ID, used to distinguish nodes and edges
-        # ① Create ONE embedding node
-        emb = Node("embeddding", op_id, 0, self.T_embedding_b)      # hw_id = 0
-        op_id += 1
-        embedding_node = [emb]      # 
-        linear_softmax = Node("linear_softmax", op_id, self.lp-1, self.T_linear_softmax_b); op_id += 1
+        batch_id = 0  # batch ID, used to distinguish data batches
+        
+        data0 = Data_batch("data0", batch_id, 0)
+        data_batch_node.append(data0)
+        
+        for i in range(1, self.num_batch):#create data batch node
+            
+            data_batch_node.append(Data_batch(f"data{i}", i, 0))
+            data_batch_node[i-1].add_child(data_batch_node[i])
 
-        # ② Create ONE softmax node (batch × sequence)
-        # soft = Node("softmax", op_id, self.lp - 1, self.Sf)  # hw_id = lp-1
-        # op_id += 1
-        softmax_node = [linear_softmax]    
-        while len(xform_node) <= self.num_layer :
-            xform_node.append([])  
-        for l in reversed(range(self.num_layer)):         
-            # xform_node.append([])
-
-            hw_id = min(l // self.layer_per_device + 1, self.lp - 1)
-
-            # for t in range(self.num_seq):
-            # 6 gemm nodes
-            qkv_proj  = Node("qkv_proj",  op_id, hw_id, self.T_qkv_b);  op_id += 1
-            attn_score = Node("attn_score", op_id, hw_id, self.T_attn_score_b); op_id += 1
-            attn_scale_softmax = Node("attn_scale_softmax", op_id, hw_id, self.T_attn_S_b); op_id += 1  # Add softmax node
-            attn_out  = Node("attn_out", op_id, hw_id, self.T_attn_out_b); op_id += 1
-            output_proj = Node("output_proj", op_id, hw_id, self.T_out_b); op_id += 1
-            residual1 = Node("residual1", op_id, hw_id, self.T_residual1_b); op_id += 1  # Add residual node
-            layer_norm1 = Node("layer_norm1", op_id, hw_id, self.T_layer_norm1_b); op_id += 1  # Add layer norm node
-
-            ffn1 = Node("ffn1", op_id, hw_id, self.T_ffn1_b); op_id += 1
-            ffn2 = Node("ffn2", op_id, hw_id, self.T_ffn2_b); op_id += 1
-            residual2 = Node("residual2", op_id, hw_id, self.T_residual2_b); op_id += 1  # Add residual node
-            layer_norm2 = Node("layer_norm2", op_id, hw_id, self.T_layer_norm2_b); op_id += 1
-
-            attn_score.add_child(qkv_proj)  ; edge_list.append((attn_score,qkv_proj ))
-            attn_scale_softmax.add_child(attn_score) ; edge_list.append((attn_scale_softmax, attn_score))
-            attn_out.add_child(attn_scale_softmax) ; edge_list.append((attn_out, attn_scale_softmax))
-            output_proj.add_child(attn_out) ; edge_list.append((output_proj, attn_out))
-            residual1.add_child(output_proj) ; edge_list.append((residual1, output_proj))
-            layer_norm1.add_child(residual1) ; edge_list.append((layer_norm1, residual1))
-            ffn1.add_child(layer_norm1) ; edge_list.append((ffn1, layer_norm1))
-            ffn2.add_child(ffn1) ; edge_list.append((ffn2, ffn1))
-            residual2.add_child(ffn2) ; edge_list.append((residual2, ffn2))
-            layer_norm2.add_child(residual2) ; edge_list.append((layer_norm2, residual2))
-
-            # qkv_proj.add_child(attn_score)  ; edge_list.append((qkv_proj, attn_score))
-            # attn_score.add_child(attn_scale_softmax) ; edge_list.append((attn_score, attn_scale_softmax))
-            # attn_scale_softmax.add_child(attn_out) ; edge_list.append((attn_scale_softmax, attn_out))
-            # attn_out.add_child(output_proj) ; edge_list.append((attn_out, output_proj))
-            # output_proj.add_child(residual1) ; edge_list.append((output_proj, residual1))
-            # residual1.add_child(layer_norm1) ; edge_list.append((residual1, layer_norm1))
-            # layer_norm1.add_child(ffn1) ; edge_list.append((layer_norm1, ffn1))
-            # ffn1.add_child(ffn2) ; edge_list.append((ffn1, ffn2))
-            # ffn2.add_child(residual2) ; edge_list.append((ffn2, residual2))
-            # residual2.add_child(layer_norm2) ; edge_list.append((residual2, layer_norm2))
-            # layer_norm2.add_child(linear_softmax) ; edge_list.append((layer_norm2, linear_softmax))
-
-            xform_node[l].append([layer_norm2, residual2, ffn2, ffn1, layer_norm1, residual1, output_proj, attn_out, attn_scale_softmax, attn_score, qkv_proj     ])
-
-        for l in reversed(range(1, self.num_layer)):
-            # for t in range(self.num_seq):
-            curr_qkv = xform_node[l][0][-1]         # current layer's qkv_proj.
-            next_ffn2  = xform_node[l-1][0][0]            # next layer's layernorm.
-
-            if curr_qkv.hw_id == next_ffn2.hw_id:
-                edge = Edge("cross_layer", op_id, -1, 0)  
-            else:
-                edge = Edge("cross_layer", op_id, -1, self.Tf)  
+        for b in range(self.num_batch): #connect each data batch node with corresponding nodes
+            linear_softmax = Node(f"linear_softmax{b}", op_id, self.lp-1, linear_softmax_f_time)
             op_id += 1
+            softmax_node.append(linear_softmax)
+            emb = Node(f"embedding{b}", op_id, 0, embedding_f_time)      # hw_id = 0
+            op_id += 1
+            embedding_node.append(emb)
+            data_batch_node[b].add_child(embedding_node[b])
 
-            curr_qkv.add_child(edge); edge.add_child(next_ffn2)
+            transformer_nodes[b] = []
+            layer_entry_nodes[b] = []
+            layer_exit_nodes[b] = []
 
-        qkv_0_t = xform_node[0][0][-1]     # first layer's qkv_proj
-        if qkv_0_t.hw_id == emb.hw_id:
-            edge = Edge("Emb_qkv0", op_id, -1, 0)
+            for l in range(self.num_layer):
+                hw_id = min(l // self.layer_per_device , self.lp - 1)#assign hw_id for transformer
+                transformer_node = Node(f"transformer_layer{l}", op_id, hw_id, transformer_f_time)
+                transformer_node.micro_batch_index = b
+                transformer_node.layer_index = l
+                transformer_node.direction = "forward"
+                transformer_node.stage_id = hw_id
+                op_id += 1
+                transformer_nodes[b].append(transformer_node)
+                entry_nodes = [transformer_node]
+                layer_entry_nodes[b].append(entry_nodes)
+                layer_exit_nodes[b].append(transformer_node)
+
+            for l in range(1, self.num_layer):
+                prev_node = transformer_nodes[b][l-1]        # previous layer compute node
+                curr_node  = transformer_nodes[b][l]            # current layer compute node
+                prev_exit = layer_exit_nodes[b][l-1]
+                curr_entries = layer_entry_nodes[b][l]
+
+                if prev_node.hw_id == curr_node.hw_id:
+                    edge = Edge("cross_layer", op_id, 0, comm_type="pipeline")  # on same GPU
+                else:
+                    edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')  # on different GPU
+                op_id += 1
+
+                prev_exit.add_child(edge)
+                for entry in curr_entries:
+                    edge.add_child(entry)
+
+
+            first_entries = layer_entry_nodes[b][0]   # first layer entry nodes list
+            primary_entry = first_entries[0]
+            if primary_entry.hw_id == embedding_node[b].hw_id:
+                edge = Edge("Emb_node0", op_id, 0, comm_type="pipeline")
+            else:
+                edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
+            op_id += 1
+            embedding_node[b].add_child(edge) #connect embedding node and first transformer layer
+            for entry in first_entries:
+                edge.add_child(entry)
+
+
+            last_exit = layer_exit_nodes[b][-1]  # last layer transformer node
+            if last_exit.hw_id == softmax_node[b].hw_id:
+                node_Softmax = Edge("node_Softmax", op_id, 0, comm_type="pipeline")  # same GPU
+            else:
+                node_Softmax = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
+            op_id += 1
+            last_exit.add_child(node_Softmax) #connect last layer and softmax layer
+            node_Softmax.add_child(softmax_node[b])
+
+        #add dependency edges
+        for b in range(self.num_batch - 1):
+            gpu_index = 0
+            last_transformer_layer = []
+            first_transformer_layer = []
+            first_transformer_layer.append(0)
+            for l in range(self.num_layer-1):
+                if transformer_nodes[b][l].hw_id != transformer_nodes[b][l+1].hw_id: # check if on different GPUs
+                    last_transformer_layer.append(l) # record last layer on each GPU
+                    first_transformer_layer.append(l+1) # record first layer on each GPU
+                    gpu_index += 1
+                    if transformer_nodes[b][l].hw_id == 0: #if first pipeline stage
+                        layer_exit_nodes[b][l].add_child(embedding_node[b+1]) # dependency: finish stage before next batch embedding starts
+                    else:
+                        next_entries = layer_entry_nodes[b+1][first_transformer_layer[gpu_index-1]]
+                        for entry in next_entries:
+                            layer_exit_nodes[b][l].add_child(entry)
+
+            next_entries = layer_entry_nodes[b+1][first_transformer_layer[-1]]
+            for entry in next_entries:
+                softmax_node[b].add_child(entry)
+
+        for db_node in data_batch_node:
+            db_node.remove_self_from_children()
+
+        if not include_backward:
+            return embedding_node[0]
+
+        for b in reversed(range(self.num_batch)): #connect each data batch node with corresponding nodes
+            emb_b = Node("embedding_b", op_id, 0, embedding_b_time, fwd=False)      # hw_id = 0
+            op_id += 1
+            embedding_node_b[b] = emb_b
+            linear_softmax_b = Node("linear_softmax_b", op_id, self.lp-1, linear_softmax_b_time, fwd=False)
+            op_id += 1
+            softmax_node_b[b] = linear_softmax_b
+            softmax_node[b].add_child(linear_softmax_b)
+
+
+            for l in reversed(range(self.num_layer)):
+                hw_id = min(l // self.layer_per_device , self.lp - 1)
+                transformer_node_b = Node(f"transformer_layer{l}_b", op_id, hw_id, transformer_b_time, fwd=False)
+                transformer_node_b.micro_batch_index = b
+                transformer_node_b.layer_index = l
+                transformer_node_b.direction = "backward"
+                transformer_node_b.stage_id = hw_id
+                op_id += 1
+                transformer_nodes_b[b][l] = transformer_node_b
+
+            for l in reversed(range(1, self.num_layer)):
+                curr_node = transformer_nodes_b[b][l]         # current layer's qkv_proj.
+                next_ffn2  = transformer_nodes_b[b][l-1]            # next layer's layernorm.
+                if curr_node.hw_id == next_ffn2.hw_id:
+                    edge = Edge("cross_layer", op_id, 0, comm_type="pipeline")  
+                else:
+                    edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
+                op_id += 1
+
+                curr_node.add_child(edge); edge.add_child(next_ffn2)
+
+            qkv_0_b = transformer_nodes_b[b][0]     # first layer's qkv_proj
+            if qkv_0_b.hw_id == emb_b.hw_id:
+                edge = Edge("Emb_node0", op_id, 0, comm_type="pipeline")
+            else:
+                edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
+            op_id += 1
+            qkv_0_b.add_child(edge)
+            edge.add_child(emb_b)
+
+
+            prev_layer_norm2 = transformer_nodes_b[b][self.num_layer-1] # last layer's layernorm2
+            if prev_layer_norm2.hw_id == softmax_node_b[b].hw_id:
+                layernorm_Softmax = Edge("layernorm2_Softmax", op_id, 0, comm_type="pipeline")  # same GPU
+            else:
+                layernorm_Softmax = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
+            op_id += 1
+            softmax_node_b[b].add_child(layernorm_Softmax)
+            layernorm_Softmax.add_child(prev_layer_norm2)
+
+        zero3_embedding_key = "zero3_embedding_gather"
+        if zero3_embedding_key in self.comm_metadata:
+            zero3_entry_embedding_edge = self.create_comm_edge(
+                f"{zero3_embedding_key}_b0_fwd_entry",
+                op_id,
+                zero3_embedding_key,
+                is_dp=True,
+                local_hw_id=embedding_node[0].hw_id,
+            )
+            op_id += 1
+            root_forward_entry = zero3_entry_embedding_edge
+            zero3_entry_embedding_edge.add_child(embedding_node[0])
         else:
-            edge = Edge("Emb_qkv0", op_id, -1, self.Tf)
-        op_id += 1
-        qkv_0_t.add_child(edge)
-        edge.add_child(emb)
+            root_forward_entry = embedding_node[0]
 
-        # for t in range(self.num_seq):
+        for b in range(self.num_batch):
+            # Data parallel collectives (all reduce for DDP/ZeRO-1, reduce-scatter + all-gather for ZeRO-2/3)
+            if self.dp > 1:
+                zero2_embedding_key = "zero2_embedding_gather"
+                zero2_transformer_key = "zero2_transformer_gather"
+                zero2_softmax_key = "zero2_softmax_gather"
+                embedding_edge = self.create_comm_edge(
+                    "embedding",
+                    op_id,
+                    "embedding",
+                    is_dp=True,
+                )
+                R_edge[b].append(embedding_edge)
+                op_id += 1
+                postfix = ""
+                if zero2_embedding_key in self.comm_metadata: # ZeRO-2/3, use reduce-scatter.
+                    postfix = "_reduce_scatter"
+                    gather_edge = self.create_comm_edge(
+                        zero2_embedding_key,
+                        op_id,
+                        zero2_embedding_key,
+                        is_dp=True,
+                        local_hw_id=embedding_node[b].hw_id,
+                    )
+                    op_id += 1
+                    embedding_edge.add_child(gather_edge)
+                elif zero3_embedding_key in self.comm_metadata: # No ZeRO-2/3, use all-reduce.
+                    postfix = "_reduce_scatter"
+                else:
+                    postfix = "_all_reduce"
 
-        prev_layer_norm2 = xform_node[self.num_layer-1][0][0]  # last layer's layernorm2
-        if prev_layer_norm2.hw_id == softmax_node[0].hw_id:
-            layernorm_Softmax = Edge("layernorm2_Softmax", op_id, -1, 0)  # same GPU
-        else:
-            layernorm_Softmax = Edge("layernorm2_Softmax", op_id, -1, self.Tf)
-        op_id += 1
-        softmax_node[0].add_child(layernorm_Softmax)
-        layernorm_Softmax.add_child(prev_layer_norm2)
-        # all-reduce
-        R_edge = []
+                zero3_embedding_key = "zero3_embedding_gather"
+                zero3_transformer_key = "zero3_transformer_gather"
+                zero3_softmax_key = "zero3_softmax_gather"
+                for layer_idx in range(self.num_layer):
+                    reducer = self.create_comm_edge(
+                        f"transformer_b{b}_layer{layer_idx}"+postfix,
+                        op_id,
+                        "transformer",
+                        is_dp=True,
+                        local_hw_id=transformer_nodes_b[b][layer_idx].hw_id,
+                    )
+                    R_edge[b].append(reducer)
+                    op_id += 1
 
-        R_edge.append(Edge("Reduce_Embedding", 0, self.lp - 1, self.T_reduction_embedding))
+                    if zero2_transformer_key in self.comm_metadata:
+                        gather_edge = self.create_comm_edge(
+                            zero2_transformer_key,
+                            op_id,
+                            zero2_transformer_key,
+                            is_dp=True,
+                            local_hw_id=transformer_nodes_b[b][layer_idx].hw_id,
+                        )
+                        op_id += 1
+                        reducer.add_child(gather_edge)
 
-        for i in range(0, self.num_layer):
-            R_edge.append(Edge("Reduce_transformer", i, (0 if self.lp == 1 else int(i // self.layer_per_device) + self.lp) , self.T_reduction_transformer))
+                if zero3_transformer_key in self.comm_metadata:
+                    # create the edge for the embedding gather of the next batch (except for the last batch)
+                    zero3_embedding_gather_edge = None
+                    if b < self.num_batch - 1:
+                        zero3_embedding_gather_edge = self.create_comm_edge(
+                            f"{zero3_embedding_key}_b{b+1}_fwd",
+                            op_id,
+                            zero3_embedding_key,
+                            is_dp=True,
+                            local_hw_id=embedding_node[b].hw_id,
+                        )
+                        op_id += 1
 
-        R_edge.append(Edge("Reduce_Softmax", 0, 2 * self.lp - 2, self.T_reduction_linear_softmax))
-    # Attach All-Reduce Edges
-        softmax_node[0].add_child(R_edge[self.num_layer + 1])
-        embedding_node[0].add_child(R_edge[0])
-        for i in range(0, self.num_layer):
-            xform_node[i][0][-1].add_child(R_edge[i + 1])
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_transformer_key}_b{b}_layer0_fwd",
+                        op_id,
+                        zero3_transformer_key,
+                        is_dp=True,
+                        local_hw_id=embedding_node[b].hw_id,
+                    )
+                    op_id += 1
+                    attach_parallel_edge(embedding_node[b], gather_edge)
+                    for layer_idx in range(1, self.num_layer):
+                        host = transformer_nodes[b][layer_idx - 1]
+                        target = transformer_nodes[b][layer_idx]
+                        gather_edge = self.create_comm_edge(
+                            f"{zero3_transformer_key}_b{b}_layer{layer_idx}_fwd",
+                            op_id,
+                            zero3_transformer_key,
+                            is_dp=True,
+                            local_hw_id=target.hw_id,
+                        )
+                        op_id += 1
+                        if host.hw_id == target.hw_id:
+                            attach_parallel_edge(host, gather_edge)
+                        else:
+                            # Cross-device. Have to do this very carefully.
+                            # We will need to attach the edge but make sure the dependencies only apply to the "cross_layer" comm.
+                            attach_parallel_edge(host, gather_edge, skip_non_comm_children=True)
+                            # Then, we will need to attach the zero3 embedding gather edge to the target device.
+                            if zero3_embedding_gather_edge:
+                                attach_parallel_edge(host, zero3_embedding_gather_edge, skip_comm_children=True)
+                             
 
-        return softmax_node
+                softmax_edge = self.create_comm_edge(
+                    "softmax"+postfix,
+                    op_id,
+                    "softmax",
+                    is_dp=True,
+                    local_hw_id=softmax_node[b].hw_id,
+                )
+                R_edge[b].append(softmax_edge)
+                op_id += 1
+                if zero2_softmax_key in self.comm_metadata:
+                    gather_edge = self.create_comm_edge(
+                        zero2_softmax_key,
+                        op_id,
+                        zero2_softmax_key,
+                        is_dp=True,
+                        local_hw_id=softmax_node[b].hw_id,
+                    )
+                    op_id += 1
+                    softmax_edge.add_child(gather_edge)
 
-    def simulate(self, root, gid):
+                if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+                    host = transformer_nodes[b][self.num_layer - 1]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_softmax_key}_b{b}_fwd",
+                        op_id,
+                        zero3_softmax_key,
+                        is_dp=True,
+                        local_hw_id=host.hw_id,
+                    )
+                    op_id += 1
+                    attach_parallel_edge(host, gather_edge)
+
+                softmax_node_b[b].add_child(R_edge[b][-1])
+                embedding_node_b[b].add_child(R_edge[b][0])
+                for layer_idx in range(self.num_layer):
+                    transformer_nodes_b[b][layer_idx].add_child(R_edge[b][layer_idx + 1])
+
+
+        last_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
+        first_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
+
+        # first_transformer_layer.append(0)
+        gpu_index = self.lp - 1
+        for l in range(self.num_layer - 1, 0, -1):
+            if transformer_nodes_b[0][l].hw_id != transformer_nodes_b[0][l-1].hw_id:  # Check if on different GPU
+                # print("Layer ", l, " is on GPU ", transformer_nodes_b[0][l].hw_id)
+                first_transformer_layer[gpu_index-1] = l-1  # Record first layer on each GPU
+                last_transformer_layer[gpu_index] = l  # Record last layer on each GPU
+                gpu_index -= 1
+        # for id in range(self.lp):
+            # print("GPU ", id, " first layer ", first_transformer_layer[id], " last layer ", last_transformer_layer[id])
+
+
+
+        for b in range(self.num_batch-1, 0, -1):
+            gpu_index = self.lp - 1
+            for l in range(self.num_layer - 1, 0, -1):
+                if transformer_nodes_b[b][l].hw_id != transformer_nodes_b[b][l-1].hw_id:  # Check if on different GPUs
+                    # last_transformer_layer.append(l)  # Record last layer on each GPU
+                    # first_transformer_layer.append(l-1)  # Record first layer on each GPU
+                    
+                    if transformer_nodes_b[b][l].hw_id == self.lp - 1:
+                        transformer_nodes_b[b][l].add_child(softmax_node_b[b-1])  # Add dependency edge
+                    else:
+                        transformer_nodes_b[b][l].add_child(transformer_nodes_b[b-1][first_transformer_layer[gpu_index]])  # Add dependency edge
+                    gpu_index -= 1
+            # Ensure embedding_node_b[b] is connected to the correct transformer node
+            # if first_transformer_layer:
+            embedding_node_b[b].add_child(transformer_nodes_b[b-1][first_transformer_layer[0]])  # Add dependency edge
+
+        zero3_embedding_key = "zero3_embedding_gather"
+        zero3_transformer_key = "zero3_transformer_gather"
+        zero3_softmax_key = "zero3_softmax_gather"
+
+        zero3_softmax_bwd_entry = None
+        if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+            zero3_softmax_bwd_entry = self.create_comm_edge(
+                f"{zero3_softmax_key}_b0_bwd_entry",
+                op_id,
+                zero3_softmax_key,
+                is_dp=True,
+                local_hw_id=softmax_node_b[0].hw_id,
+            )
+            op_id += 1
+            attach_parallel_edge(softmax_node[-1], zero3_softmax_bwd_entry)
+        for b in range(self.num_batch):
+            zero3_softmax_bwd_edge = None
+            if b > 0:
+                if zero3_softmax_key in self.comm_metadata:
+                    host = softmax_node[b]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_softmax_key}_b{b}_bwd",
+                        op_id,
+                        zero3_softmax_key,
+                        is_dp=True,
+                        local_hw_id=host.hw_id,
+                    )
+                    op_id += 1
+                    zero3_softmax_bwd_edge = gather_edge
+
+            if zero3_transformer_key in self.comm_metadata and self.num_layer > 0:
+                for layer_idx in reversed(range(self.num_layer)):
+                    host = softmax_node_b[b] if layer_idx == self.num_layer - 1 else transformer_nodes_b[b][layer_idx + 1]
+                    target = transformer_nodes_b[b][layer_idx]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_transformer_key}_b{b}_layer{layer_idx}_bwd",
+                        op_id,
+                        zero3_transformer_key,
+                        is_dp=True,
+                        local_hw_id=target.hw_id,
+                    )
+                    op_id += 1
+                    if host.hw_id == target.hw_id:
+                        attach_parallel_edge(host, gather_edge)
+                    else:
+                        # Cross-device. Have to do this very carefully.
+                        # We will need to attach the edge but make sure the dependencies only apply to the "cross_layer" comm.
+                        attach_parallel_edge(host, gather_edge, skip_non_comm_children=True)
+                        if zero3_softmax_bwd_edge:
+                            attach_parallel_edge(host, zero3_softmax_bwd_edge, skip_comm_children=True)
+
+
+            if zero3_embedding_key in self.comm_metadata and self.num_layer > 0:
+                host = transformer_nodes_b[b][0]
+                gather_edge = self.create_comm_edge(
+                    f"{zero3_embedding_key}_b{b}_bwd",
+                    op_id,
+                    zero3_embedding_key,
+                    is_dp=True,
+                    local_hw_id=host.hw_id,
+                )
+                op_id += 1
+                attach_parallel_edge(host, gather_edge)
+
+        return root_forward_entry
+
+    def construct_transformer_graph(self, direction: str = "both"):
+        transformer_cfg = self.transformer_cfg
+        gemm_entries = transformer_cfg.get("gemms")
+        if not gemm_entries:
+            raise ValueError("Transformer GEMM times not provided")
+
+        tp_degree = self.tp
+
+        root = Data_batch("transformer_root", 0, 0)
+        op_id = 0
+
+        for rank in range(tp_degree):
+            previous = root
+
+            if direction in {"forward", "both"}:
+                for idx, entry in enumerate(gemm_entries):
+                    entry_name = entry.get("name", f"g{idx}")
+                    forward_cfg = entry.get("forward", {})
+                    fwd_duration = forward_cfg.get("duration")
+                    if fwd_duration is None:
+                        raise ValueError("Transformer GEMM entry missing forward duration")
+
+                    node = Node(
+                        name=f"{entry_name}_fwd_rank{rank}",
+                        op_id=op_id,
+                        hw_id=rank,
+                        duration=fwd_duration,
+                        fwd=True,
+                    )
+                    op_id += 1
+                    previous.add_child(node)
+                    previous = node
+                    comm_key = forward_cfg.get("comm_keys",None)
+                    if comm_key:
+                        if len(comm_key) > 1:
+                            print(f"*CONSTRUCT INFO: Multiple comm keys for {entry_name}")
+                            print(f"*CONSTRUCT INFO: Comm keys: {comm_key}")
+                            raise ValueError(f"Multiple comm keys for {entry_name}")
+
+                        comm_key = comm_key[0]
+                        if comm_key not in self.comm_metadata:
+                            raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
+                        comm_edge = self.create_comm_edge(
+                            name=comm_key,
+                            op_id=op_id,
+                            comm_key=comm_key,
+                            is_dp=False,
+                            local_hw_id=rank,
+                        )
+                        op_id += 1
+                        previous.add_child(comm_edge)
+                        previous = comm_edge
+
+            if direction in {"backward", "both"}:
+                for idx, entry in enumerate(reversed(gemm_entries)):
+                    entry_name = entry.get("name", f"g{idx}")
+                    backward_cfg = entry.get("backward", {})
+                    bwd_duration = backward_cfg.get("duration")
+                    if bwd_duration is None:
+                        raise ValueError("Transformer GEMM entry missing backward duration")
+
+                    node = Node(
+                        name=f"{entry_name}_bwd_rank{rank}",
+                        op_id=op_id,
+                        hw_id=rank,
+                        duration=bwd_duration,
+                        fwd=False,
+                    )
+                    op_id += 1
+                    previous.add_child(node)
+                    previous = node
+
+                    for comm_idx, comm_key in enumerate(backward_cfg.get("comm_keys", [])):
+                        if comm_key not in self.comm_metadata:
+                            raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
+                        comm_edge = self.create_comm_edge(
+                            name=comm_key,
+                            op_id=op_id,
+                            comm_key=comm_key,
+                            is_dp=False,
+                            local_hw_id=rank,
+                        )
+                        op_id += 1
+                        previous.add_child(comm_edge)
+                        previous = comm_edge
+
+        return root
+        
+    def simulate(self, root):
         time = 0
         counter = 0
         event_queue = []
-        done_list = []
         ready_list = []
 
-        # for r in roots:
-        #  ready_list.append(r)
-        ready_list.append(root)
+        self._reset_execution_state(root)
 
-        GPU_list = [True for i in range(0, self.lp)]
-        link_list = [True for i in range(0, 2 * self.lp - 1)]
+        ready_list.append(root)
+        root.scheduled = True
+        ###find number of devices needed
+        base_devices = max(1, int(self.lp) if self.lp else 1)
+        max_hw_id = -1
+        visited_nodes: Set[int] = set()
+        stack = list(root if isinstance(root, (list, tuple)) else [root])
+        while stack:
+            node = stack.pop()
+            node_id = id(node)
+            if node_id in visited_nodes:
+                continue
+            visited_nodes.add(node_id)
+
+            hw_id = getattr(node, "hw_id", None)
+            if hw_id is not None:
+                try:
+                    hw_val = int(hw_id)
+                except (TypeError, ValueError):
+                    hw_val = None
+                if hw_val is not None and hw_val >= 0:
+                    max_hw_id = max(max_hw_id, hw_val)
+
+            stack.extend(getattr(node, "children", []))
+
+        if max_hw_id >= 0:
+            base_devices = max(base_devices, max_hw_id + 1)
+
+        GPU_list = [True for _ in range(base_devices)]
+        data_list = [False for i in range(0, self.num_batch)]
 
         heappush(event_queue, (root.duration, counter, root))
+        if debug:
+            print("{} enqueued at time {} batch id {}".format(root.name, 0, root.batch_id))
         ready_list.remove(root)
         counter = counter + 1
-        GPU_list[gid] = False
-
-        # print("Start simulation...")
-        # print("root: {}.{}".format(root.name, root.op_id))
-        # for i in GPU_list:
-        #    if i:
-        #        print "_",
-        #    else:
-        #        print "A",
-        #    print " ",
-        # print " | ",
-        # for i in link_list:
-        #    if i:
-        #        print "_",
-        #    else:
-        #        print "A",
-        # print
 
         while len(event_queue) > 0:
             time, _, event = heappop(event_queue)
             event.done = True
+            event.scheduled = False
             event.finish_time = time
+            if debug:
+                print("Event {} finished at time {}".format(event.name, time))
 
-            # if event.name != "intra_edge":
-            #  print("{}.{} finished at time {}".format(event.name, event.op_id, time))
-
-            # Update ready_list
             for child in event.children:
+
                 is_ready = True
                 max_time = -1
                 for parent in child.parents:
@@ -374,200 +1114,450 @@ class Graph:
                         is_ready = False
                     else:
                         max_time = max(max_time, parent.finish_time)
-                if is_ready == True:
+                # if is_ready == True:
+                if is_ready and (child not in ready_list) and (not child.done) and (not child.scheduled):
                     ready_list.append(child)
+                    if debug:
+                        print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
                 GPU_list[event.hw_id] = True
-            else:
-                link_list[event.hw_id] = True
 
-            # Schedule work
+                
 
-            # print "READY NODES: ",
-            # for event in ready_list:
-            #    print event.name,
-            #    print " ",
-            #    print event.op_id,
-            #    print " ",
-            # print
+
 
             for event in ready_list[:]:
                 enqueued = False
-                if event.hw_id == -1:
+                if isinstance(event, Data_batch):
+                    # if GPU_list[event.hw_id] == True:
                     new_time = time + event.duration
                     heappush(event_queue, (new_time, counter, event))
-                    # print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                    event.scheduled = True
                     enqueued = True
+                    if debug:
+                        print("{} enqueued at time".format(event.name,  time))
                     counter = counter + 1
+                    data_list[event.batch_id] = True #data batch sent to gpu
+                    # GPU_list[event.hw_id] = False
                     ready_list.remove(event)
+
                 elif isinstance(event, Node): 
                     if GPU_list[event.hw_id] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
+                        event.scheduled = True
                         enqueued = True
-                        # print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                        if debug:
+                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
                         GPU_list[event.hw_id] = False
                         ready_list.remove(event)
                 elif isinstance(event, Edge): 
-                    if link_list[event.hw_id] == True:
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    if debug:
+                        print("{}.{} enqueued at time {}".format(event.name, event.op_id, time))
+                    enqueued = True
+                    counter = counter + 1
+                    ready_list.remove(event)
+
+
+        return time
+    
+    def simulate_memory(self, root, memory_data, mode = "training", output_folder = "output/LLM/", filename="memory_graph"):
+        time = 0
+        counter = 0
+        event_queue = []
+        ready_list = []
+
+        self._reset_execution_state(root)
+
+        
+        ready_list.append(root)
+        root.scheduled = True
+        ###find number of devices needed
+        base_devices = max(1, int(self.lp) if self.lp else 1)
+        max_hw_id = -1
+        visited_nodes: Set[int] = set()
+        stack = list(root if isinstance(root, (list, tuple)) else [root])
+        while stack:
+            node = stack.pop()
+            node_id = id(node)
+            if node_id in visited_nodes:
+                continue
+            visited_nodes.add(node_id)
+
+            hw_id = getattr(node, "hw_id", None)
+            if hw_id is not None:
+                try:
+                    hw_val = int(hw_id)
+                except (TypeError, ValueError):
+                    hw_val = None
+                if hw_val is not None and hw_val >= 0:
+                    max_hw_id = max(max_hw_id, hw_val)
+
+            stack.extend(getattr(node, "children", []))
+
+        if max_hw_id >= 0:
+            base_devices = max(base_devices, max_hw_id + 1)
+
+        class _MemorySnapshot:
+            def __init__(self, num_devices: int, output_dir: Optional[str], file_basename: str) -> None:
+                self.static: List[float] = [0.0 for _ in range(num_devices)]
+                self.current: List[float] = [0.0 for _ in range(num_devices)]
+                self.peak: List[float] = [0.0 for _ in range(num_devices)]
+                # self.activation_allocations: memory_data["activation_allocations"]
+                self._log_files: List[Optional[Any]] = [None for _ in range(num_devices)]
+                self._log_paths: List[Optional[str]] = [None for _ in range(num_devices)]
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    for gpu_idx in range(num_devices):
+                        log_path = os.path.join(output_dir, f"{file_basename}_gpu_{gpu_idx}_memory_log.txt")
+                        self._log_paths[gpu_idx] = log_path
+                        log_file = open(log_path, "w", encoding="utf-8")
+                        log_file.write(
+                            "timestamp_s | action               | delta_gib   | current_gib | peak_gib    | details\n"
+                        )
+                        self._log_files[gpu_idx] = log_file
+
+            def add_static(self, gpu_id: int, size_bytes: float, timestamp: float = 0.0) -> None:
+                if size_bytes <= 0:
+                    return
+                self.static[gpu_id] += size_bytes
+                self.current[gpu_id] += size_bytes
+                self._update_peak(gpu_id)
+                self._record_change(
+                    gpu_id,
+                    "static_allocate",
+                    size_bytes,
+                    timestamp,
+                    details="static_mem",
+                )
+
+            def allocate_activation(self, gpu_id: int, node: Any, timestamp: float) -> None:
+                if mode != "training":
+                    size_bytes = memory_data.get("activation_mem_per_layer_inference", 0)
+                else:
+                    size_bytes = memory_data.get("activation_mem_per_layer", 0) 
+                node_identifier = getattr(node, "op_id", None)
+                if node_identifier is None:
+                    node_identifier = id(node)
+
+                if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
+                    return
+                self.current[gpu_id] += size_bytes
+                details = "node={} op_id={} fwd={}".format(
+                    getattr(node, "name", "unknown"),
+                    getattr(node, "op_id", "N/A"),
+                    getattr(node, "fwd", "N/A"),
+                )
+                self._record_change(gpu_id, "allocate_activation", size_bytes, timestamp, details=details)
+                self._update_peak(gpu_id)
+
+            def release_activation(self, gpu_id: int, node: Any, timestamp: float) -> None:
+                size_bytes = memory_data.get("activation_mem_per_layer", 0)
+                node_identifier = getattr(node, "op_id", None)
+                if node_identifier is None:
+                    node_identifier = id(node)
+                
+                if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
+                    return
+                self.current[gpu_id] = max(0.0, self.current[gpu_id] - size_bytes)
+                details = "node={} op_id={} fwd={}".format(
+                    getattr(node, "name", "unknown"),
+                    getattr(node, "op_id", "N/A"),
+                    getattr(node, "fwd", "N/A"),
+                )
+                self._record_change(gpu_id, "release_activation", -size_bytes, timestamp, details=details)
+
+            def summary(self) -> List[Dict[str, float]]:
+                summary: List[Dict[str, float]] = []
+                for idx in range(len(self.current)):
+                    static_gib = self.static[idx] / BYTES_PER_GIB
+                    current_gib = self.current[idx] / BYTES_PER_GIB
+                    peak_gib = self.peak[idx] / BYTES_PER_GIB
+                    summary.append(
+                        {
+                            "gpu_id": idx,
+                            "static_gib": static_gib,
+                            "current_gib": current_gib,
+                            "peak_gib": peak_gib,
+                        }
+                    )
+                return summary
+
+            def _update_peak(self, gpu_id: int) -> None:
+                if self.current[gpu_id] > self.peak[gpu_id]:
+                    self.peak[gpu_id] = self.current[gpu_id]
+
+            def _record_change(
+                self,
+                gpu_id: int,
+                action: str,
+                delta_bytes: float,
+                timestamp: float,
+                *,
+                details: str = "",
+            ) -> None:
+                if not self._log_files or gpu_id < 0 or gpu_id >= len(self._log_files):
+                    return
+                log_file = self._log_files[gpu_id]
+                if log_file is None:
+                    return
+
+                delta_gib = delta_bytes / BYTES_PER_GIB
+                current_gib = self.current[gpu_id] / BYTES_PER_GIB
+                peak_gib = self.peak[gpu_id] / BYTES_PER_GIB
+                line = "{:.6f} | {:<20} | {:>+.6f} | {:>+.6f} | {:>+.6f}".format(
+                    timestamp,
+                    action,
+                    delta_gib,
+                    current_gib,
+                    peak_gib,
+                )
+                if details:
+                    line = f"{line} | {details}"
+                log_file.write(line + "\n")
+                log_file.flush()
+
+            def close(self) -> None:
+                if not self._log_files:
+                    return
+                for handle in self._log_files:
+                    if handle:
+                        handle.close()
+
+        def _is_transformer_block(node: Any) -> bool:
+            """Return True when node represents a transformer compute block."""
+            if not isinstance(node, Node):
+                return False
+            name = getattr(node, "name", "")
+            if not isinstance(name, str):
+                return False
+            return "transformer" in name.lower()
+
+        def _count_transformer_layers_per_device(root_obj: Any, num_devices: int) -> List[int]:
+            layer_sets: List[Set[Any]] = [set() for _ in range(num_devices)]
+            stack_local = list(root_obj if isinstance(root_obj, (list, tuple)) else [root_obj])
+            visited_local: Set[int] = set()
+            while stack_local:
+                current = stack_local.pop()
+                current_id = id(current)
+                if current_id in visited_local:
+                    continue
+                visited_local.add(current_id)
+
+                if isinstance(current, Node):
+                    hw_id = getattr(current, "hw_id", None)
+                    layer_idx = getattr(current, "layer_index", None)
+                    if (
+                        layer_idx is not None
+                        and isinstance(hw_id, int)
+                        and 0 <= hw_id < num_devices
+                        and _is_transformer_block(current)
+                        and getattr(current, "fwd", True)
+                    ):
+                        layer_sets[hw_id].add(layer_idx)
+
+                stack_local.extend(getattr(current, "children", []))
+            return [len(layer_set) for layer_set in layer_sets]
+
+        memory_output_dir: Optional[str] = None
+        if output_folder:
+            memory_output_dir = os.path.join(output_folder, "memory-summary")
+
+        transformer_layers_per_device = _count_transformer_layers_per_device(root, base_devices)
+        static_mem_per_layer = memory_data.get("static_mem_per_layer", 0)
+        weight_mem_per_layer = memory_data.get("weight_mem_per_layer", 0)
+        total_tracked_layers = sum(transformer_layers_per_device)
+        if total_tracked_layers == 0:
+            transformer_layers_per_device = [1 for _ in range(base_devices)]
+
+        GPU_list = [True for _ in range(base_devices)]
+        data_list = [False for _ in range(0, self.num_batch)]
+        memory_snapshot = _MemorySnapshot(base_devices, memory_output_dir, filename)
+        
+        for idx in range(base_devices):
+            
+            if mode == "inference":
+                static_bytes = weight_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else weight_mem_per_layer
+                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+            elif mode == "training":
+                static_bytes = static_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else static_mem_per_layer
+                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+            else:
+                raise ValueError(f"Invalid mode '{mode}' for memory simulation")
+            
+        self.memory_monitor_snapshot = memory_snapshot
+
+        heappush(event_queue, (root.duration, counter, root))
+        if debug:
+            print("{} enqueued at time {} batch id {}".format(root.name, 0, root.batch_id))
+        ready_list.remove(root)
+        counter = counter + 1
+
+        while len(event_queue) > 0:
+            time, _, event = heappop(event_queue)
+            event.done = True
+            event.scheduled = False
+            event.finish_time = time
+            if debug:
+                print("Event {} finished at time {}".format(event.name, time))
+
+            for child in event.children:
+
+                is_ready = True
+                max_time = -1
+                for parent in child.parents:
+                    if parent.done == False:
+                        is_ready = False
+                    else:
+                        max_time = max(max_time, parent.finish_time)
+                # if is_ready == True:
+                if is_ready and (child not in ready_list) and (not child.done) and (not child.scheduled):
+                    ready_list.append(child)
+                    if debug:
+                        print("child {}  ready at time {} ".format(child.name, time))
+
+            if isinstance(event, Node):
+                GPU_list[event.hw_id] = True
+                is_transformer_block = _is_transformer_block(event) #TODO: embedding and softmax layers
+                if mode == "training":
+                    if not event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.release_activation(event.hw_id, event, time)
+                    elif event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.allocate_activation(event.hw_id, event, time)
+                elif mode == "inference":
+                    if event.fwd:
+                        if is_transformer_block:
+                            memory_snapshot.allocate_activation(event.hw_id, event, time)
+                            memory_snapshot.release_activation(event.hw_id, event, time)
+
+                
+            for event in ready_list[:]:
+                enqueued = False
+                if isinstance(event, Data_batch):
+                    # if GPU_list[event.hw_id] == True:
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    enqueued = True
+                    if debug:
+                        print("{} enqueued at time".format(event.name,  time))
+                    counter = counter + 1
+                    data_list[event.batch_id] = True #data batch sent to gpu
+                    # GPU_list[event.hw_id] = False
+                    ready_list.remove(event)
+
+                elif isinstance(event, Node): 
+                    if GPU_list[event.hw_id] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
+                        event.scheduled = True
                         enqueued = True
-                        # print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                        if debug:
+                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
-                        link_list[event.hw_id] = False
+                        GPU_list[event.hw_id] = False
                         ready_list.remove(event)
-                # if not enqueued:
-                #  print "can't schedule: " + event.name + " " + str(event.op_id)
+                elif isinstance(event, Edge): 
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    if debug:
+                        print("{}.{} enqueued at time {}".format(event.name, event.op_id, time))
+                    enqueued = True
+                    counter = counter + 1
+                    ready_list.remove(event)
 
-                # for i in GPU_list:
-                #    if i:
-                #        print "_",
-                #    else:
-                #        print "A",
-                #    print " ",
-                # print " | ",
-                # for i in link_list:
-                #    if i:
-                #        print "_",
-                #    else:
-                #        print "A",
-                # print
-        return time
-    def save_graph(self, output_folder = "output_graph/"):
-        fw_roots = self.construct_fwd_graph()
-        time_fw = self.simulate(fw_roots[0], 0)
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
 
-        filename = "fwd_graph_s%s_l%s_lp%s" % (self.num_seq, self.num_layer, self.lp)
-        filename_bwd = "bwd_graph_s%s_l%s_lp%s" % (self.num_seq, self.num_layer, self.lp)
-        dot_fw = visualize_graph(fw_roots[0], filename=filename)
-        dot_fw.render(output_folder + filename, format="png", cleanup=True)
-        print("Forward graph saved to %s%s.png" % (output_folder , filename))
-        print("Forward simulation time: {}".format(time_fw))
+        summary = memory_snapshot.summary()
+        memory_snapshot.close()
+        self.memory_monitor_summary = summary
+        peak_mem = max(entry["peak_gib"] for entry in summary) if summary else 0.0
+        return time, peak_mem
 
-        bw_roots = self.construct_bwd_graph()
-        time_bw = self.simulate(bw_roots[0], self.lp - 1)   
-        dot_bw = visualize_graph(bw_roots[0], filename=filename + "_bwd")
-        dot_bw.render(output_folder + filename_bwd , format="png", cleanup=True)
-        print("Backward graph saved to %s%s.png" % (output_folder , filename_bwd))
+    def save_graph(self, roots, output_folder = "output/LLM/", filename="graph"):
+        os.makedirs(output_folder, exist_ok=True)
 
-        print("Backward simulation time: {}".format(time_bw))
-        return time_fw , time_bw
+        printstr = " | Graph saved to    %s%s.png" % (output_folder, filename)
+        def _render_graph() -> None:
+            dot_fw = visualize_graph(roots, filename=output_folder + filename)
+            dot_fw.render(output_folder + filename, format="png", cleanup=True)
 
-# dedeepyo : 27-May-25 : Print DFS traversal of the graph.
-def print_graph(root_nodes, visited=None):
-    if visited is None:
-        visited = set()
+        graphviz_async.submit(f"{filename}.png", _render_graph, print_message=printstr)
 
-    for node in root_nodes:
+
+def visualize_graph(roots, filename="graph"):
+    _ = filename  # unused, kept for backwards compatibility with callers
+
+    dot = Digraph(comment="Computation Graph")
+    visited = set()
+
+    def _format_duration(value: float) -> str:
+        ms = value * 1e3
+        if abs(ms) > 1000:
+            return f"{value:.2f}s"
+        return f"{ms:.2f}ms"
+
+    def _node_color(node) -> str:
+        if isinstance(node, Node):
+            return "lightblue" if node.fwd else "lightcoral"
+        if isinstance(node, Data_batch):
+            return "gray"
+        if isinstance(node, Edge):
+            if getattr(node, "is_dp", False):
+                return "green"
+            else:
+                if getattr(node, "comm_type", None) == "pipeline":
+                    return "white"
+                else:
+                    return "yellow"
+        return "mediumorchid"
+
+    def _node_label(node) -> str:
+        if isinstance(node, Data_batch):
+            return f"{node.name}\n(batch_id={node.batch_id}, dur={_format_duration(node.duration)})"
+        if isinstance(node, Node):
+            return (
+                f"{node.name}\n(op_id={node.op_id}, hw_id={node.hw_id}, "
+                f"dur={_format_duration(node.duration)})"
+            )
+        if isinstance(node, Edge):
+            if getattr(node, "local_hw_id", None) is not None:
+                return (
+                    f"{node.name}\n(op_id={node.op_id}, local_hw_id={node.local_hw_id}, "
+                    f"dur={_format_duration(node.duration)})"
+                )
+            return f"{node.name}\n(op_id={node.op_id}, dur={_format_duration(node.duration)})"
+        return str(node)
+
+    def _visit(node):
         if node in visited:
-            continue
+            return
+
         visited.add(node)
+        node_id = str(id(node))
+        dot.node(node_id, label=_node_label(node), style="filled", fillcolor=_node_color(node), shape="box")
 
-        node_type = "Node" if isinstance(node, Node) else "Edge"
-        print(f"{node_type}: {node.name}, op_id: {node.op_id}, hw_id: {node.hw_id}, duration: {node.duration}")
+        for child in getattr(node, "children", []):
+            child_id = str(id(child))
+            dot.edge(node_id, child_id)
+            _visit(child)
 
-        for child in node.children:
-            child_type = "Node" if isinstance(child, Node) else "Edge"
-            print(f"  --> {child_type}: {child.name}, op_id: {child.op_id}")
+    if isinstance(roots, (list, tuple, set)):
+        iterable = roots
+    else:
+        iterable = [roots]
 
-        # Recursively print the children
-        print_graph(node.children, visited)
-
-def total_duration(root, visited=None):
-    if visited is None:
-        visited = set()
-    if root in visited:
-        return 0
-    visited.add(root)
-
-    # Only add duration if it's a Node (not a Stage)
-    duration = root.compute_time if isinstance(root, Node) else 0
-
-    for child in root.children:
-        duration += total_duration(child, visited)
-
-    return duration
-
-def visualize_graph(root, filename="graph", visited=None, dot=None):
-    if visited is None:
-        visited = set()
-    if dot is None:
-        dot = Digraph(comment='Computation Graph')
-
-    if root in visited:
-        return dot
-    visited.add(root)
-
-    node_id = str(id(root))
-    label = f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, dur={root.duration})"
-    color = "lightblue" if isinstance(root, Node) else "lightgreen"
-
-    dot.node(node_id, label=label, style='filled', fillcolor=color, shape='box')
-
-    for child in root.children:
-        child_id = str(id(child))
-        child_label = f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, dur={child.duration})"
-        child_color = "lightblue" if isinstance(child, Node) else "lightgreen"
-        dot.node(child_id, label=child_label, style='filled', fillcolor=child_color, shape='box')
-        dot.edge(node_id, child_id)
-        visualize_graph(child, filename, visited, dot)
+    for root in iterable:
+        _visit(root)
 
     return dot
 
 
-# dedeepyo : 27-May-25
-
-def main():
-    g = Graph(
-        num_seq=7,
-        num_layer=3,
-        lp=1,
-        T_qkv_projection_f=1,
-        T_qkv_projection_b=1,
-        T_attention_score_f=1,
-        T_attention_score_b=1,
-        T_attention_scale_softmax_f=1,  # Add softmax timing
-        T_attention_scale_softmax_b=1,  # Add softmax timing
-        T_attention_output_f=1,
-        T_attention_output_b=1,
-        T_out_proj_f=1,
-        T_out_proj_b=1,
-        T_ffn1_f=1,
-        T_ffn1_b=1,
-        T_ffn2_f=1,
-        T_ffn2_b=1,
-        T_residual1_f=1,
-        T_residual1_b=1,
-        T_layer_norm1_f=1,
-        T_layer_norm1_b=1,
-        T_residual2_f=1,
-        T_residual2_b=1,
-        T_layer_norm2_f=1,
-        T_layer_norm2_b=1,
-        T_linear_softmax_f=1,
-        T_linear_softmax_b=1,
         
-        
-        T_embedding_f=5,
-        
-
-        
-        Tf=3,
-        T_embedding_b=5,
-        
-        Tb=3,
-        T_reduction_transformer=2,
-        T_reduction_embedding=2,
-        T_reduction_linear_softmax=2,
-    )
-
-    g.save_graph()
-
-
-if __name__ == "__main__":
-    main()

@@ -6,6 +6,7 @@ class Parallelism():
     def __init__(self, exp_config):
         self.autoPar = exp_config.sch_config.auto
         self.lp    = exp_config.sch_config.lp
+        self.mb    = exp_config.sch_config.mb
         self.kp_hidden_dim1    = exp_config.sch_config.kp_hidden_dim1
         self.kp_softmax_dim1   = exp_config.sch_config.kp_softmax_dim1
         self.kp_embedding_dim1 = exp_config.sch_config.kp_embedding_dim1
@@ -21,6 +22,9 @@ class Parallelism():
         self.kp_projection_type  =  exp_config.sch_config.kp_projection_type #1: CR, 2: RC
         self.exp_config = exp_config
         self.t = exp_config.sch_config.t  # type of parallelism, e.g., "CR", "RC", "none"
+        self.tp = exp_config.sch_config.tp
+        self.cp = exp_config.sch_config.cp
+        self.tp_sp = exp_config.sch_config.tp_sp
         self.kp1 = exp_config.sch_config.kp1  # first parallelism parameter
         self.kp2 = exp_config.sch_config.kp2  # second parallelism parameter
 
@@ -153,5 +157,4 @@ class Parallelism():
                   break
             assert(smallestFactor != -1)
             return smallestFactor
-
 
