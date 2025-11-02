@@ -58,7 +58,30 @@ tech_param:
     dynamic_energy_per_bit: 110e-15 # (J)
     latency: 0
     util: 1
-
+  network:
+    intra_node:
+      latency: 5e-6
+      util: 1
+      bandwidth: 200 Gb
+    inter_node:
+      latency: 5e-6
+      util: 0.96
+      bandwidth: 200 Gb
+system_hierarchy:
+  num_devices_per_node: 8 # currently only support astrasim integration with all devices in one node.
+  num_nodes: 1
+  ## LLM PARAMS ##
+  dp_inter: false
+  lp_inter: false
+  tp_inter: false
+  cp_inter: false
+  ## LEGACY LSTM PARAMS ##
+  kp1_inter: false
+  kp2_inter: false
+network_topology:
+  # Allowed values: ring | fc | switch | HyperCube | Mesh | Mesh2D | Torus2D 
+  inter_node: ring
+  intra_node: ring
 memory_hierarchy:
   l0:   #Register Memory
     type: SRAM-R
@@ -72,55 +95,35 @@ memory_hierarchy:
   l3:   #Global Memory
     type: DRAM
     scope: global
-
-parallelism:
+scheduling_param:
+  auto: false # Not supported for LLM mode.
+  ### LLM PARAMS ###
   dp: 2 # data parallelism. Acts as replica count during inference
-  tp: 4 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
-  cp: 1 # context parallelism. Not supported for inference.
   lp: 2 # pipeline parallelism. Number of pipeline stages
-  # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 2 # micro-batches (for best results set to >= lp). 
-
-network:
-  # currently only support astrasim integration with all devices in one node.
-  - id: dim0
-    label: intra_wafer_mesh_silicon
-    size: 4
-    topology:
-      type: Ring
-      bandwidth: 1000 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 1.0
-    collective_override: {} # leave empty to use 'auto' for all collectives unless an override is needed
-    parallelisms: [tp, cp]
-  - id: dim1
-    label: inter_wafer_ring_infiniband
-    size: 2
-    topology:
-      type: Ring
-      bandwidth: 200 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 1.0
-    collective_override: {} # defaults to 'auto' per collective
-    parallelisms: [lp]
-  - id: dim2
-    label: wafer_dp_chains_ring_infiniband
-    size: 2
-    topology:
-      type: ring
-      bandwidth: 200 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 0.96
-    collective_override: {} # defaults to 'auto' per collective
-    parallelisms: [dp]
+  mb: 2 # micro-batches (for best results set to >= lp)
+  tp: 2 # tensor parallelism
+  tp_sp: true # tensor-sequence parallelism
+  cp : 1 # context parallelism
+  ### LSTM/GEMM LEGACY PARAMS ###
+  t: "CR"
+  kp1: 1
+  kp2: 1
+  kp_hidden_dim1: 1
+  kp_hidden_dim2: 1
+  kp_softmax_dim1: 1
+  kp_softmax_dim2: 1
+  kp_embedding_dim1: 1
+  kp_embedding_dim2: 1
+  kp_projection_dim1: 1
+  kp_projection_dim2: 1
+  kp_hidden_type: -1
+  kp_softmax_type: -1
+  kp_embedding_type: -1
+  kp_projection_type: -1
 
 
 execution_backend:
-  model: analytical # analytical | astra
+  model: astra # analytical | astra
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

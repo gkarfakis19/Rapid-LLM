@@ -419,7 +419,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         energy_per_flop = self.core.nominal_energy_per_flop
         energy_hbm_byte = self.DRAM.dynamic_energy_per_bit * 8
-        energy_comm_byte = self.network.intra_network.nominal_energy_per_link * 8  # 8 pJ/bit for interconnect
+        # TODO: honor per-dimension interconnect energies; currently assumes all comms use dimension 0.
+        energy_comm_byte = (self.network.energies_per_bit[0] if self.network.energies_per_bit else 0.0) * 8
 
         total_energy = (total_flops * energy_per_flop) + \
             (total_hbm_bytes * energy_hbm_byte) + \

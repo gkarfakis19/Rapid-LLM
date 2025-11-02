@@ -1,10 +1,10 @@
 from dataclasses import dataclass, field
-import ruamel as _ruamel
-import ruamel.yaml as _yaml
-from ruamel.yaml import YAMLError as _YAMLError
 import math
 from collections import namedtuple as _namedtuple
-from typing import Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import yaml as _yaml
+from yaml import YAMLError as _YAMLError
 
 
 _PRECISION_DTYPE_BYTES = {
@@ -235,57 +235,12 @@ class SRAMConfig:
 
 
 @dataclass
-class SubNetworkConfig:
-    latency: float
-    nominal_freq: float
-    nominal_voltage: float
-    nominal_energy_per_link: float
-    nominal_area_per_link: float
-    threshold_voltage: float
-    margin_voltage: float
-    num_links_per_mm: int
-    util: float
-    operating_frequency: float = None  # Optional: overrides voltage-scaled frequency
-    bandwidth: float = None  # Optional: master parameter that directly sets throughput
-
-    @classmethod
-    def from_dict(cls, config_dict):
-        return cls(
-            latency=config_dict["latency"],
-            nominal_freq=config_dict.get("nominal_frequency", 0.1),
-            nominal_voltage=config_dict.get("nominal_voltage", 0.1),
-            nominal_energy_per_link=config_dict.get("nominal_energy_per_link", 0.1),
-            nominal_area_per_link=config_dict.get("nominal_area_per_link", 0.1),
-            threshold_voltage=config_dict.get("threshold_voltage", 0.1),
-            margin_voltage=config_dict.get("margin_voltage", 0.1),
-            num_links_per_mm=config_dict.get("num_links_per_mm", 1),
-            util=config_dict["util"],
-            operating_frequency=config_dict.get("operating_frequency", None),
-            bandwidth=parse_bandwidth_string(config_dict.get("bandwidth", None)),
-        )
-
-
-@dataclass
-class NetworkConfig:
-    intra_node: SubNetworkConfig
-    inter_node: SubNetworkConfig
-
-    @classmethod
-    def from_dict(cls, d):
-        return cls(
-            intra_node=SubNetworkConfig.from_dict(d["intra_node"]),
-            inter_node=SubNetworkConfig.from_dict(d["inter_node"]),
-        )
-
-
-@dataclass
 class TechConfig:
     core: CoreConfig
     DRAM: DRAMConfig
     SRAML2: SRAMConfig
     SRAML1: SRAMConfig
     SRAMR: SRAMConfig
-    network: NetworkConfig
 
     @classmethod
     def from_dict(cls, tech_config_dict):
@@ -295,7 +250,6 @@ class TechConfig:
             SRAML2=SRAMConfig.from_dict(tech_config_dict["SRAM-L2"]),
             SRAML1=SRAMConfig.from_dict(tech_config_dict["SRAM-L1"]),
             SRAMR=SRAMConfig.from_dict(tech_config_dict["SRAM-R"]),
-            network=NetworkConfig.from_dict(tech_config_dict["network"]),
         )
 
 
@@ -388,69 +342,267 @@ class NetworkPowerConfig:
         )
 
 
-@dataclass
-class SystemHierarchyConfig:
-    num_nodes_per_wafer: int
-    num_wafers: int
-    num_workers: int
-    inter_derate: float
-    intra_derate: float
-    kp1_inter: float
-    kp2_inter: float
-    dp_inter: float
-    lp_inter: float
-    tp_inter: float
-    par2cross: dict
+@dataclass(frozen=True)
+class NetworkDimensionLayout:
+    id: str
+    label: str
+    size: int
+    topology_type: str
+    bandwidth: float
+    util: float
+    latency: float
+    collective_override: Dict[str, str] = field(default_factory=dict)
+    parallelisms: Tuple[str, ...] = field(default_factory=tuple)
+    energy_per_bit: float = 0.0
 
     @classmethod
-    def from_dict(cls, system_config_dict):
+    def from_raw(
+        cls,
+        raw: dict,
+        *,
+        parallelism_params: Dict[str, object],
+        index: int,
+    ) -> "NetworkDimensionLayout":
+        if not isinstance(raw, dict):
+            raise TypeError("each network dimension must be a mapping")
+
+        raw_id = raw.get("id")
+        dim_id = str(raw_id) if raw_id is not None else f"dim{index}"
+        label = str(raw.get("label", dim_id))
+
+        if "size" not in raw:
+            raise ValueError(f"network dimension '{label}' is missing required field 'size'")
+        try:
+            size = int(raw["size"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"network dimension '{label}' size must be an integer") from exc
+        if size < 1:
+            raise ValueError(f"network dimension '{label}' size must be >= 1")
+
+        topo_dict = raw.get("topology")
+        if not isinstance(topo_dict, dict):
+            raise ValueError(f"network dimension '{label}' requires a 'topology' mapping")
+        if "type" not in topo_dict:
+            raise ValueError(f"network dimension '{label}' topology missing required 'type'")
+        topo_type = str(topo_dict["type"])
+
+        if "bandwidth" not in topo_dict:
+            raise ValueError(f"network dimension '{label}' topology missing required 'bandwidth'")
+        bandwidth = parse_bandwidth_string(topo_dict["bandwidth"])
+
+        try:
+            util = float(topo_dict.get("util", 1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"network dimension '{label}' topology util must be numeric"
+            ) from exc
+        if util <= 0:
+            raise ValueError(f"network dimension '{label}' topology util must be > 0")
+
+        if "energy_per_bit" not in topo_dict:
+            raise ValueError(
+                f"network dimension '{label}' topology missing required 'energy_per_bit'"
+            )
+        try:
+            energy_per_bit = float(topo_dict["energy_per_bit"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"network dimension '{label}' energy_per_bit must be numeric"
+            ) from exc
+        if energy_per_bit < 0:
+            raise ValueError(
+                f"network dimension '{label}' energy_per_bit must be >= 0"
+            )
+
+        if "latency" not in topo_dict:
+            raise ValueError(f"network dimension '{label}' topology missing required 'latency'")
+        try:
+            latency = float(topo_dict["latency"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"network dimension '{label}' latency must be numeric") from exc
+
+        collectives_raw = raw.get("collective_override")
+        if collectives_raw is None and "collectives" in raw:
+            collectives_raw = raw.get("collectives")
+        if not collectives_raw:
+            collectives_raw = {}
+        if not isinstance(collectives_raw, dict):
+            raise ValueError(f"network dimension '{label}' collective_override must be a mapping if provided")
+        collective_override = {str(k): str(v) for k, v in collectives_raw.items()}
+
+        parallelisms_raw = raw.get("parallelisms", [])
+        if parallelisms_raw is None:
+            parallelisms_raw = []
+        if not isinstance(parallelisms_raw, Sequence) or isinstance(parallelisms_raw, (str, bytes)):
+            raise ValueError(
+                f"network dimension '{label}' parallelisms must be a sequence of names"
+            )
+
+        normalized_parallelisms: List[str] = []
+        alias_map: Dict[str, str] = {}
+        for entry in parallelisms_raw:
+            name = str(entry).strip()
+            if not name:
+                raise ValueError(f"network dimension '{label}' has an empty parallelism name")
+            normalized = name.lower()
+            normalized_parallelisms.append(normalized)
+            alias_map[normalized] = name
+
+        _validate_dimension_parallelisms(
+            dimension_label=label,
+            dimension_size=size,
+            normalized_names=tuple(normalized_parallelisms),
+            alias_map=alias_map,
+            parallelism_params=parallelism_params,
+        )
+
         return cls(
-            num_nodes_per_wafer=system_config_dict["num_devices_per_node"],
-            num_wafers=system_config_dict["num_nodes"],
-            num_workers=int(
-                system_config_dict["num_nodes"]
-                * system_config_dict["num_devices_per_node"]
-            ),
-            inter_derate=system_config_dict.get("inter_derate", 1.0),
-            intra_derate=system_config_dict.get("intra_derate", 1.0),
-            kp1_inter=system_config_dict["kp1_inter"],
-            kp2_inter=system_config_dict["kp2_inter"],
-            dp_inter=system_config_dict["dp_inter"],
-            lp_inter=system_config_dict["lp_inter"],
-            tp_inter=system_config_dict["tp_inter"],
-            par2cross={
-                "kp1": system_config_dict["kp1_inter"],
-                "kp2": system_config_dict["kp2_inter"],
-                "dp": system_config_dict["dp_inter"],
-                "lp": system_config_dict["lp_inter"],
-                "tp": system_config_dict["tp_inter"],
-            },
+            id=dim_id,
+            label=label,
+            size=size,
+            topology_type=topo_type,
+            bandwidth=bandwidth,
+            util=util,
+            latency=latency,
+            collective_override=collective_override,
+            parallelisms=tuple(normalized_parallelisms),
+            energy_per_bit=energy_per_bit,
+        )
+
+    @property
+    def effective_bandwidth(self) -> float:
+        return float(self.bandwidth) * float(self.util)
+
+
+def _validate_dimension_parallelisms(
+    *,
+    dimension_label: str,
+    dimension_size: int,
+    normalized_names: Tuple[str, ...],
+    alias_map: Dict[str, str],
+    parallelism_params: Dict[str, object],
+) -> None:
+    if not normalized_names:
+        return
+
+    product = 1
+    for name in normalized_names:
+        if name not in parallelism_params:
+            alias = alias_map.get(name, name)
+            raise ValueError(
+                f"network dimension '{dimension_label}' references parallelism '{alias}' "
+                "which is not defined in parallelism"
+            )
+        value = parallelism_params[name]
+        if value in (None, False):
+            alias = alias_map.get(name, name)
+            raise ValueError(
+                f"network dimension '{dimension_label}' parallelism '{alias}' must have a "
+                "positive parallelism factor"
+            )
+        try:
+            factor = int(value)
+        except (TypeError, ValueError) as exc:
+            alias = alias_map.get(name, name)
+            raise ValueError(
+                f"parallelism.{alias} must be an integer to compute network dimension sizes"
+            ) from exc
+        if factor < 1:
+            alias = alias_map.get(name, name)
+            raise ValueError(
+                f"parallelism.{alias} must be >= 1 to compute network dimension sizes"
+            )
+        product *= factor
+
+    if product != dimension_size:
+        readable = [alias_map.get(name, name) for name in normalized_names]
+        raise ValueError(
+            f"network dimension '{dimension_label}' size mismatch: declared size {dimension_size} "
+            f"but product of parallelisms {readable} is {product}"
         )
 
 
-@dataclass
-class TopologyConfig:
-    topology: str = None
+def _parse_network_layout(
+    network_spec,
+    parallelism_params: Dict[str, object],
+) -> Tuple[NetworkDimensionLayout, ...]:
+    if network_spec is None:
+        return tuple()
 
-    @classmethod
-    def from_dict(cls, d):
-        if d == "hybrid":
-            NotImplemented()
-        else:
-            return cls(topology=d)
+    if not isinstance(network_spec, Sequence) or isinstance(network_spec, (str, bytes)):
+        raise ValueError("network section must be a sequence of dimension mappings")
 
-
-@dataclass
-class NetworkTopologyConfig:
-    inter: TopologyConfig
-    intra: TopologyConfig
-
-    @classmethod
-    def from_dict(cls, d):
-        return cls(
-            inter=TopologyConfig.from_dict(d["inter_node"]),
-            intra=TopologyConfig.from_dict(d["intra_node"]),
+    dimensions: List[NetworkDimensionLayout] = []
+    for index, entry in enumerate(network_spec):
+        dimensions.append(
+            NetworkDimensionLayout.from_raw(
+                entry,
+                parallelism_params=parallelism_params,
+                index=index,
+            )
         )
+    return tuple(dimensions)
+
+
+@dataclass(frozen=True)
+class NetworkLayoutConfig:
+    dimensions: Tuple[NetworkDimensionLayout, ...]
+    parallelism_map: Dict[str, NetworkDimensionLayout] = field(default_factory=dict)
+
+    def primary_dimension(self) -> Optional[NetworkDimensionLayout]:
+        return self.dimensions[0] if self.dimensions else None
+
+    def dimension_for_parallelism(self, name: str) -> Optional[NetworkDimensionLayout]:
+        normalized = str(name).strip().lower()
+        if normalized in self.parallelism_map:
+            return self.parallelism_map[normalized]
+        return self.primary_dimension()
+
+    def link_for_parallelism(self, name: str) -> Tuple[float, float]:
+        dim = self.dimension_for_parallelism(name)
+        if dim is None:
+            return 0.0, 0.0
+        return dim.effective_bandwidth, dim.latency
+
+
+def _build_network_layout_config(
+    dimensions: Sequence[NetworkDimensionLayout],
+) -> NetworkLayoutConfig:
+    parallelism_map: Dict[str, NetworkDimensionLayout] = {}
+    for dim in dimensions:
+        for pname in dim.parallelisms:
+            if pname in parallelism_map:
+                raise ValueError(
+                    f"parallelism '{pname}' assigned to multiple network dimensions"
+                )
+            parallelism_map[pname] = dim
+    return NetworkLayoutConfig(dimensions=tuple(dimensions), parallelism_map=parallelism_map)
+
+
+_PARALLELISM_DEFAULTS: Dict[str, object] = {
+    "auto": False,
+    "dp": 1,
+    "lp": 1,
+    "mb": 1,
+    "kp_hidden_dim1": 1,
+    "kp_softmax_dim1": 1,
+    "kp_embedding_dim1": 1,
+    "kp_projection_dim1": 1,
+    "kp_hidden_dim2": 1,
+    "kp_softmax_dim2": 1,
+    "kp_embedding_dim2": 1,
+    "kp_projection_dim2": 1,
+    "kp_hidden_type": -1,
+    "kp_softmax_type": -1,
+    "kp_embedding_type": -1,
+    "kp_projection_type": -1,
+    "t": "CR",
+    "tp": 1,
+    "cp": 1,
+    "tp_sp": False,
+    "kp1": 1,
+    "kp2": 1,
+}
 
 
 @dataclass
@@ -561,7 +713,7 @@ SWConfig = _namedtuple(
 )
 
 SchedulingConfig = _namedtuple(
-    "scheduling_param",
+    "parallelism",
     [
         "auto",
         "dp",
@@ -598,9 +750,8 @@ FullConfig = _namedtuple(
         "sch_config",
         "area_breakdown",
         "perimeter_breakdown",
-        "system_config",
         "memory_hierarchy",
-        "network_topology",
+        "network_layout",
     ],
 )
 
@@ -658,16 +809,15 @@ HWConfig = _namedtuple(
         "sch_config",
         "area_breakdown",
         "perimeter_breakdown",
-        "system_config",
         "memory_hierarchy",
-        "network_topology",
+        "network_layout",
         "execution_backend",
         "inference_config",
     ],
 )
 
-MODELConfig = _namedtuple(
-    "MODELConfig",
+ModelConfig = _namedtuple(
+    "ModelConfig",
     [
         "model_config",
         "inference_config",
@@ -675,50 +825,60 @@ MODELConfig = _namedtuple(
 )
 
 
+def _convert_scalar_string(value: str):
+    try:
+        return float(value)
+    except ValueError:
+        pass
+
+    digit = [int(s) for s in value.split() if s.isdigit()]
+    order = [str(s) for s in value.split() if not s.isdigit()]
+    if not (order and digit):
+        return value
+
+    prefix = order[0][0]
+    bit = order[0][1] if len(order[0]) > 1 else "B"
+    mult = 1
+
+    if prefix == "K":
+        mult = 1024
+    elif prefix == "M":
+        mult = 1024 * 1024
+    elif prefix == "G":
+        mult = 1024 * 1024 * 1024
+    elif prefix == "T":
+        mult = 1024 * 1024 * 1024 * 1024
+    else:
+        raise ValueError(f"Unknown prefix '{prefix}' while parsing value '{value}'")
+
+    if bit == "b":
+        mult = mult / 8  # Capacity is expected in Bytes
+    elif bit != "B":
+        raise ValueError(f"Unknown type '{bit}' while parsing value '{value}'")
+
+    return digit[0] * mult
+
+
+def _convert_value(value):
+    if isinstance(value, dict):
+        convert(value)
+        return value
+    if isinstance(value, list):
+        return [_convert_value(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return _convert_scalar_string(value)
+        except ValueError:
+            return value
+    return value
+
+
 def convert(d):
-    for key1, val1 in d.items():
-        for key2, val2 in val1.items():
-            if isinstance(val2, dict):
-                for key3, val3 in val2.items():
-                    if isinstance(val3, str):
-                        digit = [int(s) for s in val3.split() if s.isdigit()]
-                        order = [str(s) for s in val3.split() if not s.isdigit()]
-                        if order and digit:
-                            assert len(order) >= 1
-                            assert len(digit) >= 1
-
-                            prefix = order[0][0]
-                            bit = order[0][1]
-                            mult = 1
-
-                            if prefix == "K":
-                                mult = 1024
-                            elif prefix == "M":
-                                mult = 1024 * 1024
-                            elif prefix == "G":
-                                mult = 1024 * 1024 * 1024
-                            elif prefix == "T":
-                                mult = 1024 * 1024 * 1024 * 1024
-                            else:
-                                print(
-                                    "Unknown prefix: {} at {}: {}".format(
-                                        prefix, key3, val3
-                                    )
-                                )
-                                exit(0)
-
-                            if bit == "b":
-                                mult = mult / 8  # Capacity is expected in Bytes
-                            elif bit == "B":
-                                mult = mult
-                            else:
-                                print(
-                                    "Unknown type: {} at {}: {}".format(bit, key3, val3)
-                                )
-                                exit(0)
-
-                            new_val = digit[0] * mult
-                            d[key1][key2][key3] = new_val
+    if not isinstance(d, dict):
+        return d
+    for key, val in list(d.items()):
+        d[key] = _convert_value(val)
+    return d
 
 
 def parse_bandwidth_string(value):
@@ -781,14 +941,14 @@ def parse_config(filename, config_type):
     """
     with open(filename, "r") as f:
         try:
-            config_dict = _yaml.load(f, Loader=_ruamel.yaml.Loader)
+            config_dict = _yaml.safe_load(f)
         except _YAMLError as exc:
             hint = (
                 f"Failed to parse YAML config '{filename}'. "
                 "Please check indentation and required sections like 'attention' and parameters such as 'num_experts'."
             )
             raise ValueError(hint) from exc
-        # print(config_dict) 
+        # print(config_dict)
         convert(config_dict)
     if config_type == "hardware":
         sw_block = dict(config_dict["sw_param"])
@@ -803,12 +963,22 @@ def parse_config(filename, config_type):
             h2d_bandwidth=h2d_bandwidth,
             dp_zero_stage=dp_zero_stage,
         )
-        sch_params = dict(config_dict["scheduling_param"])
-        if "tp" not in sch_params:
-            sch_params["tp"] = None
-        if "cp" not in sch_params:
-            sch_params["cp"] = None
-        sch_config = SchedulingConfig(**sch_params)
+        raw_parallelism_block = config_dict.get("parallelism", {})
+        if not isinstance(raw_parallelism_block, dict):
+            raise ValueError("parallelism must be a mapping")
+        parallelism_params = dict(_PARALLELISM_DEFAULTS)
+        parallelism_params.update(raw_parallelism_block)
+        parallelism_params["auto"] = bool(parallelism_params["auto"])
+        parallelism_params["tp_sp"] = bool(parallelism_params["tp_sp"])
+        sch_config = SchedulingConfig(**parallelism_params)
+        scheduling_for_network = {str(k).lower(): v for k, v in parallelism_params.items()}
+
+        network_spec = config_dict.get("network")
+        network_dimensions = _parse_network_layout(network_spec, scheduling_for_network)
+        if not network_dimensions:
+            raise ValueError("network section must define at least one dimension")
+        network_layout_config = _build_network_layout_config(network_dimensions)
+
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
 
         # Optional breakdown configs (not needed for simplified configs)
@@ -836,12 +1006,8 @@ def parse_config(filename, config_type):
             # Create dummy perimeter config with zeros
             perimeter_config = PerimeterBreakdownConfig(DRAM=0.1, inter_node=0.1, intra_node=0.1)
 
-        system_config = SystemHierarchyConfig.from_dict(config_dict["system_hierarchy"])
         memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
             config_dict["memory_hierarchy"]
-        )
-        network_topology_config = NetworkTopologyConfig.from_dict(
-            config_dict["network_topology"]
         )
         # execution backend (optional)
         eb_dict = config_dict.get("execution_backend", {})
@@ -891,21 +1057,20 @@ def parse_config(filename, config_type):
             sch_config=sch_config,
             area_breakdown=area_config,
             perimeter_breakdown=perimeter_config,
-            system_config=system_config,
             memory_hierarchy=memory_hierarchy_config,
-            network_topology=network_topology_config,
+            network_layout=network_layout_config,
             execution_backend=exec_backend,
             inference_config=inference_cfg,
         )
     elif config_type == "LSTM":
         model_config = ModelLSTMConfig(**config_dict["model_param"])
-        config = MODELConfig(model_config=model_config, inference_config=None)
+        config = ModelConfig(model_config=model_config, inference_config=None)
     elif config_type == "GEMM":
         mp = dict(config_dict["model_param"])  # copy
         if "backward" not in mp:
             mp["backward"] = False
         model_config = GEMMConfig(**mp)
-        config = MODELConfig(model_config=model_config, inference_config=None)
+        config = ModelConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
         if "attention" not in mp:
@@ -1114,13 +1279,13 @@ def parse_config(filename, config_type):
             num_experts=num_experts,
             top_k=top_k,
         )
-        config = MODELConfig(model_config=model_config, inference_config=inference_config)
+        config = ModelConfig(model_config=model_config, inference_config=inference_config)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))
     
     # model_config = ModelConfig(**config_dict["model_param"])
     # sw_config = SWConfig(**config_dict["sw_param"])
-    # sch_config = SchedulingConfig(**config_dict["scheduling_param"])
+    # sch_config = SchedulingConfig(**config_dict["parallelism"])
     # tech_config = TechConfig.from_dict(config_dict["tech_param"])
     # power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
     # area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])

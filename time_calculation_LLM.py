@@ -132,8 +132,8 @@ class TimeCalculationLLM(TimeCalculation):
             mode,
             astra_policy_override=astra_policy,
         )
-        if self.num_workers > 1 and self.use_moe:
-            raise ValueError("MoE is only supported for single-worker runs (system_hierarchy.num_workers must be 1).")
+        if self.num_workers > 1 and model_config.model_config.num_experts > 1:
+            raise ValueError("MoE is only supported for single-worker runs (total worker count must be 1).")
           
         self.output_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
@@ -2353,23 +2353,6 @@ class TimeCalculationLLM(TimeCalculation):
                 self._memory_breakdown_debug["zero3_ephemeral_gib"] = to_gib(
                     self.zero3_ephemeral_peak_bytes
                 )
-
-    
-
-        if self.debug:
-            print("self.tp:", self.tp)
-            print("Calculating LLM time...")
-            print(
-                "simulating parallelism with dp = {}, lp = {}, total data batch = {}, "
-                "for each dp node, data batch = {}, for each pipeline stage, data batch = {}".format(
-                    self.dp, self.lp, self.batch_size, self.miniB, self.microB
-                )
-            )
-            print("data-parallel zero stage:", self.zero_stage)
-            print("total number of workers: {}".format(self.num_workers))
-            print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
-            print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
-        
 
         (
             pipeline_graph_obj,

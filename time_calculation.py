@@ -8,7 +8,6 @@ from typing import Optional
 # import numpy as np
 
 from parallelism import Parallelism
-from topology import Topology
 from simulate import Graph
 import util
 from hw_component import Core, MemoryHierarchy, Network, DRAM
@@ -208,83 +207,20 @@ class TimeCalculation:
         self.num_levels = self.memoryHierarchy.num_levels
         self.memLayer = self.memoryHierarchy.memLayer
         self.tileSpace = None
-
-        # TODO: move this to config file
         self.H2Dbw = self.h2d_bandwidth
-
-
-        # System Parameters
-        self.num_wafer = hw_config.system_config.num_wafers
-        self.num_workers = hw_config.system_config.num_workers
-
-
+        self.num_workers = self._derive_num_workers(hw_config)
 
         level = 0
         mem_config = hw_config.memory_hierarchy.mem_hr[level]
         self.DRAM = DRAM(hw_config, mem_config, level)
-        self.memory_capacity = self.DRAM.size * self.num_workers# in bytes
-
-        # self.memory_capacity = hw_config.perimeter_breakdown.DRAM
-
         self.network = Network(hw_config)
 
-        intra_throughput, inter_throughput = self.network.calcThroughput()
-        intra_latency, inter_latency = self.network.calcLatency()
-
-        inter_derate = hw_config.system_config.inter_derate
-        intra_derate = hw_config.system_config.intra_derate
-        par2cross = hw_config.system_config.par2cross
-
-        derated_inter_throughput = -1
-        derated_intra_throughput = -1
-
-        # inter-wafer communications will pass through intra links too
-        if self.num_wafer > 1 and self.num_workers > 1:
-            if intra_derate != 0:
-                derated_inter_throughput = min(
-                    intra_throughput / intra_derate, inter_throughput / inter_derate
-                )
-                # print(f'intra_throughput / intra_derate: {intra_throughput / intra_derate}, inter_throughput / inter_derate: {inter_throughput / inter_derate}')
-            else:
-                derated_inter_throughput = inter_throughput / inter_derate
-                # print(f'inter_throughput / inter_derate: {inter_throughput / inter_derate}')
-        else:
-            derated_inter_throughput = 0
-
-        if self.num_workers > 1 and intra_derate != 0:
-            derated_intra_throughput = intra_throughput / intra_derate
-        else:
-            derated_intra_throughput = 0
-
-        self.IBK1, self.LLK1 = (
-            (derated_inter_throughput, inter_latency)
-            if par2cross["kp1"]
-            else (derated_intra_throughput, intra_latency)
-        )
-        self.IBK2, self.LLK2 = (
-            (derated_inter_throughput, inter_latency)
-            if par2cross["kp2"]
-            else (derated_intra_throughput, intra_latency)
-        )
-        self.IBD, self.LLD = ( #interconnect bandwidth and latency for data parallelism
-            (derated_inter_throughput, inter_latency)
-            if par2cross["dp"]
-            else (derated_intra_throughput, intra_latency)
-        )
-        self.IBL, self.LLL = (
-            (derated_inter_throughput, inter_latency)
-            if par2cross["lp"]
-            else (derated_intra_throughput, intra_latency)
-        )
-
-        self.IBTP, self.LLTP = (
-            (derated_inter_throughput, inter_latency)
-            if par2cross["tp"]
-            else (derated_intra_throughput, intra_latency)
-        )
+        self.IBK1, self.LLK1 = self.network.get_link("kp1")
+        self.IBK2, self.LLK2 = self.network.get_link("kp2")
+        self.IBD, self.LLD = self.network.get_link("dp")
+        self.IBL, self.LLL = self.network.get_link("lp")
+        self.IBTP, self.LLTP = self.network.get_link("tp")
         
-
-
         # Scheduling Parameters
         par = Parallelism(hw_config)
         par.findParallelStrategy()
@@ -312,17 +248,17 @@ class TimeCalculation:
         try:
             self.tp = int(tp_value)
         except (TypeError, ValueError) as exc:
-            raise ValueError("scheduling_param.tp must be an integer") from exc
+            raise ValueError("parallelism.tp must be an integer") from exc
         if self.tp < 1:
-            raise ValueError("scheduling_param.tp must be >= 1")
+            raise ValueError("parallelism.tp must be >= 1")
 
         cp_value = par.cp if par.cp not in (None, 0) else 1
         try:
             self.cp = int(cp_value)
         except (TypeError, ValueError) as exc:
-            raise ValueError("scheduling_param.cp must be an integer") from exc
+            raise ValueError("parallelism.cp must be an integer") from exc
         if self.cp < 1:
-            raise ValueError("scheduling_param.cp must be >= 1")
+            raise ValueError("parallelism.cp must be >= 1")
 
         self.tp_sp = par.tp_sp
 
@@ -338,25 +274,11 @@ class TimeCalculation:
             if self.cp > 1:
                 raise ValueError(
                     "Context parallelism (cp) is not supported for LLM inference. "
-                    "Please set scheduling_param.cp to 1 for inference runs."
+                    "Please set parallelism.cp to 1 for inference runs."
                 )
             if self.mb > 1:
                 print(f"[WARNING]: LLM inference configured with mb={self.mb} (>1). \n Pipeline micro-batching is ill-defined for autoregressive decode and should be avoided.")
 
-        if self.mode == "LLM":
-            expected_workers = self.tp * self.cp * self.dp * self.lp
-            label = f"tp({self.tp}) * cp({self.cp}) * dp({self.dp}) * lp({self.lp})"
-        else:
-            kp1 = int(self.kp1) if self.kp1 else 1
-            kp2 = int(self.kp2) if self.kp2 else 1
-            expected_workers = self.dp * self.lp * kp1 * kp2
-            label = f"dp({self.dp}) * lp({self.lp}) * kp1({kp1}) * kp2({kp2})"
-
-        if expected_workers != self.num_workers:
-            raise ValueError(
-                f"Parallelism mismatch: {label} = {expected_workers}, "
-                f"but system_hierarchy reports num_workers={self.num_workers}."
-            )
         
         # Statistics Param
         self.tot_flop = 0
@@ -377,11 +299,10 @@ class TimeCalculation:
             self.roofline,
             astra_policy=self._astra_policy,
         )
-        
+
         # Dynamically select and instantiate the model class
         model_class = self.get_model_class(mode)
         self.model = model_class(model_config)  # Instantiate the model class
-
 
         # Model Parameters
         # self.model = self.get_model_class(mode)
@@ -432,6 +353,37 @@ class TimeCalculation:
             if self.moe_top_k > self.moe_num_experts:
                 raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
             self.use_moe = self.moe_num_experts > 1
+
+
+    def _derive_num_workers(self, hw_config) -> int:
+        layout = getattr(hw_config, "network_layout", None)
+        if layout and getattr(layout, "dimensions", None):
+            total = 1
+            for dim in layout.dimensions:
+                try:
+                    size = int(dim.size)
+                except (TypeError, ValueError):
+                    size = 1
+                if size < 1:
+                    size = 1
+                total *= size
+            if total >= 1:
+                return int(total)
+
+        factors = []
+        for name in ("dp", "lp", "tp", "cp", "kp1", "kp2"):
+            value = getattr(hw_config.sch_config, name, 1)
+            try:
+                factor = int(value) if value else 1
+            except (TypeError, ValueError):
+                factor = 1
+            if factor < 1:
+                factor = 1
+            factors.append(factor)
+        total = 1
+        for factor in factors:
+            total *= factor
+        return max(1, total)
    
 
     def get_model_class(self, model_type):

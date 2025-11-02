@@ -88,19 +88,6 @@ tech_param:
       util: 0.96
       bandwidth: 300 Gb
 
-system_hierarchy:
-  num_devices_per_node: 1   # devices per package essentially
-  num_nodes: 20   # one package
-  kp1_inter: true
-  kp2_inter: true
-  dp_inter: false
-  lp_inter: false
-  tp_inter: true
-
-network_topology:
-  inter_node: none     #mesh, torus, crossbar, custom, hierarchical
-  intra_node: mesh
-
 memory_hierarchy:
   l0:   #Register Memory
     type: SRAM-R
@@ -115,7 +102,7 @@ memory_hierarchy:
     type: DRAM
     scope: global
 
-scheduling_param:
+parallelism:
   auto: false
   dp: 1
   lp: 1
@@ -123,27 +110,26 @@ scheduling_param:
   tp: 20
   tp_sp: false
   cp: 1
-  t: CR
-  kp1: 20
-  kp2: 1
-  kp_hidden_dim1: 1
-  kp_hidden_dim2: 1
-  kp_softmax_dim1: 1
-  kp_softmax_dim2: 1
-  kp_embedding_dim1: 1
-  kp_embedding_dim2: 1
-  kp_projection_dim1: 1
-  kp_projection_dim2: 1
-  kp_hidden_type: -1
-  kp_softmax_type: -1
-  kp_embedding_type: -1
-  kp_projection_type: -1
+
+network:
+  - id: dim0
+    label: wafer_mesh
+    size: 20
+    topology:
+      type: Mesh
+      bandwidth: 5000 Gb
+      latency: 5e-6
+      energy_per_bit: 8e-12 # (J/bit)
+      util: 0.95
+    collective_override: {}
+    parallelisms: [tp, cp, lp, dp]
+
 execution_backend:
   model: astra # analytical | astra
   astra:
     backend: astra
     mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collectives:
+    collective_override:
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
       # Note: leave to auto unless you have a specific reason to change it.
       all_gather: auto

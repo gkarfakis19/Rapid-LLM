@@ -70,18 +70,6 @@ tech_param:
       latency: 5e-6
       util: 0.96
       bandwidth: 400 Gb
-system_hierarchy:
-  num_devices_per_node: 1
-  num_nodes: 1
-  kp1_inter: false
-  kp2_inter: false
-  dp_inter: false
-  lp_inter: false
-  tp_inter: false
-network_topology:
-  # Allowed values: ring | fc | switch
-  inter_node: ring
-  intra_node: ring
 memory_hierarchy:
   l0:
     type: SRAM-R
@@ -95,8 +83,9 @@ memory_hierarchy:
   l3:
     type: DRAM
     scope: global
-scheduling_param:
-  auto: false # Not supported for LLM mode.
+
+
+parallelism:
   ### LLM PARAMS ###
   dp: 1 # acts as replica count during inference
   lp: 1 # pipeline stages
@@ -104,22 +93,20 @@ scheduling_param:
   tp: 1 # tensor parallelism
   tp_sp: false # tensor-sequence parallelism
   cp : 1 # context parallelism
-  ### LSTM/GEMM LEGACY PARAMS ###
-  t: "CR"
-  kp1: 1
-  kp2: 1
-  kp_hidden_dim1: 1
-  kp_hidden_dim2: 1
-  kp_softmax_dim1: 1
-  kp_softmax_dim2: 1
-  kp_embedding_dim1: 1
-  kp_embedding_dim2: 1
-  kp_projection_dim1: 1
-  kp_projection_dim2: 1
-  kp_hidden_type: -1
-  kp_softmax_type: -1
-  kp_embedding_type: -1
-  kp_projection_type: -1
+
+network:
+  - id: dim0
+    label: device_fabric
+    size: 1
+    topology:
+      type: Ring
+      bandwidth: 400 Gb
+      latency: 5e-6
+      energy_per_bit: 8e-12 # (J/bit)
+      util: 1.0
+    collective_override: {}
+    parallelisms: [tp, cp, lp, dp, kp1, kp2]
+
 
 
 execution_backend:
@@ -127,7 +114,7 @@ execution_backend:
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collectives:
+    collective_override:
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
       # Note: leave to auto unless you have a specific reason to change it.
       all_gather: auto

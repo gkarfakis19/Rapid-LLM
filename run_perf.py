@@ -85,17 +85,16 @@ def _validate_astrasim_dependencies(hw_config) -> None:
 def _validate_network_topology(hw_config) -> None:
     backend = getattr(hw_config, "execution_backend", None)
     model = getattr(backend, "model", "analytical") if backend else "analytical"
-    network_topology = getattr(hw_config, "network_topology", None)
+    network_layout = getattr(hw_config, "network_layout", None)
 
-    if str(model).lower() == "analytical" and network_topology:
-        inter_topology = getattr(network_topology.inter, "topology", "ring")
-        intra_topology = getattr(network_topology.intra, "topology", "ring")
-
-        if str(inter_topology).lower() != "ring" or str(intra_topology).lower() != "ring":
-            raise RuntimeError(
-                "Non-ring network topologies are not supported in analytical mode. "
-                "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
-            )
+    if str(model).lower() == "analytical" and network_layout:
+        for dim in getattr(network_layout, "dimensions", ()):
+            topo = str(getattr(dim, "topology_type", "ring")).lower()
+            if topo != "ring":
+                raise RuntimeError(
+                    "Non-ring network topologies are not supported in analytical mode. "
+                    "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
+                )
 
 def run_LSTM(
     exp_hw_config_path,
