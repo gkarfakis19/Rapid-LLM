@@ -88,7 +88,7 @@ def derive_topology_from_hw(hw_obj) -> str:
         return "Ring"
     if topo_str in ("switch",):
         return "Switch"
-    if topo_str in ("torus2d", "torus"):
+    if topo_str in ("torus2d"):
         return "Torus2D"
     if topo_str in ("mesh",):
         return "Mesh"
