@@ -55,6 +55,16 @@ def choose_collective(alg: str, topo: str, op: str) -> str:
         return "direct"
     if topo == "Switch":
         return "halvingDoubling"
+    if topo == "Torus2D":
+        return "torus2d"
+    if topo == "Mesh":
+        return "mesh"
+    if topo == "Mesh2D":
+        return "torus2d"
+    if topo == "HyperCube":
+        return "hypercube"
+    if topo == "KingMesh2D":
+        return "torus2d"
     return "ring"
 
 
@@ -70,13 +80,23 @@ def derive_topology_from_hw(hw_obj) -> str:
     """Map DeepFlow network topology enums to AstraSim names."""
     try:
         topo = getattr(hw_obj.network_topology.intra, "topology", None)
-        topo_str = (topo or "fc").lower()
+        topo_str = topo.lower()
         if topo_str in ("fc", "fullyconnected", "fully_connected", "fully-connected"):
             return "FullyConnected"
         if topo_str in ("ring",):
             return "Ring"
         if topo_str in ("switch",):
             return "Switch"
+        if topo_str in ("torus2d",):
+            return "Torus2D"
+        if topo_str in ("mesh",):
+            return "Mesh"
+        if topo_str in ("hypercube",):
+            return "HyperCube"
+        if topo_str in ("mesh2d",):
+            return "Mesh2D"
+        if topo_str in ("kingmesh2d",):
+            return "KingMesh2D"
     except Exception:  # pragma: no cover - defensive
         pass
     return "FullyConnected"
