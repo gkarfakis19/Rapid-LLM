@@ -533,7 +533,6 @@ class LLMExecutionDispatcher:
             return self._run_full_astrasim_hierarchical()
         if mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
             return self._run_full_astrasim_flattened()
-        raise ValueError(f"Unsupported execution mode: {mode}")
 
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
         if declared_mode == ExecutionMode.HYBRID:

@@ -678,7 +678,7 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
             
         if size_bytes > 0:
-            total_bytes = size_bytes #we already has the totol bytes for all reduce not bytes per rank
+            total_bytes = size_bytes # we already has the total bytes for all reduce not bytes per rank
             reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, participants=participants, name=name)
 
 
@@ -878,13 +878,16 @@ class TimeCalculationLLM(TimeCalculation):
         """
         _, effective_m, k, n = self._effective_dims(gemm)
 
-        gemm_time, reduction_time, size_bytes,_,_ = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
+        # Previous TP-aware path kept comm time here:
+        # gemm_time, reduction_time, size_bytes, _, _ = self._tensor_parallelism_gemm_forward(
+        #     gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX
+        # )
+        # Linear softmax is modeled as running on a single device within each TP group.
+        gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
 
             
         elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
         point_flop = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
-        # TODO:
-        # unsure if should be precision.activations or precision.stats
         point_mem = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES 
         point_time = self.roofline(
             point_flop,
@@ -901,14 +904,19 @@ class TimeCalculationLLM(TimeCalculation):
             )
             print("Linear Softmax (f) point_time: {:,}\n".format(point_time))
 
-        return gemm_time + reduction_time + point_time, point_mem
+        return gemm_time + point_time, point_mem
     
     def get_linear_softmax_b(self, gemm):
 
 
         _, effective_m, k, n = self._effective_dims(gemm)
 
-        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX)
+        # Previous TP-aware path kept comm time here:
+        # gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(
+        #     gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX
+        # )
+        # Linear softmax is modeled as running on a single device within each TP group.
+        gemm_time, _, _ = self.single_gpu_gemm_backward(gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX)
         elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
         point_flop = elements * SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT
         # TODO:
@@ -930,7 +938,7 @@ class TimeCalculationLLM(TimeCalculation):
             )
             print("Linear Softmax (b) point_time: {:,}\n".format(point_time))
 
-        return gemm_time + reduction_time + point_time
+        return gemm_time + point_time
     def get_scale_softmax_f(self, gemm):
         """
         Estimate time for scale + softmax forward.
@@ -1406,12 +1414,14 @@ class TimeCalculationLLM(TimeCalculation):
         # Helpers to handle variable-length returns (supports TP/Single returns with flops/mem and CP/Hybrid without)
         def _extract_forward(ret):
             # ret may be (time, red, size, flops, mem) or (time, red, size)
-            if len(ret) >= 5:
-                return ret[0], ret[1], ret[2], ret[3], ret[4]
+            if len(ret) == 5:
+                time, reduction, size, flops, mem = ret
+                return time, reduction, size, flops, mem
             elif len(ret) == 3:
-                return ret[0], ret[1], ret[2], 0, []
+                time, reduction, size = ret
+                return time, reduction, size, 0, []
             else:
-                return ret[0], 0, 0, 0, []
+                raise ValueError(f"Unsupported return length: {len(ret)}")
 
         # QKV Projection GEMM
         qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f = _extract_forward(
@@ -1616,6 +1626,16 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['MHA'] = {
             'forward': mha_time_f,
             'backward': mha_time_b,
+            'forward_compute': (
+                transformer_results['qkv_proj']['forward_gemm']
+                + transformer_results['attention']['forward_gemm']
+                + transformer_results['output_proj']['forward_gemm']
+            ),
+            'backward_compute': (
+                transformer_results['qkv_proj']['backward_gemm']
+                + transformer_results['attention']['backward_gemm']
+                + transformer_results['output_proj']['backward_gemm']
+            ),
             "forward_reduction": qkv_proj_reduction_f + attention_reduction_f + out_proj_reduction_f,
             "backward_reduction": qkv_proj_reduction_b + attention_reduction_b + out_proj_reduction_b,
             "comm_size_forward": qkv_proj_size_f + attention_size_f + out_proj_size_f,
@@ -1636,6 +1656,16 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results['MLP'] = {
             'forward': ffn_time_f,
             'backward': ffn_time_b,
+            'forward_compute': (
+                transformer_results['ffn1']['forward_gemm']
+                + transformer_results['ffn2']['forward_gemm']
+                + transformer_results['gelu']['forward']
+            ),
+            'backward_compute': (
+                transformer_results['ffn1']['backward_gemm']
+                + transformer_results['ffn2']['backward_gemm']
+                + transformer_results['gelu']['backward']
+            ),
             "forward_reduction": ffn2_reduction_f + ffn1_reduction_f,
             "backward_reduction": ffn1_reduction_b + ffn2_reduction_b,
             "comm_size_forward": ffn2_size_f + ffn1_size_f,
@@ -1928,6 +1958,17 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         parallelism_mode = self.get_parallelism_mode()
+
+        def _require_compute(spec: Dict[str, Any], direction: str, entry_name: str) -> float:
+            key_compute = f"{direction}_compute"
+            key_gemm = f"{direction}_gemm"
+            if key_compute in spec:
+                return spec[key_compute]
+            if key_gemm in spec:
+                return spec[key_gemm]
+            print(f"Keys/Values: {spec}")
+            raise KeyError(f"Missing compute-only duration for transformer entry '{entry_name}' direction '{direction}'")
+
         if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
             for key in ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP"):
                 try:
@@ -1936,8 +1977,8 @@ class TimeCalculationLLM(TimeCalculation):
                     print(f"Key {key} not found in transformer_results")
                     print(transformer_results)
                     exit()
-                fwd_time = spec['forward_gemm'] if 'forward_gemm' in spec else spec['forward_compute'] if 'forward_compute' in spec else spec['forward']
-                bwd_time = spec['backward_gemm'] if 'backward_gemm' in spec else spec['backward_compute'] if 'backward_compute' in spec else spec['backward']
+                fwd_time = _require_compute(spec, "forward", key)
+                bwd_time = _require_compute(spec, "backward", key)
                 fwd_red = spec.get('forward_reduction', 0.0)
                 bwd_red = spec.get('backward_reduction', 0.0)
                 comm_bytes_fwd = spec.get('comm_size_forward', 0)
@@ -1969,8 +2010,8 @@ class TimeCalculationLLM(TimeCalculation):
         elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
             for key in ("layernorm1", "MHA", "layernorm2", "MLP"):
                 spec = transformer_results[key]
-                fwd_time = spec['forward']
-                bwd_time = spec['backward']
+                fwd_time = _require_compute(spec, "forward", key)
+                bwd_time = _require_compute(spec, "backward", key)
                 fwd_red = spec.get('forward_reduction', 0.0)
                 bwd_red = spec.get('backward_reduction', 0.0)
                 comm_bytes_fwd = spec.get('comm_size_forward', 0)

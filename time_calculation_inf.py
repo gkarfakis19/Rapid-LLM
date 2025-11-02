@@ -149,12 +149,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         attention_forward = (
             attention_score_time + attention_scale_softmax_f + attention_output_time + attention_reduction
         )
+        attention_forward_compute = attention_score_time + attention_scale_softmax_f + attention_output_time
         out_proj_forward = out_proj_time + out_proj_reduction
         mha_forward = qkv_proj_forward + attention_forward + out_proj_forward
+        mha_forward_compute = qkv_proj_time + attention_forward_compute + out_proj_time
 
         ffn1_forward = ffn1_time + ffn1_reduction
         ffn2_forward = ffn2_time + ffn2_reduction
         mlp_forward = ffn1_forward + act_f + ffn2_forward
+        mlp_forward_compute = ffn1_time + act_f + ffn2_time
 
         layernorm1_forward = residual1_f + layernorm1_f
         layernorm2_forward = residual2_f + layernorm2_f
@@ -215,6 +218,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "MHA": {
                 "forward": mha_forward,
                 "backward": 0.0,
+                "forward_compute": mha_forward_compute, 
+                "backward_compute": 0.0,
                 "forward_reduction": qkv_proj_reduction + attention_reduction + out_proj_reduction,
                 "backward_reduction": 0.0,
                 "comm_size_forward": qkv_proj_size + attention_comm_bytes + out_proj_size,
@@ -253,6 +258,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "MLP": {
                 "forward": mlp_forward,
                 "backward": 0.0,
+                "forward_compute": mlp_forward_compute,
+                "backward_compute": 0.0,
                 "forward_reduction": ffn1_reduction + ffn2_reduction,
                 "backward_reduction": 0.0,
                 "comm_size_forward": ffn1_size + ffn2_size,
@@ -266,16 +273,18 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "gelu": {
                 "forward": act_f,
                 "backward": 0.0,
-                "forward_gemm": act_f,
+                "forward_compute": act_f,
+                "backward_compute": 0.0,
                 "forward_reduction": 0.0,
-                "backward_gemm": 0.0,
                 "backward_reduction": 0.0,
                 "comm_size_forward": 0,
                 "comm_size_backward": 0,
             },
             "layernorm1": {
                 "forward": layernorm1_forward,
+                "forward_compute": layernorm1_f,
                 "backward": 0.0,
+                "backward_compute": 0.0,
                 "forward_reduction": layernorm1_reduction,
                 "backward_reduction": 0.0,
                 "comm_size_forward": layernorm1_bytes,
@@ -283,7 +292,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             },
             "layernorm2": {
                 "forward": layernorm2_forward,
+                "forward_compute": layernorm2_f,
                 "backward": 0.0,
+                "backward_compute": 0.0,
                 "forward_reduction": layernorm2_reduction,
                 "backward_reduction": 0.0,
                 "comm_size_forward": layernorm2_bytes,
