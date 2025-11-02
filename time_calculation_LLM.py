@@ -2,13 +2,15 @@ import math
 import os
 import json
 from enum import Enum
-from typing import Any, Dict, Tuple, Optional, List
+from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
+from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 import simulate_LLM
 from LLM_execution import ExecutionMode, LLMExecutionDispatcher
 from simulate_LLM import Graph
 import LLM_util
 from time_calculation import TimeCalculation
 from itertools import zip_longest  # for element-wise aggregation of memory access lists
+from timing_model import CommSpec, DirectionTiming, OperationTiming, OperationGroup
 
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
@@ -1365,23 +1367,36 @@ class TimeCalculationLLM(TimeCalculation):
             for d in args:
                 mem_levels = self._mem_levels(d)
                 for k, v in mem_levels.items():
-                    combined[k] = combined.get(k, 0) + v
+                    combined[k] = combined.get(k, 0.0) + (v or 0.0)
             return combined
         
     def _mem_levels(self, arr):
+        # Accept both dict-like and sequence-like inputs since GEMM helpers return lists while
+        # aggregated OperationTiming instances already carry dicts. MappingABC/SequenceABC cover
+        # any object implementing the mapping/sequence protocol (e.g., dict, defaultdict, numpy arrays).
+        if isinstance(arr, MappingABC):
+            return {str(k): float(v) for k, v in arr.items()}
         if isinstance(arr, (int, float)):
-            return {f"L{i}": (arr if i == self.num_levels - 1 else 0) for i in range(self.num_levels)}
-        return {f"L{i}": v for i, v in enumerate(arr or [])}
+            return {f"L{i}": (float(arr) if i == self.num_levels - 1 else 0.0) for i in range(self.num_levels)}
+        if isinstance(arr, SequenceABC) and not isinstance(arr, (str, bytes)):
+            return {f"L{i}": float(v) for i, v in enumerate(arr)}
+        return {}
 
     # TODO TODO:
     # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
     # FIX at some point!
     def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs):
-        """Compute latency for all GEMM operations and node breakdown times in one function."""
+        """Compute latency for all GEMM operations and node breakdown times."""
 
-        # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
-            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, intermediate_size, vocab_size
+            self,
+            batch_size,
+            seq_len,
+            hidden_dim,
+            num_heads,
+            kv_heads,
+            intermediate_size,
+            vocab_size,
         )
         if self.debug:
             print(
@@ -1398,6 +1413,7 @@ class TimeCalculationLLM(TimeCalculation):
                 "intermediate_size:",
                 intermediate_size,
             )
+
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
         gemm_attention_score = gemm_shapes["attention_score"]
         gemm_attention_output = gemm_shapes["attention_output"]
@@ -1406,295 +1422,434 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_ffn2 = gemm_shapes["ffn2"]
         gemm_linear = gemm_shapes["linear"]
 
-        # Compute GEMM times and organize in structured dict
-        transformer_results = {}
+        transformer_timings: Dict[str, OperationTiming] = {}
 
-        # assuming no context-parallelism for now and only running inference
+        def _make_direction(
+            op_name: str,
+            direction: str,
+            compute_time: float,
+            comm_time: float,
+            comm_bytes: float,
+            *,
+            flops: float = 0.0,
+            memory: Optional[Mapping[str, float]] = None,
+        ) -> DirectionTiming:
+            mem_map = dict(memory) if memory else {}
+            bytes_int = int(math.ceil(float(comm_bytes or 0.0)))
+            return DirectionTiming(
+                compute_time=compute_time,
+                comm_time=comm_time,
+                comm_bytes=bytes_int,
+                flops=flops,
+                memory_accesses=mem_map,
+            )
 
-        # Helpers to handle variable-length returns (supports TP/Single returns with flops/mem and CP/Hybrid without)
-        def _extract_forward(ret):
-            # ret may be (time, red, size, flops, mem) or (time, red, size)
+        def _extract_forward(ret: Sequence[Any]) -> Tuple[float, float, float, float, Any]:
             if len(ret) == 5:
                 time, reduction, size, flops, mem = ret
                 return time, reduction, size, flops, mem
-            elif len(ret) == 3:
+            if len(ret) == 3:
                 time, reduction, size = ret
-                return time, reduction, size, 0, []
-            else:
-                raise ValueError(f"Unsupported return length: {len(ret)}")
+                return time, reduction, size, 0.0, []
+            raise ValueError(f"Unsupported return length: {len(ret)}")
 
-        # QKV Projection GEMM
-        qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f = _extract_forward(
+        # QKV
+        qkv_proj_gemm_f, qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f = _extract_forward(
             self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV)
         )
-        qkv_proj_gemm_b,  qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV)
-        qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
-        qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
-        transformer_results['qkv_proj'] = {
-            'forward': qkv_proj_f, 'backward': qkv_proj_b,
-            'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': qkv_proj_reduction_f,
-            'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b,
-            'comm_size_forward': qkv_proj_size_f, 'comm_size_backward': qkv_proj_size_b,
-            'flops': qkv_proj_flops_f,
-            'memory_accesses': self._mem_levels(qkv_proj_mem_f),
-        }
+        qkv_proj_gemm_b, qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(
+            gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV
+        )
+        qkv_forward = _make_direction(
+            "qkv_proj",
+            "forward",
+            compute_time=qkv_proj_gemm_f,
+            comm_time=qkv_proj_reduction_f,
+            comm_bytes=qkv_proj_size_f,
+            flops=qkv_proj_flops_f,
+            memory=self._mem_levels(qkv_proj_mem_f),
+        )
+        qkv_backward = _make_direction(
+            "qkv_proj",
+            "backward",
+            compute_time=qkv_proj_gemm_b,
+            comm_time=qkv_proj_reduction_b,
+            comm_bytes=qkv_proj_size_b,
+        )
+        transformer_timings["qkv_proj"] = OperationTiming("qkv_proj", forward=qkv_forward, backward=qkv_backward)
 
-        if self.flash_attention is False:
-            # Attention Score GEMM
-            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f, attn_score_flops_f, attn_score_mem_f = _extract_forward(
+        if not self.flash_attention:
+            attn_score_gemm_f, attn_score_reduction_f, attn_score_size_f, attn_score_flops_f, attn_score_mem_f = _extract_forward(
                 self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE)
             )
-            attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE)
-            attention_score_f = attn_score_gemm_f + attn_score_reduction_f
-            attention_score_b = attn_score_gemm_b + attn_score_reduction_b
-            transformer_results['attention_score'] = {
-                'forward': attention_score_f, 'backward': attention_score_b,
-                'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
-                'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b,
-                'comm_size_forward': attn_score_size_f, 'comm_size_backward': attn_score_size_b,
-                'flops': attn_score_flops_f,
-                'memory_accesses': self._mem_levels(attn_score_mem_f),
-            }
+            attn_score_gemm_b, attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(
+                gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE
+            )
+            attn_score_forward = _make_direction(
+                "attention_score",
+                "forward",
+                compute_time=attn_score_gemm_f,
+                comm_time=attn_score_reduction_f,
+                comm_bytes=attn_score_size_f,
+                flops=attn_score_flops_f,
+                memory=self._mem_levels(attn_score_mem_f),
+            )
+            attn_score_backward = _make_direction(
+                "attention_score",
+                "backward",
+                compute_time=attn_score_gemm_b,
+                comm_time=attn_score_reduction_b,
+                comm_bytes=attn_score_size_b,
+            )
+            transformer_timings["attention_score"] = OperationTiming(
+                "attention_score",
+                forward=attn_score_forward,
+                backward=attn_score_backward,
+            )
+
             attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
             attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
-            transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
+            transformer_timings["attention_scale_softmax"] = OperationTiming(
+                name="attention_scale_softmax",
+                forward=_make_direction(
+                    "attention_scale_softmax",
+                    "forward",
+                    compute_time=attention_scale_softmax_f,
+                    comm_time=0.0,
+                    comm_bytes=0.0,
+                ),
+                backward=_make_direction(
+                    "attention_scale_softmax",
+                    "backward",
+                    compute_time=attention_scale_softmax_b,
+                    comm_time=0.0,
+                    comm_bytes=0.0,
+                ),
+            )
 
-            # Attention Output GEMM
-            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f, attn_out_flops_f, attn_out_mem_f = _extract_forward(
+            attn_out_gemm_f, attn_out_reduction_f, attn_out_size_f, attn_out_flops_f, attn_out_mem_f = _extract_forward(
                 self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT)
             )
-            attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT)
-            attention_output_f = attn_out_gemm_f + attn_out_reduction_f
-            attention_output_b = attn_out_gemm_b + attn_out_reduction_b
-            transformer_results['attention_output'] = {
-                'forward': attention_output_f, 'backward': attention_output_b,
-                'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
-                'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b,
-                'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b,
-                'flops': attn_out_flops_f,
-                'memory_accesses': self._mem_levels(attn_out_mem_f),
-            }
-            # Aggregate attention (score + softmax + output)
-            attention_f = attention_score_f + attention_scale_softmax_f + attention_output_f
-            attention_b = attention_score_b + attention_scale_softmax_b + attention_output_b
-            attention_gemm_f = attn_score_gemm_f + attn_out_gemm_f + attention_scale_softmax_f
-            attention_reduction_f = attn_score_reduction_f + attn_out_reduction_f
-            attention_gemm_b = attn_score_gemm_b + attn_out_gemm_b + attention_scale_softmax_b
-            attention_reduction_b = attn_score_reduction_b + attn_out_reduction_b
-            attention_size_f = attn_score_size_f + attn_out_size_f
-            attention_size_b = attn_score_size_b + attn_out_size_b
-            # Aggregate flops and per-level memory accesses (score + output)
-            attention_flops = (attn_score_flops_f or 0) + (attn_out_flops_f or 0)
-            attention_mem = [
-                (a or 0) + (b or 0)
-                for a, b in zip_longest(attn_score_mem_f or [], attn_out_mem_f or [], fillvalue=0)
-            ]
-            transformer_results["attention"] = {
-                'forward': attention_f,
-                'backward': attention_b,
-                "forward_gemm": attention_gemm_f,
-                "forward_reduction": attention_reduction_f,
-                "backward_gemm": attention_gemm_b,
-                "backward_reduction": attention_reduction_b,
-                "comm_size_forward": attention_size_f,
-                "comm_size_backward": attention_size_b,
-                "flops": attention_flops,
-                "memory_accesses": self._mem_levels(attention_mem),
-            }
-        elif self.flash_attention is True:
-            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f, attention_mem = self.flash_attention_kernel_forward(batch_size,hidden_dim, seq_len, num_heads, kv_heads, num_SMs)
-            # TODO WIP.
-            attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
+            attn_out_gemm_b, attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(
+                gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT
+            )
+            attn_out_forward = _make_direction(
+                "attention_output",
+                "forward",
+                compute_time=attn_out_gemm_f,
+                comm_time=attn_out_reduction_f,
+                comm_bytes=attn_out_size_f,
+                flops=attn_out_flops_f,
+                memory=self._mem_levels(attn_out_mem_f),
+            )
+            attn_out_backward = _make_direction(
+                "attention_output",
+                "backward",
+                compute_time=attn_out_gemm_b,
+                comm_time=attn_out_reduction_b,
+                comm_bytes=attn_out_size_b,
+            )
+            transformer_timings["attention_output"] = OperationTiming(
+                "attention_output",
+                forward=attn_out_forward,
+                backward=attn_out_backward,
+            )
 
-            # flops for flash attention is 2* (QK^T + SV)
-            attention_flops = 2 * (batch_size * seq_len * (hidden_dim ** 2) + batch_size * (seq_len ** 2) * hidden_dim)
-            
-            transformer_results['attention'] = {
-                'forward': attention_f, 'backward': attention_b,
-                'forward_gemm': attention_gemm_f, 'forward_reduction': attention_reduction_f,
-                'backward_gemm': attention_gemm_b, 'backward_reduction': attention_reduction_b,
-                'comm_size_forward': attention_size_f, 'comm_size_backward': attention_size_b,
-                'flops': attention_flops,
-                'memory_accesses': self._mem_levels(attention_mem), # HBM only
-            }
+            attention_forward_compute = (
+                attn_score_forward.compute_time
+                + transformer_timings["attention_scale_softmax"].forward.compute_time
+                + attn_out_forward.compute_time
+            )
+            attention_forward_comm = attn_score_forward.comm_time + attn_out_forward.comm_time
+            attention_backward_compute = (
+                attn_score_backward.compute_time
+                + transformer_timings["attention_scale_softmax"].backward.compute_time
+                + attn_out_backward.compute_time
+            )
+            attention_backward_comm = attn_score_backward.comm_time + attn_out_backward.comm_time
+            attention_comm_bytes_f = attn_score_size_f + attn_out_size_f
+            attention_comm_bytes_b = attn_score_size_b + attn_out_size_b
+            attention_mem = self._combine_mem(attn_score_mem_f, attn_out_mem_f)
+            transformer_timings["attention"] = OperationTiming(
+                "attention",
+                forward=_make_direction(
+                    "attention",
+                    "forward",
+                    compute_time=attention_forward_compute,
+                    comm_time=attention_forward_comm,
+                    comm_bytes=attention_comm_bytes_f,
+                    memory=self._mem_levels(attention_mem),
+                    flops=(attn_score_flops_f + attn_out_flops_f),
+                ),
+                backward=_make_direction(
+                    "attention",
+                    "backward",
+                    compute_time=attention_backward_compute,
+                    comm_time=attention_backward_comm,
+                    comm_bytes=attention_comm_bytes_b,
+                ),
+            )
         else:
-            raise ValueError("flash_attention should be either True or False")
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f, attention_mem = self.flash_attention_kernel_forward(
+                batch_size,
+                hidden_dim,
+                seq_len,
+                num_heads,
+                kv_heads,
+                num_SMs,
+            )
+            attention_b = attention_f * 2
+            attention_gemm_b = attention_gemm_f * 2
+            attention_reduction_b = attention_reduction_f * 2
+            attention_size_b = attention_size_f * 2
+            transformer_timings["attention"] = OperationTiming(
+                "attention",
+                forward=_make_direction(
+                    "attention",
+                    "forward",
+                    compute_time=attention_gemm_f,
+                    comm_time=attention_reduction_f,
+                    comm_bytes=attention_size_f,
+                    memory=self._mem_levels(attention_mem),
+                ),
+                backward=_make_direction(
+                    "attention",
+                    "backward",
+                    compute_time=attention_gemm_b,
+                    comm_time=attention_reduction_b,
+                    comm_bytes=attention_size_b,
+                ),
+            )
 
-        # Output Projection GEMM
         out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f, out_proj_flops_f, out_proj_mem_f = _extract_forward(
             self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ)
         )
-        out_proj_gemm_b,  out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(gemm_output_proj, "output_projection_b", gemm_type=GemmType.OUT_PROJ)
-        output_proj_f = out_proj_gemm_f + out_proj_reduction_f
-        output_proj_b = out_proj_gemm_b + out_proj_reduction_b
-        transformer_results['output_proj'] = {
-            'forward': output_proj_f, 'backward': output_proj_b,
-            'forward_gemm': out_proj_gemm_f, 'forward_reduction': out_proj_reduction_f,
-            'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b,
-            'comm_size_forward': out_proj_size_f, 'comm_size_backward': out_proj_size_b,
-            'flops': out_proj_flops_f,
-            'memory_accesses': self._mem_levels(out_proj_mem_f),
-        }
+        out_proj_gemm_b, out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(
+            gemm_output_proj, "output_projection_b", gemm_type=GemmType.OUT_PROJ
+        )
+        transformer_timings["output_proj"] = OperationTiming(
+            "output_proj",
+            forward=_make_direction(
+                "output_proj",
+                "forward",
+                compute_time=out_proj_gemm_f,
+                comm_time=out_proj_reduction_f,
+                comm_bytes=out_proj_size_f,
+                flops=out_proj_flops_f,
+                memory=self._mem_levels(out_proj_mem_f),
+            ),
+            backward=_make_direction(
+                "output_proj",
+                "backward",
+                compute_time=out_proj_gemm_b,
+                comm_time=out_proj_reduction_b,
+                comm_bytes=out_proj_size_b,
+            ),
+        )
 
-        # FFN1 GEMM
-        ffn1_gemm_f,  ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
+        ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
             self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
         )
-        ffn1_gemm_b,  ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1)
-        ffn1_f = ffn1_gemm_f + ffn1_reduction_f
-        ffn1_b = ffn1_gemm_b + ffn1_reduction_b
-        transformer_results['ffn1'] = {
-            'forward': ffn1_f, 'backward': ffn1_b,
-            'forward_gemm': ffn1_gemm_f, 'forward_reduction': ffn1_reduction_f,
-            'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b,
-            'comm_size_forward': ffn1_size_f, 'comm_size_backward': ffn1_size_b,
-            'flops': ffn1_flops_f,
-            'memory_accesses': self._mem_levels(ffn1_mem_f),
-        }
+        ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(
+            gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1
+        )
+        transformer_timings["ffn1"] = OperationTiming(
+            "ffn1",
+            forward=_make_direction(
+                "ffn1",
+                "forward",
+                compute_time=ffn1_gemm_f,
+                comm_time=ffn1_reduction_f,
+                comm_bytes=ffn1_size_f,
+                flops=ffn1_flops_f,
+                memory=self._mem_levels(ffn1_mem_f),
+            ),
+            backward=_make_direction(
+                "ffn1",
+                "backward",
+                compute_time=ffn1_gemm_b,
+                comm_time=ffn1_reduction_b,
+                comm_bytes=ffn1_size_b,
+            ),
+        )
 
-        # FFN2 GEMM
         ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
             self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
         )
-        ffn2_gemm_b,  ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2)
-        ffn2_f = ffn2_gemm_f + ffn2_reduction_f
-        ffn2_b = ffn2_gemm_b + ffn2_reduction_b
-        transformer_results['ffn2'] = {
-            'forward': ffn2_f, 'backward': ffn2_b,
-            'forward_gemm': ffn2_gemm_f, 'forward_reduction': ffn2_reduction_f,
-            'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b,
-            'comm_size_forward': ffn2_size_f , 'comm_size_backward': ffn2_size_b,
-            'flops': ffn2_flops_f,
-            'memory_accesses': self._mem_levels(ffn2_mem_f),
-        }
-        
-            
+        ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(
+            gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
+        )
+        transformer_timings["ffn2"] = OperationTiming(
+            "ffn2",
+            forward=_make_direction(
+                "ffn2",
+                "forward",
+                compute_time=ffn2_gemm_f,
+                comm_time=ffn2_reduction_f,
+                comm_bytes=ffn2_size_f,
+                flops=ffn2_flops_f,
+                memory=self._mem_levels(ffn2_mem_f),
+            ),
+            backward=_make_direction(
+                "ffn2",
+                "backward",
+                compute_time=ffn2_gemm_b,
+                comm_time=ffn2_reduction_b,
+                comm_bytes=ffn2_size_b,
+            ),
+        )
 
-        # Calculate non-GEMM operations
         embedding_f, embedding_mem = self.get_embedding_f(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
         embedding_b = self.get_embedding_b(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
-        transformer_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b, 'memory_accesses': self._mem_levels(embedding_mem)}
+        transformer_timings["embedding"] = OperationTiming(
+            "embedding",
+            forward=_make_direction(
+                "embedding",
+                "forward",
+                compute_time=embedding_f,
+                comm_time=0.0,
+                comm_bytes=0.0,
+                memory=self._mem_levels(embedding_mem),
+            ),
+            backward=_make_direction(
+                "embedding",
+                "backward",
+                compute_time=embedding_b,
+                comm_time=0.0,
+                comm_bytes=0.0,
+            ),
+        )
 
         residual1_f = self.get_residual_f(tensor_shape=gemm_output_proj)
         residual1_b = self.get_residual_b(tensor_shape=gemm_output_proj)
-        # transformer_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
-
-        layernorm1_f, layernorm_reduction_f, LN1_comm_bytes_f= self.get_layernorm_f(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
-        layernorm1_b, layernorm_reduction_b, LN1_comm_bytes_b= self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
-        transformer_results['layernorm1'] = {
-            'forward': layernorm1_f + residual1_f +layernorm_reduction_f,
-            'forward_compute': layernorm1_f + residual1_f, 
-            'forward_reduction':layernorm_reduction_f, 
-            'backward': layernorm1_b + residual1_b + layernorm_reduction_b,
-            "backward_compute":layernorm1_b + residual1_b , 
-            'backward_reduction': layernorm_reduction_b, 
-            'comm_size_forward': LN1_comm_bytes_f, 'comm_size_backward': LN1_comm_bytes_b
-        }
+        layernorm1_f, layernorm1_reduction_f, LN1_comm_bytes_f = self.get_layernorm_f(
+            batch=batch_size,
+            seq_len=seq_len,
+            d_model=hidden_dim,
+        )
+        layernorm1_b, layernorm1_reduction_b, LN1_comm_bytes_b = self.get_layernorm_b(
+            batch=batch_size,
+            seq_len=seq_len,
+            d_model=hidden_dim,
+        )
+        transformer_timings["layernorm1"] = OperationTiming(
+            "layernorm1",
+            forward=_make_direction(
+                "layernorm1",
+                "forward",
+                compute_time=layernorm1_f + residual1_f,
+                comm_time=layernorm1_reduction_f,
+                comm_bytes=LN1_comm_bytes_f,
+            ),
+            backward=_make_direction(
+                "layernorm1",
+                "backward",
+                compute_time=layernorm1_b + residual1_b,
+                comm_time=layernorm1_reduction_b,
+                comm_bytes=LN1_comm_bytes_b,
+            ),
+        )
 
         residual2_f = self.get_residual_f(tensor_shape=gemm_ffn2)
         residual2_b = self.get_residual_b(tensor_shape=gemm_ffn2)
-        # transformer_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
+        layernorm2_f, layernorm2_reduction_f, LN2_comm_bytes_f = self.get_layernorm_f(
+            batch=batch_size,
+            seq_len=seq_len,
+            d_model=hidden_dim,
+        )
+        layernorm2_b, layernorm2_reduction_b, LN2_comm_bytes_b = self.get_layernorm_b(
+            batch=batch_size,
+            seq_len=seq_len,
+            d_model=hidden_dim,
+        )
+        transformer_timings["layernorm2"] = OperationTiming(
+            "layernorm2",
+            forward=_make_direction(
+                "layernorm2",
+                "forward",
+                compute_time=layernorm2_f + residual2_f,
+                comm_time=layernorm2_reduction_f,
+                comm_bytes=LN2_comm_bytes_f,
+            ),
+            backward=_make_direction(
+                "layernorm2",
+                "backward",
+                compute_time=layernorm2_b + residual2_b,
+                comm_time=layernorm2_reduction_b,
+                comm_bytes=LN2_comm_bytes_b,
+            ),
+        )
 
-        layernorm2_f, layernorm_reduction_f, LN2_comm_bytes_f = self.get_layernorm_f(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
-        layernorm2_b, layernorm_reduction_b, LN2_comm_bytes_b = self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
-        transformer_results['layernorm2'] = {'forward': layernorm2_f + residual2_f + layernorm_reduction_f, "forward_compute": layernorm2_f + residual2_f, 'forward_reduction':layernorm_reduction_f,'backward': layernorm2_b + residual2_b + layernorm_reduction_b, "backward_compute":layernorm2_b + residual2_b, 'backward_reduction': layernorm_reduction_b, 'comm_size_forward': LN2_comm_bytes_f, 'comm_size_backward': LN2_comm_bytes_b}
-        
         if self.model_type == "llama":
             act_f = self.get_swiglu_f(tensor_shape=gemm_ffn1)
             act_b = self.get_swiglu_b(tensor_shape=gemm_ffn1)
         else:
             act_f = self.get_gelu_f(tensor_shape=gemm_ffn1)
             act_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
-        transformer_results['gelu'] = {'forward': act_f, 'backward': act_b}
+        transformer_timings["gelu"] = OperationTiming(
+            "gelu",
+            forward=_make_direction("gelu", "forward", compute_time=act_f, comm_time=0.0, comm_bytes=0.0),
+            backward=_make_direction("gelu", "backward", compute_time=act_b, comm_time=0.0, comm_bytes=0.0),
+        )
 
         linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
-        transformer_results['linear_softmax'] = {
-            'forward': linear_softmax_f, 
-            'backward': linear_softmax_b, 
-            'memory_accesses': self._mem_levels(linear_softmax_mem)}
-
-        # Calculate MHA and FFN times directly from results dict
-        mha_time_f = ( 
-            transformer_results['qkv_proj']['forward'] + transformer_results['attention']['forward'] + transformer_results['output_proj']['forward'] 
+        transformer_timings["linear_softmax"] = OperationTiming(
+            "linear_softmax",
+            forward=_make_direction(
+                "linear_softmax",
+                "forward",
+                compute_time=linear_softmax_f,
+                comm_time=0.0,
+                comm_bytes=0.0,
+                memory=self._mem_levels(linear_softmax_mem),
+            ),
+            backward=_make_direction(
+                "linear_softmax",
+                "backward",
+                compute_time=linear_softmax_b,
+                comm_time=0.0,
+                comm_bytes=0.0,
+            ),
         )
-        
-        
-        mha_time_b = ( 
-            transformer_results['qkv_proj']['backward'] + transformer_results['attention']['backward'] + transformer_results['output_proj']['backward'] 
-        )
-        transformer_results['MHA'] = {
-            'forward': mha_time_f,
-            'backward': mha_time_b,
-            'forward_compute': (
-                transformer_results['qkv_proj']['forward_gemm']
-                + transformer_results['attention']['forward_gemm']
-                + transformer_results['output_proj']['forward_gemm']
-            ),
-            'backward_compute': (
-                transformer_results['qkv_proj']['backward_gemm']
-                + transformer_results['attention']['backward_gemm']
-                + transformer_results['output_proj']['backward_gemm']
-            ),
-            "forward_reduction": qkv_proj_reduction_f + attention_reduction_f + out_proj_reduction_f,
-            "backward_reduction": qkv_proj_reduction_b + attention_reduction_b + out_proj_reduction_b,
-            "comm_size_forward": qkv_proj_size_f + attention_size_f + out_proj_size_f,
-            "comm_size_backward": qkv_proj_size_b + attention_size_b + out_proj_size_b,
-            "flops": qkv_proj_flops_f + transformer_results['attention']['flops'] + out_proj_flops_f,
-            "memory_accesses": self._combine_mem(
-                qkv_proj_mem_f,
-                attention_mem,
-                out_proj_mem_f,
-            ),
 
-        }
-
-        ffn_time_f = transformer_results['ffn1']['forward'] + transformer_results['ffn2']['forward'] + transformer_results['gelu']['forward']
-        ffn_time_b = (
-            transformer_results['ffn1']['backward'] + transformer_results['ffn2']['backward'] + transformer_results['gelu']['backward']
+        mha_group = OperationGroup(
+            "MHA",
+            operations=(
+                transformer_timings["qkv_proj"],
+                transformer_timings["attention"],
+                transformer_timings["output_proj"],
+            ),
         )
-        transformer_results['MLP'] = {
-            'forward': ffn_time_f,
-            'backward': ffn_time_b,
-            'forward_compute': (
-                transformer_results['ffn1']['forward_gemm']
-                + transformer_results['ffn2']['forward_gemm']
-                + transformer_results['gelu']['forward']
+        mlp_group = OperationGroup(
+            "MLP",
+            operations=(
+                transformer_timings["ffn1"],
+                transformer_timings["gelu"],
+                transformer_timings["ffn2"],
             ),
-            'backward_compute': (
-                transformer_results['ffn1']['backward_gemm']
-                + transformer_results['ffn2']['backward_gemm']
-                + transformer_results['gelu']['backward']
-            ),
-            "forward_reduction": ffn2_reduction_f + ffn1_reduction_f,
-            "backward_reduction": ffn1_reduction_b + ffn2_reduction_b,
-            "comm_size_forward": ffn2_size_f + ffn1_size_f,
-            "comm_size_backward": ffn1_size_b + ffn2_size_b,
-            "flops": ffn1_flops_f + ffn2_flops_f,
-            "memory_accesses": self._combine_mem(
-                ffn1_mem_f,
-                ffn2_mem_f,
-            ),
-        }
-        # Calculate transformer times directly
-        
+        )
+
         transformer_time_f = (
-            transformer_results['MHA']['forward'] + transformer_results['MLP']['forward']  +
-            transformer_results['layernorm1']['forward'] + transformer_results['layernorm2']['forward']
+            mha_group.forward_total_time()
+            + mlp_group.forward_total_time()
+            + transformer_timings["layernorm1"].total_forward_time()
+            + transformer_timings["layernorm2"].total_forward_time()
         )
         transformer_time_b = (
-            transformer_results['MHA']['backward'] + transformer_results['MLP']['backward'] +
-            transformer_results['layernorm1']['backward'] + transformer_results['layernorm2']['backward']
+            mha_group.backward_total_time()
+            + mlp_group.backward_total_time()
+            + transformer_timings["layernorm1"].total_backward_time()
+            + transformer_timings["layernorm2"].total_backward_time()
         )
-        
 
         node_breakdown = {
-            'transformer_time_f': transformer_time_f,
-            'transformer_time_b': transformer_time_b,
-            'embedding_f': transformer_results['embedding']['forward'],
-            'embedding_b': transformer_results['embedding']['backward'],
-            'linear_softmax_f': transformer_results['linear_softmax']['forward'],
-            'linear_softmax_b': transformer_results['linear_softmax']['backward']
+            "transformer_time_f": transformer_time_f,
+            "transformer_time_b": transformer_time_b,
+            "embedding_f": transformer_timings["embedding"].total_forward_time(),
+            "embedding_b": transformer_timings["embedding"].total_backward_time(),
+            "linear_softmax_f": transformer_timings["linear_softmax"].total_forward_time(),
+            "linear_softmax_b": transformer_timings["linear_softmax"].total_backward_time(),
         }
 
         if self._generate_graphs:
@@ -1702,7 +1857,9 @@ class TimeCalculationLLM(TimeCalculation):
             with open(results_path, "w", encoding="utf-8") as results_file:
                 json.dump(
                     {
-                        "transformer_results": transformer_results,
+                        "transformer_results": {
+                            name: timing.to_dict() for name, timing in transformer_timings.items()
+                        },
                         "node_breakdown": node_breakdown,
                     },
                     results_file,
@@ -1710,7 +1867,9 @@ class TimeCalculationLLM(TimeCalculation):
                     sort_keys=True,
                 )
 
-        return transformer_results, node_breakdown
+        return transformer_timings, node_breakdown
+
+
 
 
     def _effective_transformer_batch(self) -> int:
@@ -1816,77 +1975,6 @@ class TimeCalculationLLM(TimeCalculation):
             }
         return metadata
 
-    def _populate_transformer_comm_metadata(
-        self,
-        entry: Dict[str, Any],
-        metadata: Dict[str, Dict[str, Any]],
-        # gemm_spec: Tuple[int, ...],
-        comm_bytes_fwd: int,
-        comm_bytes_bwd: int,
-    ) -> None:
-        """Attach tensor-parallel collectives for a GEMM to metadata and entry."""
-
-
-        if not self.tp or self.tp <= 1 and self.cp <= 1:
-            return
-
-
-
-        def add_comm(direction: str, suffix: str, kind: str, size_bytes: float, participants: int, interconnect: str) -> None:
-            if participants <= 1:
-                return
-            bytes_int = int(math.ceil(size_bytes))
-            if bytes_int <= 0:
-                return
-            key = f"{entry['name']}_{direction}_{suffix}"
-            # ensure uniqueness when multiple collectives share the same suffix
-            unique_key = key
-            counter = 1
-            while unique_key in metadata:
-                counter += 1
-                unique_key = f"{key}_{counter}"
-
-            metadata[unique_key] = {
-                'size': bytes_int,
-                'type': kind,
-                'participants': int(participants),
-                'interconnect_type': interconnect,
-            }
-            entry[direction]['comm_keys'].append(unique_key)
-
-        parallelism_mode = self.get_parallelism_mode()
-        rules_by_mode = COMMUNICATION_RULES.get(parallelism_mode)
-        if not rules_by_mode:
-            return
-
-        spec = rules_by_mode.get(entry['name'])
-        if spec is None:
-            spec = rules_by_mode.get(COMM_RULE_DEFAULT_KEY)
-        if not spec:
-            return
-
-
-        participants_lookup = {
-            'tp': getattr(self, 'tp', 0),
-            'cp': getattr(self, 'cp', 0),
-            'dp': getattr(self, 'dp', 0),
-            'lp': getattr(self, 'lp', 0),
-        }
-
-        for direction in ('forward', 'backward'):
-            rule = spec.get(direction)
-            if not rule:
-                continue
-            size_bytes = comm_bytes_fwd if direction == 'forward' else comm_bytes_bwd
-            scope = rule.get('participants')
-            participants = participants_lookup.get(scope or '', 0)
-            if participants <= 1:
-                continue
-            kind = rule['kind']
-            suffix = rule.get('suffix', kind)
-            interconnect = rule.get('interconnect', scope or 'tp')
-            add_comm(direction, suffix, kind, size_bytes, participants, interconnect)
-
     def _build_interconnect_params(self) -> Dict[str, Tuple[float, float]]:
         return {
             'dp': (self.IBD, self.LLD),
@@ -1899,7 +1987,7 @@ class TimeCalculationLLM(TimeCalculation):
         self,
         *,
         node_breakdown: Dict[str, float],
-        transformer_results: Dict[str, Dict[str, Any]],
+        transformer_timings: Dict[str, OperationTiming],
         batch_size: int,
         seq_len: int,
         hidden_dim: int,
@@ -1936,7 +2024,6 @@ class TimeCalculationLLM(TimeCalculation):
             local_comp = self.get_data_parallel_local_computation(hidden_dim, intermediate_size)
 
         # these are used for dp all-reduce/reduce-scatter.
-        # TODO: check the embedding_size below. I think only the first term is needed.
         embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
         softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
@@ -1958,90 +2045,146 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         parallelism_mode = self.get_parallelism_mode()
+        rules_by_mode = COMMUNICATION_RULES.get(parallelism_mode) or {}
+        participants_lookup = {
+            'tp': int(getattr(self, 'tp', 0) or 0),
+            'cp': int(getattr(self, 'cp', 0) or 0),
+            'dp': int(getattr(self, 'dp', 0) or 0),
+            'lp': int(getattr(self, 'lp', 0) or 0),
+        }
+        group_members = {
+            "MHA": ("qkv_proj", "attention", "output_proj"),
+            "MLP": ("ffn1", "gelu", "ffn2"),
+        }
 
-        def _require_compute(spec: Dict[str, Any], direction: str, entry_name: str) -> float:
-            key_compute = f"{direction}_compute"
-            key_gemm = f"{direction}_gemm"
-            if key_compute in spec:
-                return spec[key_compute]
-            if key_gemm in spec:
-                return spec[key_gemm]
-            print(f"Keys/Values: {spec}")
-            raise KeyError(f"Missing compute-only duration for transformer entry '{entry_name}' direction '{direction}'")
+        def _register_specs(specs: Sequence[CommSpec]) -> List[str]:
+            names: List[str] = []
+            for spec in specs:
+                existing = transformer_comm_metadata.get(spec.name)
+                if existing:
+                    if (
+                        existing["size"] != spec.size_bytes
+                        or existing["type"] != spec.kind
+                        or existing["participants"] != spec.participants
+                        or existing["interconnect_type"] != spec.interconnect
+                    ):
+                        raise ValueError(
+                            f"Conflicting CommSpec registration for '{spec.name}' "
+                            f"(existing={existing}, new={spec})"
+                        )
+                else:
+                    transformer_comm_metadata[spec.name] = {
+                        "size": spec.size_bytes,
+                        "type": spec.kind,
+                        "participants": spec.participants,
+                        "interconnect_type": spec.interconnect,
+                    }
+                names.append(spec.name)
+            return names
+
+        def _build_direction_entry(op_name: str, direction: str, timing: Optional[DirectionTiming]) -> Dict[str, Any]:
+            if timing is None:
+                return {"duration": 0.0, "reduction": 0.0, "comm_keys": []}
+            specs = _make_comm_specs(op_name, direction, timing.comm_bytes)
+            return {
+                "duration": timing.compute_time,
+                "reduction": timing.comm_time,
+                "comm_keys": _register_specs(specs),
+            }
+
+        def _make_comm_specs(op_name: str, direction: str, total_bytes: float) -> Tuple[CommSpec, ...]:
+            bytes_int = int(math.ceil(float(total_bytes or 0.0)))
+            if bytes_int <= 0:
+                return ()
+            rule_spec = rules_by_mode.get(op_name) or rules_by_mode.get(COMM_RULE_DEFAULT_KEY)
+            if not rule_spec:
+                return ()
+            rule = rule_spec.get(direction)
+            if not rule:
+                return ()
+            kind = rule.get("kind")
+            scope = rule.get("participants")
+            if not kind or not scope:
+                return ()
+            participants = participants_lookup.get(scope, 0)
+            if participants <= 1:
+                return ()
+            interconnect = rule.get("interconnect", scope)
+            suffix = rule.get("suffix", kind)
+            name = f"{op_name}_{direction}_{suffix}"
+            return (
+                CommSpec(
+                    name=name,
+                    kind=kind,
+                    size_bytes=bytes_int,
+                    participants=participants,
+                    interconnect=interconnect,
+                    extra={
+                        "scope": scope,
+                        "direction": direction,
+                        "op_name": op_name,
+                        "parallelism_mode": parallelism_mode.value,
+                    },
+                ),
+            )
+
+        def _build_group_operation(name: str, members: Tuple[str, ...]) -> OperationTiming:
+            ops = tuple(transformer_timings[m] for m in members)
+            group = OperationGroup(name, ops)
+            forward_memory = self._combine_mem(*(op.forward.memory_accesses for op in ops))
+            forward_flops = sum(op.forward.flops for op in ops)
+            forward_dir = DirectionTiming(
+                compute_time=group.forward_compute_time(),
+                comm_time=group.forward_comm_time(),
+                comm_bytes=group.forward_comm_bytes(),
+                flops=forward_flops,
+                memory_accesses=forward_memory,
+            )
+            if include_transformer_backward:
+                backward_memory = self._combine_mem(
+                    *(op.backward.memory_accesses for op in ops if op.backward is not None)
+                )
+                backward_flops = sum((op.backward.flops if op.backward else 0.0) for op in ops)
+                backward_dir = DirectionTiming(
+                    compute_time=group.backward_compute_time(),
+                    comm_time=group.backward_comm_time(),
+                    comm_bytes=group.backward_comm_bytes(),
+                    flops=backward_flops,
+                    memory_accesses=backward_memory,
+                )
+            else:
+                backward_dir = None
+            return OperationTiming(name, forward_dir, backward_dir)
+
+        def _resolve_operation(name: str) -> OperationTiming:
+            if name in group_members:
+                return _build_group_operation(name, group_members[name])
+            return transformer_timings[name]
 
         if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
-            for key in ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP"):
-                try:
-                    spec = transformer_results[key]
-                except KeyError:
-                    print(f"Key {key} not found in transformer_results")
-                    print(transformer_results)
-                    exit()
-                fwd_time = _require_compute(spec, "forward", key)
-                bwd_time = _require_compute(spec, "backward", key)
-                fwd_red = spec.get('forward_reduction', 0.0)
-                bwd_red = spec.get('backward_reduction', 0.0)
-                comm_bytes_fwd = spec.get('comm_size_forward', 0)
-                comm_bytes_bwd = spec.get('comm_size_backward', 0)
-
-                entry = {
-                    "name": key,
-                    "forward": {
-                        "duration": fwd_time,
-                        "reduction": fwd_red,
-                        "comm_keys": [],
-                    },
-                    "backward": {
-                        "duration": bwd_time,
-                        "reduction": bwd_red,
-                        "comm_keys": [],
-                    },
-                }
-
-                self._populate_transformer_comm_metadata(
-                    entry=entry,
-                    metadata=transformer_comm_metadata,
-                    comm_bytes_fwd=comm_bytes_fwd,
-                    comm_bytes_bwd=comm_bytes_bwd,
-                )
-
-                transformer_operation_entries.append(entry)
-            
+            op_names = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
         elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
-            for key in ("layernorm1", "MHA", "layernorm2", "MLP"):
-                spec = transformer_results[key]
-                fwd_time = _require_compute(spec, "forward", key)
-                bwd_time = _require_compute(spec, "backward", key)
-                fwd_red = spec.get('forward_reduction', 0.0)
-                bwd_red = spec.get('backward_reduction', 0.0)
-                comm_bytes_fwd = spec.get('comm_size_forward', 0)
-                comm_bytes_bwd = spec.get('comm_size_backward', 0)
-
-                entry = {
-                    "name": key,
-                    "forward": {
-                        "duration": fwd_time,
-                        "reduction": fwd_red,
-                        "comm_keys": [],
-                    },
-                    "backward": {
-                        "duration": bwd_time,
-                        "reduction": bwd_red,
-                        "comm_keys": [],
-                    },
-                }
-
-                self._populate_transformer_comm_metadata(
-                    entry=entry,
-                    metadata=transformer_comm_metadata,
-                    comm_bytes_fwd=comm_bytes_fwd,
-                    comm_bytes_bwd=comm_bytes_bwd,
-                )
-
-                transformer_operation_entries.append(entry)
-
+            op_names = ("layernorm1", "MHA", "layernorm2", "MLP")
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
+
+        for key in op_names:
+            try:
+                op_timing = _resolve_operation(key)
+            except KeyError as exc:
+                raise KeyError(f"Missing transformer timing for operation '{key}'") from exc
+
+            entry = {
+                "name": key,
+                "forward": _build_direction_entry(key, "forward", op_timing.forward),
+                "backward": _build_direction_entry(key, "backward", op_timing.backward if include_transformer_backward else None),
+            }
+
+            if not include_transformer_backward:
+                # Ensure backward section is zeroed when excluded.
+                entry["backward"] = {"duration": 0.0, "reduction": 0.0, "comm_keys": []}
+
+            transformer_operation_entries.append(entry)
         transformer_graph: Optional[Graph] = None
         transformer_forward_root: Optional[Any] = None
         transformer_backward_root: Optional[Any] = None
@@ -2161,7 +2304,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
 
         num_SMs = self.hw_config.tech_config.core.num_bundles
-        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
+        transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
             batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs
         )
 
@@ -2237,7 +2380,7 @@ class TimeCalculationLLM(TimeCalculation):
             interconnect_params,
         ) = self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
-            transformer_results=transformer_results,
+            transformer_timings=transformer_timings,
             batch_size=batch_size,
             seq_len=seq_len,
             hidden_dim=hidden_dim,
