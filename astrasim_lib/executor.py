@@ -165,6 +165,25 @@ def _build_axis_groups(
     return axis_groups
 
 
+def _derive_axes_filter(
+    axis_order: Sequence[str],
+    axis_sizes: Mapping[str, int],
+    dp_count: int,
+) -> Optional[List[str]]:
+    axes: List[str] = []
+    for axis in axis_order:
+        try:
+            size = max(1, int(axis_sizes.get(axis, 1)))
+        except Exception:
+            size = 1
+        if size > 1 and axis not in axes:
+            axes.append(axis)
+    if dp_count > 1:
+        axes = [axis for axis in axes if axis != "dp"]
+        axes.append("dp")
+    return axes or None
+
+
 def _assign_collective_labels(
     tp_collective_groups: Mapping[str, List[Any]],
     collective_info: Mapping[Any, Dict[str, Any]],
@@ -644,9 +663,8 @@ def convert_deepflow_graph_to_chakra_et(
 
     # Step 3: Recover the multi-dimensional axis layout (tp/cp/lp, etc.) so that
     # communicator membership can be reconstructed deterministically later on.
-    axis_order, axis_sizes = _extract_axis_layout(
-        getattr(graph_root, "_astrasim_rank_layout", None)
-    )
+    rank_layout = getattr(graph_root, "_astrasim_rank_layout", None)
+    axis_order, axis_sizes = _extract_axis_layout(rank_layout)
     stage_axis_coords = _compute_stage_axis_coords(stage_ids, axis_order, axis_sizes)
     axis_groups = _build_axis_groups(axis_order, axis_sizes, stage_axis_coords, stage_to_ranks)
 
@@ -1529,7 +1547,16 @@ def run_astra_simulation_only_onepath(
         if os.environ.get("DEEPFLOW_ASTRA_SKIP_EXEC"):
             print("[AstraSim] DEEPFLOW_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
             exit()
-        astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
+
+        rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
+        axis_order, axis_sizes = _extract_axis_layout(rank_layout)    
+        axes_filter = _derive_axes_filter(axis_order, axis_sizes, dp_count)
+        astra_configs = generate_astrasim_configs_from_hw(
+            time_calc_obj.hw_config,
+            work_dir,
+            rank_count,
+            axes_filter=axes_filter,
+        )
 
         # Run AstraSim simulation on forward graph (cached via manifest)
         print(f"[AstraSim] Executing forward simulation with {rank_count} ranks...")
@@ -1543,6 +1570,8 @@ def run_astra_simulation_only_onepath(
             manifest_json_path=fwd_manifest,
             workload_prefix=fwd_et_prefix,
             comm_group_json=comm_groups_path,
+            axes_filter=axes_filter,
+            files=astra_configs,
         )
 
 

@@ -4,7 +4,7 @@ import math
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Tuple, Optional, List, Set
+from typing import Any, Dict, Tuple, Optional, List, Set, Sequence
 
 import simulate_LLM
 from astrasim_lib import run_astra_simulation_only_onepath
@@ -636,6 +636,8 @@ class LLMExecutionDispatcher:
         self.transformer_forward_root = transformer_forward_root
         self.transformer_backward_root = transformer_backward_root
         self.flattened_root: Optional[Any] = None
+        self._transformer_rank_layout: Optional[Dict[str, Any]] = None
+        self._pipeline_rank_layout: Optional[Dict[str, Any]] = None
         self._rank_layout = self._build_rank_layout_descriptor()
 
     def _build_rank_layout_descriptor(self) -> Dict[str, Any]:
@@ -659,8 +661,31 @@ class LLMExecutionDispatcher:
 
         axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "lp": lp_size, "dp": dp_size}
         axis_order: List[str] = []
+
+        # Enforce axis ordering for hierarchical/hybrid modes: the first active
+        # dimension must contain exactly {'tp','cp'}. Subsequent active
+        # dimensions may contain 'lp' (optionally combined with 'dp'). This
+        # matches the assumptions in the hierarchical graphs where a stage is a
+        # TP/CP cluster replicated across LP (and potentially DP) axes.
+        enforce_layout = self.time_calc.execution_mode in {
+            ExecutionMode.HYBRID,
+            ExecutionMode.FULL_ASTRASIM_HIERARCHICAL,
+        }
+        first_active_checked = False
+
         for dim in dimensions:
             dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
+            declared = int(getattr(dim, "size", 1))
+
+            if enforce_layout and declared > 1 and not first_active_checked:
+                canon = sorted(dim_axes)
+                if canon != ["cp", "tp"]:
+                    raise ValueError(
+                        "For hierarchical/hybrid AstraSim modes, the first active network "
+                        "dimension must contain exactly {'tp','cp'} to represent the tensor/context cluster."
+                    )
+                first_active_checked = True
+
             for name in dim_axes:
                 if name == "dp":
                     continue
@@ -672,7 +697,6 @@ class LLMExecutionDispatcher:
                 if name not in axis_order:
                     axis_order.append(name)
 
-            declared = int(getattr(dim, "size", 1))
             expected = 1
             for axis_name in dim_axes:
                 expected *= axis_sizes.get(axis_name, 1)
@@ -709,6 +733,29 @@ class LLMExecutionDispatcher:
             f"{axis_order or ['<none>']} ({pretty_sizes or 'single device'}{dp_msg}) | "
             "dp ranks are appended separately."
         )
+
+        def _subset_layout(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
+            subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) > 1]
+            if not subset:
+                return None
+            strides: Dict[str, int] = {}
+            span = 1
+            for axis in subset:
+                strides[axis] = span
+                span *= axis_sizes[axis]
+            return {
+                "axis_order": subset,
+                "axis_sizes": {axis: axis_sizes[axis] for axis in subset},
+                "axis_strides": strides,
+                "stage_span": span,
+            }
+
+        # Transformer graphs only encode TP/CP axes; pipeline graphs encode LP
+        # (DP replicas are handled externally). Store these subsets so callers
+        # can attach the appropriate layout before invoking AstraSim.
+        self._transformer_rank_layout = _subset_layout(["tp", "cp"])
+        self._pipeline_rank_layout = _subset_layout(["lp"])
+
         return descriptor
 
     def run(self, mode: ExecutionMode) -> ExecutionResult:
@@ -795,7 +842,11 @@ class LLMExecutionDispatcher:
                 "/pipeline_graph_hierarchical",
             )
 
-        setattr(self.pipeline_root, "_astrasim_rank_layout", self._rank_layout)
+        pipeline_layout = getattr(self, "_pipeline_rank_layout", None)
+        if pipeline_layout:
+            setattr(self.pipeline_root, "_astrasim_rank_layout", pipeline_layout)
+        elif hasattr(self.pipeline_root, "_astrasim_rank_layout"):
+            delattr(self.pipeline_root, "_astrasim_rank_layout")
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
@@ -959,6 +1010,11 @@ class LLMExecutionDispatcher:
         fwd_max = 0
         bwd_max = 0
         if self.transformer_forward_root:
+            layout = getattr(self, "_transformer_rank_layout", None)
+            if layout:
+                setattr(self.transformer_forward_root, "_astrasim_rank_layout", layout)
+            elif hasattr(self.transformer_forward_root, "_astrasim_rank_layout"):
+                delattr(self.transformer_forward_root, "_astrasim_rank_layout")
             fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
                 self.transformer_forward_root,
                 self.time_calc,
@@ -967,6 +1023,11 @@ class LLMExecutionDispatcher:
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
             )
         if self.transformer_backward_root:
+            layout = getattr(self, "_transformer_rank_layout", None)
+            if layout:
+                setattr(self.transformer_backward_root, "_astrasim_rank_layout", layout)
+            elif hasattr(self.transformer_backward_root, "_astrasim_rank_layout"):
+                delattr(self.transformer_backward_root, "_astrasim_rank_layout")
             bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
                 self.transformer_backward_root,
                 self.time_calc,

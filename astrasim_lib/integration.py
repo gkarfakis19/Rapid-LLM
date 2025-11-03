@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .bootstrap import ensure_chakra_available
 from .config_generation import (
@@ -315,6 +315,8 @@ def run_cache_astrasim(
     manifest_json_path: Optional[str] = None,
     workload_prefix: Optional[str] = None,
     comm_group_json: Optional[str] = None,
+    axes_filter: Optional[Sequence[str]] = None,
+    files = None,
 ) -> Tuple[List[float], float]:
     """Run AstraSim with caching to avoid recomputation when inputs match."""
 
@@ -341,6 +343,7 @@ def run_cache_astrasim(
     topo = derive_topology_from_hw(hw_obj)
     colls = _collectives_from_hw(hw_obj, topo)
     sys_opts_sig = _sys_options_from_hw(hw_obj)
+    axes_filter_tuple: Optional[Tuple[str, ...]] = tuple(axes_filter) if axes_filter else None
 
     sig: Dict[str, Any] = {
         "comm": comm.lower(),
@@ -357,7 +360,15 @@ def run_cache_astrasim(
         sig["sys_options"] = sys_opts_sig
     if manifest_json_path:
         sig["multinode"] = True
-    files = generate_astrasim_configs_from_hw(hw_obj, out_dir=astra_config_dir, npus_count=npus_count)
+    if axes_filter_tuple is not None:
+        sig["axes_filter"] = axes_filter_tuple
+    if not files:
+        files = generate_astrasim_configs_from_hw(
+            hw_obj,
+            out_dir=astra_config_dir,
+            npus_count=npus_count,
+            axes_filter=axes_filter_tuple,
+        )
     topo_list = files.get("topology_list")
     npus_per_dim = files.get("npus_per_dim")
     if topo_list:
@@ -434,6 +445,8 @@ def run_cache_astrasim(
         debug_cmd.append(f"--remote-memory-configuration={remote_mem_path}")
     if comm_group_json and os.path.exists(comm_group_json):
         debug_cmd.append(f"--comm-group-configuration={comm_group_json}")
+    cmd_str = " ".join(debug_cmd)
+    # print(f"Full AstraSim command:\n{cmd_str}")
 
     while attempts < 5:
         attempts += 1
@@ -448,9 +461,8 @@ def run_cache_astrasim(
             last_outcome_zero = False
             break
         last_outcome_zero = True
-        time.sleep(0.5)
+        time.sleep(0.1)
     if last_outcome_zero:
-        cmd_str = " ".join(debug_cmd)
         raise RuntimeError(
             f"AstraSim returned zero time for {comm} size={size_bytes} npus={npus_count} after 5 retries.\n"
             f"Full AstraSim command:\n{cmd_str}"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hw_component import Network
 
@@ -109,6 +109,8 @@ def generate_astrasim_configs_from_hw(
     hw_obj,
     out_dir: str = "./astra_cache",
     npus_count: Optional[int] = None,
+    *,
+    axes_filter: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
     """Write AstraSim network/system configs derived from ``hw_obj``."""
     if npus_count is None:
@@ -133,11 +135,26 @@ def generate_astrasim_configs_from_hw(
         "lp": _safe_int(getattr(sch_config, "lp", 1)) if sch_config else 1,
         "dp": _safe_int(getattr(sch_config, "dp", 1)) if sch_config else 1,
     }
+    if axes_filter:
+        axis_sizes = {axis: axis_sizes.get(axis, 1) for axis in axes_filter}
+        axis_sizes.setdefault("tp", 1)
+        axis_sizes.setdefault("cp", 1)
+        axis_sizes.setdefault("lp", 1)
+        axis_sizes.setdefault("dp", 1)
     axis_order_preference = ["tp", "cp", "lp", "dp"]
 
+    allowed_axes = set(axis_sizes.keys()) if axes_filter else None
+    # print(f"Allowed axes: {allowed_axes}")
+    # print(f"Axes sizes: {axis_sizes}")
     dim_infos: List[Tuple[Any, List[str], int]] = []
+    # print(f"Filter: {axes_filter}")
     for dim in dimensions:
         axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
+        # print(f"All axes for dimension {dim.label}: {axes}")
+        if allowed_axes is not None and axes_filter:
+            filtered_axes = [axis for axis in axes if axis in allowed_axes]
+            axes = filtered_axes
+        # print(f"Filtered axes for dimension {dim.label}: {axes}")
         effective = 1
         for axis in axes:
             if axis not in axis_sizes:
@@ -146,11 +163,11 @@ def generate_astrasim_configs_from_hw(
                     "Supported axes are tp, cp, lp, dp."
                 )
             effective *= axis_sizes[axis]
-        if effective != int(getattr(dim, "size", effective)):
-            raise ValueError(
-                f"Network dimension '{dim.label}' size mismatch: declared {dim.size}, "
-                f"but parallelism factors imply {effective}."
-            )
+        # if effective != int(getattr(dim, "size", effective)):
+        #     raise ValueError(
+        #         f"Network dimension '{dim.label}' size mismatch: declared {dim.size}, "
+        #         f"but parallelism factors imply {effective}."
+        #     )
         dim_infos.append((dim, axes, effective))
 
     active_dim_indices = [idx for idx, (dim, _, _) in enumerate(dim_infos) if int(getattr(dim, "size", 0)) > 1]
