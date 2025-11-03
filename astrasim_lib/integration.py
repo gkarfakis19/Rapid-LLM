@@ -357,9 +357,16 @@ def run_cache_astrasim(
         sig["sys_options"] = sys_opts_sig
     if manifest_json_path:
         sig["multinode"] = True
-    canonical = _canonical_sig(sig)
-
     files = generate_astrasim_configs_from_hw(hw_obj, out_dir=astra_config_dir, npus_count=npus_count)
+    topo_list = files.get("topology_list")
+    npus_per_dim = files.get("npus_per_dim")
+    if topo_list:
+        sig["topology"] = list(topo_list)
+        sig["physical_topology"] = list(topo_list)
+    if npus_per_dim:
+        sig["npus_per_dim"] = list(npus_per_dim)
+
+    canonical = _canonical_sig(sig)
 
     if workload_prefix:
         pass

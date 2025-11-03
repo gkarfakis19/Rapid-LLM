@@ -20,7 +20,7 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from itertools import count as _it_count
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 sys.setrecursionlimit(10000)
 
@@ -64,11 +64,17 @@ def _clean_astrasim_artifacts(directory: str) -> None:
                     os.remove(path)
                 except OSError:
                     pass
-            elif entry in {
-                "manifest.json",
-                "system_native_collectives.json",
-                "comm_groups.json",
-            }:
+            elif entry == "manifest.json":
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            elif entry == "comm_groups.json" or entry.startswith("comm_groups_"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            elif entry.startswith("system_native_collectives"):
                 try:
                     os.remove(path)
                 except OSError:
@@ -86,7 +92,137 @@ def _clean_astrasim_artifacts(directory: str) -> None:
 
 _TP_GROUP_BASE_ID = 1000
 _LAST_TP_GROUPS: Optional[Dict[str, List[int]]] = None
+_LAST_STAGE_GROUPS: Optional[List[List[int]]] = None
 _TP_LABEL_DP_TO_ID: Dict[Tuple[str, int], str] = {}
+_TP_MEMBERS_TO_GID: Dict[Tuple[int, ...], str] = {}
+
+
+def _extract_axis_layout(rank_layout: Optional[Dict[str, Any]]) -> Tuple[List[str], Dict[str, int]]:
+    if not isinstance(rank_layout, dict):
+        return [], {}
+    axis_order = list(rank_layout.get("axis_order", []))
+    raw_sizes = rank_layout.get("axis_sizes", {})
+    if isinstance(axis_order, tuple):
+        axis_order = list(axis_order)
+    axis_sizes: Dict[str, int] = {}
+    if isinstance(raw_sizes, dict):
+        for key, value in raw_sizes.items():
+            try:
+                axis_sizes[str(key)] = max(1, int(value))
+            except Exception:
+                axis_sizes[str(key)] = 1
+    return axis_order, axis_sizes
+
+
+def _compute_stage_axis_coords(
+    stage_ids: Sequence[int],
+    axis_order: Sequence[str],
+    axis_sizes: Mapping[str, int],
+) -> Dict[int, Dict[str, int]]:
+    coords: Dict[int, Dict[str, int]] = {}
+    if not axis_order:
+        return coords
+    for stage in stage_ids:
+        remaining = int(stage)
+        stage_coords: Dict[str, int] = {}
+        for axis in axis_order:
+            size = max(1, int(axis_sizes.get(axis, 1)))
+            if size > 1:
+                stage_coords[axis] = remaining % size
+                remaining //= size
+            else:
+                stage_coords[axis] = 0
+        coords[stage] = stage_coords
+    return coords
+
+
+def _build_axis_groups(
+    axis_order: Sequence[str],
+    axis_sizes: Mapping[str, int],
+    stage_axis_coords: Mapping[int, Dict[str, int]],
+    stage_to_ranks: Mapping[int, List[int]],
+) -> Dict[str, Dict[Tuple[int, Tuple[Tuple[str, int], ...]], List[int]]]:
+    axis_groups: Dict[
+        str, Dict[Tuple[int, Tuple[Tuple[str, int], ...]], List[int]]
+    ] = {}
+    if not axis_order:
+        return axis_groups
+    for axis in axis_order:
+        size = max(1, int(axis_sizes.get(axis, 1)))
+        if size <= 1:
+            continue
+        groups: Dict[
+            Tuple[int, Tuple[Tuple[str, int], ...]], List[int]
+        ] = defaultdict(list)
+        for stage, coords in stage_axis_coords.items():
+            key_base = tuple((ax, coords.get(ax, 0)) for ax in axis_order if ax != axis)
+            ranks = stage_to_ranks.get(stage, [])
+            for dp_idx, rank in enumerate(ranks):
+                groups[(dp_idx, key_base)].append(rank)
+        axis_groups[axis] = {
+            key: sorted(set(values)) for key, values in groups.items() if values
+        }
+    return axis_groups
+
+
+def _assign_collective_labels(
+    tp_collective_groups: Mapping[str, List[Any]],
+    collective_info: Mapping[Any, Dict[str, Any]],
+    axis_order: Sequence[str],
+    axis_sizes: Mapping[str, int],
+    stage_axis_coords: Mapping[int, Dict[str, int]],
+    axis_groups: Mapping[str, Dict[Tuple[int, Tuple[Tuple[str, int], ...]], List[int]]],
+    stage_to_ranks: Mapping[int, List[int]],
+    dp_count: int,
+) -> Tuple[Dict[Any, str], Dict[str, List[Any]], Dict[str, Set[Tuple[str, int, Tuple[int, ...]]]]]:
+    tp_collective_labels: Dict[Any, str] = {}
+    label_to_edges: Dict[str, List[Any]] = {}
+    label_group_tokens: Dict[str, Set[Tuple[str, int, Tuple[int, ...]]]] = defaultdict(set)
+    group_key_to_label: Dict[Tuple[str, Tuple[int, ...]], str] = {}
+    label_suffix_counter: Dict[str, int] = defaultdict(int)
+
+    for base_name, edges in tp_collective_groups.items():
+        if not edges:
+            continue
+        for edge in sorted(edges, key=lambda e: getattr(e, "op_id", 0)):
+            info = collective_info[edge]
+            axis = str(info.get("interconnect_type", "tp")).lower()
+            stage = info["stage"]
+            coords = stage_axis_coords.get(stage, {})
+            key_base = tuple((ax, coords.get(ax, 0)) for ax in axis_order if ax != axis)
+
+            members_per_dp: List[Tuple[int, Tuple[int, ...]]] = []
+            for dp_idx in range(dp_count):
+                members = None
+                axis_map = axis_groups.get(axis)
+                if axis_map is not None:
+                    members = axis_map.get((dp_idx, key_base))
+                if not members:
+                    ranks = stage_to_ranks.get(stage, [])
+                    if dp_idx < len(ranks):
+                        members = [ranks[dp_idx]]
+                if members:
+                    members_tuple = tuple(sorted(members))
+                    members_per_dp.append((dp_idx, members_tuple))
+
+            if not members_per_dp:
+                continue
+
+            primary_members = members_per_dp[0][1]
+            label_key = (base_name, primary_members)
+            label = group_key_to_label.get(label_key)
+            if label is None:
+                suffix = label_suffix_counter[base_name]
+                label = base_name if suffix == 0 else f"{base_name}_{suffix}"
+                label_suffix_counter[base_name] += 1
+                group_key_to_label[label_key] = label
+
+            tp_collective_labels[edge] = label
+            label_to_edges.setdefault(label, []).append(edge)
+            for dp_idx, members_tuple in members_per_dp:
+                label_group_tokens[label].add((axis, dp_idx, members_tuple))
+
+    return tp_collective_labels, label_to_edges, label_group_tokens
 
 
 class _RankTrace:
@@ -203,6 +339,9 @@ def _visualize_et_files(et_paths: List[str]) -> None:
     if not et_paths:
         return
 
+    # prune et_paths to only include the first 10
+    et_paths = et_paths[:20]
+
     def _render_et_file(et_path: str) -> None:
         try:
             fh = chakra_open(et_path)
@@ -224,8 +363,7 @@ def _visualize_et_files(et_paths: List[str]) -> None:
             nodes.append(node)
         fh.close()
 
-        dot = Digraph(comment=os.path.basename(et_path))
-        dot.graph_attr.update({"rankdir": "TB", "fontsize": "10"})
+        dot = Digraph(comment=os.path.basename(et_path), format="svg",graph_attr={"rankdir": "TB", "fontsize": "10"})
 
         id_to_node = {int(node.id): node for node in nodes}
         type_color = {
@@ -271,11 +409,11 @@ def _visualize_et_files(et_paths: List[str]) -> None:
         dir_name, base_name = os.path.split(et_path)
         viz_base = base_name + ".viz"
         try:
-            output_path = dot.render(viz_base, directory=dir_name or None, format="png", cleanup=True)
-            final_png = et_path + ".png"
-            if output_path and output_path != final_png:
+            output_path = dot.render(viz_base, directory=dir_name or None, format="svg", cleanup=True)
+            final_svg = et_path + ".svg"
+            if output_path and output_path != final_svg:
                 try:
-                    os.replace(output_path, final_png)
+                    os.replace(output_path, final_svg)
                 except FileNotFoundError:
                     # Some graphviz versions return path without creating file when empty graph
                     pass
@@ -283,7 +421,7 @@ def _visualize_et_files(et_paths: List[str]) -> None:
             print(f"[WARN] Failed to render Graphviz graph for {et_path}: {exc}")
 
     for et_path in et_paths:
-        message = f" | ET Graph saved to {et_path}.png"
+        message = f" | ET Graph saved to {et_path}.svg"
         graphviz_async.submit(
             f"et:{os.path.basename(et_path)}",
             _render_et_file,
@@ -367,7 +505,7 @@ def _dump_et_text(et_paths: List[str]) -> None:
         try:
             with open(out_path, "w") as outf:
                 outf.write("\n".join(lines) + "\n")
-            print(f"[AstraSim] Saved ET text dump to {out_path}")
+            # print(f"[AstraSim] Saved ET text dump to {out_path}")
         except OSError as exc:
             print(f"[WARN] Failed to write ET text dump for {et_path}: {exc}")
 
@@ -423,12 +561,32 @@ def convert_deepflow_graph_to_chakra_et(
     output_dir: str,
 ) -> Tuple[str, List[int], str]:
     """Convert DeepFlow graph to AstraSim ET format by scheduling per stage and DP rank.
-    This function is black magic. Don't touch it unless you know what you are doing.
-    Prefer changes *anywhere* else in the codebase if possible."""
+    This means converting the single DeepFlow DAG into a set of different AstraSim ET files.
+
+    INPUTS: ``graph_root`` is the DeepFlow DAG (after flattening). ``dp_size`` is the
+    data-parallel replication degree. ``output_dir`` is where ET traces + metadata
+    should be written.
+
+    OUTPUTS: returns ``(et_prefix, rank_ids, manifest_path)``. ``et_prefix`` is the
+    file prefix for ``llm_graph.<rank>.et``. ``rank_ids`` is the list of produced rank
+    IDs, and ``manifest_path`` points to the per-rank summary JSON.
+
+    CONCEPTS: a *stage* is a unique ``hw_id`` (flattened hardware coordinate) of the
+    compute graph. Each (stage, DP replica) pair becomes an AstraSim rank. The function
+    recovers tensor/context/pipeline axes, schedules tasks per stage and per DP rank, and
+    emits Chakra ET traces with matching communicator metadata so AstraSim can replay the
+    workload deterministically.
+    
+    This function is very complicated. Don't touch it unless you know what you are doing.
+    Prefer changes *anywhere* else in the codebase if possible. I have tried to document it
+    as much as possible, but it definitely needs further cleaning and breaking up. This is TODO."""
 
     os.makedirs(output_dir, exist_ok=True)
     debug_enabled = _env_truthy("DEEPFLOW_DUMP_CONVERTER_DEBUG")
 
+    # Step 1: Traverse the graph once to snapshot every object reachable from the
+    # provided root(s). Collecting upfront avoids mutating the graph while we
+    # analyse dependencies.
     def collect_objects(root) -> List[Any]:
         visited: Set[int] = set()
         ordered: List[Any] = []
@@ -459,6 +617,9 @@ def convert_deepflow_graph_to_chakra_et(
     if not compute_nodes:
         raise ValueError("DeepFlow graph did not expose any executable compute nodes (hw_id >= 0).")
 
+    # Step 2: Each unique ``hw_id`` defines a logical stage (one flattened hardware
+    # coordinate). We build a DP-major rank ordering so AstraSim sees one rank per
+    # (stage, data-parallel replica) pair.
     stage_ids = sorted({node.hw_id for node in compute_nodes})
     dp_count = max(int(dp_size) if dp_size else 1, 1)
 
@@ -481,6 +642,16 @@ def convert_deepflow_graph_to_chakra_et(
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
 
+    # Step 3: Recover the multi-dimensional axis layout (tp/cp/lp, etc.) so that
+    # communicator membership can be reconstructed deterministically later on.
+    axis_order, axis_sizes = _extract_axis_layout(
+        getattr(graph_root, "_astrasim_rank_layout", None)
+    )
+    stage_axis_coords = _compute_stage_axis_coords(stage_ids, axis_order, axis_sizes)
+    axis_groups = _build_axis_groups(axis_order, axis_sizes, stage_axis_coords, stage_to_ranks)
+
+    # Step 4: Attribute each comm edge to the stage that owns it. This lets the
+    # dependency walkers treat collectives the same way they treat compute nodes.
     edge_stage: Dict[Any, int] = {}
     for obj in all_objects:
         comm = getattr(obj, "comm_type", None)
@@ -523,6 +694,8 @@ def convert_deepflow_graph_to_chakra_et(
 
     pipeline_edge_map: Dict[Tuple[Any, Any], Any] = {}
 
+    # Step 5a: Walk backwards from a compute node to classify dependencies into
+    # stage-local, cross-stage (pipeline), or collective inputs.
     def analyze_for_compute(node: Any) -> Tuple[Set[Any], Set[Any], Set[Any]]:
         stage = node.hw_id
         stage_deps: Set[Any] = set()
@@ -685,6 +858,8 @@ def convert_deepflow_graph_to_chakra_et(
         
         return stage_deps, pipeline_deps, collective_deps
 
+    # Step 5b: Same classification for collective edges (they often use local_hw_id
+    # instead of hw_id, so we check both).
     def analyze_for_collective(edge: Any) -> Tuple[Set[Any], Set[Any], Set[Any]]:
         stage = edge_stage[edge]
         stage_deps: Set[Any] = set()
@@ -744,6 +919,7 @@ def convert_deepflow_graph_to_chakra_et(
 
         return stage_deps, pipeline_deps, collective_deps
 
+    # Aggregate the analysis results so later stages can fetch dependencies by node.
     compute_info: Dict[Any, Dict[str, Any]] = {}
     for node in compute_nodes:
         stage_deps, pipeline_deps, collective_deps = analyze_for_compute(node)
@@ -792,36 +968,32 @@ def convert_deepflow_graph_to_chakra_et(
                 f"[ConverterDebug] collective {name}: stage={info['stage']}"
                 f" stage_deps={stage_names} pipeline_deps={pipe_names} collectives={coll_names}"
             )
+    # Step 6: Group collectives by label/axis so we can reconstruct communicator
+    # memberships (tp/cp/lp) without relying on the original ordering.
     tp_collective_groups: Dict[str, List[Any]] = defaultdict(list)
     for edge, info in collective_info.items():
         interconnect_type = info.get("interconnect_type")
         if interconnect_type and interconnect_type not in {"dp", "lp", "pipeline"}:
             tp_collective_groups[info["name"]].append(edge)
 
-    tp_collective_labels: Dict[Any, str] = {}
-    # Map final labels (with suffix) to their member edges, preserving order
-    label_to_edges: Dict[str, List[Any]] = {}
-    for base_name, edges in tp_collective_groups.items():
-        if not edges:
-            continue
-        sorted_edges = sorted(edges, key=lambda edge: getattr(edge, "op_id", 0))
-        group_index = 0
-        idx = 0
-        while idx < len(sorted_edges):
-            edge = sorted_edges[idx]
-            info = collective_info[edge]
-            participants = max(1, int(info.get("participants") or 1))
-            label = base_name if group_index == 0 else f"{base_name}_{group_index}"
-            group_members = sorted_edges[idx: idx + participants]
-            for member in group_members:
-                tp_collective_labels[member] = label
-            # Record members for this final label in insertion order
-            if label not in label_to_edges:
-                label_to_edges[label] = []
-            label_to_edges[label].extend(group_members)
-            idx += len(group_members)
-            group_index += 1
+    (
+        tp_collective_labels,
+        label_to_edges,
+        label_group_tokens,
+    ) = _assign_collective_labels(
+        tp_collective_groups,
+        collective_info,
+        axis_order,
+        axis_sizes,
+        stage_axis_coords,
+        axis_groups,
+        stage_to_ranks,
+        dp_count,
+    )
 
+    # Step 7: Build a per-stage task list (compute + collectives). If a collective
+    # introduces a new stage we extend ``stage_to_ranks`` so every stage has the
+    # full (dp-major) rank list.
     stage_tasks: Dict[int, Set[Any]] = {stage: set() for stage in stage_ids}
     for node in compute_nodes:
         stage_tasks[node.hw_id].add(node)
@@ -958,32 +1130,30 @@ def convert_deepflow_graph_to_chakra_et(
     tag_counter = itertools.count(start=1)
 
     # Build TP communicator groups (ids start at 1000) per label and dp
-    global _LAST_TP_GROUPS, _TP_LABEL_DP_TO_ID
+    global _LAST_TP_GROUPS, _TP_LABEL_DP_TO_ID, _TP_MEMBERS_TO_GID
     _LAST_TP_GROUPS = {}
     _TP_LABEL_DP_TO_ID = {}
+    _TP_MEMBERS_TO_GID = {}
     tp_gid_counter = _it_count(start=_TP_GROUP_BASE_ID)
 
     # Collect per-label TP members per dp index (use prebuilt mapping to avoid rescans)
-    for label in sorted(label_to_edges.keys()):
-        edges_for_label = label_to_edges.get(label, [])
-        if not edges_for_label:
-            continue
-        # Determine stage for each edge
-        stages = [collective_info[e]["stage"] for e in edges_for_label]
-        # For each dp index, map to ranks
-        for dp_idx in range(dp_count):
-            members: List[int] = []
-            for e, st in zip(edges_for_label, stages):
-                try:
-                    members.append(stage_to_ranks[st][dp_idx])
-                except Exception:
-                    continue
-            if not members:
-                continue
-            gid = str(next(tp_gid_counter))
+    # Step 9: Convert axis membership tokens into communicator IDs (reused across
+    # labels/dp replicas) so later we can write ``comm_groups.json``.
+    for label in sorted(label_group_tokens.keys()):
+        tokens = sorted(label_group_tokens[label])
+        for axis, dp_idx, members_tuple in tokens:
+            members_list = list(members_tuple)
+            members_key = tuple(members_list)
+            gid = _TP_MEMBERS_TO_GID.get(members_key)
+            if gid is None:
+                gid = str(next(tp_gid_counter))
+                _TP_MEMBERS_TO_GID[members_key] = gid
+                if gid not in _LAST_TP_GROUPS:
+                    _LAST_TP_GROUPS[gid] = members_list
             _TP_LABEL_DP_TO_ID[(label, dp_idx)] = gid
-            _LAST_TP_GROUPS[gid] = sorted(members)
 
+    # Step 8 helper: materialise SEND/RECV control edges across stages whenever a
+    # pipeline dependency exists between ``parent`` and ``target``.
     def ensure_pipeline(parent: Any, target: Any, dp_idx: int) -> int:
         parent_stage = getattr(parent, "hw_id", None)
         if parent_stage == None:
@@ -1066,6 +1236,8 @@ def convert_deepflow_graph_to_chakra_et(
         return recv_id
 
 
+    # Step 10: Emit ET nodes per stage (collectives first, then compute nodes),
+    # iterating in the topological order computed above.
     for stage in stage_order:
         order = stage_order[stage]
         for task in order:
@@ -1153,7 +1325,8 @@ def convert_deepflow_graph_to_chakra_et(
                     # above to avoid duplication. Here we only reference them
                     # via dependencies when needed.
 
-    # Attach cross-stage (pipeline) dependencies after all nodes are created.
+    # Step 11: Attach cross-stage (pipeline) dependencies by wiring the RECV
+    # nodes created via ``ensure_pipeline`` into the ET nodes’ control deps.
     for stage, order in stage_order.items():
         for task in order:
             if task in collective_info:
@@ -1196,7 +1369,8 @@ def convert_deepflow_graph_to_chakra_et(
                         node.ctrl_deps.append(rid)
 
 
-    # Build manifest ops directly from in-memory traces (graph-derived), not ET files
+    # Step 12: Build manifest ops directly from the in-memory traces. This lets the
+    # caller reuse the same metadata that will be written into the ET files.
     manifest_ranks: Dict[str, List[List]] = {}
     def _manifest_op_key(op: List) -> tuple:
         # Sort primarily by size/duration, with stable type ordering
@@ -1257,7 +1431,8 @@ def convert_deepflow_graph_to_chakra_et(
         rank_ops_sorted = sorted(rank_ops, key=_manifest_op_key)
         manifest_ranks[str(int(rank))] = rank_ops_sorted
 
-    # Now actually write ET files
+    # Step 13: Write the Chakra ET traces (with control-send renumbering) and
+    # persist the manifest/metadata alongside them.
     for trace in rank_traces.values():
         trace.close()
 
@@ -1338,8 +1513,6 @@ def run_astra_simulation_only_onepath(
         if persist and _env_truthy("DEEPFLOW_PERSIST_ARTIFACT_VIZ"):
             et_paths = []
             for rank in rank_ids:
-                if rank > 10:
-                    break
                 et_path = os.path.join(work_dir, f"llm_graph.{rank}.et")
                 if os.path.exists(et_path):
                     et_paths.append(et_path)
@@ -1408,8 +1581,8 @@ if __name__ == "__main__":
 
     def my_save_graph(roots, output_folder = "output_graph/", filename="graph"):
         dot_fw = visualize_graph(roots, filename=output_folder + filename)
-        dot_fw.render(output_folder + filename , format="png", cleanup=True)
-        print("graph saved to %s%s.png" % (output_folder , filename ))
+        dot_fw.render(output_folder + filename , format="svg", cleanup=True)
+        print("graph saved to %s%s.svg" % (output_folder , filename ))
 
     import config
     import pickle

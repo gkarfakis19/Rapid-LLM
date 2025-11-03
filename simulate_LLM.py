@@ -98,7 +98,10 @@ class Graph:
 
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
-        self.layer_per_device = max(1, math.ceil(self.num_layer / self.lp)) if self.lp else self.num_layer
+        self.layer_per_device = self.num_layer / self.lp if self.lp else self.num_layer
+        # if self layers per device is not an integer, raise Exception complaining about divisors!
+        if self.layer_per_device != int(self.layer_per_device):
+            raise Exception(f"The number of layers {self.num_layer} is not divisible by the degree of pipeline parallelism {self.lp}")
         self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
 
         self.transformer_cfg = self.comp_times.get("transformer", {})
@@ -1484,18 +1487,18 @@ class Graph:
     def save_graph(self, roots, output_folder = "output/LLM/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
 
-        printstr = " | Graph saved to    %s%s.png" % (output_folder, filename)
+        printstr = " | Graph saved to    %s%s.svg" % (output_folder, filename)
         def _render_graph() -> None:
             dot_fw = visualize_graph(roots, filename=output_folder + filename)
-            dot_fw.render(output_folder + filename, format="png", cleanup=True)
+            dot_fw.render(output_folder + filename, format="svg", cleanup=True)
 
-        graphviz_async.submit(f"{filename}.png", _render_graph, print_message=printstr)
+        graphviz_async.submit(f"{filename}.svg", _render_graph, print_message=printstr)
 
 
 def visualize_graph(roots, filename="graph"):
     _ = filename  # unused, kept for backwards compatibility with callers
 
-    dot = Digraph(comment="Computation Graph")
+    dot = Digraph(comment="Computation Graph", format="svg")
     visited = set()
 
     def _format_duration(value: float) -> str:

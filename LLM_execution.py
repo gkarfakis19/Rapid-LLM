@@ -48,6 +48,8 @@ class PipelineGraphFlattener:
         self,
         pipeline_graph: Graph,
         transformer_graph: Graph,
+        *,
+        rank_layout: Optional[Dict[str, Any]] = None,
     ) -> None:
         if transformer_graph is None:
             raise ValueError("Transformer graph is required for flattening")
@@ -63,11 +65,50 @@ class PipelineGraphFlattener:
         par_degree = transformer_graph.tp * transformer_graph.cp
         self._par_degree = max(1, int(par_degree))
         self._zero_stage = int(getattr(transformer_graph, "misc_metadata", {}).get("dp_zero_stage", 0))
+        self._layout_axis_order: Optional[List[str]] = None
+        self._layout_axis_sizes: Dict[str, int] = {}
+        self._layout_axis_strides: Dict[str, int] = {}
+        self._tp_size = int(getattr(transformer_graph, "tp", 1))
+        self._cp_size = int(getattr(transformer_graph, "cp", 1))
+        self._lp_size = int(getattr(pipeline_graph, "lp", 1))
+        if rank_layout is not None:
+            self._configure_rank_layout(rank_layout)
 
         # Track original ZeRO-3 transformer gather edges -> per-rank clones
         self._clone_cache: Dict[int, Any] = {}
         self._op_id_counter: int = 0
-        
+        self._stage_span = 1
+
+    def _configure_rank_layout(self, descriptor: Dict[str, Any]) -> None:
+        axis_order = list(descriptor.get("axis_order", []))
+        axis_sizes = dict(descriptor.get("axis_sizes", {}))
+        axis_strides = dict(descriptor.get("axis_strides", {}))
+        if not axis_order:
+            self._layout_axis_order = None
+            return
+        self._layout_axis_order = axis_order
+        self._layout_axis_sizes = axis_sizes
+        if not axis_strides:
+            span = 1
+            for axis in axis_order:
+                axis_strides[axis] = span
+                span *= axis_sizes.get(axis, 1)
+        self._layout_axis_strides = axis_strides
+        self._tp_size = max(1, axis_sizes.get("tp", self._tp_size))
+        self._cp_size = max(1, axis_sizes.get("cp", self._cp_size))
+        self._lp_size = max(1, axis_sizes.get("lp", self._lp_size))
+        if self._par_degree != self._tp_size * self._cp_size:
+            raise ValueError(
+                f"Inconsistent tensor/context parallel factors: tp={self._tp_size}, cp={self._cp_size}, "
+                f"product does not equal par_degree={self._par_degree}"
+            )
+        stage_span = 1
+        for axis in axis_order:
+            if axis == "dp":
+                continue
+            stage_span *= axis_sizes.get(axis, 1)
+        self._stage_span = stage_span
+
     def _should_shard_zero3_transformer(self, edge: Any) -> bool:
         if self._par_degree <= 1 or self._zero_stage < 3:
             return False
@@ -239,6 +280,52 @@ class PipelineGraphFlattener:
             return cloned_batch
 
         raise TypeError(f"Unsupported graph element type: {type(obj)!r}")
+
+    def _propagate_local_hw_ids(self, roots: Any) -> None:
+        stack: List[Any] = []
+        if isinstance(roots, (list, tuple)):
+            stack.extend(list(roots))
+        elif roots is not None:
+            stack.append(roots)
+        visited: Set[int] = set()
+        while stack:
+            obj = stack.pop()
+            obj_id = id(obj)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            children = getattr(obj, "children", [])
+            if isinstance(children, (list, tuple)):
+                stack.extend(children)
+            elif children is not None:
+                stack.append(children)
+
+            parents = getattr(obj, "parents", None)
+            if parents:
+                if isinstance(parents, (list, tuple)):
+                    stack.extend(parents)
+                else:
+                    stack.append(parents)
+
+            if isinstance(obj, simulate_LLM.Edge):
+                new_hw = None
+                for parent in getattr(obj, "parents", []) or []:
+                    parent_hw = getattr(parent, "hw_id", None)
+                    if parent_hw is None:
+                        parent_hw = getattr(parent, "local_hw_id", None)
+                    if parent_hw is not None and parent_hw >= 0:
+                        new_hw = parent_hw
+                        break
+                if new_hw is None:
+                    stage_id = getattr(obj, "stage_id", None)
+                    if stage_id is not None:
+                        try:
+                            new_hw = self._hw_id_for_rank(stage_id, 0)
+                        except Exception:
+                            new_hw = None
+                if new_hw is not None and new_hw >= 0:
+                    obj.local_hw_id = new_hw
 
 
     def _expand_transformer_node(self, node: simulate_LLM.Node) -> Tuple[Any, ...]:
@@ -501,7 +588,33 @@ class PipelineGraphFlattener:
 
     def _hw_id_for_rank(self, stage_id: int, tp_rank: int) -> int:
         stage_int = int(stage_id) if stage_id is not None else 0
-        return stage_int * self._par_degree + tp_rank
+        tp_rank_int = int(tp_rank)
+        if tp_rank_int < 0 or tp_rank_int >= self._par_degree:
+            raise ValueError(f"tp_rank {tp_rank_int} is out of range for par_degree {self._par_degree}")
+        if not self._layout_axis_order:
+            return stage_int * self._par_degree + tp_rank_int
+
+        coords: Dict[str, int] = {}
+        if "tp" in self._layout_axis_order:
+            coords["tp"] = tp_rank_int % self._tp_size
+        if "cp" in self._layout_axis_order:
+            coords["cp"] = (tp_rank_int // self._tp_size) % self._cp_size
+        if "lp" in self._layout_axis_order:
+            if stage_int < 0 or stage_int >= self._lp_size:
+                raise ValueError(f"stage_id {stage_int} is out of range for lp={self._lp_size}")
+            coords["lp"] = stage_int % self._lp_size
+
+        linear_rank = 0
+        for axis in self._layout_axis_order:
+            coord = coords.get(axis, 0)
+            size = self._layout_axis_sizes.get(axis, 1)
+            if coord < 0 or coord >= size:
+                raise ValueError(f"Coordinate {coord} for axis '{axis}' is out of range <{size}")
+            stride = self._layout_axis_strides.get(axis)
+            if stride is None:
+                raise KeyError(f"Rank layout stride missing for axis '{axis}'")
+            linear_rank += coord * stride
+        return linear_rank
     
     
 class LLMExecutionDispatcher:
@@ -523,6 +636,80 @@ class LLMExecutionDispatcher:
         self.transformer_forward_root = transformer_forward_root
         self.transformer_backward_root = transformer_backward_root
         self.flattened_root: Optional[Any] = None
+        self._rank_layout = self._build_rank_layout_descriptor()
+
+    def _build_rank_layout_descriptor(self) -> Dict[str, Any]:
+        hw_config = getattr(self.time_calc, "hw_config", None)
+        layout = getattr(hw_config, "network_layout", None)
+        dimensions = getattr(layout, "dimensions", None) if layout is not None else None
+        if not dimensions:
+            return {}
+
+        def _safe_int(value: Any, default: int = 1) -> int:
+            try:
+                candidate = int(value)
+            except (TypeError, ValueError):
+                candidate = default
+            return max(1, candidate)
+
+        tp_size = _safe_int(getattr(self.pipeline_graph, "tp", getattr(self.time_calc, "tp", 1)))
+        cp_size = _safe_int(getattr(self.pipeline_graph, "cp", getattr(self.time_calc, "cp", 1)))
+        lp_size = _safe_int(getattr(self.pipeline_graph, "lp", getattr(self.time_calc, "lp", 1)))
+        dp_size = _safe_int(getattr(self.time_calc, "dp", 1))
+
+        axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "lp": lp_size, "dp": dp_size}
+        axis_order: List[str] = []
+        for dim in dimensions:
+            dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
+            for name in dim_axes:
+                if name == "dp":
+                    continue
+                if name not in axis_sizes:
+                    raise ValueError(
+                        f"Unsupported parallelism axis '{name}' in network layout. "
+                        "Supported axes for AstraSim integration are: tp, cp, lp, dp."
+                    )
+                if name not in axis_order:
+                    axis_order.append(name)
+
+            declared = int(getattr(dim, "size", 1))
+            expected = 1
+            for axis_name in dim_axes:
+                expected *= axis_sizes.get(axis_name, 1)
+            if expected != declared:
+                raise ValueError(
+                    f"Network dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' "
+                    f"size mismatch: declared {declared}, but parallelism factors imply {expected}."
+                )
+
+        # Ensure the layout covers active parallel axes
+        if tp_size > 1 and "tp" not in axis_order:
+            raise ValueError("Network layout must include 'tp' when tensor parallelism > 1.")
+        if cp_size > 1 and "cp" not in axis_order:
+            raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
+        if lp_size > 1 and "lp" not in axis_order:
+            raise ValueError("Network layout must include 'lp' when pipeline parallelism > 1.")
+
+        axis_strides: Dict[str, int] = {}
+        span = 1
+        for axis in axis_order:
+            axis_strides[axis] = span
+            span *= axis_sizes[axis]
+
+        descriptor = {
+            "axis_order": axis_order,
+            "axis_sizes": axis_sizes,
+            "axis_strides": axis_strides,
+            "stage_span": span,
+        }
+        pretty_sizes = ", ".join(f"{axis}={axis_sizes[axis]}" for axis in axis_order)
+        dp_msg = f", dp={dp_size}" if dp_size > 1 else ""
+        print(
+            "[DeepFlow][hw-id] Flattening axes for hw_id assignment: "
+            f"{axis_order or ['<none>']} ({pretty_sizes or 'single device'}{dp_msg}) | "
+            "dp ranks are appended separately."
+        )
+        return descriptor
 
     def run(self, mode: ExecutionMode) -> ExecutionResult:
         if mode == ExecutionMode.ANALYTICAL:
@@ -608,6 +795,7 @@ class LLMExecutionDispatcher:
                 "/pipeline_graph_hierarchical",
             )
 
+        setattr(self.pipeline_root, "_astrasim_rank_layout", self._rank_layout)
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
@@ -629,6 +817,7 @@ class LLMExecutionDispatcher:
         flattener = PipelineGraphFlattener(
             pipeline_graph=self.pipeline_graph,
             transformer_graph=self.transformer_graph,
+            rank_layout=self._rank_layout,
         )
 
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
@@ -641,6 +830,8 @@ class LLMExecutionDispatcher:
         if flattened_root is None:
             raise RuntimeError("Pipeline flattening produced an empty graph")
 
+        flattener._propagate_local_hw_ids(flattened_root)
+        setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
         self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             self.pipeline_graph.save_graph(
@@ -654,7 +845,7 @@ class LLMExecutionDispatcher:
         # base_path = os.path.join(output_dir, "pipeline_flattened")
         # dot = visualize_graph(flattened_root, filename=base_path)
         # try:
-        #     dot.render(base_path, format="png", cleanup=True)
+        #     dot.render(base_path, format="svg", cleanup=True)
         # except Exception as exc:  # pragma: no cover - visualization best-effort
         #     print(f"[WARN] Failed to render flattened pipeline graph: {exc}")
 
