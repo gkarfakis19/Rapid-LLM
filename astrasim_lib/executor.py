@@ -283,11 +283,18 @@ class _RankTrace:
                 node.type == pb.COMM_SEND_NODE
                 and (node.name or "").endswith("_send_control")
             )
+        def _is_control_recv(node: pb.Node) -> bool:
+            return (
+                node.type == pb.COMM_RECV_NODE
+                and (node.name or "").endswith("_recv_control")
+            )
 
         control_nodes: List[pb.Node] = []
         regular_nodes: List[pb.Node] = []
         for node in self.nodes:
             if _is_control_send(node):
+                control_nodes.append(node)
+            elif _is_control_recv(node):
                 control_nodes.append(node)
             else:
                 regular_nodes.append(node)
