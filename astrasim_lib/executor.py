@@ -1526,12 +1526,14 @@ def run_astra_simulation_only_onepath(
         rank_count = len(rank_ids)
         # Astrasim doesn't play well with only 1 rank.
         # When that happens, let's duplicate to 2 ranks. No collectives exist between the two so this should not have an effect.
+        synthetic_pair = False
         if rank_count == 1:
             # duplicate the .et file
             src = os.path.join(work_dir, "llm_graph.0.et")
             dst = os.path.join(work_dir, "llm_graph.1.et")
             shutil.copy(src, dst)
             rank_ids = [rank_ids[0], rank_ids[0]+1]
+            synthetic_pair = True
         rank_count = len(rank_ids)
 
         # Handle artifact visualization if enabled
@@ -1558,6 +1560,8 @@ def run_astra_simulation_only_onepath(
         rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
         axis_order, axis_sizes = _extract_axis_layout(rank_layout)    
         axes_filter = _derive_axes_filter(axis_order, axis_sizes, dp_count)
+        if synthetic_pair:
+            axes_filter = ["synthetic2"]
         astra_configs = generate_astrasim_configs_from_hw(
             time_calc_obj.hw_config,
             work_dir,

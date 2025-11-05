@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from types import SimpleNamespace
 
 from hw_component import Network
 
@@ -133,21 +134,53 @@ def generate_astrasim_configs_from_hw(
             candidate = default
         return max(1, candidate)
 
-    axis_sizes: Dict[str, int] = {
+    axes_filter_original = tuple(axes_filter) if axes_filter else None
+    axes_filter_normalized: Optional[Tuple[str, ...]] = None
+    if axes_filter_original:
+        axes_filter_normalized = tuple(str(axis).strip().lower() for axis in axes_filter_original)
+
+    axis_sizes_full: Dict[str, int] = {
         "tp": _safe_int(getattr(sch_config, "tp", 1)) if sch_config else 1,
         "cp": _safe_int(getattr(sch_config, "cp", 1)) if sch_config else 1,
         "lp": _safe_int(getattr(sch_config, "lp", 1)) if sch_config else 1,
         "dp": _safe_int(getattr(sch_config, "dp", 1)) if sch_config else 1,
     }
-    if axes_filter:
-        axis_sizes = {axis: axis_sizes.get(axis, 1) for axis in axes_filter}
-        axis_sizes.setdefault("tp", 1)
-        axis_sizes.setdefault("cp", 1)
-        axis_sizes.setdefault("lp", 1)
-        axis_sizes.setdefault("dp", 1)
-    axis_order_preference = ["tp", "cp", "lp", "dp"]
+    synthetic_only = axes_filter_normalized is not None and set(axes_filter_normalized) == {"synthetic2"}
+    if synthetic_only:
+        if dimensions:
+            base_dim = dimensions[0]
+            base_bw = float(getattr(base_dim, "effective_bandwidth", getattr(base_dim, "bandwidth", None)))
+            base_latency = float(getattr(base_dim, "latency", None))
+            base_topology = getattr(base_dim, "topology_type", None)
+            base_collectives = getattr(base_dim, "collective_override", {}) or {}
+        else:
+            raise ValueError(f"Synthetic dimension requested but no dimensions found in hardware config. Info: Called with filter {axes_filter_original}, npus_count={npus_count}, axes_sizes={axis_sizes_full}.")
+        synthetic_dim = SimpleNamespace(
+            label="synthetic2",
+            parallelisms=("synthetic2",),
+            size=2,
+            topology_type=base_topology,
+            effective_bandwidth=base_bw,
+            bandwidth=base_bw,
+            latency=base_latency,
+            collective_override=base_collectives,
+            faulty_links=(),
+        )
+        dimensions = [synthetic_dim]
+        axis_sizes_full = {"synthetic2": 2}
+        axis_sizes = {"synthetic2": 2}
+        axis_order_preference = ["synthetic2"]
+    else:
+        axis_sizes: Dict[str, int] = dict(axis_sizes_full)
+        if axes_filter_normalized:
+            axis_sizes = {axis: axis_sizes_full.get(axis, 1) for axis in axes_filter_normalized}
+            axis_sizes.setdefault("tp", 1)
+            axis_sizes.setdefault("cp", 1)
+            axis_sizes.setdefault("lp", 1)
+            axis_sizes.setdefault("dp", 1)
+        axis_order_preference = ["tp", "cp", "lp", "dp"]
 
-    allowed_axes = set(axis_sizes.keys()) if axes_filter else None
+    allowed_axes = set(axis_sizes.keys()) if axes_filter_normalized else None
     # print(f"Allowed axes: {allowed_axes}")
     # print(f"Axes sizes: {axis_sizes}")
     dim_infos: List[Tuple[Any, List[str], int, int]] = []
@@ -155,7 +188,7 @@ def generate_astrasim_configs_from_hw(
     for dim_idx, dim in enumerate(dimensions):
         axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
         # print(f"All axes for dimension {dim.label}: {axes}")
-        if allowed_axes is not None and axes_filter:
+        if allowed_axes is not None and axes_filter_normalized:
             filtered_axes = [axis for axis in axes if axis in allowed_axes]
             axes = filtered_axes
         # print(f"Filtered axes for dimension {dim.label}: {axes}")
@@ -215,7 +248,7 @@ def generate_astrasim_configs_from_hw(
     
     axes_needed: List[str] = []
     remaining = target
-    
+
     for axis in axis_order_preference:
         size = axis_sizes.get(axis, 1)
         
@@ -228,7 +261,7 @@ def generate_astrasim_configs_from_hw(
     
     if remaining != 1:
         raise ValueError(
-            f"Unable to map requested npus_count={target} to network axes {axis_sizes}."
+            f"Unable to map requested npus_count={target} to network axes {axis_sizes}. Info: Called with filter {axes_filter_original}, npus_count={npus_count}, axes_sizes={axis_sizes}."
         )
 
     axes_needed_set = set(axes_needed)

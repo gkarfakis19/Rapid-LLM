@@ -77,7 +77,7 @@ class NetworkModel:
             if kind in collective_ops or kind == "pipeline":
                 # Pipeline uses 2 NPUs for point-to-point, others use part
                 npus = 2 if kind == "pipeline" else part
-                axis_filter = None if kind == "pipeline" else axis
+                axis_filter = axis if kind != "pipeline" else None
                 network_time = self._astra_collective(kind, npus, network_bytes, axis_filter)
             else:
                 raise ValueError(f"Unsupported collective operation: {kind}")
