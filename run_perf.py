@@ -19,11 +19,6 @@ from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
 from time_calculation_inf import TimeCalculationLLMInference
 
-algByte = False  # algorithmic ops false
-proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
-validating_v100 = True
-
-
 # Cache handling policy for AstraSim integration.
 # Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
 cache_handling = "CACHE READWRITE"

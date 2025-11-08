@@ -28,6 +28,7 @@ import graphviz_async
 from graphviz import Digraph
 
 from .config_generation import ASTRA_DEBUG, generate_astrasim_configs_from_hw
+from . import gmap
 from .et_utils import (
     chakra_decode,
     chakra_encode,
@@ -99,9 +100,9 @@ _TP_LABEL_DP_TO_ID: Dict[Tuple[str, int], str] = {}
 _TP_MEMBERS_TO_GID: Dict[Tuple[int, ...], str] = {}
 
 
-def _extract_axis_layout(rank_layout: Optional[Dict[str, Any]]) -> Tuple[List[str], Dict[str, int]]:
+def _extract_axis_layout(rank_layout: Optional[Dict[str, Any]]) -> Tuple[List[str], Dict[str, int], Dict[str, int]]:
     if not isinstance(rank_layout, dict):
-        return [], {}
+        return [], {}, {}
     axis_order = list(rank_layout.get("axis_order", []))
     raw_sizes = rank_layout.get("axis_sizes", {})
     if isinstance(axis_order, tuple):
@@ -113,7 +114,85 @@ def _extract_axis_layout(rank_layout: Optional[Dict[str, Any]]) -> Tuple[List[st
                 axis_sizes[str(key)] = max(1, int(value))
             except Exception:
                 axis_sizes[str(key)] = 1
-    return axis_order, axis_sizes
+    raw_strides = rank_layout.get("axis_strides", {})
+    axis_strides: Dict[str, int] = {}
+    if isinstance(raw_strides, dict):
+        for key, value in raw_strides.items():
+            try:
+                axis_strides[str(key)] = int(value)
+            except Exception:
+                axis_strides[str(key)] = 0
+    else:
+        span = 1
+        for axis in axis_order:
+            axis_strides[axis] = span
+            span *= axis_sizes.get(axis, 1)
+    return axis_order, axis_sizes, axis_strides
+
+
+def _remap_stages_for_mapping(
+    *,
+    permutation: Sequence[int],
+    collector: Optional[gmap.GMapCollector],
+    stage_ids: List[int],
+    stage_to_ranks: Dict[int, List[int]],
+    stage_index: Dict[int, int],
+    rank_traces: Dict[int, "_RankTrace"],
+    rank_meta: Dict[int, Dict[str, int]],
+    dp_count: int,
+    num_stages: int,
+    output_dir: str,
+) -> Tuple[List[int], Dict[int, int]]:
+    """Reorder stages so AstraSim ranks match the SCOTCH permutation.
+
+    We apply the permutation *before* ET emission so the rest of the converter
+    remains unaware of the remap. Only stage ordering / rank bookkeeping is
+    touched here, which keeps the change localized and avoids renaming files
+    after the fact.
+    """
+
+    if collector is None or not permutation:
+        return stage_ids, stage_index
+
+    if len(permutation) != collector.vertex_count:
+        raise ValueError("Permutation length does not match first-dimension vertex count.")
+
+    def _sort_key(stage: int) -> Tuple[int, ...]:
+        coords = collector.stage_axis_coords.get(stage, {})
+        higher = tuple(int(coords.get(axis, 0)) for axis in collector.replication_axes)
+        local_idx = collector.local_index_for_stage(stage)
+        target_idx = permutation[local_idx]
+        return higher + (target_idx,)
+
+    ordered_stages = sorted(stage_ids, key=_sort_key)
+    new_stage_index = {stage: idx for idx, stage in enumerate(ordered_stages)}
+
+    new_stage_to_ranks: Dict[int, List[int]] = {stage: [0] * dp_count for stage in ordered_stages}
+    new_rank_traces: Dict[int, _RankTrace] = {}
+    new_rank_meta: Dict[int, Dict[str, int]] = {}
+
+    for stage in stage_ids:
+        for dp_idx in range(dp_count):
+            old_rank = stage_to_ranks[stage][dp_idx]
+            new_idx = new_stage_index[stage]
+            new_rank = dp_idx * num_stages + new_idx
+            trace = rank_traces[old_rank]
+            trace.rank = new_rank
+            trace.path = os.path.join(output_dir, f"llm_graph.{new_rank}.et")
+            new_rank_traces[new_rank] = trace
+            new_stage_to_ranks[stage][dp_idx] = new_rank
+            new_rank_meta[new_rank] = {"stage": stage, "dp": dp_idx}
+
+    stage_to_ranks.clear()
+    stage_to_ranks.update(new_stage_to_ranks)
+    rank_traces.clear()
+    rank_traces.update(new_rank_traces)
+    rank_meta.clear()
+    rank_meta.update(new_rank_meta)
+
+    stage_ids[:] = ordered_stages
+    stage_index = new_stage_index
+    return ordered_stages, stage_index
 
 
 def _compute_stage_axis_coords(
@@ -690,9 +769,14 @@ def convert_deepflow_graph_to_chakra_et(
     # Step 3: Recover the multi-dimensional axis layout (tp/cp/lp, etc.) so that
     # communicator membership can be reconstructed deterministically later on.
     rank_layout = getattr(graph_root, "_astrasim_rank_layout", None)
-    axis_order, axis_sizes = _extract_axis_layout(rank_layout)
+    axis_order, axis_sizes, axis_strides = _extract_axis_layout(rank_layout)
     stage_axis_coords = _compute_stage_axis_coords(stage_ids, axis_order, axis_sizes)
     axis_groups = _build_axis_groups(axis_order, axis_sizes, stage_axis_coords, stage_to_ranks)
+    if hasattr(graph_root, "_optimize_2dmap"):
+        optimize_cfg = getattr(graph_root, "_optimize_2dmap")
+    else:
+        optimize_cfg = None
+    collector = gmap.begin_collection(optimize_cfg, axis_sizes, stage_axis_coords, output_dir)
 
     # Step 4: Attribute each comm edge to the stage that owns it. This lets the
     # dependency walkers treat collectives the same way they treat compute nodes.
@@ -737,6 +821,35 @@ def convert_deepflow_graph_to_chakra_et(
             edge_stage[obj] = stage
 
     pipeline_edge_map: Dict[Tuple[Any, Any], Any] = {}
+
+    def _record_pipeline_edges_for_first_dim(collector_obj: gmap.GMapCollector) -> None:
+        if not collector_obj.include_pipeline:
+            return
+        for obj in all_objects:
+            if getattr(obj, "comm_type", None) != "pipeline":
+                continue
+            parents = getattr(obj, "parents", [])
+            src_stage = None
+            for parent in parents:
+                if hasattr(parent, "hw_id") and parent.hw_id is not None and int(parent.hw_id) >= 0:
+                    src_stage = int(parent.hw_id)
+                    break
+            if src_stage is None:
+                raise ValueError("Unable to resolve source stage for pipeline edge during gmap collection.")
+            children = getattr(obj, "children", [])
+            dst_stage = None
+            for child in children:
+                if hasattr(child, "hw_id") and child.hw_id is not None and int(child.hw_id) >= 0:
+                    dst_stage = int(child.hw_id)
+                    break
+            if dst_stage is None:
+                raise ValueError("Unable to resolve destination stage for pipeline edge during gmap collection.")
+            if src_stage == dst_stage:
+                continue
+            if not hasattr(obj, "comm_size_bytes"):
+                raise ValueError("Pipeline edge is missing comm_size_bytes for gmap collection.")
+            size_bytes = int(getattr(obj, "comm_size_bytes"))
+            collector_obj.record_pipeline(src_stage=src_stage, dst_stage=dst_stage, size_bytes=size_bytes)
 
     # Step 5a: Walk backwards from a compute node to classify dependencies into
     # stage-local, cross-stage (pipeline), or collective inputs.
@@ -978,7 +1091,7 @@ def convert_deepflow_graph_to_chakra_et(
     collective_info: Dict[Any, Dict[str, Any]] = {}
     for edge, stage in edge_stage.items():
         stage_deps, pipeline_deps, collective_deps = analyze_for_collective(edge)
-        collective_info[edge] = {
+        entry = {
             "stage": stage,
             "stage_deps": stage_deps,
             "pipeline_deps": pipeline_deps,
@@ -989,6 +1102,20 @@ def convert_deepflow_graph_to_chakra_et(
             "interconnect_type": getattr(edge, "comm_interconnect_type", None),
             "participants": int(getattr(edge, "participants", 0) or 0),
         }
+        collective_info[edge] = entry
+        if collector:
+            axis_name = entry["interconnect_type"]
+            if axis_name:
+                axis_norm = str(axis_name).strip().lower()
+                if axis_norm in collector.subset_axes:
+                    should_double = entry["comm_type"] in (pb.ALL_REDUCE, pb.ALL_TO_ALL)
+                    collector.record_collective(
+                        axis=axis_norm,
+                        stage_id=stage,
+                        size_bytes=entry["size"],
+                        participant_count=entry["participants"],
+                        double_weight=should_double,
+                    )
 
     if debug_enabled:
         print("[ConverterDebug] === COMPUTE INFO (stage deps / pipeline deps / collectives) ===")
@@ -1012,6 +1139,8 @@ def convert_deepflow_graph_to_chakra_et(
                 f"[ConverterDebug] collective {name}: stage={info['stage']}"
                 f" stage_deps={stage_names} pipeline_deps={pipe_names} collectives={coll_names}"
             )
+    if collector:
+        _record_pipeline_edges_for_first_dim(collector)
     # Step 6: Group collectives by label/axis so we can reconstruct communicator
     # memberships (tp/cp/lp) without relying on the original ordering.
     tp_collective_groups: Dict[str, List[Any]] = defaultdict(list)
@@ -1048,6 +1177,7 @@ def convert_deepflow_graph_to_chakra_et(
             # Ensure mapping present even for stages discovered only via collectives
             stage_idx = stage_index.setdefault(stage, len(stage_index))
             stage_to_ranks[stage] = [dp_idx * num_stages + stage_idx for dp_idx in range(dp_count)]
+            stage_ids.append(stage)
         stage_tasks[stage].add(edge)
 
     stage_adj: Dict[int, Dict[Any, Set[Any]]] = {stage: defaultdict(set) for stage in stage_tasks}
@@ -1280,10 +1410,27 @@ def convert_deepflow_graph_to_chakra_et(
         return recv_id
 
 
+    mapping_result = gmap.finalize_collection(collector)
+    if mapping_result:
+        stage_ids, stage_index = _remap_stages_for_mapping(
+            permutation=mapping_result.permutation,
+            collector=collector,
+            stage_ids=stage_ids,
+            stage_to_ranks=stage_to_ranks,
+            stage_index=stage_index,
+            rank_traces=rank_traces,
+            rank_meta=rank_meta,
+            dp_count=dp_count,
+            num_stages=num_stages,
+            output_dir=output_dir,
+        )
+
     # Step 10: Emit ET nodes per stage (collectives first, then compute nodes),
     # iterating in the topological order computed above.
-    for stage in stage_order:
-        order = stage_order[stage]
+    for stage in stage_ids:
+        order = stage_order.get(stage)
+        if not order:
+            continue
         for task in order:
             if task in collective_info:
                 info = collective_info[task]
@@ -1579,7 +1726,7 @@ def run_astra_simulation_only_onepath(
             exit()
 
         rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
-        axis_order, axis_sizes = _extract_axis_layout(rank_layout)    
+        axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)    
         axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)
         if not axes_filter:
             axes_filter = None

@@ -33,6 +33,8 @@ class NetworkModel:
             return 0.0
         byte_count = int(math.ceil(size_bytes))
         axes_filter = [str(axis).lower()] if axis else None
+        if os.environ.get("DEEPFLOW_ASTRA_SKIP_EXEC"):
+            return 0.0
         # for collectives ONLY, we cannot use 2D topologies (Mesh2D, Torus2D, KingMesh2D)
         # transform them to their 1D equivalents (Ring, Mesh, HyperCube (?))
         _, max_sec = run_cache_astrasim(

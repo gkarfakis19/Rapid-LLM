@@ -354,6 +354,7 @@ class NetworkDimensionLayout:
     collective_override: Dict[str, str] = field(default_factory=dict)
     parallelisms: Tuple[str, ...] = field(default_factory=tuple)
     energy_per_bit: float = 0.0
+    optimize_2dmap: bool = False
 
     @classmethod
     def from_raw(
@@ -427,6 +428,20 @@ class NetworkDimensionLayout:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"network dimension '{label}' latency must be numeric") from exc
 
+        raw_optimize = topo_dict.get("optimize_2dmap", False)
+        if raw_optimize not in (True, False):
+            raise ValueError(
+                f"network dimension '{label}' topology optimize_2dmap must be a boolean when provided"
+            )
+        optimize_2dmap = bool(raw_optimize)
+        if optimize_2dmap:
+            normalized_topo = topo_type.lower()
+            if normalized_topo not in {"mesh2d", "torus2d", "kingmesh2d"}:
+                raise ValueError(
+                    f"network dimension '{label}' sets optimize_2dmap but topology type '{topo_type}'"
+                    " is not Mesh2D/Torus2D/KingMesh2D"
+                )
+
         collectives_raw = raw.get("collective_override")
         if collectives_raw is None and "collectives" in raw:
             collectives_raw = raw.get("collectives")
@@ -486,6 +501,7 @@ class NetworkDimensionLayout:
             collective_override=collective_override,
             parallelisms=tuple(normalized_parallelisms),
             energy_per_bit=energy_per_bit,
+            optimize_2dmap=optimize_2dmap,
         )
 
     @property

@@ -651,6 +651,7 @@ class LLMExecutionDispatcher:
         self._transformer_baseline_timings: Optional[TransformerTimings] = None
         self.no_data_parallel = bool(no_data_parallel)
         self._rank_layout = self._build_rank_layout_descriptor()
+        self._first_dim_optimize_cfg: Optional[Dict[str, Any]] = getattr(self, "_first_dim_optimize_cfg", None)
         self._fault_space: Optional[FaultSpace] = None
         self._fault_projections: Dict[str, FaultProjectionResult] = {}
         self._initialize_fault_mappings()
@@ -662,6 +663,28 @@ class LLMExecutionDispatcher:
         if not dimensions:
             return {}
         self._network_dimensions = tuple(dimensions)
+        optimize_cfg: Optional[Dict[str, Any]] = None
+        for idx, dim in enumerate(dimensions):
+            if getattr(dim, "optimize_2dmap", False):
+                if idx != 0:
+                    raise ValueError("optimize_2dmap is only supported on the first network dimension.")
+                if optimize_cfg is not None:
+                    raise ValueError("Multiple network dimensions requested optimize_2dmap; only one is supported.")
+                topo_type = getattr(dim, "topology_type", None)
+                if not topo_type:
+                    raise ValueError("optimize_2dmap requires a topology type on the target dimension.")
+                if str(topo_type).strip().lower() == "kingmesh2d":
+                    raise NotImplementedError("optimize_2dmap is not implemented for KingMesh2D.")
+                size_value = getattr(dim, "size", None)
+                if size_value is None:
+                    raise ValueError("optimize_2dmap requires an explicit dimension size.")
+                optimize_cfg = {
+                    "dimension_index": idx,
+                    "topology": str(topo_type),
+                    "size": int(size_value),
+                    "parallelisms": tuple(getattr(dim, "parallelisms", ()) or ()),
+                }
+        self._first_dim_optimize_cfg = optimize_cfg
 
         def _safe_int(value: Any, default: int = 1) -> int:
             try:
@@ -742,6 +765,16 @@ class LLMExecutionDispatcher:
             "stage_span": span,
         }
 
+        return descriptor
+
+    def _attach_optimize_hint(self, root: Any) -> None:
+        if root is None:
+            return
+        if self._first_dim_optimize_cfg:
+            setattr(root, "_optimize_2dmap", dict(self._first_dim_optimize_cfg))
+        elif hasattr(root, "_optimize_2dmap"):
+            delattr(root, "_optimize_2dmap")
+
 
         def _subset_layout(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
             subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) > 1]
@@ -766,6 +799,14 @@ class LLMExecutionDispatcher:
         self._pipeline_rank_layout = _subset_layout(["lp", "dp"])
 
         return descriptor
+
+    def _attach_optimize_hint(self, root: Any) -> None:
+        if root is None:
+            return
+        if self._first_dim_optimize_cfg:
+            setattr(root, "_optimize_2dmap", dict(self._first_dim_optimize_cfg))
+        elif hasattr(root, "_optimize_2dmap"):
+            delattr(root, "_optimize_2dmap")
 
     def _log_fault_summary(self, axis_order: Sequence[str], axis_sizes: Mapping[str, int]) -> None:
         if not axis_order:
@@ -1054,6 +1095,7 @@ class LLMExecutionDispatcher:
             setattr(self.pipeline_root, "_astrasim_rank_layout", pipeline_layout)
         elif hasattr(self.pipeline_root, "_astrasim_rank_layout"):
             delattr(self.pipeline_root, "_astrasim_rank_layout")
+        self._attach_optimize_hint(self.pipeline_root)
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
@@ -1091,6 +1133,7 @@ class LLMExecutionDispatcher:
 
         flattener._propagate_local_hw_ids(flattened_root)
         setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
+        self._attach_optimize_hint(flattened_root)
         self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             filename = "/pipeline_graph_post_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_post_flatten"

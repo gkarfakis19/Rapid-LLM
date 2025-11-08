@@ -12,3 +12,4 @@ tools/fault_sweep_results*
 tools/*.png
 tools/*.tsv
 tools/*.json
+tools/gmap_artifacts/

@@ -133,6 +133,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "pytz" },
     { name = "pyyaml" },
+    { name = "scotchpy64" },
     { name = "seaborn" },
     { name = "six" },
     { name = "tqdm" },
@@ -151,6 +152,7 @@ requires-dist = [
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
     { name = "pytz", specifier = "==2025.2" },
     { name = "pyyaml", specifier = "==6.0.2" },
+    { name = "scotchpy64", specifier = ">=1.0.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "six", specifier = "==1.17.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
@@ -685,6 +687,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/0f/25911a9f080464c59fab9027482f822b86bf0608957a5fcc6eaac85aa515/PyYAML-6.0.2-cp313-cp313-musllinux_1_1_x86_64.whl", hash = "sha256:68ccc6023a3400877818152ad9a1033e3db8625d899c72eacb5a668902e4d652", size = 751597 },
     { url = "https://files.pythonhosted.org/packages/14/0d/e2c3b43bbce3cf6bd97c840b46088a3031085179e596d4929729d8d68270/PyYAML-6.0.2-cp313-cp313-win32.whl", hash = "sha256:bc2fa7c6b47d6bc618dd7fb02ef6fdedb1090ec036abab80d4681424b84c1183", size = 140527 },
     { url = "https://files.pythonhosted.org/packages/fa/de/02b54f42487e3d3c6efb3f89428677074ca7bf43aae402517bc7cca949f3/PyYAML-6.0.2-cp313-cp313-win_amd64.whl", hash = "sha256:8388ee1976c416731879ac16da0aff3f63b286ffdd57cdeb95f3f2e085687563", size = 156446 },
+]
+
+[[package]]
+name = "scotchpy64"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/b3/5e171536989e4fa154b22a480f256dd5fada8d9ce47614c77b747adb250c/scotchpy64-1.0.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:78b17354dafe8d99471ff01fc54ce2d26fca2061ea27db95c8f8bb73813fc579", size = 2123702 },
+    { url = "https://files.pythonhosted.org/packages/5f/be/3b344a1beba0abd011d0193f151d510a286787d3910c3ae3d7940dd70931/scotchpy64-1.0.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:87705f9c4105740306d5048c7c44a51e62b2f03c9a95fa7610d6a3386989e8c5", size = 2123702 },
+    { url = "https://files.pythonhosted.org/packages/3b/ea/12491425a0148b8b0ccbe3694a24d2b498a99c21084c8cec09e3e94dd78f/scotchpy64-1.0.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e2ea7f50b3a7797e0cd71537b2c072114dd9bb6ca48dc5f826d555370eb3150a", size = 2123703 },
+    { url = "https://files.pythonhosted.org/packages/82/cd/b2f1f81a7adbec6e4c70cea0b518f89c5b2650e2fdc669aed380bcbb2bb4/scotchpy64-1.0.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3cd52831289d592cca3ca9ec4093467855f3c77d0af0966ba182fe49ceadc4d2", size = 2123703 },
+    { url = "https://files.pythonhosted.org/packages/e4/f0/25613cd7f193b23dd5f886555b04012816fcebe0589c39d51e75f9fcb687/scotchpy64-1.0.1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e0c8c77a8aa5cc75d59b40cfb47f02814c5bdfb605fc82deaa57cac4f486f125", size = 2123708 },
 ]
 
 [[package]]
