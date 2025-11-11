@@ -765,17 +765,6 @@ class LLMExecutionDispatcher:
             "stage_span": span,
         }
 
-        return descriptor
-
-    def _attach_optimize_hint(self, root: Any) -> None:
-        if root is None:
-            return
-        if self._first_dim_optimize_cfg:
-            setattr(root, "_optimize_2dmap", dict(self._first_dim_optimize_cfg))
-        elif hasattr(root, "_optimize_2dmap"):
-            delattr(root, "_optimize_2dmap")
-
-
         def _subset_layout(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
             subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) > 1]
             if not subset:
