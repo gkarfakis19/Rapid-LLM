@@ -83,7 +83,7 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
         gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
         gemms["ffn2"] = (batch_size, seq_len, intermediate_size, d_model) 
     gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
-    gemms["gate"] = (batch_size, seq_len, d_model, self.moe_num_experts) 
+    gemms["router"] = (batch_size, seq_len, d_model, self.moe_num_experts) 
 
     return gemms
 

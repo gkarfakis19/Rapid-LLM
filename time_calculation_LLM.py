@@ -111,8 +111,8 @@ COMMUNICATION_RULES: Dict[
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
     },
 }
-
-_MOE_GATE_RULE = {
+# MoE-specific overrides for router, MLP, and layer norm collectives.
+_MOE_ROUTER_RULE = {
     'forward': {
         'kind': 'all_to_all',
         'participants': 'moe',
@@ -152,7 +152,7 @@ MOE_COMMUNICATION_RULES: Dict[
     ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
 ] = {
     mode: {
-        'gate': _MOE_GATE_RULE,
+        'router': _MOE_ROUTER_RULE,
         'MLP': _MOE_MLP_RULE,
         'layernorm1': _MOE_LAYER_NORM1_RULE,
     }
@@ -1349,16 +1349,16 @@ class TimeCalculationLLM(TimeCalculation):
 
 
         return compute_time, reduction_time, total_bytes
-    def get_gate_f(self, gemm_gate, gemm_ffn1):
-        #TODO gate overhead for moe is very minimal, can be ignored, implemented for completeness
-        _, effective_m, k, n = self._effective_dims(gemm_gate)
+    def get_router_f(self, gemm_router, gemm_ffn1):
+        #TODO router overhead for moe is very minimal, can be ignored, implemented for completeness
+        _, effective_m, k, n = self._effective_dims(gemm_router)
         effective_m = effective_m / (self.cp)
-        gemm_time = self.single_gpu_gemm_forward(gemm_gate, "gate_f")[0]
+        gemm_time = self.single_gpu_gemm_forward(gemm_router, "router_f")[0]
         elements = effective_m * n
         flops = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES  
 
-        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-gate-f", mem_level=self.num_levels - 1) + self.O
+        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-router-f", mem_level=self.num_levels - 1) + self.O
 
         per_rank_bytes = math.ceil(self.precision.activations * gemm_ffn1[0] * gemm_ffn1[1] * self.experts_per_gpu)
         total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp )) 
@@ -1369,22 +1369,22 @@ class TimeCalculationLLM(TimeCalculation):
             ib=self.IBTP,
             ll=self.LLTP,
             local_bytes=0,
-            debug_label="gate_f_all_to_all",
+            debug_label="router_f_all_to_all",
         )
 
 
         return compute_time, reduction_time, total_bytes
-    def get_gate_b(self, gemm_gate, gemm_ffn1):
-        #TODO gate overhead for moe is very minimal, can be ignored, implemented for completeness
-        _, effective_m, k, n = self._effective_dims(gemm_gate)
+    def get_router_b(self, gemm_router, gemm_ffn1):
+        #TODO router overhead for moe is very minimal, can be ignored, implemented for completeness
+        _, effective_m, k, n = self._effective_dims(gemm_router)
         elements = effective_m * k / (self.tp * self.cp)
 
-        gemm_time = self.single_gpu_gemm_backward(gemm_gate, "gate_f")[0]
+        gemm_time = self.single_gpu_gemm_backward(gemm_router, "router_f")[0]
 
         flops = elements * SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.activations * elements * SOFTMAX_BACKWARD_MEM_ACCESSES
 
-        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-gate-f", mem_level=self.num_levels - 1) + self.O
+        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-router-f", mem_level=self.num_levels - 1) + self.O
         bytes_per_rank = math.ceil(self.precision.activations * elements)
 
         total_bytes = int(math.ceil(bytes_per_rank * self.tp))
@@ -1395,7 +1395,7 @@ class TimeCalculationLLM(TimeCalculation):
             ib=self.IBTP,
             ll=self.LLTP,
             local_bytes=0,
-            debug_label="gate_b_reduce_scatter",
+            debug_label="router_b_reduce_scatter",
         )
 
 
@@ -1654,7 +1654,7 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_ffn1 = gemm_shapes["ffn1"]
         gemm_ffn2 = gemm_shapes["ffn2"]
         gemm_linear = gemm_shapes["linear"]
-        gemm_gate = gemm_shapes["gate"]
+        gemm_router = gemm_shapes["router"]
 
         transformer_timings: Dict[str, OperationTiming] = {}
 
@@ -1887,7 +1887,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=out_proj_size_b,
             ),
         )
-        if not self.use_moe:
+        if not self.use_moe: 
             ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
                 self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
             )
@@ -1901,9 +1901,9 @@ class TimeCalculationLLM(TimeCalculation):
                 gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
             )
 
-        else:
-            gate_gemm_time_f , gate_reduction_f, gate_size_f, _, _ = _extract_forward(self.get_gate_f(gemm_gate, gemm_ffn1))
-            gate_gemm_time_b , gate_reduction_b, gate_size_b= self.get_gate_b(gemm_gate, gemm_ffn1)
+        else: # MOE expert parallelism
+            router_gemm_time_f , router_reduction_f, router_size_f, _, _ = _extract_forward(self.get_router_f(gemm_router, gemm_ffn1))
+            router_gemm_time_b , router_reduction_b, router_size_b= self.get_router_b(gemm_router, gemm_ffn1)
             ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
                 self.get_moe_ffn_f(gemm_ffn1, "ffn1_f", gemm_type=GemmType.FFN1)
             )
@@ -1913,21 +1913,21 @@ class TimeCalculationLLM(TimeCalculation):
             )
             ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.get_moe_ffn_b(gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2)
         if self.use_moe:
-            transformer_timings["gate"] = OperationTiming(
-                "gate",
+            transformer_timings["router"] = OperationTiming(
+                "router",
                 forward=_make_direction(
-                    "gate",
+                    "router",
                     "forward",
-                    compute_time=gate_gemm_time_f,
-                    comm_time=gate_reduction_f,
-                    comm_bytes=gate_size_f,
+                    compute_time=router_gemm_time_f,
+                    comm_time=router_reduction_f,
+                    comm_bytes=router_size_f,
                 ),
                 backward=_make_direction(
-                    "gate",
+                    "router",
                     "backward",
-                    compute_time=gate_gemm_time_b,
-                    comm_time=gate_reduction_b,
-                    comm_bytes=gate_size_b,
+                    compute_time=router_gemm_time_b,
+                    comm_time=router_reduction_b,
+                    comm_bytes=router_size_b,
                 ),
             )
         
@@ -2474,9 +2474,9 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         op_names = list(op_names)
-        if self.use_moe and "MLP" in op_names and "gate" not in op_names:
+        if self.use_moe and "MLP" in op_names and "router" not in op_names: # if MOE is enabled, ensure router is included in the graph
             mlp_index = op_names.index("MLP")
-            op_names.insert(mlp_index, "gate")
+            op_names.insert(mlp_index, "router")
 
         for key in op_names:
             try:
@@ -2552,7 +2552,7 @@ class TimeCalculationLLM(TimeCalculation):
         graph_root_no_dp = None
         need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
         if need_no_dp_variant:
-            pipeline_graph_obj_no_dp = simulate_LLM.Graph(
+            pipeline_graph_obj_no_dp = simulate_LLM.Graph( # if gradient accumulation is used, we need a no-dp variant of the graph for the non-last step, since dp all-reduce is only done on the last step
                 mode="pipeline",
                 dp=1,
                 lp=self.lp,
@@ -2782,10 +2782,10 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.4f}s")
                 print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
-        if self.gradient_accumulation_steps > 1: #if gradient accumulation is enabled, non-last steps have no dp overhead, only last step has dp overhead
+        if self.gradient_accumulation_steps > 1: 
             if time_fw_bw_no_dp is None:
                 raise RuntimeError("Missing no-DP timing for gradient accumulation computation")
-            self.tot_time = time_fw_bw_no_dp * (self.gradient_accumulation_steps - 1) + time_fw_bw 
+            self.tot_time = time_fw_bw_no_dp * (self.gradient_accumulation_steps - 1) + time_fw_bw #total time is (time for no-dp steps) + (time for last step with dp)
         else:
             self.tot_time = time_fw_bw
         return self.tot_time
