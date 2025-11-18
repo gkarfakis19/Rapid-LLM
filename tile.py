@@ -308,7 +308,7 @@ class TiledGEMM:
         self.memLayer = memLayer
         self.dtype_size = dtype_size
         self.M, self.K, self.N = tile_dims[3]
-        self.capacity = memLayer[3].size_per_bundle
+        self.capacity = memLayer[2].size_per_bundle # L2 capacity in bytes
         self.order_dims = order_dims if isinstance(order_dims, str) else None
         # Precompute inner code once (accepts str or int code)
         self._inner_code = (
