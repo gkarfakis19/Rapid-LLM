@@ -142,8 +142,10 @@ class NetworkModel:
         data_transfer = ((per_rank / ib) + mem_access + ll) * 2 * (participants - 1)
         prep_comp = per_rank
         prep_mem = int(math.ceil(3 * size_bytes / participants))
+
+        # NOTE: removed overhead because it made it impossible to eliminate network effects even with inf bandwidth and zero latency
         data_prep = (
-            self._roofline(prep_comp, prep_mem, name=f"{label}-prep") + self.O
+            self._roofline(prep_comp, prep_mem, name=f"{label}-prep") # + self.O
         ) * (participants - 1)
         return data_transfer + data_prep
 
@@ -276,15 +278,17 @@ class TimeCalculation:
         else:
             self.kp1 = None
             self.kp2 = None
-        run_type = model_config.model_config.run_type
-        if run_type == "inference":
-            if self.cp > 1:
-                raise ValueError(
-                    "Context parallelism (cp) is not supported for LLM inference. "
-                    "Please set parallelism.cp to 1 for inference runs."
-                )
-            if self.mb > 1:
-                print(f"[WARNING]: LLM inference configured with mb={self.mb} (>1). \n Pipeline micro-batching is ill-defined for autoregressive decode and should be avoided.")
+
+        if self.mode != "GEMM":
+            run_type = model_config.model_config.run_type
+            if run_type == "inference":
+                if self.cp > 1:
+                    raise ValueError(
+                        "Context parallelism (cp) is not supported for LLM inference. "
+                        "Please set parallelism.cp to 1 for inference runs."
+                    )
+                if self.mb > 1:
+                    print(f"[WARNING]: LLM inference configured with mb={self.mb} (>1). \n Pipeline micro-batching is ill-defined for autoregressive decode and should be avoided.")
 
         
         # Statistics Param
