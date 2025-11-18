@@ -35,8 +35,7 @@ def _load_data(csv_path: Path) -> pd.DataFrame:
     # Normalize dtypes
     df["TP"] = df["TP"].astype(int)
     df["actual"] = pd.to_numeric(df["actual"], errors="coerce")
-    df["seconds"] = pd.to_numeric(df["seconds"], errors="coerce")
-    return df.dropna(subset=["device", "model", "TP", "actual", "seconds"])
+    return df.dropna(subset=["device", "model", "TP", "actual"])
 
 
 def _iter_tests(df: pd.DataFrame):
@@ -75,12 +74,9 @@ def _run_test(
                 "dimensions": [
                     {
                         "id": "dim0",
-                        "topology": {"bandwidth": "100000 GB", "latency": "0"},
+                        "topology": {"bandwidth": "100000 GB", "latency": "1e-9" },
                     }
                 ]
-            },
-            "execution_backend": {
-                "model": "analytical",
             },
         }
         hw_overrides.update(override_bw)
@@ -221,9 +217,9 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
     return outpath
 
 
-def run(enable_plot: bool = True, network_ignored: bool = True):
+def run(enable_plot: bool = True, network_ignored: bool = True, device: str = "A100"):
     pct_errors = []
-    data = _load_data(Path(__file__).parent / "nvidia_inf.csv")
+    data = _load_data(Path(__file__).parent / f"imec_data/{device}_inf.csv")
 
     for idx, (device, model, tp) in enumerate(_iter_tests(data)):
         seconds = _run_test(device, model, tp, idx, network_ignored)
@@ -277,7 +273,7 @@ def run(enable_plot: bool = True, network_ignored: bool = True):
     avg_abs_error = sum(e for e in pct_errors if not math.isnan(e)) / len(
         [e for e in pct_errors if not math.isnan(e)]
     )
-    # print("Average absolute percent error across all tests: {:.2f}%".format(avg_abs_error))
+    print("Average absolute percent error across all tests: {:.2f}%".format(avg_abs_error))
     return {"avg_abs_error": avg_abs_error}
 
 
