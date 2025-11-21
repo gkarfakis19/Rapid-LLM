@@ -35,8 +35,9 @@ MODEL_CONFIGS = {
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PERF = os.path.join(PROJECT_ROOT, "run_perf.py")
-HARDWARE_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs/hardware-config")
-MODEL_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs/model-config")
+VALIDATION_CONFIG_ROOT = os.path.join(PROJECT_ROOT, "validation_scripts", "validation_configs")
+HARDWARE_CONFIG_PATH = os.path.join(VALIDATION_CONFIG_ROOT, "hardware-config")
+MODEL_CONFIG_PATH = os.path.join(VALIDATION_CONFIG_ROOT, "model-config")
 DATA_DIR = Path(__file__).parent / "imec_data"
 
 

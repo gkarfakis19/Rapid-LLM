@@ -71,8 +71,9 @@ sns.set()
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PERF = os.path.join(PROJECT_ROOT, "run_perf.py")
-HARDWARE_CONFIG = os.path.join(PROJECT_ROOT, "configs/hardware-config/a100_80GB_no_parallelism.yaml")
-BASE_MODEL_CONFIG = os.path.join(PROJECT_ROOT, "configs/model-config/Llama3.1-8B_inf.yaml")
+VALIDATION_CONFIG_ROOT = os.path.join(PROJECT_ROOT, "validation_scripts", "validation_configs")
+HARDWARE_CONFIG = os.path.join(VALIDATION_CONFIG_ROOT, "hardware-config/a100_80GB_no_parallelism.yaml")
+BASE_MODEL_CONFIG = os.path.join(VALIDATION_CONFIG_ROOT, "model-config/Llama3.1-8B_inf.yaml")
 
 
 def _collect_points_in_order(data: Dict[str, Dict[Tuple[int, int, int], Tuple[float, float]]]) -> List[Tuple[str, Tuple[int, int, int], Tuple[float, float]]]:
