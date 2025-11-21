@@ -8,17 +8,26 @@ from validation_scripts import nvidia_inf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "validation_scripts/imec_data"
-DEFAULT_THRESHOLD = 100.0
-# Override per (device, model) if needed. Falls back to DEFAULT_THRESHOLD.
-# Actual + 0.5% margin of error, rounded up to nearest 0.5%.
-GROUP_THRESHOLDS = {
-  ("A100", "Llama 2-7B"): 5.5,   # 4.62 + 0.5 = 5.12 -> 5.5
-  ("A100", "Llama 2-13B"): 3.0,  # 2.44 + 0.5 = 2.94 -> 3.0
-  ("A100", "Llama 2-70B"): 13.0, # 12.09 + 0.5 = 12.59 -> 13.0
+
+
+DEFAULT_THRESHOLD = 10.0
+# Override per (device, model) average pct error.
+# Error is actual + 0.5% margin of error, rounded up to nearest 0.5%.
+MODEL_THRESHOLDS = {
+  ("A100", "Llama 2-7B"): 5.5,   # 4.62 + 0.5 -> ceil to 5.5
+  ("A100", "Llama 2-13B"): 3.0,  # 2.44 + 0.5 -> ceil to 3.0
+  ("A100", "Llama 2-70B"): 13.0, # 12.09 + 0.5 -> ceil to 13.0
+}
+# Override per (device, TP) average pct error across all models at that TP.
+TP_THRESHOLDS = {
+  ("A100", 1): 4.5,  # 3.98 + 0.5 -> ceil to 4.5
+  ("A100", 2): 8.5,  # 7.60 + 0.5 -> ceil to 8.5
+  ("A100", 4): 5.5,  # 4.91 + 0.5 -> ceil to 5.5
+  ("A100", 8): 7.0,  # 6.34 + 0.5 -> ceil to 7.0
 }
 
 
-def _load_params():
+def _load_params(by: str):
   params = []
   for device in ("A100", "H100"):
     csv_path = DATA_DIR / f"{device}_inf.csv"
@@ -28,38 +37,51 @@ def _load_params():
     df["TP"] = df["TP"].astype(int)
     df["actual"] = pd.to_numeric(df["actual"], errors="coerce")
     df = df.dropna(subset=["device", "model", "TP", "actual"])
-    for model, group in df.groupby("model"):
-      tp_actuals = [(int(tp), float(act)) for tp, act in zip(group["TP"], group["actual"])]
+    if by == "model":
+      grouped = df.groupby("model")
+    else:
+      grouped = df.groupby("TP")
+    for key, group in grouped:
       marks = ()
       if device == "H100":
         marks = (pytest.mark.xfail(reason="Pending model refinements", strict=False),)
       params.append(
         pytest.param(
           device,
-          model,
-          tp_actuals,
+          key,
           marks=marks,
-          id=f"{device}-{model}",
+          id=f"{device}-{by}-{key}",
         )
       )
   return params
 
 
-PARAMS = _load_params()
+MODEL_PARAMS = _load_params("model")
+TP_PARAMS = _load_params("TP")
 
 
-@pytest.mark.parametrize("device,model,tp_actuals", PARAMS)
-def test_avg_abs_error_below_threshold_network_ignored(device, model, tp_actuals, record_validation):
+@pytest.fixture(scope="module")
+def cached_rows():
+  cache = {}
+  for device in ("A100", "H100"):
+    try:
+      result = nvidia_inf.run(
+        enable_plot=False,
+        network_ignored=True,
+        device=device,
+        emit_logs=False,
+      )
+    except FileNotFoundError:
+      continue
+    cache[device] = result["rows"]
+  return cache
+
+
+@pytest.mark.parametrize("device,model", MODEL_PARAMS)
+def test_avg_abs_error_by_model(device, model, cached_rows, record_validation):
   label = f"{device} | {model}"
-  threshold = GROUP_THRESHOLDS.get((device, model), DEFAULT_THRESHOLD)
-  result = nvidia_inf.run(
-    enable_plot=False,
-    network_ignored=True,
-    device=device,
-    models=[model],
-    emit_logs=False,
-  )
-  rows = result["rows"]
+  threshold = MODEL_THRESHOLDS.get((device, model), DEFAULT_THRESHOLD)
+  rows = [r for r in cached_rows.get(device, []) if r["model"] == model]
   assert rows, f"{label} produced no validation rows"
 
   pct_errors = []
@@ -67,7 +89,27 @@ def test_avg_abs_error_below_threshold_network_ignored(device, model, tp_actuals
     pct_error = row["pct_error"]
     assert not math.isnan(pct_error), f"{label}-TP{row['tp']} produced no valid measurements"
     pct_errors.append(pct_error)
-  val_label = f"{label} avg_abs_error"
+
   avg_error = sum(pct_errors) / len(pct_errors)
+  val_label = f"{label} avg_abs_error"
+  record_validation(val_label, avg_error, expected_pct=threshold)
+  assert avg_error <= threshold, f"{label} avg error {avg_error:.2f}% exceeds {threshold}%"
+
+
+@pytest.mark.parametrize("device,tp", TP_PARAMS)
+def test_avg_abs_error_by_tp(device, tp, cached_rows, record_validation):
+  label = f"{device} | TP{tp}"
+  threshold = TP_THRESHOLDS.get((device, int(tp)), DEFAULT_THRESHOLD)
+  rows = [r for r in cached_rows.get(device, []) if int(r["tp"]) == int(tp)]
+  assert rows, f"{label} produced no validation rows"
+
+  pct_errors = []
+  for row in rows:
+    pct_error = row["pct_error"]
+    assert not math.isnan(pct_error), f"{label}-{row['model']} produced no valid measurements"
+    pct_errors.append(pct_error)
+
+  avg_error = sum(pct_errors) / len(pct_errors)
+  val_label = f"{label} avg_abs_error"
   record_validation(val_label, avg_error, expected_pct=threshold)
   assert avg_error <= threshold, f"{label} avg error {avg_error:.2f}% exceeds {threshold}%"
