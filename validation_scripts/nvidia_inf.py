@@ -1,16 +1,26 @@
 import argparse
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
-import pandas as pd
-from typing import List
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import sys
 import matplotlib.pyplot as plt
+import pandas as pd
 
-from .validation_helpers import (
-    ValidationSpec,
-    run_validation_suite,
-    parse_inference_time,
-)
+try:
+    from .validation_helpers import (
+        ValidationSpec,
+        run_validation_suite,
+        parse_inference_time,
+    )
+except ImportError:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+    from validation_scripts.validation_helpers import (  # type: ignore
+        ValidationSpec,
+        run_validation_suite,
+        parse_inference_time,
+    )
 
 HW_CONFIGS = {
     "A100": "a100_80GB.yaml",
@@ -27,6 +37,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PERF = os.path.join(PROJECT_ROOT, "run_perf.py")
 HARDWARE_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs/hardware-config")
 MODEL_CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs/model-config")
+DATA_DIR = Path(__file__).parent / "imec_data"
 
 
 def _load_data(csv_path: Path) -> pd.DataFrame:
@@ -38,16 +49,20 @@ def _load_data(csv_path: Path) -> pd.DataFrame:
     return df.dropna(subset=["device", "model", "TP", "actual"])
 
 
+@lru_cache(maxsize=None)
+def _load_device_data(device: str) -> pd.DataFrame:
+    csv_path = DATA_DIR / f"{device}_inf.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Validation CSV not found for device {device}: {csv_path}")
+    return _load_data(csv_path)
+
+
 def _iter_tests(df: pd.DataFrame):
     for _, row in df.iterrows():
         yield (row["device"], row["model"], row["TP"])
 
 
-def _run_test(
-    device: str, model: str, tp: int, idx: int, network_ignored: bool = True
-) -> float:
-    print(f"Running test {idx + 1}: Device={device}, Model={model}, TP={tp}")
-    specs: List[ValidationSpec] = []
+def _build_spec(device: str, model: str, tp: int, idx: int, network_ignored: bool) -> Tuple[ValidationSpec, str, str]:
     label = f"{device} {model} TP={tp}"
 
     model_overrides = {
@@ -58,7 +73,7 @@ def _run_test(
         }
     }
 
-    hw_overrides = {
+    hw_overrides: Dict[str, Dict[str, object]] = {
         "parallelism": {
             "dp": 1,
             "tp": int(tp),
@@ -81,20 +96,43 @@ def _run_test(
         }
         hw_overrides.update(override_bw)
 
-    specs.append(
-        ValidationSpec(
-            label=label,
-            model_overrides=model_overrides,
-            hardware_overrides=hw_overrides,
-            order=idx,
-        )
+    spec = ValidationSpec(
+        label=label,
+        model_overrides=model_overrides,
+        hardware_overrides=hw_overrides,
+        model_config_path=os.path.join(MODEL_CONFIG_PATH, MODEL_CONFIGS.get(model)),
+        hardware_config_path=os.path.join(HARDWARE_CONFIG_PATH, HW_CONFIGS.get(device)),
+        metadata={"device": device, "model": model, "tp": int(tp)},
+        order=idx,
     )
+    hw_config_path = spec.hardware_config_path  # type: ignore[arg-type]
+    model_config_path = spec.model_config_path  # type: ignore[arg-type]
+    return spec, hw_config_path, model_config_path
 
-    hw_config_path = os.path.join(HARDWARE_CONFIG_PATH, HW_CONFIGS.get(device))
-    model_config_path = os.path.join(MODEL_CONFIG_PATH, MODEL_CONFIGS.get(model))
 
+def _lookup_actual(device: str, model: str, tp: int) -> float:
+    data = _load_device_data(device)
+    matches = data.loc[
+        (data["device"] == device) & (data["model"] == model) & (data["TP"] == int(tp)),
+        "actual",
+    ]
+    if matches.empty:
+        raise ValueError(f"No reference inference time for {device} {model} TP={tp}")
+    return float(matches.values[0])
+
+
+def run_single(
+    device: str,
+    model: str,
+    tp: int,
+    *,
+    network_ignored: bool = True,
+    actual_inference_time_s: Optional[float] = None,
+    emit_logs: bool = False,
+) -> Dict[str, object]:
+    spec, hw_config_path, model_config_path = _build_spec(device, model, tp, idx=0, network_ignored=network_ignored)
     validation_results = run_validation_suite(
-        specs,
+        [spec],
         base_model_config_path=model_config_path,
         base_hardware_config_path=hw_config_path,
         result_parser=parse_inference_time,
@@ -102,16 +140,97 @@ def _run_test(
     )
 
     result = validation_results[0]
-    if result.success:
-        inf_time_s = float(result.metrics.get("inference_time_s", float("nan")))
-    else:
-        inf_time_s = float("nan")
-        err_detail = result.error or "DeepFlow run failed"
-        print(f" ERROR: {err_detail}")
-        if result.raw_output:
-            print(result.raw_output.strip())
+    inference_time_s = float(result.metrics.get("inference_time_s", float("nan"))) if result.success else float("nan")
+    err_detail = None if result.success else (result.error or "DeepFlow run failed")
 
-    return inf_time_s
+    if actual_inference_time_s is None:
+        try:
+            actual_inference_time_s = _lookup_actual(device, model, tp)
+        except Exception:
+            actual_inference_time_s = float("nan")
+
+    if math.isnan(inference_time_s) or actual_inference_time_s == 0 or math.isnan(actual_inference_time_s):
+        pct_error = float("nan")
+    else:
+        pct_error = abs(inference_time_s - actual_inference_time_s) / actual_inference_time_s * 100.0
+
+    if emit_logs:
+        block_lines = [
+            f"\n=== Result (device={device}, model={model}, TP={tp}) ===",
+        ]
+        if not math.isnan(inference_time_s):
+            block_lines.append(f"  DeepFlow Inference Time: {inference_time_s:.2f}s")
+            block_lines.append(f"  Actual Inference Time:   {actual_inference_time_s:.2f}s")
+            block_lines.append(f"  Percent Error:          {pct_error:.2f}%")
+        else:
+            block_lines.append(f"  DeepFlow run failed. {err_detail or ''}".rstrip())
+            if result.raw_output:
+                block_lines.append(result.raw_output.strip())
+        print("\n".join(block_lines))
+
+    return {
+        "success": result.success,
+        "inference_time_s": inference_time_s,
+        "actual_inference_time_s": actual_inference_time_s,
+        "pct_error": pct_error,
+        "error": err_detail,
+        "raw_output": result.raw_output,
+    }
+
+
+def build_specs_for_device(
+    device: str,
+    *,
+    network_ignored: bool = True,
+    models: Optional[Iterable[str]] = None,
+) -> Tuple[List[ValidationSpec], Dict[Tuple[str, int], float], str, str]:
+    data = _load_device_data(device)
+    model_filter = set(models) if models is not None else None
+    specs: List[ValidationSpec] = []
+    actual_lookup: Dict[Tuple[str, int], float] = {}
+    base_model_path: Optional[str] = None
+    hw_config_path: Optional[str] = None
+    idx = 0
+    for device_val, model, tp in _iter_tests(data):
+        if model_filter and model not in model_filter:
+            continue
+        spec, hw_path, model_path = _build_spec(device_val, model, tp, idx, network_ignored)
+        specs.append(spec)
+        actual_lookup[(model, int(tp))] = _lookup_actual(device_val, model, int(tp))
+        base_model_path = base_model_path or model_path
+        hw_config_path = hw_config_path or hw_path
+        idx += 1
+
+    if not specs:
+        raise ValueError(f"No validation specs generated for device={device} (models={models}).")
+    return specs, actual_lookup, base_model_path, hw_config_path
+
+
+def compute_pct_errors(results, actual_lookup: Dict[Tuple[str, int], float]):
+    rows: List[Dict[str, object]] = []
+    for res in results:
+        metadata = res.spec.metadata or {}
+        model = metadata.get("model")
+        tp = int(metadata.get("tp")) if "tp" in metadata else None
+        inf_time = float(res.metrics.get("inference_time_s", float("nan"))) if res.success else float("nan")
+        actual = actual_lookup.get((model, tp)) if model is not None and tp is not None else float("nan")
+        if math.isnan(inf_time) or actual is None or actual == 0 or math.isnan(actual):
+            pct_error = float("nan")
+        else:
+            pct_error = abs(inf_time - actual) / actual * 100.0
+        rows.append(
+            {
+                "device": metadata.get("device"),
+                "model": model,
+                "tp": tp,
+                "inference_time_s": inf_time,
+                "actual_inference_time_s": actual,
+                "pct_error": pct_error,
+                "success": res.success,
+                "error": res.error,
+            }
+        )
+    return rows
 
 
 def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
@@ -217,43 +336,54 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
     return outpath
 
 
-def run(enable_plot: bool = True, network_ignored: bool = True, device: str = "A100"):
+def run(
+    enable_plot: bool = True,
+    network_ignored: bool = True,
+    device: str = "A100",
+    models: Optional[Sequence[str]] = None,
+    emit_logs: bool = True,
+):
     pct_errors = []
-    data = _load_data(Path(__file__).parent / f"imec_data/{device}_inf.csv")
+    data = _load_device_data(device)
 
-    for idx, (device, model, tp) in enumerate(_iter_tests(data)):
-        seconds = _run_test(device, model, tp, idx, network_ignored)
+    specs, actual_lookup, base_model_path, hw_config_path = build_specs_for_device(
+        device, network_ignored=network_ignored, models=models
+    )
 
-        actual = data.loc[
-            (data["device"] == device) & (data["model"] == model) & (data["TP"] == tp),
-            "actual",
-        ].values[0]
+    validation_results = run_validation_suite(
+        specs,
+        base_model_config_path=base_model_path,
+        base_hardware_config_path=hw_config_path,
+        result_parser=parse_inference_time,
+        run_perf_path=RUN_PERF,
+    )
 
-        pct_error = (
-            abs(seconds - actual) / actual * 100.0 if actual != 0 else float("nan")
-        )
+    rows = compute_pct_errors(validation_results, actual_lookup)
+
+    for row in rows:
+        pct_error = float(row["pct_error"])
         pct_errors.append(pct_error)
-
         data.loc[
-            (data["device"] == device) & (data["model"] == model) & (data["TP"] == tp),
+            (data["device"] == row["device"]) & (data["model"] == row["model"]) & (data["TP"] == row["tp"]),
             "seconds",
-        ] = seconds
+        ] = row["inference_time_s"]
 
         data.loc[
-            (data["device"] == device) & (data["model"] == model) & (data["TP"] == tp),
+            (data["device"] == row["device"]) & (data["model"] == row["model"]) & (data["TP"] == row["tp"]),
             "pct_error",
         ] = pct_error
 
-        block_lines = [
-            f"\n=== Result (device={device}, model={model}, TP={tp}) ===",
-        ]
-        if not math.isnan(seconds):
-            block_lines.append(f"  DeepFlow Inference Time: {seconds:.2f}s")
-            block_lines.append(f"  Actual Inference Time:   {actual:.2f}s")
-            block_lines.append(f"  Percent Error:          {pct_error:.2f}%")
-        else:
-            block_lines.append("  DeepFlow run failed.")
-        print("\n".join(block_lines))
+        if emit_logs:
+            block_lines = [
+                f"\n=== Result (device={row['device']}, model={row['model']}, TP={row['tp']}) ===",
+            ]
+            if not math.isnan(row["inference_time_s"]):
+                block_lines.append(f"  DeepFlow Inference Time: {float(row['inference_time_s']):.2f}s")
+                block_lines.append(f"  Actual Inference Time:   {float(row['actual_inference_time_s']):.2f}s")
+                block_lines.append(f"  Percent Error:          {pct_error:.2f}%")
+            else:
+                block_lines.append(f"  DeepFlow run failed. {(row.get('error') or '')}".rstrip())
+            print("\n".join(block_lines))
 
     if enable_plot:
         out_dir = os.path.join(PROJECT_ROOT, "output", "validation")
@@ -270,11 +400,11 @@ def run(enable_plot: bool = True, network_ignored: bool = True, device: str = "A
         else:
             for p in outputs:
                 print(f"Saved: {p}")
-    avg_abs_error = sum(e for e in pct_errors if not math.isnan(e)) / len(
-        [e for e in pct_errors if not math.isnan(e)]
-    )
-    print("Average absolute percent error across all tests: {:.2f}%".format(avg_abs_error))
-    return {"avg_abs_error": avg_abs_error}
+    valid_errors = [e for e in pct_errors if not math.isnan(e)]
+    avg_abs_error = sum(valid_errors) / len(valid_errors) if valid_errors else float("nan")
+    if emit_logs:
+        print("Average absolute percent error across all tests: {:.2f}%".format(avg_abs_error))
+    return {"avg_abs_error": avg_abs_error, "rows": rows}
 
 
 if __name__ == "__main__":

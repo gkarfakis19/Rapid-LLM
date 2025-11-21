@@ -12,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import pytest
 import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -369,10 +370,43 @@ def parse_inference_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
     raise ValueError(f"Failed to parse inference time for experiment '{spec.label}'.")
   return {"inference_time_s": float(match.group(1))}
 
+# ---- Pytest integration for quiet validation reporting ----
+_VALIDATION_METRICS: List[Tuple[str, str, float, Optional[float]]] = []
+
+# magic function, needed for pytest to work
+def pytest_configure(config):
+  _VALIDATION_METRICS.clear()
+
+
+@pytest.fixture
+def record_validation(request):
+  def _record(label: str, achieved_pct: float, expected_pct: Optional[float] = None) -> None:
+    #node id is tests/test_IMEC_A100_no_network.py::test_avg_abs_error_below_threshold_network_ignored
+    # I want just the filename under tests/, not the function name
+    filename = request.node.nodeid.split("::")[0]
+    filename = filename.split("/")[-1]
+    _VALIDATION_METRICS.append(
+      (filename, label, achieved_pct, expected_pct)
+    )
+  return _record
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus):
+  if not _VALIDATION_METRICS:
+    return
+  tr = terminalreporter
+  tr.write_sep("=", "Test results")
+  for nodeid, label, achieved, expected in _VALIDATION_METRICS:
+    line = f"{nodeid}: {label} achieved {achieved:.2f}%"
+    if expected is not None:
+      line += f" (expected <= {expected:.2f}%)"
+    tr.write_line(line)
+
 __all__ = [
   "ValidationSpec",
   "ValidationResult",
   "run_validation_suite",
   "parse_decode_time",
-  "parse_inference_time"
+  "parse_inference_time",
+  "record_validation",
 ]

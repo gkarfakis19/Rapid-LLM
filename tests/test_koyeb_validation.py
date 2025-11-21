@@ -9,9 +9,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from validation_scripts import koyeb
 
 
-def test_koyeb_average_absolute_error_below_threshold():
+def test_koyeb_average_absolute_error_below_threshold(record_validation):
   results = koyeb.run_all_and_plot(enable_plot=False, verbose=False)
   avg_abs_error = results["avg_abs_error"]
+  record_validation("avg_abs_error", avg_abs_error, expected_pct=6.5)
   assert not math.isnan(avg_abs_error), "Koyeb validation produced no valid measurements"
   # Historically the average absolute error bottoms out at roughly 5.97%, so we allow
   # a little slack (6.5%) to absorb minor DeepFlow changes while still flagging regressions.
