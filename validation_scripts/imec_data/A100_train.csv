@@ -1,0 +1,3 @@
+// placeholder training validation data
+device,model,batch,dp,tp,pp,cp,actual
+A100,Llama 2-7B,32,2,2,1,1,123.45

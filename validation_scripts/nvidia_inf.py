@@ -22,6 +22,9 @@ except ImportError:
         parse_inference_time,
     )
 
+# Data used to be in  https://docs.nvidia.com/nemo-framework/user-guide/latest/llms/llama/performance.html in 2022.
+# no longer available now, found via paper. "Performance Modeling and Workload Analysis of Distributed Large Language Model Training and Inference" by J. Kundu et al.
+
 HW_CONFIGS = {
     "A100": "a100_80GB.yaml",
     "H100": "H100_SXM5_80GB.yaml",
