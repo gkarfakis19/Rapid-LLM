@@ -291,6 +291,7 @@ def run_validation_suite(
   env_overrides: Optional[Dict[str, str]] = None,
   cache_mode: str = "NO_CACHE",
   extra_run_perf_args: Optional[Sequence[str]] = None,
+  show_progress: bool = False,
 ) -> List[ValidationResult]:
   if not specs:
     return []
@@ -327,6 +328,14 @@ def run_validation_suite(
     extra_run_perf_args=extra_args,
   )
   results: List[ValidationResult] = []
+  progress = None
+  if show_progress:
+    try:
+      from tqdm import tqdm  # type: ignore
+      progress = tqdm(total=len(assigned_specs), desc="validation", leave=True)
+    except Exception:
+      progress = None
+
   with ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init, initargs=(context,)) as executor:
     future_map = {executor.submit(_execute_spec, spec): spec for spec in assigned_specs}
     for future in as_completed(future_map):
@@ -346,6 +355,10 @@ def run_validation_suite(
           hardware_config_used=None,
         )
       results.append(result)
+      if progress is not None:
+        progress.update(1)
+  if progress is not None:
+    progress.close()
   results.sort(key=lambda item: item.spec.order)
   return results
 
@@ -356,6 +369,9 @@ _DECODE_TIME_REGEX = re.compile(
 
 _INF_TIME_REGEX = re.compile(
   r"LLM inference time:\s*([0-9]+(?:\.[0-9]+)?)s"
+)
+_TRAIN_TIME_REGEX = re.compile(
+  r"Training time for batch:\s*([0-9]+(?:\.[0-9]+)?)s"
 )
 
 def parse_decode_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
@@ -369,6 +385,13 @@ def parse_inference_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
   if not match:
     raise ValueError(f"Failed to parse inference time for experiment '{spec.label}'.")
   return {"inference_time_s": float(match.group(1))}
+
+
+def parse_training_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
+  match = _TRAIN_TIME_REGEX.search(output)
+  if not match:
+    raise ValueError(f"Failed to parse training time for experiment '{spec.label}'.")
+  return {"training_time_s": float(match.group(1))}
 
 # ---- Pytest integration for quiet validation reporting ----
 _VALIDATION_METRICS: List[Tuple[str, str, float, Optional[float]]] = []
@@ -408,5 +431,6 @@ __all__ = [
   "run_validation_suite",
   "parse_decode_time",
   "parse_inference_time",
+  "parse_training_time",
   "record_validation",
 ]

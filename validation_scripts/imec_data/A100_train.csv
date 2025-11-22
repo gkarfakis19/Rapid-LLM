@@ -1,3 +1,5 @@
-// placeholder training validation data
-device,model,batch,dp,tp,pp,cp,actual
-A100,Llama 2-7B,32,2,2,1,1,123.45
+device,model,batch,mb,dp,tp,pp,cp,tp_sp,recomputation,actual
+A100_korthi,GPT 22B,4,1,1,8,1,1,True,selective,1.1
+A100_korthi,GPT 175B,64,64,1,8,8,1,True,selective,12.9
+A100_korthi,GPT 530B,280,280,1,8,35,1,True,selective,35.5
+A100_korthi,GPT 1T,512,512,1,8,64,1,True,selective,69.1
