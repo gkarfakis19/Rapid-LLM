@@ -1485,7 +1485,6 @@ class TimeCalculationLLM(TimeCalculation):
         kv_heads,
         intermediate_size,
         num_SMs,
-        include_optimizer: bool = False,
     ):
         """Compute latency for all GEMM operations and node breakdown times."""
 
@@ -1893,20 +1892,6 @@ class TimeCalculationLLM(TimeCalculation):
             + transformer_timings["layernorm1"].total_backward_time()
             + transformer_timings["layernorm2"].total_backward_time()
         )
-
-        if include_optimizer:
-            optimizer_time = self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size)
-            if optimizer_time > 0.0:
-                transformer_timings["optimizer"] = OperationTiming(
-                    "optimizer",
-                    forward=None,
-                    backward=DirectionTiming(
-                        compute_time=optimizer_time,
-                        comm_time=0.0,
-                        comm_bytes=0,
-                    ),
-                )
-                transformer_time_b += optimizer_time
 
         node_breakdown = {
             "transformer_time_f": transformer_time_f,
@@ -2434,7 +2419,6 @@ class TimeCalculationLLM(TimeCalculation):
             kv_heads,
             intermediate_size,
             num_SMs,
-            include_optimizer=False,
         )
 
         # transformer mem layer considers zero stage internally
