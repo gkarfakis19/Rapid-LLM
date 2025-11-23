@@ -1726,7 +1726,8 @@ def run_astra_simulation_only_onepath(
             exit()
 
         rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
-        axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)    
+        axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)
+        preferred_axes_for_synthetic = tuple(axis_order) if axis_order else tuple()
         axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)
         if not axes_filter:
             axes_filter = None
@@ -1738,6 +1739,7 @@ def run_astra_simulation_only_onepath(
             rank_count,
             axes_filter=axes_filter,
             faulty_links_override=faulty_links_override,
+            preferred_axes_for_synthetic=preferred_axes_for_synthetic,
         )
 
         # Run AstraSim simulation on forward graph (cached via manifest)

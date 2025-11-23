@@ -804,7 +804,7 @@ class LLMExecutionDispatcher:
         }
 
         def _subset_layout(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
-            subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) > 1]
+            subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) >= 1]
             if not subset:
                 return None
             strides: Dict[str, int] = {}

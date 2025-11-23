@@ -109,6 +109,7 @@ def generate_astrasim_configs_from_hw(
     transform_2d_to_1d: bool = False,
     faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
     ephemeral_outputs: bool = False,
+    preferred_axes_for_synthetic: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
     """Write AstraSim network/system configs derived from ``hw_obj``."""
     if npus_count is None:
@@ -132,34 +133,48 @@ def generate_astrasim_configs_from_hw(
     astra_mode = str(getattr(astra_cfg, "mode", "") or "").strip().lower()
 
     sch_config = getattr(hw_obj, "sch_config", None)
-    def _safe_int(value: Any, default: int = 1) -> int:
-        try:
-            candidate = int(value)
-        except (TypeError, ValueError):
-            candidate = default
-        return max(1, candidate)
 
     axes_filter_original = tuple(axes_filter) if axes_filter else None
     axes_filter_normalized: Optional[Tuple[str, ...]] = None
     if axes_filter_original:
         axes_filter_normalized = tuple(str(axis).strip().lower() for axis in axes_filter_original)
 
+    preferred_axes_synth: Tuple[str, ...] = tuple(
+        str(axis).strip().lower()
+        for axis in preferred_axes_for_synthetic or ()
+        if str(axis).strip()
+    )
+
     axis_sizes_full: Dict[str, int] = {
-        "tp": _safe_int(getattr(sch_config, "tp", 1)) if sch_config else 1,
-        "cp": _safe_int(getattr(sch_config, "cp", 1)) if sch_config else 1,
-        "lp": _safe_int(getattr(sch_config, "lp", 1)) if sch_config else 1,
-        "dp": _safe_int(getattr(sch_config, "dp", 1)) if sch_config else 1,
+        "tp": int(sch_config.tp),
+        "cp": int(sch_config.cp),
+        "lp": int(sch_config.lp),
+        "dp": int(sch_config.dp),
     }
     synthetic_only = axes_filter_normalized is not None and set(axes_filter_normalized) == {"synthetic2"}
     if synthetic_only:
+        preferred_set = set(preferred_axes_synth)
+        base_dim = None
         if dimensions:
-            base_dim = dimensions[0]
-            base_bw = float(getattr(base_dim, "effective_bandwidth", getattr(base_dim, "bandwidth", None)))
-            base_latency = float(getattr(base_dim, "latency", None))
-            base_topology = getattr(base_dim, "topology_type", None)
-            base_collectives = getattr(base_dim, "collective_override", {}) or {}
-        else:
+            for dim in dimensions:
+                dim_axes = [
+                    str(axis).strip().lower()
+                    for axis in getattr(dim, "parallelisms", ()) or ()
+                    if str(axis).strip()
+                ]
+                if preferred_set and any(axis in preferred_set for axis in dim_axes):
+                    base_dim = dim
+                    break
+                if base_dim is None and dim_axes:
+                    base_dim = dim
+        if base_dim is None:
+            base_dim = dimensions[0] if dimensions else None
+        if base_dim is None:
             raise ValueError(f"Synthetic dimension requested but no dimensions found in hardware config. Info: Called with filter {axes_filter_original}, npus_count={npus_count}, axes_sizes={axis_sizes_full}.")
+        base_bw = float(getattr(base_dim, "effective_bandwidth", getattr(base_dim, "bandwidth", None)))
+        base_latency = float(getattr(base_dim, "latency", None))
+        base_topology = getattr(base_dim, "topology_type", None)
+        base_collectives = getattr(base_dim, "collective_override", {}) or {}
         synthetic_dim = SimpleNamespace(
             label="synthetic2",
             parallelisms=("synthetic2",),
