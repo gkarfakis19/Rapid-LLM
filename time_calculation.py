@@ -1499,7 +1499,7 @@ class TimeCalculation:
         apply_grad_comp = num_params * OPT_FLOPS_PER_PARAM
         apply_grad_mem = num_params * (bytes_per_param_read + bytes_per_param_write)
 
-        apply_grad_time = self.roofline(apply_grad_comp, apply_grad_mem, name="pointwise-applyGrad")
+        apply_grad_time = self.roofline(apply_grad_comp, apply_grad_mem, name="apply_grad", mem_level=self.num_levels-1)
         clip_time = self.grad_clipping(num_params)
         return apply_grad_time + clip_time
 

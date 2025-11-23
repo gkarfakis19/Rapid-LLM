@@ -19,7 +19,7 @@ sw_param:
     # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
     #    keeps a separate FP32 master copy for weights.
     # -> fp32_params makes weights *and* gradients use FP32 bytes without a master copy.
-    param_storage_mode: as_tensor_format
+    param_storage_mode: tensor_plus_fp32_master
     # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
     kv_cache: as_tensor_format
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
