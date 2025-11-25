@@ -287,15 +287,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             backward=None,
         )
 
-        # Aggregate operations
-        mha_group = OperationGroup(
-            "MHA",
-            operations=(
-                transformer_timings["qkv_proj"],
-                transformer_timings["attention"],
-                transformer_timings["output_proj"],
-            ),
-        )
         mlp_group = OperationGroup(
             "MLP",
             operations=(
@@ -393,10 +384,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         inter_comm_bytes = 0.0  # data parallelism?
 
         aggregate_groups = {
-            "MHA": ("qkv_proj", "attention", "output_proj"),
             "MLP": ("ffn1", "gelu", "ffn2"),
         }
-        solo_ops = ("layernorm1", "layernorm2", "embedding", "linear_softmax")
+        solo_ops = ("layernorm1", "layernorm2", "embedding", "linear_softmax", "qkv_proj", "attention", "output_proj")
 
         for members in aggregate_groups.values():
             for name in members:

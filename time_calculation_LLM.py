@@ -54,6 +54,30 @@ COMMUNICATION_RULES: Dict[
             'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
             'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
         },
+        'layernorm1': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'layernorm2': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'qkv_proj': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'attention': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'output_proj': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'MLP': {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+        },
     },
     ParallelismMode.TENSOR_SEQUENCE: {
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None}, # <- dangerous
@@ -65,7 +89,15 @@ COMMUNICATION_RULES: Dict[
             'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
             'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
         },
-        'MHA': {
+        'qkv_proj': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'attention': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+        },
+        'output_proj': {
             'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
             'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
         },
@@ -1863,14 +1895,6 @@ class TimeCalculationLLM(TimeCalculation):
             ),
         )
 
-        mha_group = OperationGroup(
-            "MHA",
-            operations=(
-                transformer_timings["qkv_proj"],
-                transformer_timings["attention"],
-                transformer_timings["output_proj"],
-            ),
-        )
         mlp_group = OperationGroup(
             "MLP",
             operations=(
@@ -1881,13 +1905,17 @@ class TimeCalculationLLM(TimeCalculation):
         )
 
         transformer_time_f = (
-            mha_group.forward_total_time()
+            transformer_timings["qkv_proj"].total_forward_time()
+            + transformer_timings["attention"].total_forward_time()
+            + transformer_timings["output_proj"].total_forward_time()
             + mlp_group.forward_total_time()
             + transformer_timings["layernorm1"].total_forward_time()
             + transformer_timings["layernorm2"].total_forward_time()
         )
         transformer_time_b = (
-            mha_group.backward_total_time()
+            transformer_timings["qkv_proj"].total_backward_time()
+            + transformer_timings["attention"].total_backward_time()
+            + transformer_timings["output_proj"].total_backward_time()
             + mlp_group.backward_total_time()
             + transformer_timings["layernorm1"].total_backward_time()
             + transformer_timings["layernorm2"].total_backward_time()
@@ -2123,7 +2151,6 @@ class TimeCalculationLLM(TimeCalculation):
         }
         participants_lookup['moe'] = max(1, participants_lookup['tp'] * participants_lookup['cp'])
         group_members = {
-            "MHA": ("qkv_proj", "attention", "output_proj"),
             "MLP": ("ffn1", "gelu", "ffn2"),
         }
 
@@ -2233,12 +2260,15 @@ class TimeCalculationLLM(TimeCalculation):
                 return _build_group_operation(name, group_members[name])
             return transformer_timings[name]
 
-        if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
-            op_names: Sequence[str] = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
-        elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
-            op_names = ("layernorm1", "MHA", "layernorm2", "MLP")
-        else:
+        if parallelism_mode not in (
+            ParallelismMode.CONTEXT,
+            ParallelismMode.TENSOR_CONTEXT_HYBRID,
+            ParallelismMode.TENSOR,
+            ParallelismMode.TENSOR_SEQUENCE,
+            ParallelismMode.SINGLE,
+        ):
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
+        op_names: Sequence[str] = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
         op_names = list(op_names)
         if "optimizer" in transformer_timings:
             op_names.append("optimizer")
