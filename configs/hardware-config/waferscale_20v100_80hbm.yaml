@@ -125,6 +125,13 @@ network:
       collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, lp, dp]
 
+  overlap:
+    # fraction of TP+SP compute that can overlap TP/SP comm
+    tp_sp_overlap: 0.63
+    # fraction of TP compute that can overlap TP comm
+    tp_overlap: 0.6
+    # fraction of CP comm that can overlap CP compute
+    cp_overlap: 0.0
 execution_backend:
   model: astra # analytical | astra
   astra:

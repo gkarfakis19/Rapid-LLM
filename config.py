@@ -580,17 +580,18 @@ def _compute_dimension_parallelism_product(
 def _parse_network_layout(
     network_spec,
     parallelism_params: Dict[str, object],
-) -> Tuple[Tuple[NetworkDimensionLayout, ...], Tuple[Tuple[int, int, float], ...]]:
+) -> Tuple[Tuple[NetworkDimensionLayout, ...], Tuple[Tuple[int, int, float], ...], "NetworkOverlapConfig"]:
     if network_spec is None:
-        return tuple(), tuple()
+        raise ValueError("network section must be specified and include overlap settings")
 
-    faulty_links: Tuple[Tuple[int, int, float], ...] = tuple()
-    dimensions_spec = network_spec
-    if isinstance(network_spec, dict):
-        faulty_links = _parse_faulty_links("network", network_spec.get("faulty_links", []))
-        dimensions_spec = network_spec.get("dimensions")
-        if dimensions_spec is None:
-            raise ValueError("network.dimensions must be specified when network is a mapping")
+    if not isinstance(network_spec, dict):
+        raise ValueError("network must be provided as a mapping to supply overlap settings")
+
+    faulty_links: Tuple[Tuple[int, int, float], ...] = _parse_faulty_links("network", network_spec.get("faulty_links", []))
+    overlap_config = _parse_network_overlap(network_spec.get("overlap"))
+    dimensions_spec = network_spec.get("dimensions")
+    if dimensions_spec is None:
+        raise ValueError("network.dimensions must be specified when network is a mapping")
 
     if not isinstance(dimensions_spec, Sequence) or isinstance(dimensions_spec, (str, bytes)):
         raise ValueError("network.dimensions must be a sequence of dimension mappings")
@@ -604,7 +605,14 @@ def _parse_network_layout(
                 index=index,
             )
         )
-    return tuple(dimensions), faulty_links
+    return tuple(dimensions), faulty_links, overlap_config
+
+
+@dataclass(frozen=True)
+class NetworkOverlapConfig:
+    tp_overlap: float
+    tp_sp_overlap: float
+    cp_overlap: float
 
 
 @dataclass(frozen=True)
@@ -612,6 +620,7 @@ class NetworkLayoutConfig:
     dimensions: Tuple[NetworkDimensionLayout, ...]
     faulty_links: Tuple[Tuple[int, int, float], ...] = field(default_factory=tuple)
     parallelism_map: Dict[str, NetworkDimensionLayout] = field(default_factory=dict)
+    overlap_config: "NetworkOverlapConfig" = None
 
     def primary_dimension(self) -> Optional[NetworkDimensionLayout]:
         return self.dimensions[0] if self.dimensions else None
@@ -672,10 +681,32 @@ def _parse_faulty_links(owner_label: str, faulty_links_raw) -> Tuple[Tuple[int, 
         entries.append((src, dst, weight))
     return tuple(entries)
 
+def _parse_network_overlap(overlap_raw) -> "NetworkOverlapConfig":
+    if not isinstance(overlap_raw, dict):
+        raise ValueError("network.overlap must be a mapping with tp_overlap, tp_sp_overlap, and cp_overlap")
+    required_fields = ("tp_overlap", "tp_sp_overlap", "cp_overlap")
+    values = {}
+    for field in required_fields:
+        if field not in overlap_raw:
+            raise ValueError(f"network.overlap missing required field '{field}'")
+        try:
+            val = float(overlap_raw[field])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"network.overlap.{field} must be numeric") from exc
+        if val < 0.0 or val > 1.0:
+            raise ValueError(f"network.overlap.{field} must be between 0.0 and 1.0")
+        values[field] = val
+    return NetworkOverlapConfig(
+        tp_overlap=values["tp_overlap"],
+        tp_sp_overlap=values["tp_sp_overlap"],
+        cp_overlap=values["cp_overlap"],
+    )
+
 
 def _build_network_layout_config(
     dimensions: Sequence[NetworkDimensionLayout],
     faulty_links: Sequence[Tuple[int, int, float]] = (),
+    overlap_config: Optional["NetworkOverlapConfig"] = None,
 ) -> NetworkLayoutConfig:
     parallelism_map: Dict[str, NetworkDimensionLayout] = {}
     for dim in dimensions:
@@ -689,6 +720,7 @@ def _build_network_layout_config(
         dimensions=tuple(dimensions),
         faulty_links=tuple(faulty_links),
         parallelism_map=parallelism_map,
+        overlap_config=overlap_config,
     )
 
 
@@ -1093,10 +1125,10 @@ def parse_config(filename, config_type):
         scheduling_for_network = {str(k).lower(): v for k, v in parallelism_params.items()}
 
         network_spec = config_dict.get("network")
-        network_dimensions, network_faults = _parse_network_layout(network_spec, scheduling_for_network)
+        network_dimensions, network_faults, network_overlap = _parse_network_layout(network_spec, scheduling_for_network)
         if not network_dimensions:
             raise ValueError("network section must define at least one dimension")
-        network_layout_config = _build_network_layout_config(network_dimensions, network_faults)
+        network_layout_config = _build_network_layout_config(network_dimensions, network_faults, network_overlap)
 
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
 

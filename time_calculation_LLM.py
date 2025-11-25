@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 import simulate_LLM
-from LLM_execution import ExecutionMode, LLMExecutionDispatcher
+from LLM_execution import ExecutionMode, LLMExecutionDispatcher, apply_overlap_transforms
 from simulate_LLM import Graph
 import LLM_util
 from time_calculation import TimeCalculation
@@ -212,6 +212,12 @@ class TimeCalculationLLM(TimeCalculation):
           
         self.output_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
+        overlap_cfg = getattr(getattr(hw_config, "network_layout", None), "overlap_config", None)
+        if overlap_cfg is None:
+            raise ValueError("network.overlap must be provided in the hardware config")
+        self.tp_overlap = float(overlap_cfg.tp_overlap)
+        self.tp_sp_overlap = float(overlap_cfg.tp_sp_overlap)
+        self.cp_overlap = float(overlap_cfg.cp_overlap)
         self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
         self._debug_memory = _env_flag("DEEPFLOW_DEBUG_MEMORY")
@@ -2059,6 +2065,7 @@ class TimeCalculationLLM(TimeCalculation):
             'cp': (self.IBTP, self.LLTP),
         }
 
+
     def _prepare_execution_graphs(
         self,
         *,
@@ -2316,6 +2323,22 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
         if include_transformer_backward:
             transformer_backward_root = transformer_graph.construct_transformer_graph(direction="backward")
+
+        transformer_forward_root = apply_overlap_transforms(
+            transformer_forward_root,
+            parallelism_mode,
+            self.tp_overlap,
+            self.tp_sp_overlap,
+            self.cp_overlap,
+        )
+        if include_transformer_backward:
+            transformer_backward_root = apply_overlap_transforms(
+                transformer_backward_root,
+                parallelism_mode,
+                self.tp_overlap,
+                self.tp_sp_overlap,
+                self.cp_overlap,
+            )
 
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),

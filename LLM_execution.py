@@ -14,6 +14,274 @@ from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
 from simulate_LLM import Graph
 from util import log_message
+from typing import Iterable
+
+
+def _mode_label(mode: Any) -> str:
+    for attr in ("value", "name"):
+        if hasattr(mode, attr):
+            return str(getattr(mode, attr)).lower()
+    return str(mode).lower()
+
+
+def _copy_node_metadata(source: simulate_LLM.Node, target: simulate_LLM.Node) -> None:
+    for attr in (
+        "micro_batch_index",
+        "layer_index",
+        "direction",
+        "stage_id",
+        "tp_rank",
+        "cp_rank",
+    ):
+        if hasattr(source, attr):
+            setattr(target, attr, getattr(source, attr))
+
+
+def _copy_edge_metadata(source: simulate_LLM.Edge, target: simulate_LLM.Edge) -> None:
+    for attr in (
+        "local_hw_id",
+        "stage_id",
+        "micro_batch_index",
+        "layer_index",
+        "direction",
+        "tp_rank",
+        "cp_rank",
+    ):
+        if hasattr(source, attr):
+            setattr(target, attr, getattr(source, attr))
+
+
+def _detach_edge(parent: Any, child: Any) -> None:
+    children = getattr(parent, "children", None)
+    if isinstance(children, list):
+        try:
+            children.remove(child)
+        except ValueError:
+            pass
+    parents = getattr(child, "parents", None)
+    if isinstance(parents, list):
+        try:
+            parents.remove(parent)
+        except ValueError:
+            pass
+
+
+def _connect_edge(parent: Any, child: Any) -> None:
+    if child in getattr(parent, "children", []):
+        return
+    parent.add_child(child)
+
+
+def _split_tp_node(
+    node: simulate_LLM.Node,
+    tp_children: List[simulate_LLM.Edge],
+    overlap: float,
+) -> None:
+    if overlap <= 0.0 or not tp_children:
+        return
+
+    duration = float(getattr(node, "duration", 0.0) or 0.0)
+    if duration <= 0.0:
+        return
+
+    if overlap >= 1.0:
+        parents = list(getattr(node, "parents", []))
+        tp_succs: List[Any] = []
+        for tp_edge in tp_children:
+            _detach_edge(node, tp_edge)
+            for parent in parents:
+                _connect_edge(parent, tp_edge)
+            for succ in list(getattr(tp_edge, "children", []) or []):
+                tp_succs.append(succ)
+        for succ in tp_succs:
+            _connect_edge(node, succ)
+        return
+
+    head_duration = duration * (1.0 - overlap)
+    tail_duration = duration * overlap
+    if head_duration <= 0.0 or tail_duration <= 0.0:
+        return
+
+    tail = node
+    tail.duration = tail_duration
+    head = simulate_LLM.Node(
+        name=f"{tail.name}_head",
+        op_id=getattr(tail, "op_id", 0),
+        hw_id=tail.hw_id,
+        duration=head_duration,
+        fwd=tail.fwd,
+    )
+    _copy_node_metadata(tail, head)
+
+    parents = list(getattr(tail, "parents", []))
+    for parent in parents:
+        _detach_edge(parent, tail)
+        _connect_edge(parent, head)
+
+    _connect_edge(head, tail)
+
+    for tp_edge in tp_children:
+        _detach_edge(tail, tp_edge)
+        _connect_edge(head, tp_edge)
+        for succ in list(getattr(tp_edge, "children", []) or []):
+            _connect_edge(tail, succ)
+
+
+def _apply_tp_overlap_transforms(root: Any, parallelism_mode: Any, tp_overlap: float, tp_sp_overlap: float) -> Any:
+    mode = _mode_label(parallelism_mode)
+    if mode == "tensor_sequence":
+        overlap = tp_sp_overlap
+    elif mode in {"tensor", "tensor_context_hybrid"}:
+        overlap = tp_overlap
+    else:
+        return root
+    if overlap <= 0.0:
+        return root
+
+    nodes_to_process: List[simulate_LLM.Node] = []
+    visited: Set[int] = set()
+    stack: List[Any] = list(root) if isinstance(root, (list, tuple)) else [root]
+    while stack:
+        obj = stack.pop()
+        obj_id = id(obj)
+        if obj_id in visited:
+            continue
+        visited.add(obj_id)
+        if isinstance(obj, simulate_LLM.Node):
+            nodes_to_process.append(obj)
+        for child in getattr(obj, "children", []):
+            stack.append(child)
+
+    for node in nodes_to_process:
+        tp_children = [
+            child for child in getattr(node, "children", [])
+            if isinstance(child, simulate_LLM.Edge) and getattr(child, "comm_interconnect_type", None) == "tp"
+        ]
+        if not tp_children:
+            continue
+        _split_tp_node(node, tp_children, overlap)
+    return root
+
+
+def _apply_cp_overlap_transforms(root: Any, parallelism_mode: Any, cp_overlap: float) -> Any:
+    mode = _mode_label(parallelism_mode)
+    if mode not in {"context", "tensor_context_hybrid"}:
+        return root
+    overlap = cp_overlap
+    if overlap <= 0.0:
+        return root
+
+    cp_edges: List[simulate_LLM.Edge] = []
+    visited: Set[int] = set()
+    stack: List[Any] = list(root) if isinstance(root, (list, tuple)) else [root]
+    while stack:
+        obj = stack.pop()
+        obj_id = id(obj)
+        if obj_id in visited:
+            continue
+        visited.add(obj_id)
+        if isinstance(obj, simulate_LLM.Edge) and getattr(obj, "comm_interconnect_type", None) == "cp":
+            cp_edges.append(obj)
+        for child in getattr(obj, "children", []):
+            stack.append(child)
+
+    for edge in cp_edges:
+        _split_cp_edge(edge, overlap)
+    return root
+
+
+def _split_cp_edge(edge: simulate_LLM.Edge, overlap: float) -> None:
+    attention_children = [
+        child for child in getattr(edge, "children", [])
+        if isinstance(child, simulate_LLM.Node) and "attention" in str(getattr(child, "name", "")).lower()
+    ]
+    if not attention_children:
+        return
+
+    total_bytes = int(getattr(edge, "comm_size_bytes", 0) or 0)
+    preds = list(getattr(edge, "parents", []))
+    succs = list(getattr(edge, "children", []))
+
+    if overlap >= 1.0 or total_bytes <= 0:
+        for attention in attention_children:
+            _detach_edge(edge, attention)
+            for pred in preds:
+                _connect_edge(pred, attention)
+        for succ in succs:
+            if succ in attention_children:
+                continue
+            for attention in attention_children:
+                _connect_edge(attention, succ)
+            _connect_edge(edge, succ)
+        return
+
+    block_bytes = int(math.ceil(total_bytes * (1.0 - overlap)))
+    ovlp_bytes = max(0, total_bytes - block_bytes)
+    if block_bytes <= 0:
+        _split_cp_edge(edge, 1.0)
+        return
+
+    block_edge = simulate_LLM.Edge(
+        name=f"{edge.name}_block",
+        op_id=getattr(edge, "op_id", 0),
+        duration=0,
+        is_dp=edge.is_dp,
+        comm_size_bytes=block_bytes,
+        comm_type=edge.comm_type,
+        participants=edge.participants,
+        comm_interconnect_type=edge.comm_interconnect_type,
+    )
+    ovlp_edge = None
+    if ovlp_bytes > 0:
+        ovlp_edge = simulate_LLM.Edge(
+            name=f"{edge.name}_ovlp",
+            op_id=getattr(edge, "op_id", 0),
+            duration=0,
+            is_dp=edge.is_dp,
+            comm_size_bytes=ovlp_bytes,
+            comm_type=edge.comm_type,
+            participants=edge.participants,
+            comm_interconnect_type=edge.comm_interconnect_type,
+        )
+        _copy_edge_metadata(edge, ovlp_edge)
+    _copy_edge_metadata(edge, block_edge)
+
+    for pred in preds:
+        _detach_edge(pred, edge)
+        _connect_edge(pred, block_edge)
+
+    for attention in attention_children:
+        _detach_edge(edge, attention)
+        _connect_edge(block_edge, attention)
+
+    if ovlp_edge is not None:
+        _connect_edge(block_edge, ovlp_edge)
+
+    for succ in succs:
+        if succ in attention_children:
+            continue
+        _detach_edge(edge, succ)
+        for attention in attention_children:
+            _connect_edge(attention, succ)
+        if ovlp_edge is not None:
+            _connect_edge(ovlp_edge, succ)
+        else:
+            _connect_edge(block_edge, succ)
+
+
+def apply_overlap_transforms(
+    root: Any,
+    parallelism_mode: Any,
+    tp_overlap: float,
+    tp_sp_overlap: float,
+    cp_overlap: float,
+) -> Any:
+    """Apply TP/TP_SP/CP overlap rewrites to a constructed graph."""
+    if root is None:
+        return None
+    root = _apply_tp_overlap_transforms(root, parallelism_mode, tp_overlap, tp_sp_overlap)
+    root = _apply_cp_overlap_transforms(root, parallelism_mode, cp_overlap)
+    return root
 
 
 def _env_flag(name: str) -> bool:
@@ -1197,6 +1465,13 @@ class LLMExecutionDispatcher:
         if flattened_root is None:
             raise RuntimeError("Pipeline flattening produced an empty graph")
 
+        flattened_root = apply_overlap_transforms(
+            flattened_root,
+            self.time_calc.get_parallelism_mode(),
+            getattr(self.time_calc, "tp_overlap", 0.0),
+            getattr(self.time_calc, "tp_sp_overlap", 0.0),
+            getattr(self.time_calc, "cp_overlap", 0.0),
+        )
         flattener._propagate_local_hw_ids(flattened_root)
         setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
         self._attach_optimize_hint(flattened_root)

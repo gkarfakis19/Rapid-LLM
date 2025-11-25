@@ -120,6 +120,13 @@ network:
         util: 1.0
       parallelisms: [dp]
 
+  overlap:
+    # fraction of TP+SP compute that can overlap TP/SP comm
+    tp_sp_overlap: 0.63
+    # fraction of TP compute that can overlap TP comm
+    tp_overlap: 0.6
+    # fraction of CP comm that can overlap CP compute
+    cp_overlap: 0.0
 power_breakdown:
   TDP: 400
   core: 200
