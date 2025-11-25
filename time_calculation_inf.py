@@ -33,6 +33,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
+        if self.zero_stage >= 3 and self.dp > 1:
+            raise ValueError("ZeRO-3 data parallelism is not supported for inference runs (dp_zero_stage must be <3 or dp=1).")
         self._raw_model_config = model_config
 
     def _build_decode_transformer_results(
