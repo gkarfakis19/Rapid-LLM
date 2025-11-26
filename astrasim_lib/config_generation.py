@@ -6,7 +6,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
-
+import math
 from hw_component import Network
 
 from .bootstrap import ensure_chakra_available
@@ -114,15 +114,22 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
             dim_count = int(topo[-2]) if len(topo) >= 2 and topo[-2].isdigit() else 2
             base_name = "Ring" if topo.startswith("Torus") else "Mesh"
             for dim_idx in range(dim_count):
+                curr_npu = (
+                    npus_value[dim_idx]
+                    if isinstance(npus_value, (list, tuple))
+                    else npus_value
+                )
+                if dim_count == 2:
+                    root = int(math.isqrt(int(curr_npu)))
+                    if root * root != int(curr_npu):
+                        raise ValueError(f"npus ({curr_npu}) must be a perfect square for 2D topology {topo}.")
+                    curr_npu = root
+                topology_name = "Mesh" if dim_count == 2 and curr_npu <= 2 else base_name
                 expanded.append(
                     {
                         **entry,
-                        "topology": base_name,
-                        "npus": (
-                            npus_value[dim_idx]
-                            if isinstance(npus_value, (list, tuple)) and dim_idx < len(npus_value)
-                            else npus_value
-                        ),
+                        "topology": topology_name,
+                        "npus": curr_npu,
                         "bandwidth": bw_value,
                         "latency": lat_value,
                     }
