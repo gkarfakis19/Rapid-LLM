@@ -107,23 +107,39 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
     for entry in entries:
         topo = entry.get("topology")
         npus_value = entry.get("npus")
+        dims_value = entry.get("dims")
         bw_value = entry.get("bandwidth")
         lat_value = entry.get("latency")
 
         if isinstance(topo, str) and (topo.startswith("Torus") or topo.startswith("Mesh")):
-            dim_count = int(topo[-2]) if len(topo) >= 2 and topo[-2].isdigit() else 2
+            dim_count: int
+            if dims_value is not None and isinstance(dims_value, (list, tuple)):
+                dim_count = len(dims_value)
+            elif isinstance(npus_value, (list, tuple)):
+                dim_count = len(npus_value)
+            elif len(topo) >= 2 and topo[-2].isdigit():
+                dim_count = int(topo[-2])
+            else:
+                dim_count = 1
             base_name = "Ring" if topo.startswith("Torus") else "Mesh"
+            if dims_value is None and isinstance(npus_value, (list, tuple)) and len(npus_value) == dim_count:
+                dims_value = tuple(npus_value)
             for dim_idx in range(dim_count):
-                curr_npu = (
-                    npus_value[dim_idx]
-                    if isinstance(npus_value, (list, tuple))
-                    else npus_value
-                )
-                if dim_count == 2:
-                    root = int(math.isqrt(int(curr_npu)))
-                    if root * root != int(curr_npu):
-                        raise ValueError(f"npus ({curr_npu}) must be a perfect square for 2D topology {topo}.")
-                    curr_npu = root
+                if dims_value is not None:
+                    if not isinstance(dims_value, (list, tuple)) or len(dims_value) != dim_count:
+                        raise ValueError(f"dims for topology {topo} must match dimension count {dim_count}.")
+                    curr_npu = dims_value[dim_idx]
+                else:
+                    curr_npu = (
+                        npus_value[dim_idx]
+                        if isinstance(npus_value, (list, tuple))
+                        else npus_value
+                    )
+                    if dim_count == 2:
+                        root = int(math.isqrt(int(curr_npu)))
+                        if root * root != int(curr_npu):
+                            raise ValueError(f"npus ({curr_npu}) must be a perfect square for 2D topology {topo}.")
+                        curr_npu = root
                 topology_name = "Mesh" if dim_count == 2 and curr_npu <= 2 else base_name
                 expanded.append(
                     {
@@ -340,7 +356,21 @@ def generate_astrasim_configs_from_hw(
 
     for dim, axes_selected, product_size, _ in selected_dims:
         topo = _normalize_topology_name(dim.topology_type)
-        size = product_size
+        full_size = int(getattr(dim, "size", product_size) or product_size)
+        dims_value = getattr(dim, "size_2d", None)
+        dims_tuple: Optional[Tuple[int, int]] = None
+        use_shape = dims_value is not None and product_size == full_size
+        if use_shape:
+            dims_tuple = (int(dims_value[0]), int(dims_value[1]))  # type: ignore[index]
+            shape_product = dims_tuple[0] * dims_tuple[1]
+            if shape_product != product_size:
+                raise ValueError(
+                    f"Network dimension '{dim.label}' shape {dims_tuple} product {shape_product} "
+                    f"does not match parallelism product {product_size}."
+                )
+            size = shape_product
+        else:
+            size = product_size
         if transform_2d_to_1d and topo in ["Torus2D", "Mesh2D", "KingMesh2D"]:
             if topo == "Torus2D":
                 topo = "Ring"
@@ -348,6 +378,8 @@ def generate_astrasim_configs_from_hw(
                 topo = "Mesh"
             if topo == "KingMesh2D":
                 topo = "HyperCube"
+            # When flattening 2D, prefer the explicit shape product if available.
+            size = size
         if topo == "Ring" and size <= 2:
             topo = "FullyConnected"
         effective_bw = float(getattr(dim, "effective_bandwidth", dim.bandwidth))
@@ -360,6 +392,8 @@ def generate_astrasim_configs_from_hw(
             "bandwidth": round(_gbps_from_bps(effective_bw), 6),
             "latency": round(_ns_from_s(latency_s), 3),
         }
+        if dims_tuple is not None and topo in ["Torus2D", "Mesh2D", "KingMesh2D"]:
+            entry["dims"] = dims_tuple
         network_entries.append(entry)
 
     network_entries = _expand_network_entries(network_entries)

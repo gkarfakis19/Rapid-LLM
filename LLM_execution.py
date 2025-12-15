@@ -984,12 +984,17 @@ class LLMExecutionDispatcher:
                 size_value = getattr(dim, "size", None)
                 if size_value is None:
                     raise ValueError("optimize_2dmap requires an explicit dimension size.")
+                dims_value = getattr(dim, "size_2d", None)
+                if dims_value is not None:
+                    dims_value = (int(dims_value[0]), int(dims_value[1]))
                 optimize_cfg = {
                     "dimension_index": idx,
                     "topology": str(topo_type),
                     "size": int(size_value),
                     "parallelisms": tuple(getattr(dim, "parallelisms", ()) or ()),
                 }
+                if dims_value:
+                    optimize_cfg["dims"] = dims_value
         self._first_dim_optimize_cfg = optimize_cfg
 
         def _safe_int(value: Any, default: int = 1) -> int:

@@ -42,6 +42,7 @@ class GMapCollector:
         output_dir: str,
         vertex_count: int,
         include_pipeline: bool,
+        dims: Optional[Tuple[int, int]] = None,
     ) -> None:
         if not subset_axes:
             raise ValueError("optimize_2dmap requires at least one axis in the first network dimension")
@@ -54,6 +55,7 @@ class GMapCollector:
         self.output_dir = output_dir
         self.vertex_count = int(vertex_count)
         self.include_pipeline = include_pipeline
+        self.dims: Optional[Tuple[int, int]] = tuple(int(v) for v in dims) if dims else None
         self._edge_weights: Dict[Tuple[int, int], float] = {}
 
         missing = [axis for axis in self.subset_axes if axis not in self.axis_sizes]
@@ -312,12 +314,42 @@ def begin_collection(
         if str(axis).strip()
     )
     subset_strides = build_subset_strides(subset_axes, axis_sizes)
-    vertex_count = 1
+    dims_raw = optimize_cfg.get("dims")
+    if dims_raw is None and isinstance(optimize_cfg.get("size"), (tuple, list)):
+        dims_raw = optimize_cfg.get("size")
+    dims: Optional[Tuple[int, int]] = None
+    if dims_raw is not None:
+        if not isinstance(dims_raw, (tuple, list)) or len(dims_raw) != 2:
+            raise ValueError("optimize_2dmap dims must be a two-item tuple/list when provided.")
+        try:
+            dims = (int(dims_raw[0]), int(dims_raw[1]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("optimize_2dmap dims entries must be integers.") from exc
+        if dims[0] <= 0 or dims[1] <= 0:
+            raise ValueError("optimize_2dmap dims entries must be > 0.")
+
+    subset_product = 1
     for axis in subset_axes:
         if axis not in axis_sizes:
             raise ValueError(f"Axis '{axis}' from optimize_2dmap is missing in axis_sizes.")
-        vertex_count *= int(axis_sizes[axis])
-    declared_size = int(optimize_cfg.get("size", vertex_count))
+        subset_product *= int(axis_sizes[axis])
+
+    if dims:
+        vertex_count = int(dims[0]) * int(dims[1])
+        if vertex_count != subset_product:
+            raise ValueError(
+                f"optimize_2dmap dims product {vertex_count} does not match product of subset axes {subset_product}."
+            )
+    else:
+        vertex_count = subset_product
+    declared_size_raw = optimize_cfg.get("size", vertex_count)
+    if isinstance(declared_size_raw, (tuple, list)):
+        try:
+            declared_size = int(declared_size_raw[0]) * int(declared_size_raw[1])
+        except Exception:
+            declared_size = vertex_count
+    else:
+        declared_size = int(declared_size_raw)
     if declared_size != vertex_count:
         raise ValueError(
             f"optimize_2dmap size {declared_size} does not match product of subset axes {vertex_count}."
@@ -335,6 +367,7 @@ def begin_collection(
         output_dir=output_dir,
         vertex_count=vertex_count,
         include_pipeline=include_pipeline,
+        dims=dims,
     )
 
 
@@ -387,6 +420,11 @@ def finalize_collection(collector: Optional[GMapCollector]) -> Optional[MappingR
 
 
 def _infer_target_dims(collector: GMapCollector) -> Tuple[int, int]:
+    if collector.dims:
+        dim_x, dim_y = collector.dims
+        if dim_x <= 0 or dim_y <= 0:
+            raise ValueError("optimize_2dmap requires positive dims entries.")
+        return dim_x, dim_y
     total = int(collector.vertex_count)
     if total <= 0:
         raise ValueError("optimize_2dmap requires a positive vertex count.")

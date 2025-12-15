@@ -351,6 +351,7 @@ class NetworkDimensionLayout:
     bandwidth: float
     util: float
     latency: float
+    size_2d: Optional[Tuple[int, int]] = None
     collective_override: Dict[str, str] = field(default_factory=dict)
     parallelisms: Tuple[str, ...] = field(default_factory=tuple)
     energy_per_bit: float = 0.0
@@ -374,17 +375,34 @@ class NetworkDimensionLayout:
         if "size" not in raw:
             raise ValueError(f"network dimension '{label}' is missing required field 'size'")
         size_raw = raw["size"]
-        size_is_auto = False
-        if isinstance(size_raw, str) and size_raw.strip().lower() == "auto":
-            size_is_auto = True
-            size = None
+        size_mode: str
+        size_value: Optional[int] = None
+        size_2d: Optional[Tuple[int, int]] = None
+        tuple_entries: Optional[Tuple[object, object]] = None
+        if isinstance(size_raw, str):
+            normalized_size = size_raw.strip()
+            if normalized_size.startswith("(") and normalized_size.endswith(")"):
+                tuple_entries = tuple(
+                    part.strip() for part in normalized_size[1:-1].split(",")
+                )  # type: ignore[assignment]
+                size_mode = "tuple"
+            elif normalized_size.lower() == "auto":
+                size_mode = "auto_scalar"
+            else:
+                try:
+                    size_value = int(size_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"network dimension '{label}' size must be an integer or tuple") from exc
+                if size_value < 1:
+                    raise ValueError(f"network dimension '{label}' size must be >= 1")
+                size_mode = "scalar"
+        elif isinstance(size_raw, (list, tuple)):
+            if len(size_raw) != 2:
+                raise ValueError(f"network dimension '{label}' 2D size must have exactly two entries")
+            tuple_entries = tuple(size_raw)  # type: ignore[assignment]
+            size_mode = "tuple"
         else:
-            try:
-                size = int(size_raw)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"network dimension '{label}' size must be an integer") from exc
-            if size < 1:
-                raise ValueError(f"network dimension '{label}' size must be >= 1")
+            size_mode = "auto_scalar"
 
         topo_dict = raw.get("topology")
         if not isinstance(topo_dict, dict):
@@ -469,21 +487,125 @@ class NetworkDimensionLayout:
             normalized_parallelisms.append(normalized)
             alias_map[normalized] = name
 
-        computed_product = None
-        if size_is_auto:
-            computed_product = _compute_dimension_parallelism_product(
+        computed_product: Optional[int] = None
+        auto_product: Optional[int] = None
+
+        if size_mode in {"auto_scalar", "tuple"}:
+            auto_product = _compute_dimension_parallelism_product(
                 dimension_label=label,
                 normalized_names=tuple(normalized_parallelisms),
                 alias_map=alias_map,
                 parallelism_params=parallelism_params,
             )
-            size = computed_product
-            if size < 1:
+            if auto_product < 1:
                 raise ValueError(f"network dimension '{label}' inferred size must be >= 1")
+
+        if size_mode == "auto_scalar":
+            size_value = auto_product
+            computed_product = auto_product
+        elif size_mode == "tuple":
+            assert tuple_entries is not None
+            resolved: List[Optional[int]] = [None, None]
+            auto_entries = 0
+            for idx, entry in enumerate(tuple_entries):
+                if isinstance(entry, str):
+                    normalized = entry.strip().lower()
+                    if normalized == "auto":
+                        auto_entries += 1
+                        if auto_entries > 1:
+                            raise ValueError(
+                                f"network dimension '{label}' 2D size may include at most one 'auto' entry"
+                            )
+                        resolved[idx] = None
+                        continue
+                    if normalized not in parallelism_params:
+                        alias = alias_map.get(normalized, normalized)
+                        raise ValueError(
+                            f"network dimension '{label}' 2D size references parallelism '{alias}' "
+                            "which is not defined in parallelism"
+                        )
+                    try:
+                        factor = int(parallelism_params[normalized])
+                    except (TypeError, ValueError) as exc:
+                        alias = alias_map.get(normalized, normalized)
+                        raise ValueError(
+                            f"network dimension '{label}' 2D size parallelism '{alias}' must be an integer"
+                        ) from exc
+                    if factor < 1:
+                        alias = alias_map.get(normalized, normalized)
+                        raise ValueError(
+                            f"network dimension '{label}' 2D size parallelism '{alias}' must be >= 1"
+                        )
+                    resolved[idx] = factor
+                else:
+                    try:
+                        factor = int(entry)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"network dimension '{label}' 2D size entries must be integers, parallelism names, or 'auto'"
+                        ) from exc
+                    if factor < 1:
+                        raise ValueError(f"network dimension '{label}' 2D size entries must be >= 1")
+                    resolved[idx] = factor
+
+            known_product = 1
+            for val in resolved:
+                if val:
+                    known_product *= val
+
+            if auto_entries:
+                if auto_product is None:
+                    auto_product = _compute_dimension_parallelism_product(
+                        dimension_label=label,
+                        normalized_names=tuple(normalized_parallelisms),
+                        alias_map=alias_map,
+                        parallelism_params=parallelism_params,
+                    )
+                if known_product == 0:
+                    raise ValueError(f"network dimension '{label}' 2D size known entries must be > 0")
+                if auto_product % known_product != 0:
+                    raise ValueError(
+                        f"network dimension '{label}' 2D size mismatch: auto product {auto_product} "
+                        f"is not divisible by provided factors {tuple_entries}"
+                    )
+                auto_value = auto_product // known_product
+                if auto_value < 1:
+                    raise ValueError(
+                        f"network dimension '{label}' 2D size auto-resolved entry must be >= 1 (got {auto_value})"
+                    )
+                for idx in range(2):
+                    if resolved[idx] is None:
+                        resolved[idx] = auto_value
+                        break
+            else:
+                if auto_product is None:
+                    auto_product = _compute_dimension_parallelism_product(
+                        dimension_label=label,
+                        normalized_names=tuple(normalized_parallelisms),
+                        alias_map=alias_map,
+                        parallelism_params=parallelism_params,
+                    )
+                if known_product != auto_product:
+                    raise ValueError(
+                        f"network dimension '{label}' 2D size mismatch: provided shape {tuple_entries} "
+                        f"product {known_product} does not match parallelism product {auto_product}"
+                    )
+
+            if resolved[0] is None or resolved[1] is None:
+                raise ValueError(f"network dimension '{label}' 2D size could not be fully resolved")
+
+            size_2d = (int(resolved[0]), int(resolved[1]))
+            size_value = int(size_2d[0]) * int(size_2d[1])
+            computed_product = auto_product
+        else:
+            computed_product = None
+
+        if size_value is None:
+            raise ValueError(f"network dimension '{label}' size could not be resolved")
 
         _validate_dimension_parallelisms(
             dimension_label=label,
-            dimension_size=size,
+            dimension_size=int(size_value) if size_value is not None else 0,
             normalized_names=tuple(normalized_parallelisms),
             alias_map=alias_map,
             parallelism_params=parallelism_params,
@@ -493,7 +615,8 @@ class NetworkDimensionLayout:
         return cls(
             id=dim_id,
             label=label,
-            size=size,
+            size=int(size_value) if size_value is not None else 0,
+            size_2d=size_2d,
             topology_type=topo_type,
             bandwidth=bandwidth,
             util=util,
