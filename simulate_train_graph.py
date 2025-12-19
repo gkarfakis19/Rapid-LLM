@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from graphviz import Digraph
 import os
 
-import graphviz_async
+import util
 import util
 debug = False
 BYTES_PER_GIB = 1024 ** 3
@@ -545,7 +545,7 @@ class Graph:
         Args:
             network_model: NetworkModel instance for collective timing
             interconnect_params: Dict with bandwidth/latency for each type
-                                {'dp': (ib, ll), 'lp': (ib, ll), 'kp1': (ib, ll), 'kp2': (ib, ll)}
+                                {'dp': (ib, ll), 'lp': (ib, ll), 'tp': (ib, ll)}
         """
         def traverse_and_convert(node, visited=None):
             if visited is None:
@@ -1644,7 +1644,7 @@ class Graph:
             dot_fw = visualize_graph(roots, filename=base_path)
             dot_fw.render(base_path, format="svg", cleanup=True)
 
-        graphviz_async.submit(f"{filename}.svg", _render_graph, print_message=printstr)
+        util.graphviz_submit(f"{filename}.svg", _render_graph, print_message=printstr)
 
 
 def visualize_graph(roots, filename="graph"):

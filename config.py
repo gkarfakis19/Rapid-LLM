@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 import math
-from collections import namedtuple as _namedtuple
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import yaml as _yaml
@@ -852,24 +851,9 @@ _PARALLELISM_DEFAULTS: Dict[str, object] = {
     "dp": 1,
     "lp": 1,
     "mb": 1,
-    "kp_hidden_dim1": 1,
-    "kp_softmax_dim1": 1,
-    "kp_embedding_dim1": 1,
-    "kp_projection_dim1": 1,
-    "kp_hidden_dim2": 1,
-    "kp_softmax_dim2": 1,
-    "kp_embedding_dim2": 1,
-    "kp_projection_dim2": 1,
-    "kp_hidden_type": -1,
-    "kp_softmax_type": -1,
-    "kp_embedding_type": -1,
-    "kp_projection_type": -1,
-    "t": "CR",
     "tp": 1,
     "cp": 1,
     "tp_sp": False,
-    "kp1": 1,
-    "kp2": 1,
 }
 
 
@@ -904,33 +888,88 @@ class MemoryHierarchyConfig:
         )
 
 
-ModelLSTMConfig = _namedtuple(
-    "model_param",
-    [
-        "mode",
-        "batch_size",
-        "vocab_size",
-        "num_layers",
-        "layer_size",
-        "seq_len",
-        "projection",
-        "num_gates",
-        "num_non_linear",
-        "num_add",
-        "data_scale",
-    
-    ],
-)
-GEMMConfig = _namedtuple(
-    "model_param",
-    [
-        "mode",
-        "M",
-        "K",
-        "N",
-        "backward",
-    ],
-)
+def _require_mapping(context: str, value: object) -> Dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a mapping")
+    return value
+
+
+def _require_field(context: str, data: Dict[str, object], field: str) -> object:
+    if field not in data:
+        raise ValueError(f"{context}.{field} must be specified")
+    return data[field]
+
+
+def _parse_str_field(context: str, data: Dict[str, object], field: str) -> str:
+    value = _require_field(context, data, field)
+    return str(value).strip()
+
+
+def _parse_int_field(context: str, data: Dict[str, object], field: str, *, min_value: Optional[int] = 1) -> int:
+    value = _require_field(context, data, field)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context}.{field} must be an integer (got {value!r})") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"{context}.{field} must be >= {min_value}")
+    return parsed
+
+
+def _coerce_bool(value: object, context: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"{context} must be a boolean (got {value!r})")
+
+
+def _parse_bool_field(context: str, data: Dict[str, object], field: str) -> bool:
+    value = _require_field(context, data, field)
+    return _coerce_bool(value, f"{context}.{field}")
+
+
+@dataclass
+class GEMMConfig:
+    mode: str
+    M: int
+    K: int
+    N: int
+    backward: bool
+    gemm_shard_axis: str
+
+    @classmethod
+    def from_dict(cls, model_dict: Dict[str, object]) -> "GEMMConfig":
+        model_dict = _require_mapping("model_param", model_dict)
+        mode_raw = _parse_str_field("model_param", model_dict, "mode")
+        mode = mode_raw.upper()
+        if mode != "GEMM":
+            raise ValueError(f"model_param.mode must be 'GEMM' for GEMM configs (got {mode_raw!r})")
+        M = _parse_int_field("model_param", model_dict, "M")
+        K = _parse_int_field("model_param", model_dict, "K")
+        N = _parse_int_field("model_param", model_dict, "N")
+        backward = _coerce_bool(model_dict.get("backward", False), "model_param.backward")
+        axis_raw = _parse_str_field("model_param", model_dict, "gemm_shard_axis")
+        axis = axis_raw.strip().lower()
+        if axis not in {"row", "col"}:
+            raise ValueError(
+                "model_param.gemm_shard_axis must be 'row' or 'col' "
+                f"(got {axis_raw!r})"
+            )
+        return cls(
+            mode=mode,
+            M=M,
+            K=K,
+            N=N,
+            backward=backward,
+            gemm_shard_axis=axis,
+        )
 @dataclass
 class LLMAttentionConfig:
     attention_type: str
@@ -938,6 +977,78 @@ class LLMAttentionConfig:
     kv_heads: Optional[int] = None
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, attention_dict: Dict[str, object]) -> "LLMAttentionConfig":
+        attention_dict = _require_mapping("model_param.attention", attention_dict)
+
+        attn_type_raw = _parse_str_field("model_param.attention", attention_dict, "attention_type")
+        attn_type = attn_type_raw.strip().lower()
+        if attn_type == "mla":
+            raise NotImplementedError("attention_type='mla' is not yet supported. Please use 'mha' or 'gqa'.")
+        if attn_type not in {"mha", "gqa"}:
+            raise ValueError(
+                f"model_param.attention.attention_type must be either 'mha' or 'gqa' (got {attn_type_raw!r})"
+            )
+
+        num_heads = _parse_int_field("model_param.attention", attention_dict, "num_heads")
+        kv_heads_raw = attention_dict.get("kv_heads", None)
+        if attn_type == "gqa":
+            if kv_heads_raw is None:
+                raise ValueError(
+                    "model_param.attention.kv_heads must be specified when attention_type='gqa'"
+                )
+            try:
+                kv_heads = int(kv_heads_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.kv_heads must be an integer when attention_type='gqa' (got {kv_heads_raw!r})"
+                ) from exc
+            if kv_heads <= 0:
+                raise ValueError("model_param.attention.kv_heads must be a positive integer")
+            if num_heads % kv_heads != 0:
+                raise ValueError(
+                    f"model_param.attention.kv_heads={kv_heads} must divide num_heads={num_heads}"
+                )
+        else:
+            kv_heads = num_heads
+
+        raw_flash = attention_dict.get(
+            "use_flashattention",
+            attention_dict.get("used_flash_attention", False),
+        )
+        use_flashattention = _coerce_bool(
+            raw_flash,
+            "model_param.attention.use_flashattention",
+        )
+
+        attention_tile_size = attention_dict.get("attention_tile_size", None)
+        if use_flashattention:
+            if attention_tile_size is None:
+                raise ValueError(
+                    "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
+                )
+            try:
+                attention_tile_size = int(attention_tile_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "model_param.attention.attention_tile_size must be an integer when flash attention is enabled "
+                    f"(got {attention_tile_size!r})"
+                ) from exc
+            if attention_tile_size <= 0:
+                raise ValueError(
+                    "model_param.attention.attention_tile_size must be a positive integer when flash attention is enabled"
+                )
+        else:
+            attention_tile_size = None
+
+        return cls(
+            attention_type=attn_type,
+            num_heads=num_heads,
+            kv_heads=kv_heads,
+            use_flashattention=use_flashattention,
+            attention_tile_size=attention_tile_size,
+        )
 
 
 @dataclass
@@ -977,134 +1088,381 @@ class LLMConfig:
     def grad_accumulation_steps(self) -> int:
         """Backward-compatible alias for gradient accumulation steps."""
         return self.gradient_accumulation_steps
-LLMInferenceConfig = _namedtuple(
-    "inference_param",
-    [
-        "sample_every",
-    ],
-)
-SWConfig = _namedtuple(
-    "sw_param",
-    [
-        "kernel_launch_overhead",
-        "precision",
-        "h2d_bandwidth",
-        "dp_zero_stage",
-        "full_recomputation",
-        "dp_microbatch",
-    ],
-)
 
-SchedulingConfig = _namedtuple(
-    "parallelism",
-    [
-        "auto",
-        "dp",
-        "lp",
-        "mb",
-        "kp_hidden_dim1",
-        "kp_softmax_dim1",
-        "kp_embedding_dim1",
-        "kp_projection_dim1",
-        "kp_hidden_dim2",
-        "kp_softmax_dim2",
-        "kp_embedding_dim2",
-        "kp_projection_dim2",
-        "kp_hidden_type",
-        "kp_softmax_type",
-        "kp_embedding_type",
-        "kp_projection_type",
-        "t",
-        "tp",
-        "cp",
-        "tp_sp",
-        "kp1",
-        "kp2",
-    ],
-)
+    @classmethod
+    def from_dict(cls, model_dict: Dict[str, object]) -> "LLMConfig":
+        model_dict = _require_mapping("model_param", model_dict)
 
-FullConfig = _namedtuple(
-    "FullConfig",
-    [
-        "model_config",
-        "sw_config",
-        "tech_config",
-        "power_breakdown",
-        "sch_config",
-        "area_breakdown",
-        "perimeter_breakdown",
-        "memory_hierarchy",
-        "network_layout",
-    ],
-)
+        mode_raw = _parse_str_field("model_param", model_dict, "mode")
+        mode = mode_raw.strip().upper()
+        if mode != "LLM":
+            raise ValueError(f"model_param.mode must be 'LLM' for LLM configs (got {mode_raw!r})")
 
-ExecutionBackendAstraCollectives = _namedtuple(
-    "ExecutionBackendAstraCollectives",
-    [
-        "all_gather",
-        "all_reduce",
-        "reduce_scatter",
-        "all_to_all",
-    ],
-)
+        run_type_raw = _parse_str_field("model_param", model_dict, "run_type")
+        run_type = run_type_raw.strip().lower()
+        if run_type not in {"training", "inference"}:
+            raise ValueError(
+                f"model_param.run_type must be either 'training' or 'inference' (got {run_type_raw!r})"
+            )
 
-ExecutionBackendAstra = _namedtuple(
-    "ExecutionBackendAstra",
-    [
-        "backend",   # analytical | ns3 | garnet
-        "mode",      # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-        "collectives",
-        "sys_options",
-    ],
-)
+        tied_embeddings = _coerce_bool(
+            _require_field("model_param", model_dict, "tied_embeddings"),
+            "model_param.tied_embeddings",
+        )
 
-ExecutionBackendAstraSysOptions = _namedtuple(
-    "ExecutionBackendAstraSysOptions",
-    [
-        "endpoint_delay",
-        "active_chunks_per_dimension",
-        "preferred_dataset_splits",
-    ],
-)
+        model_type_raw = _parse_str_field("model_param", model_dict, "model_type")
+        model_type = model_type_raw.strip().lower()
+        if model_type not in {"gpt", "llama"}:
+            raise ValueError(
+                f"model_param.model_type must be either 'gpt' or 'llama' (got {model_type_raw!r})"
+            )
 
-ExecutionBackend = _namedtuple(
-    "ExecutionBackend",
-    [
-        "model",   # analytical | astra
-        "astra",   # ExecutionBackendAstra or None
-    ],
-)
+        attention = LLMAttentionConfig.from_dict(_require_field("model_param", model_dict, "attention"))
 
-InferenceHWConfig = _namedtuple(
-    "InferenceHWConfig",
-    [
-        "kvcache_type",
-    ],
-)
+        num_experts = _parse_int_field("model_param", model_dict, "num_experts")
+        top_k_raw = model_dict.get("top_k", 1)
+        try:
+            top_k = int(top_k_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"model_param.top_k must be an integer (got {top_k_raw!r})") from exc
+        if top_k <= 0:
+            raise ValueError("model_param.top_k must be a positive integer")
 
-HWConfig = _namedtuple(
-    "HWConfig",
-    [
-        "sw_config",
-        "tech_config",
-        "power_breakdown",
-        "sch_config",
-        "area_breakdown",
-        "perimeter_breakdown",
-        "memory_hierarchy",
-        "network_layout",
-        "execution_backend",
-        "inference_config",
-    ],
-)
+        num_layers = _parse_int_field("model_param", model_dict, "num_layers")
+        hidden_dim = _parse_int_field("model_param", model_dict, "hidden_dim")
+        global_batch_size = _parse_int_field("model_param", model_dict, "global_batch_size")
+        grad_accum_raw = model_dict.get("gradient_accumulation_steps", None)
+        if grad_accum_raw is None:
+            grad_accum_raw = model_dict.get("gradient_accumulation_step", None)
+        if grad_accum_raw is None:
+            gradient_accumulation_steps = 1
+        else:
+            try:
+                gradient_accumulation_steps = int(grad_accum_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.gradient_accumulation_steps must be an integer (got {grad_accum_raw!r})"
+                ) from exc
+            if gradient_accumulation_steps <= 0:
+                raise ValueError("model_param.gradient_accumulation_steps must be a positive integer")
+        seq_len = _parse_int_field("model_param", model_dict, "seq_len")
+        vocab_size = _parse_int_field("model_param", model_dict, "vocab_size")
+        intermediate_size = _parse_int_field("model_param", model_dict, "intermediate_size")
 
-ModelConfig = _namedtuple(
-    "ModelConfig",
-    [
-        "model_config",
-        "inference_config",
-    ],
-)
+        decode_len = model_dict.get("decode_len", None)
+        if decode_len is not None:
+            try:
+                decode_len = int(decode_len)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.decode_len must be an integer when provided (got {decode_len!r})"
+                ) from exc
+
+        if run_type == "inference" and decode_len is None:
+            raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
+
+        return cls(
+            mode=mode,
+            run_type=run_type,
+            model_type=model_type,
+            tied_embeddings=tied_embeddings,
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            global_batch_size=global_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            seq_len=seq_len,
+            decode_len=decode_len,
+            intermediate_size=intermediate_size,
+            vocab_size=vocab_size,
+            n_tokens=0,
+            all_reduce="every layer",
+            attention=attention,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
+
+
+@dataclass
+class LLMInferenceConfig:
+    sample_every: int = -1
+
+    @classmethod
+    def from_dict(cls, inference_dict: Optional[Dict[str, object]]) -> "LLMInferenceConfig":
+        if not inference_dict:
+            return cls(sample_every=-1)
+        inference_dict = _require_mapping("inference_param", inference_dict)
+        raw = inference_dict.get("sample_every", -1)
+        try:
+            sample_every = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"inference_param.sample_every must be an integer (got {raw!r})"
+            ) from exc
+        return cls(sample_every=sample_every)
+def _coerce_int(value: object, context: str, *, min_value: Optional[int] = 1) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must be an integer (got {value!r})") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"{context} must be >= {min_value}")
+    return parsed
+
+
+@dataclass
+class SWConfig:
+    kernel_launch_overhead: float
+    precision: PrecisionConfig
+    h2d_bandwidth: float
+    dp_zero_stage: int
+    full_recomputation: bool
+    dp_microbatch: str
+
+    @classmethod
+    def from_dict(cls, sw_block: Dict[str, object]) -> "SWConfig":
+        sw_block = _require_mapping("sw_param", sw_block)
+        precision_spec = _require_field("sw_param", sw_block, "precision")
+        precision_config = _parse_precision_block(precision_spec)
+        kernel_launch_overhead = float(_require_field("sw_param", sw_block, "kernel_launch_overhead"))
+        h2d_bandwidth = float(sw_block.get("h2d_bandwidth", -1))
+        dp_zero_stage = _coerce_int(sw_block.get("dp_zero_stage", 0), "sw_param.dp_zero_stage", min_value=0)
+        full_recomputation = _coerce_bool(
+            sw_block.get("full_recomputation", False),
+            "sw_param.full_recomputation",
+        )
+        dp_microbatch_raw = sw_block.get("dp_microbatch", "every_mb")
+        dp_microbatch = str(dp_microbatch_raw).strip().lower()
+        if dp_microbatch not in {"every_mb", "last_mb"}:
+            raise ValueError("sw_param.dp_microbatch must be 'every_mb' or 'last_mb'")
+        return cls(
+            kernel_launch_overhead=kernel_launch_overhead,
+            precision=precision_config,
+            h2d_bandwidth=h2d_bandwidth,
+            dp_zero_stage=dp_zero_stage,
+            full_recomputation=full_recomputation,
+            dp_microbatch=dp_microbatch,
+        )
+
+
+@dataclass
+class SchedulingConfig:
+    auto: bool
+    dp: int
+    lp: int
+    mb: int
+    tp: int
+    cp: int
+    tp_sp: bool
+
+    @classmethod
+    def from_dict(cls, parallelism_block: Optional[Dict[str, object]]) -> "SchedulingConfig":
+        if parallelism_block is None:
+            parallelism_block = {}
+        parallelism_block = _require_mapping("parallelism", parallelism_block)
+        params = dict(_PARALLELISM_DEFAULTS)
+        params.update(parallelism_block)
+        auto = _coerce_bool(params.get("auto", False), "parallelism.auto")
+        tp_sp = _coerce_bool(params.get("tp_sp", False), "parallelism.tp_sp")
+        dp = _coerce_int(params.get("dp", 1), "parallelism.dp")
+        lp = _coerce_int(params.get("lp", 1), "parallelism.lp")
+        mb = _coerce_int(params.get("mb", 1), "parallelism.mb")
+        tp = _coerce_int(params.get("tp", 1), "parallelism.tp")
+        cp = _coerce_int(params.get("cp", 1), "parallelism.cp")
+        return cls(
+            auto=auto,
+            dp=dp,
+            lp=lp,
+            mb=mb,
+            tp=tp,
+            cp=cp,
+            tp_sp=tp_sp,
+        )
+
+
+@dataclass
+class FullConfig:
+    model_config: object
+    sw_config: SWConfig
+    tech_config: TechConfig
+    power_breakdown: PowerBreakdownConfig
+    sch_config: SchedulingConfig
+    area_breakdown: AreaBreakdownConfig
+    perimeter_breakdown: PerimeterBreakdownConfig
+    memory_hierarchy: MemoryHierarchyConfig
+    network_layout: NetworkLayoutConfig
+
+
+@dataclass
+class ExecutionBackendAstraCollectives:
+    all_gather: str = "auto"
+    all_reduce: str = "auto"
+    reduce_scatter: str = "auto"
+    all_to_all: str = "auto"
+
+    @classmethod
+    def from_dict(cls, coll_dict: Optional[Dict[str, object]]) -> "ExecutionBackendAstraCollectives":
+        if not coll_dict:
+            return cls()
+        coll_dict = _require_mapping("execution_backend.astra.collectives", coll_dict)
+        return cls(
+            all_gather=str(coll_dict.get("all_gather", "auto")),
+            all_reduce=str(coll_dict.get("all_reduce", "auto")),
+            reduce_scatter=str(coll_dict.get("reduce_scatter", "auto")),
+            all_to_all=str(coll_dict.get("all_to_all", "auto")),
+        )
+
+
+@dataclass
+class ExecutionBackendAstraSysOptions:
+    endpoint_delay: Optional[int] = None
+    active_chunks_per_dimension: Optional[int] = None
+    preferred_dataset_splits: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, sys_dict: Optional[Dict[str, object]]) -> Optional["ExecutionBackendAstraSysOptions"]:
+        if sys_dict is None:
+            return None
+        sys_dict = _require_mapping("execution_backend.astra.sys_options", sys_dict)
+        endpoint_delay = sys_dict.get("endpoint_delay", None)
+        active_chunks = sys_dict.get("active_chunks_per_dimension", None)
+        preferred_splits = sys_dict.get("preferred_dataset_splits", None)
+        return cls(
+            endpoint_delay=None if endpoint_delay is None else _coerce_int(endpoint_delay, "execution_backend.astra.sys_options.endpoint_delay", min_value=0),
+            active_chunks_per_dimension=None if active_chunks is None else _coerce_int(active_chunks, "execution_backend.astra.sys_options.active_chunks_per_dimension", min_value=1),
+            preferred_dataset_splits=None if preferred_splits is None else _coerce_int(preferred_splits, "execution_backend.astra.sys_options.preferred_dataset_splits", min_value=1),
+        )
+
+
+@dataclass
+class ExecutionBackendAstra:
+    backend: str
+    mode: str
+    collectives: ExecutionBackendAstraCollectives
+    sys_options: Optional[ExecutionBackendAstraSysOptions]
+
+    @classmethod
+    def from_dict(cls, astra_dict: Optional[Dict[str, object]]) -> "ExecutionBackendAstra":
+        astra_dict = _require_mapping("execution_backend.astra", astra_dict or {})
+        backend = str(astra_dict.get("backend", "analytical"))
+        mode = str(astra_dict.get("mode", "hybrid"))
+        collectives = ExecutionBackendAstraCollectives.from_dict(astra_dict.get("collectives"))
+        sys_options = ExecutionBackendAstraSysOptions.from_dict(astra_dict.get("sys_options"))
+        return cls(
+            backend=backend,
+            mode=mode,
+            collectives=collectives,
+            sys_options=sys_options,
+        )
+
+
+@dataclass
+class ExecutionBackend:
+    model: str
+    astra: Optional[ExecutionBackendAstra]
+
+    @classmethod
+    def from_dict(cls, backend_dict: Optional[Dict[str, object]]) -> "ExecutionBackend":
+        backend_dict = _require_mapping("execution_backend", backend_dict or {})
+        model = str(backend_dict.get("model", "analytical"))
+        astra_cfg = backend_dict.get("astra", {}) if model == "astra" else None
+        astra = ExecutionBackendAstra.from_dict(astra_cfg) if astra_cfg is not None else None
+        return cls(model=model, astra=astra)
+
+
+@dataclass
+class InferenceHWConfig:
+    kvcache_type: str
+
+    @classmethod
+    def from_dict(cls, inference_dict: Optional[Dict[str, object]]) -> "InferenceHWConfig":
+        if not inference_dict:
+            return cls(kvcache_type="hbm_only")
+        inference_dict = _require_mapping("inference", inference_dict)
+        return cls(kvcache_type=str(inference_dict.get("kvcache_type", "hbm_only")))
+
+
+@dataclass
+class HWConfig:
+    sw_config: SWConfig
+    tech_config: TechConfig
+    power_breakdown: PowerBreakdownConfig
+    sch_config: SchedulingConfig
+    area_breakdown: AreaBreakdownConfig
+    perimeter_breakdown: PerimeterBreakdownConfig
+    memory_hierarchy: MemoryHierarchyConfig
+    network_layout: NetworkLayoutConfig
+    execution_backend: ExecutionBackend
+    inference_config: InferenceHWConfig
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, object]) -> "HWConfig":
+        config_dict = _require_mapping("hardware_config", config_dict)
+        sw_config = SWConfig.from_dict(_require_field("hardware_config", config_dict, "sw_param"))
+        sch_config = SchedulingConfig.from_dict(config_dict.get("parallelism", {}))
+        scheduling_for_network = {
+            "auto": sch_config.auto,
+            "dp": sch_config.dp,
+            "lp": sch_config.lp,
+            "mb": sch_config.mb,
+            "tp": sch_config.tp,
+            "cp": sch_config.cp,
+            "tp_sp": sch_config.tp_sp,
+        }
+        network_dimensions, network_faults, network_overlap = _parse_network_layout(
+            config_dict.get("network"),
+            scheduling_for_network,
+        )
+        if not network_dimensions:
+            raise ValueError("network section must define at least one dimension")
+        network_layout_config = _build_network_layout_config(
+            network_dimensions,
+            network_faults,
+            network_overlap,
+        )
+        tech_config = TechConfig.from_dict(_require_field("hardware_config", config_dict, "tech_param"))
+
+        if "power_breakdown" in config_dict:
+            power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
+        else:
+            power_config = PowerBreakdownConfig(
+                TDP=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                network=NetworkPowerConfig(inter_node=1.0, intra_node=1.0)
+            )
+        if "area_breakdown" in config_dict:
+            area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
+        else:
+            area_config = AreaBreakdownConfig(
+                proc_chip_area_budget=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                node_area_budget=1.0, network=NetworkAreaConfig(inter_node=1.0, intra_node=1.0)
+            )
+        if "perimeter_breakdown" in config_dict:
+            perimeter_config = PerimeterBreakdownConfig.from_dict(config_dict["perimeter_breakdown"])
+        else:
+            perimeter_config = PerimeterBreakdownConfig(DRAM=0.1, inter_node=0.1, intra_node=0.1)
+
+        memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
+            _require_field("hardware_config", config_dict, "memory_hierarchy")
+        )
+        execution_backend = ExecutionBackend.from_dict(config_dict.get("execution_backend", {}))
+        inference_config = InferenceHWConfig.from_dict(config_dict.get("inference"))
+
+        return cls(
+            sw_config=sw_config,
+            tech_config=tech_config,
+            power_breakdown=power_config,
+            sch_config=sch_config,
+            area_breakdown=area_config,
+            perimeter_breakdown=perimeter_config,
+            memory_hierarchy=memory_hierarchy_config,
+            network_layout=network_layout_config,
+            execution_backend=execution_backend,
+            inference_config=inference_config,
+        )
+
+@dataclass
+class ModelConfig:
+    model_config: object
+    inference_config: Optional["LLMInferenceConfig"]
 
 
 def _convert_scalar_string(value: str):
@@ -1233,365 +1591,15 @@ def parse_config(filename, config_type):
         # print(config_dict)
         convert(config_dict)
     if config_type == "hardware":
-        sw_block = dict(config_dict["sw_param"])
-        precision_spec = sw_block["precision"]
-        precision_config = _parse_precision_block(precision_spec)
-        kernel_launch_overhead = sw_block["kernel_launch_overhead"]
-        h2d_bandwidth = sw_block["h2d_bandwidth"]
-        dp_zero_stage = sw_block["dp_zero_stage"]
-        full_recomp_raw = sw_block.get("full_recomputation", False)
-        if isinstance(full_recomp_raw, str):
-            full_recomputation = full_recomp_raw.strip().lower() in {"1", "true", "yes", "y", "on", "full"}
-        else:
-            full_recomputation = bool(full_recomp_raw)
-        dp_microbatch_raw = sw_block.get("dp_microbatch", "every_mb")
-        if isinstance(dp_microbatch_raw, str):
-            dp_microbatch = dp_microbatch_raw.strip().lower()
-        else:
-            dp_microbatch = str(dp_microbatch_raw).strip().lower()
-        if dp_microbatch not in {"every_mb", "last_mb"}:
-            raise ValueError("sw_param.dp_microbatch must be 'every_mb' or 'last_mb'")
-        sw_config = SWConfig(
-            kernel_launch_overhead=kernel_launch_overhead,
-            precision=precision_config,
-            h2d_bandwidth=h2d_bandwidth,
-            dp_zero_stage=dp_zero_stage,
-            full_recomputation=full_recomputation,
-            dp_microbatch=dp_microbatch,
-        )
-        raw_parallelism_block = config_dict.get("parallelism", {})
-        if not isinstance(raw_parallelism_block, dict):
-            raise ValueError("parallelism must be a mapping")
-        parallelism_params = dict(_PARALLELISM_DEFAULTS)
-        parallelism_params.update(raw_parallelism_block)
-        parallelism_params["auto"] = bool(parallelism_params["auto"])
-        parallelism_params["tp_sp"] = bool(parallelism_params["tp_sp"])
-        sch_config = SchedulingConfig(**parallelism_params)
-        scheduling_for_network = {str(k).lower(): v for k, v in parallelism_params.items()}
-
-        network_spec = config_dict.get("network")
-        network_dimensions, network_faults, network_overlap = _parse_network_layout(network_spec, scheduling_for_network)
-        if not network_dimensions:
-            raise ValueError("network section must define at least one dimension")
-        network_layout_config = _build_network_layout_config(network_dimensions, network_faults, network_overlap)
-
-        tech_config = TechConfig.from_dict(config_dict["tech_param"])
-
-        # Optional breakdown configs (not needed for simplified configs)
-        if "power_breakdown" in config_dict:
-            power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
-        else:
-            # Create dummy power config with zeros
-            power_config = PowerBreakdownConfig(
-                TDP=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
-                network=NetworkPowerConfig(inter_node=1.0, intra_node=1.0)
-            )
-
-        if "area_breakdown" in config_dict:
-            area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
-        else:
-            # Create dummy area config with zeros
-            area_config = AreaBreakdownConfig(
-                proc_chip_area_budget=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
-                node_area_budget=1.0, network=NetworkAreaConfig(inter_node=1.0, intra_node=1.0)
-            )
-
-        if "perimeter_breakdown" in config_dict:
-            perimeter_config = PerimeterBreakdownConfig.from_dict(config_dict["perimeter_breakdown"])
-        else:
-            # Create dummy perimeter config with zeros
-            perimeter_config = PerimeterBreakdownConfig(DRAM=0.1, inter_node=0.1, intra_node=0.1)
-
-        memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
-            config_dict["memory_hierarchy"]
-        )
-        # execution backend (optional)
-        eb_dict = config_dict.get("execution_backend", {})
-        eb_model = eb_dict.get("model", "analytical")
-        astra_cfg = eb_dict.get("astra", {}) if eb_model == "astra" else None
-        if astra_cfg is not None:
-            coll = astra_cfg.get("collectives", {})
-            coll_cfg = ExecutionBackendAstraCollectives(
-                all_gather=coll.get("all_gather", "auto"),
-                all_reduce=coll.get("all_reduce", "auto"),
-                reduce_scatter=coll.get("reduce_scatter", "auto"),
-                all_to_all=coll.get("all_to_all", "auto"),
-            )
-            sys_cfg_dict = astra_cfg.get("sys_options")
-            if sys_cfg_dict is not None:
-                sys_cfg = ExecutionBackendAstraSysOptions(
-                    endpoint_delay=sys_cfg_dict.get("endpoint_delay"),
-                    active_chunks_per_dimension=sys_cfg_dict.get(
-                        "active_chunks_per_dimension"
-                    ),
-                    preferred_dataset_splits=sys_cfg_dict.get(
-                        "preferred_dataset_splits"
-                    ),
-                )
-            else:
-                sys_cfg = None
-            eb_astra = ExecutionBackendAstra(
-                backend=astra_cfg.get("backend", "analytical"),
-                mode=astra_cfg.get("mode", "hybrid"),
-                collectives=coll_cfg,
-                sys_options=sys_cfg,
-            )
-        else:
-            eb_astra = None
-        exec_backend = ExecutionBackend(model=eb_model, astra=eb_astra)
-
-        inference_dict = config_dict.get("inference", {}) or {}
-        inference_cfg = InferenceHWConfig(
-            kvcache_type=inference_dict.get("kvcache_type", "hbm_only"),
-        )
-
-        config = HWConfig(
-            sw_config=sw_config,
-            tech_config=tech_config,
-            power_breakdown=power_config,
-            sch_config=sch_config,
-            area_breakdown=area_config,
-            perimeter_breakdown=perimeter_config,
-            memory_hierarchy=memory_hierarchy_config,
-            network_layout=network_layout_config,
-            execution_backend=exec_backend,
-            inference_config=inference_cfg,
-        )
-    elif config_type == "LSTM":
-        model_config = ModelLSTMConfig(**config_dict["model_param"])
-        config = ModelConfig(model_config=model_config, inference_config=None)
+        config = HWConfig.from_dict(config_dict)
     elif config_type == "GEMM":
-        mp = dict(config_dict["model_param"])  # copy
-        if "backward" not in mp:
-            mp["backward"] = False
-        model_config = GEMMConfig(**mp)
+        model_config = GEMMConfig.from_dict(config_dict["model_param"])
         config = ModelConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
-        mp = dict(config_dict["model_param"])
-        if "attention" not in mp:
-            raise ValueError("model_param.attention section must be specified for LLM configs")
-        attention_dict = mp.pop("attention")
-        if not isinstance(attention_dict, dict):
-            raise ValueError("model_param.attention must be a mapping of attention parameters")
-
-        if "attention_type" not in attention_dict:
-            raise ValueError("model_param.attention.attention_type must be specified")
-        attn_type_raw = attention_dict["attention_type"]
-        attn_type = str(attn_type_raw).strip().lower()
-        if attn_type == "mla":
-            raise NotImplementedError("attention_type='mla' is not yet supported. Please use 'mha' or 'gqa'.")
-        if attn_type not in {"mha", "gqa"}:
-            raise ValueError(
-                f"model_param.attention.attention_type must be either 'mha' or 'gqa' (got {attn_type_raw!r})"
-            )
-
-        if "num_heads" not in attention_dict:
-            raise ValueError("model_param.attention.num_heads must be specified")
-        try:
-            num_heads = int(attention_dict["num_heads"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"model_param.attention.num_heads must be an integer (got {attention_dict['num_heads']!r})"
-            ) from exc
-        if num_heads <= 0:
-            raise ValueError("model_param.attention.num_heads must be a positive integer")
-
-        kv_heads_field = attention_dict.get("kv_heads")
-
-        if attn_type == "gqa":
-            if kv_heads_field is None:
-                raise ValueError(
-                    "model_param.attention.kv_heads must be specified when attention_type='gqa'"
-                )
-            try:
-                kv_heads = int(kv_heads_field)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"model_param.attention.kv_heads must be an integer when attention_type='gqa' (got {kv_heads_field!r})"
-                ) from exc
-        else:
-            # For MHA/MLA, ignore any provided kv_heads override and default to num_heads.
-            kv_heads = num_heads
-
-        if kv_heads <= 0:
-            raise ValueError("model_param.attention.kv_heads must be a positive integer")
-        if num_heads % kv_heads != 0:
-            raise ValueError(
-                f"model_param.attention.kv_heads={kv_heads} must divide num_heads={num_heads}"
-            )
-
-        raw_flash_attention = attention_dict.get("use_flashattention", attention_dict.get("used_flash_attention", False))
-        if isinstance(raw_flash_attention, str):
-            flash_attention = raw_flash_attention.strip().lower() in {"1", "true", "yes", "y"}
-        else:
-            flash_attention = bool(raw_flash_attention)
-
-        tile_size_field = attention_dict.get("attention_tile_size")
-        if flash_attention:
-            if tile_size_field is None:
-                raise ValueError(
-                    "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
-                )
-            try:
-                attention_tile_size = int(tile_size_field)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"model_param.attention.attention_tile_size must be an integer when flash attention is enabled (got {tile_size_field!r})"
-                ) from exc
-            if attention_tile_size <= 0:
-                raise ValueError("model_param.attention.attention_tile_size must be a positive integer when flash attention is enabled")
-        else:
-            # Flash attention disabled; tile size, if provided, is ignored.
-            attention_tile_size = None
-
-        attention_cfg = LLMAttentionConfig(
-            attention_type=attn_type,
-            num_heads=num_heads,
-            kv_heads=kv_heads,
-            use_flashattention=flash_attention,
-            attention_tile_size=attention_tile_size,
-        )
-
-        num_experts_field = mp.pop("num_experts", None)
-        if num_experts_field is None:
-            raise ValueError("model_param.num_experts must be specified for LLM configs")
-        try:
-            num_experts = int(num_experts_field)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"model_param.num_experts must be an integer (got {num_experts_field!r})"
-            ) from exc
-        if num_experts <= 0:
-            raise ValueError("model_param.num_experts must be a positive integer")
-
-        top_k_field = mp.pop("top_k", None)
-        if top_k_field is None:
-            top_k = 1
-        else:
-            try:
-                top_k = int(top_k_field)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"model_param.top_k must be an integer when provided (got {top_k_field!r})"
-                ) from exc
-            if top_k <= 0:
-                raise ValueError("model_param.top_k must be a positive integer when provided")
-
-
-        if "run_type" not in mp:
-            raise ValueError("model_param.run_type must be specified")
-        run_type_raw = mp.pop("run_type")
-        run_type = str(run_type_raw).strip().lower()
-        if run_type not in {"training", "inference"}:
-            raise ValueError(f"model_param.run_type must be either 'training' or 'inference' (got {run_type_raw!r})")
-        if "tied_embeddings" not in mp:
-            raise ValueError("model_param.tied_embeddings must be specified")
-        tied_embeddings_raw = mp.pop("tied_embeddings")
-        if isinstance(tied_embeddings_raw, str):
-            tied_embeddings = tied_embeddings_raw.strip().lower() in {"1", "true", "yes", "y"}
-        else:
-            tied_embeddings = bool(tied_embeddings_raw)
-        if "model_type" not in mp:
-            raise ValueError("model_param.model_type must be specified")
-        model_type_raw = mp.pop("model_type")
-        model_type = str(model_type_raw).strip().lower()
-        if model_type not in {"gpt", "llama"}:
-            raise ValueError(
-                f"model_param.model_type must be either 'gpt' or 'llama' (got {model_type_raw!r})"
-            )
-        decode_len = mp.pop("decode_len", None)
-        if decode_len is not None:
-            try:
-                decode_len = int(decode_len)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"model_param.decode_len must be an integer when provided (got {decode_len!r})") from exc
-
+        model_config = LLMConfig.from_dict(config_dict["model_param"])
         inference_config = None
-        if run_type == "inference":
-            if decode_len is None:
-                raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
-            inference_dict = dict(config_dict.get("inference_param", {}) or {})
-            sample_every_raw = inference_dict.get("sample_every", -1)
-            try:
-                sample_every = int(sample_every_raw)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"inference_param.sample_every must be an integer (got {sample_every_raw!r})"
-                ) from exc
-            inference_config = LLMInferenceConfig(sample_every=sample_every)
-
-        if "mode" not in mp:
-            raise ValueError("model_param.mode must be specified")
-        mode_raw = mp.pop("mode")
-        mode = str(mode_raw).strip().upper()
-        if mode != "LLM":
-            raise ValueError(f"model_param.mode must be 'LLM' for LLM configs (got {mode_raw!r})")
-
-        def _pop_required_int(field: str) -> int:
-            if field not in mp:
-                raise ValueError(f"model_param.{field} must be specified")
-            raw_value = mp.pop(field)
-            try:
-                value = int(raw_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"model_param.{field} must be an integer (got {raw_value!r})") from exc
-            if value <= 0:
-                raise ValueError(f"model_param.{field} must be a positive integer")
-            return value
-
-        num_layers = _pop_required_int("num_layers")
-        hidden_dim = _pop_required_int("hidden_dim")
-
-        global_batch_size = _pop_required_int("global_batch_size")
-
-
-        grad_accum_field = mp.pop("gradient_accumulation_steps", None)
-        if grad_accum_field is None:
-            grad_accum_field = mp.pop("gradient_accumulation_step", None)
-        if grad_accum_field is None:
-            gradient_accumulation_steps = 1
-        else:
-            try:
-                gradient_accumulation_steps = int(grad_accum_field)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"model_param.gradient_accumulation_steps must be an integer (got {grad_accum_field!r})"
-                ) from exc
-            if gradient_accumulation_steps <= 0:
-                raise ValueError("model_param.gradient_accumulation_steps must be a positive integer")
-
-        seq_len = _pop_required_int("seq_len")
-        vocab_size = _pop_required_int("vocab_size")
-
-        intermediate_size = mp.pop("intermediate_size", None)
-        if intermediate_size is None:
-            raise ValueError("model_param.intermediate_size must be specified for LLM configs")
-        try:
-            intermediate_size = int(intermediate_size)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"model_param.intermediate_size must be an integer (got {intermediate_size!r})") from exc
-        if intermediate_size <= 0:
-            raise ValueError("model_param.intermediate_size must be a positive integer")
-
-        model_config = LLMConfig(
-            mode=mode,
-            run_type=run_type,
-            model_type=model_type,
-            tied_embeddings=tied_embeddings,
-            num_layers=num_layers,
-            hidden_dim=hidden_dim,
-            global_batch_size=global_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            seq_len=seq_len,
-            decode_len=decode_len,
-            intermediate_size=intermediate_size,
-            vocab_size=vocab_size,
-            n_tokens=0, # not used for now.
-            all_reduce="every layer", # hard set for now.
-            attention=attention_cfg,
-            num_experts=num_experts,
-            top_k=top_k,
-        )
+        if model_config.run_type == "inference":
+            inference_config = LLMInferenceConfig.from_dict(config_dict.get("inference_param"))
         config = ModelConfig(model_config=model_config, inference_config=inference_config)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))
@@ -1614,3 +1622,91 @@ def parse_config(filename, config_type):
     # )
 
     return config
+
+
+def validate_hw_config(hw_config: HWConfig) -> None:
+    backend = getattr(hw_config, "execution_backend", None)
+    model = getattr(backend, "model", "analytical") if backend else "analytical"
+    network_layout = getattr(hw_config, "network_layout", None)
+    if str(model).lower() == "analytical" and network_layout:
+        for dim in getattr(network_layout, "dimensions", ()):
+            topo = str(getattr(dim, "topology_type", "ring")).lower()
+            if topo != "ring":
+                raise RuntimeError(
+                    "Non-ring network topologies are not supported in analytical mode. "
+                    "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
+                )
+
+
+def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> None:
+    sch = getattr(hw_config, "sch_config", None)
+    if sch is None:
+        raise ValueError("hardware parallelism settings are missing")
+
+    dp = sch.dp
+    lp = sch.lp
+    mb = sch.mb
+    tp = sch.tp
+    cp = sch.cp
+
+    model = model_config.model_config
+
+    if isinstance(model, GEMMConfig):
+        if tp > 1:
+            if model.gemm_shard_axis == "row" and (model.K % tp != 0):
+                raise ValueError("GEMM row sharding requires K divisible by tp")
+            if model.gemm_shard_axis == "col" and (model.N % tp != 0):
+                raise ValueError("GEMM col sharding requires N divisible by tp")
+        return
+
+    if not isinstance(model, LLMConfig):
+        raise ValueError("Unsupported model config type for validation")
+
+    if model.num_experts > 1 and model.top_k > model.num_experts:
+        raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
+
+    if model.run_type == "inference":
+        if cp > 1:
+            raise ValueError(
+                "Context parallelism (cp) is not supported for LLM inference. "
+                "Please set parallelism.cp to 1 for inference runs."
+            )
+        if mb > 1:
+            print(
+                f"[WARNING]: LLM inference configured with mb={mb} (>1). \n "
+                "Pipeline micro-batching is ill-defined for autoregressive decode and should be avoided."
+            )
+        if getattr(hw_config.sw_config, "dp_zero_stage", 0) >= 3 and dp > 1:
+            raise ValueError(
+                "ZeRO-3 data parallelism is not supported for inference runs "
+                "(dp_zero_stage must be <3 or dp=1)."
+            )
+        if model.decode_len is not None and model.decode_len > model.seq_len:
+            raise ValueError("model_param.decode_len must be <= seq_len for inference")
+
+    if model.global_batch_size % model.gradient_accumulation_steps != 0:
+        raise ValueError(
+            "Global batch size must be divisible by gradient accumulation steps"
+        )
+    batch_size = model.global_batch_size // model.gradient_accumulation_steps
+    if batch_size % dp != 0:
+        raise ValueError("Batch size must be divisible by data parallelism degree")
+    mini_batch = batch_size // dp
+    if mini_batch % mb != 0:
+        raise ValueError("Batch size must be divisible by micro-batch size")
+
+    if model.num_experts > 1:
+        moe_ranks = max(1, tp * cp)
+        if moe_ranks > model.num_experts:
+            raise ValueError(
+                "Number of MoE experts must be at least equal to the number of parallel ranks."
+            )
+        if model.num_experts % moe_ranks != 0:
+            raise ValueError(
+                "Number of MoE experts must be divisible by the total number of parallel ranks (tp * cp )."
+            )
+
+
+def validate_configs(hw_config: HWConfig, model_config: ModelConfig) -> None:
+    validate_hw_config(hw_config)
+    validate_model_config(hw_config, model_config)

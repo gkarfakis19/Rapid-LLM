@@ -80,7 +80,7 @@ parallelism:
   dp: 2 # data parallelism. Acts as replica count during inference
   tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
-  cp: 2 # context parallelism. Not supported for inference.
+  cp: 1 # context parallelism. Not supported for inference.
   lp: 4 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
   mb: 4 # micro-batches (for best results set to >= lp). 

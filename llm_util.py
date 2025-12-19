@@ -205,7 +205,7 @@ def get_embedding_weight_mem(
     output_head = 0 if tied_embeddings else per_matrix * param_replica_factor
     return input_embed + output_head
     
-def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
+def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
     # Model Params
     default_global_batch = getattr(
         exp_model_config.model_config,
@@ -232,9 +232,9 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     dp                  = int(kwargs.get('dp', exp_hw_config.sch_config.dp))
     # print("Data Parallelism Degree:", dp)
     dp = 8 #for testing
-    miniB               = math.ceil(batch_size / dp)
+    mini_batch               = math.ceil(batch_size / dp)
     mb             = int(kwargs.get('microbatches', exp_hw_config.sch_config.mb))
-    microB              = math.ceil(miniB / mb)
+    micro_batch              = math.ceil(mini_batch / mb)
 
     tied_embeddings = exp_model_config.model_config.tied_embeddings
 
@@ -243,7 +243,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
             dp = dp,
             tp = 1,
             zero_stage=1,
-            batch_size=microB,
+            batch_size=micro_batch,
             hidden_dim=hidden_dim,
             seq_len=seq_len,
             intermediate_size=intermediate_size,
@@ -253,7 +253,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
         )
     )
     softmax_mem = get_linear_softmax_mem(
-        batch_size=microB,
+        batch_size=micro_batch,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
         vocab_size=vocab_size,
@@ -264,7 +264,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
 
 
     embedding_mem = get_embedding_act_mem(
-        batch_size=microB,
+        batch_size=micro_batch,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
         p=1,
@@ -421,7 +421,7 @@ if __name__ == "__main__":
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    mem, embedding_mem, transformer_mem, transformer_act_mem, transformer_static_mem, gradient_mem, optimizer_mem, weight_memory, softmax_mem = get_tot_mem_req(
+    mem, embedding_mem, transformer_mem, transformer_act_mem, transformer_static_mem, gradient_mem, optimizer_mem, weight_memory, softmax_mem = _test_mem_req_total(
                 exp_hw_config,
                 exp_model_config,
 

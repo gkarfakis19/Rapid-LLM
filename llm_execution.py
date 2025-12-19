@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import math
 import os
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Tuple, Optional, List, Set, Sequence, Mapping
-from collections import defaultdict
-from collections import defaultdict
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
-import simulate_LLM
+import simulate_train_graph as llm_simulation
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
-from simulate_LLM import Graph
+from simulate_train_graph import Graph
 from util import log_message
-from typing import Iterable
+
+if TYPE_CHECKING:
+    from inference_timing import TimeCalculationLLM
 
 
 def _mode_label(mode: Any) -> str:
@@ -24,7 +25,7 @@ def _mode_label(mode: Any) -> str:
     return str(mode).lower()
 
 
-def _copy_node_metadata(source: simulate_LLM.Node, target: simulate_LLM.Node) -> None:
+def _copy_node_metadata(source: llm_simulation.Node, target: llm_simulation.Node) -> None:
     for attr in (
         "micro_batch_index",
         "layer_index",
@@ -37,7 +38,7 @@ def _copy_node_metadata(source: simulate_LLM.Node, target: simulate_LLM.Node) ->
             setattr(target, attr, getattr(source, attr))
 
 
-def _copy_edge_metadata(source: simulate_LLM.Edge, target: simulate_LLM.Edge) -> None:
+def _copy_edge_metadata(source: llm_simulation.Edge, target: llm_simulation.Edge) -> None:
     for attr in (
         "local_hw_id",
         "stage_id",
@@ -73,8 +74,8 @@ def _connect_edge(parent: Any, child: Any) -> None:
 
 
 def _split_tp_node(
-    node: simulate_LLM.Node,
-    tp_children: List[simulate_LLM.Edge],
+    node: llm_simulation.Node,
+    tp_children: List[llm_simulation.Edge],
     overlap: float,
 ) -> None:
     if overlap <= 0.0 or not tp_children:
@@ -104,7 +105,7 @@ def _split_tp_node(
 
     tail = node
     tail.duration = tail_duration
-    head = simulate_LLM.Node(
+    head = llm_simulation.Node(
         name=f"{tail.name}_head",
         op_id=getattr(tail, "op_id", 0),
         hw_id=tail.hw_id,
@@ -138,7 +139,7 @@ def _apply_tp_overlap_transforms(root: Any, parallelism_mode: Any, tp_overlap: f
     if overlap <= 0.0:
         return root
 
-    nodes_to_process: List[simulate_LLM.Node] = []
+    nodes_to_process: List[llm_simulation.Node] = []
     visited: Set[int] = set()
     stack: List[Any] = list(root) if isinstance(root, (list, tuple)) else [root]
     while stack:
@@ -147,7 +148,7 @@ def _apply_tp_overlap_transforms(root: Any, parallelism_mode: Any, tp_overlap: f
         if obj_id in visited:
             continue
         visited.add(obj_id)
-        if isinstance(obj, simulate_LLM.Node):
+        if isinstance(obj, llm_simulation.Node):
             nodes_to_process.append(obj)
         for child in getattr(obj, "children", []):
             stack.append(child)
@@ -155,7 +156,7 @@ def _apply_tp_overlap_transforms(root: Any, parallelism_mode: Any, tp_overlap: f
     for node in nodes_to_process:
         tp_children = [
             child for child in getattr(node, "children", [])
-            if isinstance(child, simulate_LLM.Edge) and getattr(child, "comm_interconnect_type", None) == "tp"
+            if isinstance(child, llm_simulation.Edge) and getattr(child, "comm_interconnect_type", None) == "tp"
         ]
         if not tp_children:
             continue
@@ -171,7 +172,7 @@ def _apply_cp_overlap_transforms(root: Any, parallelism_mode: Any, cp_overlap: f
     if overlap <= 0.0:
         return root
 
-    cp_edges: List[simulate_LLM.Edge] = []
+    cp_edges: List[llm_simulation.Edge] = []
     visited: Set[int] = set()
     stack: List[Any] = list(root) if isinstance(root, (list, tuple)) else [root]
     while stack:
@@ -180,7 +181,7 @@ def _apply_cp_overlap_transforms(root: Any, parallelism_mode: Any, cp_overlap: f
         if obj_id in visited:
             continue
         visited.add(obj_id)
-        if isinstance(obj, simulate_LLM.Edge) and getattr(obj, "comm_interconnect_type", None) == "cp":
+        if isinstance(obj, llm_simulation.Edge) and getattr(obj, "comm_interconnect_type", None) == "cp":
             cp_edges.append(obj)
         for child in getattr(obj, "children", []):
             stack.append(child)
@@ -190,10 +191,10 @@ def _apply_cp_overlap_transforms(root: Any, parallelism_mode: Any, cp_overlap: f
     return root
 
 
-def _split_cp_edge(edge: simulate_LLM.Edge, overlap: float) -> None:
+def _split_cp_edge(edge: llm_simulation.Edge, overlap: float) -> None:
     attention_children = [
         child for child in getattr(edge, "children", [])
-        if isinstance(child, simulate_LLM.Node) and "attention" in str(getattr(child, "name", "")).lower()
+        if isinstance(child, llm_simulation.Node) and "attention" in str(getattr(child, "name", "")).lower()
     ]
     if not attention_children:
         return
@@ -221,7 +222,7 @@ def _split_cp_edge(edge: simulate_LLM.Edge, overlap: float) -> None:
         _split_cp_edge(edge, 1.0)
         return
 
-    block_edge = simulate_LLM.Edge(
+    block_edge = llm_simulation.Edge(
         name=f"{edge.name}_block",
         op_id=getattr(edge, "op_id", 0),
         duration=0,
@@ -233,7 +234,7 @@ def _split_cp_edge(edge: simulate_LLM.Edge, overlap: float) -> None:
     )
     ovlp_edge = None
     if ovlp_bytes > 0:
-        ovlp_edge = simulate_LLM.Edge(
+        ovlp_edge = llm_simulation.Edge(
             name=f"{edge.name}_ovlp",
             op_id=getattr(edge, "op_id", 0),
             duration=0,
@@ -385,21 +386,21 @@ class PipelineGraphFlattener:
     def _should_shard_zero3_transformer(self, edge: Any) -> bool:
         if self._par_degree <= 1 or self._zero_stage < 3:
             return False
-        if isinstance(edge, simulate_LLM.Edge):
+        if isinstance(edge, llm_simulation.Edge):
             if getattr(edge, "tp_shard", False):
                 return True
         return False
 
     def _ensure_zero3_per_rank_edges(
         self,
-        edge: simulate_LLM.Edge,
+        edge: llm_simulation.Edge,
         rank_heads = None,
         rank_tails = None,
         hw_ids = None
-    ) -> List[simulate_LLM.Edge]:
+    ) -> List[llm_simulation.Edge]:
 
         transformer_mode = ""
-        per_rank_edges: List[simulate_LLM.Edge] = []
+        per_rank_edges: List[llm_simulation.Edge] = []
         if rank_tails and rank_heads:
             # this is used in expand_transformer_node
             # use them as anchors
@@ -420,7 +421,7 @@ class PipelineGraphFlattener:
         for r, item in enumerate(iterable):
             base_bytes = getattr(edge, "comm_size_bytes", 0)
             per_rank_bytes = int(base_bytes)
-            gather_edge = simulate_LLM.Edge(
+            gather_edge = llm_simulation.Edge(
                 name=f"{edge.name}_rank{r}",
                 op_id=self._next_op_id(),
                 duration=0,
@@ -468,7 +469,7 @@ class PipelineGraphFlattener:
         if obj_id in self._clone_cache:
             return self._clone_cache[obj_id]
 
-        if isinstance(obj, simulate_LLM.Node):
+        if isinstance(obj, llm_simulation.Node):
             base_name = str(getattr(obj, "name", "") or "")
             if base_name.startswith("transformer_layer"):
                 expanded = self._expand_transformer_node(obj)
@@ -477,7 +478,7 @@ class PipelineGraphFlattener:
 
             if "linear_softmax" in obj.name:
                 # for linear softmax we need to carefully look at hw id to choose.
-                cloned = simulate_LLM.Node(
+                cloned = llm_simulation.Node(
                     obj.name,
                     self._next_op_id(),
                     self._hw_id_for_rank(obj.hw_id, 0),
@@ -489,7 +490,7 @@ class PipelineGraphFlattener:
                 cloned_nodes = []
                 for tp_rank in range(self._par_degree):
                     hw_id = self._hw_id_for_rank(obj.hw_id, tp_rank)
-                    cloned_node = simulate_LLM.Node(
+                    cloned_node = llm_simulation.Node(
                         name=f"{obj.name}_rank{tp_rank}",
                         op_id=self._next_op_id(),
                         hw_id=hw_id,
@@ -514,7 +515,7 @@ class PipelineGraphFlattener:
                         
                 return cloned_tuple
             else:
-                cloned = simulate_LLM.Node(
+                cloned = llm_simulation.Node(
                     obj.name,
                     self._next_op_id(),
                     obj.hw_id,
@@ -524,7 +525,7 @@ class PipelineGraphFlattener:
 
 
             # following _expand_transformer_node logic, we need to find siblings that are zero3 tp_shard=True.
-            zero3_attachments: List[simulate_LLM.Edge] = []
+            zero3_attachments: List[llm_simulation.Edge] = []
             for parent in getattr(obj, "parents", []):
                 for sibling in getattr(parent, "children", []):
                     if sibling is obj:
@@ -537,7 +538,7 @@ class PipelineGraphFlattener:
             for tp_rank in range(self._par_degree):
                 hw_ids.append(self._hw_id_for_rank(obj.hw_id, tp_rank))
 
-            per_rank_edges: List[simulate_LLM.Edge] = []
+            per_rank_edges: List[llm_simulation.Edge] = []
             for zero3_attachment in zero3_attachments:
                 per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_attachment, rank_heads=None, rank_tails=None, hw_ids=hw_ids)
                 self._clone_cache[id(zero3_attachment)] = per_rank_edges
@@ -553,8 +554,8 @@ class PipelineGraphFlattener:
                     self._attach(cloned, child_clone)
             return cloned
 
-        if isinstance(obj, simulate_LLM.Edge):
-            cloned_edge = simulate_LLM.Edge(
+        if isinstance(obj, llm_simulation.Edge):
+            cloned_edge = llm_simulation.Edge(
                 obj.name,
                 self._next_op_id(),
                 obj.duration,
@@ -573,8 +574,8 @@ class PipelineGraphFlattener:
                     self._attach(cloned_edge, child_clone)
             return cloned_edge
 
-        if isinstance(obj, simulate_LLM.Data_batch):
-            cloned_batch = simulate_LLM.Data_batch(obj.name, obj.batch_id, obj.duration)
+        if isinstance(obj, llm_simulation.Data_batch):
+            cloned_batch = llm_simulation.Data_batch(obj.name, obj.batch_id, obj.duration)
             self._clone_cache[obj_id] = cloned_batch
             for child in getattr(obj, "children", []):
                 child_clone = self._clone(child)
@@ -611,7 +612,7 @@ class PipelineGraphFlattener:
                 else:
                     stack.append(parents)
 
-            if isinstance(obj, simulate_LLM.Edge):
+            if isinstance(obj, llm_simulation.Edge):
                 new_hw = None
                 for parent in getattr(obj, "parents", []) or []:
                     parent_hw = getattr(parent, "hw_id", None)
@@ -631,7 +632,7 @@ class PipelineGraphFlattener:
                     obj.local_hw_id = new_hw
 
 
-    def _expand_transformer_node(self, node: simulate_LLM.Node) -> Tuple[Any, ...]:
+    def _expand_transformer_node(self, node: llm_simulation.Node) -> Tuple[Any, ...]:
         node_id = id(node)
         if node_id in self._clone_cache:
             cached_entry = self._clone_cache[node_id]
@@ -664,7 +665,7 @@ class PipelineGraphFlattener:
                         f"Missing duration for transformer entry '{entry_name}' in direction '{direction}'"
                     )
 
-                gemm_node = simulate_LLM.Node(
+                gemm_node = llm_simulation.Node(
                     name=self._format_gemm_name(entry_name, direction, micro_batch, layer_index, tp_rank),
                     op_id=self._next_op_id(),
                     hw_id=hw_id,
@@ -704,7 +705,7 @@ class PipelineGraphFlattener:
 
         dp_children: List[Any] = []
         other_children: List[Any] = []
-        zero3_attachments: List[simulate_LLM.Edge] = []
+        zero3_attachments: List[llm_simulation.Edge] = []
 
         for child in getattr(node, "children", []):
             comm_type = getattr(child, "comm_interconnect_type", None)
@@ -741,7 +742,7 @@ class PipelineGraphFlattener:
             # Special-case marked cross_layer edges (set in original graph):
             # create one per TP rank and wire tail[r] -> cross_layer_r -> next_head[r].
             is_pipeline_edge = False
-            if isinstance(child, simulate_LLM.Edge):
+            if isinstance(child, llm_simulation.Edge):
                 comm_type = getattr(child, "comm_type", None)
                 if comm_type == "pipeline":
                     is_pipeline_edge = True
@@ -767,7 +768,7 @@ class PipelineGraphFlattener:
                 # For each TP rank, create its own pipeline edge and connect
                 for r, tail in enumerate(rank_tails):
                     # Create rank-specific pipeline edge
-                    edge_obj = simulate_LLM.Edge(
+                    edge_obj = llm_simulation.Edge(
                         name=f"{getattr(child, 'name', '')}_rank{r}",
                         op_id=self._next_op_id(),
                         duration=0,
@@ -787,7 +788,7 @@ class PipelineGraphFlattener:
                     visited_ids = set()
                     while cur is not None and id(cur) not in visited_ids:
                         visited_ids.add(id(cur))
-                        if isinstance(cur, simulate_LLM.Node):
+                        if isinstance(cur, llm_simulation.Node):
                             compute_anchor = cur
                             break
                         parents = getattr(cur, "parents", [])
@@ -813,7 +814,7 @@ class PipelineGraphFlattener:
                 continue
             
             # Special handling for optimizer nodes: 1-to-1 connection
-            if isinstance(child, simulate_LLM.Node) and "optimizer" in child.name and isinstance(child_clone, (list, tuple)):
+            if isinstance(child, llm_simulation.Node) and "optimizer" in child.name and isinstance(child_clone, (list, tuple)):
                 if len(child_clone) == len(rank_tails):
                     for r in range(len(rank_tails)):
                         rank_tails[r].add_child(child_clone[r])
@@ -838,7 +839,7 @@ class PipelineGraphFlattener:
         layer_index: Optional[int],
         direction: str,
         tp_rank: int,
-    ) -> simulate_LLM.Edge:
+    ) -> llm_simulation.Edge:
         comm_info = self.transformer_graph.comm_metadata.get(comm_key, {})
         is_dp_edge = comm_info.get("interconnect_type") == "dp"
 
@@ -931,7 +932,7 @@ class PipelineGraphFlattener:
 class LLMExecutionDispatcher:
     def __init__(
         self,
-        time_calc: TimeCalculationLLM, # somehow this works? TODO: fix this at some point so its not annotated by IDE.
+        time_calc: TimeCalculationLLM,  # somehow this works? TODO: fix this at some point so its not annotated by IDE.
         pipeline_graph: Graph,
         pipeline_root: Any,
         interconnect_params: Dict[str, Tuple[float, float]],
@@ -1577,7 +1578,7 @@ class LLMExecutionDispatcher:
                 continue
             visited.add(obj_id)
 
-            if isinstance(obj, simulate_LLM.Node):
+            if isinstance(obj, llm_simulation.Node):
                 hw_id = getattr(obj, "hw_id", None)
                 if hw_id is not None and hw_id >= 0:
                     hw_ids.add(int(hw_id))
@@ -1738,7 +1739,7 @@ class LLMExecutionDispatcher:
             return
         visited.add(node_id)
 
-        if isinstance(node, simulate_LLM.Node):
+        if isinstance(node, llm_simulation.Node):
             base_name = str(getattr(node, "name", "") or "")
             if base_name.startswith("transformer_layer"):
                 hw_stage = None

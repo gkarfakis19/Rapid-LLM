@@ -66,8 +66,8 @@ def choose_collective(alg: str, topo: str, op: str) -> str:
 def compute_intra_inter_ib_ll_from_hw(hw_obj) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     """Return intra/inter bandwidth+latency tuples from a parsed DeepFlow config."""
     net = Network(hw_obj)
-    intra_throughput, inter_throughput = net.calcThroughput()
-    intra_latency, inter_latency = net.calcLatency()
+    intra_throughput, inter_throughput = net.calc_throughput()
+    intra_latency, inter_latency = net.calc_latency()
     return (intra_throughput, intra_latency), (inter_throughput, inter_latency)
 
 

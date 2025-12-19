@@ -166,22 +166,6 @@ scheduling_param:
   tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
   cp: 1  # context parallelism
-  ### LSTM/GEMM LEGACY PARAMS ###
-  t: "CR"
-  kp1: 1
-  kp2: 1
-  kp_hidden_dim1: 1
-  kp_hidden_dim2: 1
-  kp_softmax_dim1: 1
-  kp_softmax_dim2: 1
-  kp_embedding_dim1: 1
-  kp_embedding_dim2: 1
-  kp_projection_dim1: 1
-  kp_projection_dim2: 1
-  kp_hidden_type: -1
-  kp_softmax_type: -1
-  kp_embedding_type: -1
-  kp_projection_type: -1
 
 
 execution_backend:

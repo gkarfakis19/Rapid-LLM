@@ -11,9 +11,9 @@ import shutil
 from typing import Any, Callable, Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
-from simulate_LLM import Graph
-import LLM_util
-from time_calculation_LLM import LLMExecutionDispatcher
+from simulate_train_graph import Graph
+import llm_util
+from inference_timing import LLMExecutionDispatcher
 
 @dataclass
 class InferenceConfig:
@@ -104,7 +104,7 @@ class DecodeGraph(Graph):
             generated_tokens = step_id + 1
             total_seq_len = self.config.seq_len + generated_tokens
 
-            gemm_shapes = LLM_util.process_decode_gemm_shapes(
+            gemm_shapes = llm_util.process_decode_gemm_shapes(
                 self,
                 batch_size=self.config.batch_size,
                 current_seq_len=total_seq_len,

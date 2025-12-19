@@ -93,9 +93,6 @@ def as_dataflow_code(df: Union["Dataflow", int, str]) -> int:
         if s in ("ost", "os"):
             return int(Dataflow.OST)
     raise ValueError(f"Unknown dataflow: {df}")
-from enum import IntEnum
-
-
 def inner_code_from_order(order_dims: str) -> InnerLoop:
     """Extract the inner loop dimension code from a 3-char order string.
 
@@ -156,7 +153,7 @@ def generate_orders_inner_codes(dataflow_code: int, dim1: int, dim2: int, dim3: 
     return (InnerLoop.K, InnerLoop.N, InnerLoop.M)
 
 
-def generate_tile_space(memLayer, num_levels: int, dim1: int, dim2: int, dim3: int):
+def generate_tile_space(mem_layer, num_levels: int, dim1: int, dim2: int, dim3: int):
     """Enumerate tile shapes across memory levels.
 
     The memory objects define their permissible tile sizes. We build the space
@@ -169,11 +166,11 @@ def generate_tile_space(memLayer, num_levels: int, dim1: int, dim2: int, dim3: i
     tile_space = []
     tiles = [None] * num_levels
     for level in range(0, num_levels - 1):
-        memory = memLayer[level]
+        memory = mem_layer[level]
         if not original and level == 2:
-            tiles[level] = memory.getGEMMBasedTileDims(dim1, dim2, dim3)
+            tiles[level] = memory.get_gemm_based_tile_dims(dim1, dim2, dim3)
         else:
-            tiles[level] = memory.getTileDims()
+            tiles[level] = memory.get_tile_dims()
 
     if num_levels == 1:
         tile_space = []
@@ -186,7 +183,7 @@ def generate_tile_space(memLayer, num_levels: int, dim1: int, dim2: int, dim3: i
         for x in tiles[2]:
             t1, t2, t3 = x
             if not original:
-                tiles[1] = memLayer[1].getGEMMBasedTileDims(t1, t2, t3)
+                tiles[1] = mem_layer[1].get_gemm_based_tile_dims(t1, t2, t3)
             tile_strategy = [
                 (x, y, z) for y in tiles[1] for z in tiles[2]
             ]
@@ -323,14 +320,14 @@ class TiledGEMM:
     later method calls are O(1) arithmetic with no string parsing and no loops.
     """
 
-    def __init__(self, order_dims, tile_dims, core, memLayer, dtype_size=2):
+    def __init__(self, order_dims, tile_dims, core, mem_layer, dtype_size=2):
         self.num_bundle = core.num_bundle
         tile_dims = list(tile_dims)
         # Problem and memory parameters
-        self.memLayer = memLayer
+        self.mem_layer = mem_layer
         self.dtype_size = dtype_size
         self.M, self.K, self.N = tile_dims[3]
-        self.capacity = memLayer[2].size_per_bundle # L2 capacity in bytes
+        self.capacity = mem_layer[2].size_per_bundle # L2 capacity in bytes
         self.order_dims = order_dims if isinstance(order_dims, str) else None
         # Precompute inner code once (accepts str or int code)
         self._inner_code = (
@@ -391,7 +388,7 @@ class TiledGEMM:
         reuse_K = -(-self.K // self.l2_K)
         reuse_N = -(-self.N // self.l2_N)
 
-        gemm_waves = self.memLayer[1].calc_waves_per_sm(
+        gemm_waves = self.mem_layer[1].calc_waves_per_sm(
             self.M, self.K, self.N,
             self.l2_M, self.l2_K, self.l2_N
         )
@@ -429,7 +426,7 @@ class TiledGEMM:
     # It generates instances of the class.
     # Generator (yield) means it will return one instance at a time and doesn't precompute. It's like a lazy for loop.
     @classmethod
-    def enumerate_candidates(cls, core, memLayer, dim1: int, dim2: int, dim3: int,
+    def enumerate_candidates(cls, core, mem_layer, dim1: int, dim2: int, dim3: int,
                               dtype_size: int = 2, original: bool = False):
         """Yield `TiledGEMM` instances across tile shapes and preferred inner codes.
 
@@ -438,11 +435,11 @@ class TiledGEMM:
         """
         df_code = as_dataflow_code(core.dataflow)
         inner_codes = generate_orders_inner_codes(df_code, dim1, dim2, dim3)
-        space = generate_tile_space(memLayer, len(memLayer), dim1, dim2, dim3)
+        space = generate_tile_space(mem_layer, len(mem_layer), dim1, dim2, dim3)
         for (l0, l1, l2) in space:
             tile_dims = (l0, l1, l2, (dim1, dim2, dim3))
             for code in inner_codes:
-                yield cls(code, tile_dims, core, memLayer, dtype_size)
+                yield cls(code, tile_dims, core, mem_layer, dtype_size)
     
     def per_layer_capacity(self):
         """Return utilization per memory level relative to its capacity.
@@ -452,7 +449,7 @@ class TiledGEMM:
         ds = self.dtype_size
         l2_total = (self.l2_M * self.l2_K * ds) + (self.l2_K * self.l2_N * ds) + (self.l2_M * self.l2_N * ds)
         l1_total = (self.l1_M * self.l1_K * ds) + (self.l1_K * self.l1_N * ds) + (self.l1_M * self.l1_N * ds)
-        return [l2_total / self.memLayer[2].size_per_bundle, l1_total / self.memLayer[1].size_per_bundle]
+        return [l2_total / self.mem_layer[2].size_per_bundle, l1_total / self.mem_layer[1].size_per_bundle]
 
     @property
     def mk_bytes(self):
@@ -500,7 +497,7 @@ if __name__ == "__main__":
     cores = [_Core(num_bundle=4, FMA_dims=(8, 4), dataflow=df) for df in dataflows]
 
     # Memory layer capacities per level (0..3)
-    memLayer = [
+    mem_layer = [
         _Mem(256 * 1024),  # L0/register-like
         _Mem(192 * 1024),  # L1/shared
         _Mem(40 * 1024 * 1024),  # L2
@@ -541,7 +538,7 @@ if __name__ == "__main__":
                         ]
                         for order in orders:
                             for core in cores:
-                                tg = TiledGEMM(order, tile_dims, core, memLayer, dtype_size=2)
+                                tg = TiledGEMM(order, tile_dims, core, mem_layer, dtype_size=2)
                                 ma0, ma1, ma2, ma3 = tg.mem_accesses
                                 checksum += (ma0 + ma1 + ma2 + ma3) * 1e-18
                                 for uc in tg.per_layer_capacity():

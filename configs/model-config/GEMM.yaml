@@ -4,3 +4,4 @@ model_param:
   K: 524288
   N: 2048
   backward: true
+  gemm_shard_axis: row

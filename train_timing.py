@@ -3,15 +3,15 @@
 import math
 import os
 from typing import Dict, List, Optional, Tuple, Mapping, Set
-from time_calculation_LLM import (
+from inference_timing import (
     LLMExecutionDispatcher,
     TimeCalculationLLM,
     GemmType,
     COMMUNICATION_RULES,
     COMM_RULE_DEFAULT_KEY,
 )
-from simulate_inf import DecodeSample, InferenceConfig, InferenceEngine
-import LLM_util
+from simulate_inference_graph import DecodeSample, InferenceConfig, InferenceEngine
+import llm_util
 import json
 from timing_model import CommSpec, DirectionTiming, OperationTiming, OperationGroup
 
@@ -33,8 +33,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
-        if self.zero_stage >= 3 and self.dp > 1:
-            raise ValueError("ZeRO-3 data parallelism is not supported for inference runs (dp_zero_stage must be <3 or dp=1).")
         self._raw_model_config = model_config
 
     def _build_decode_transformer_results(
@@ -48,7 +46,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         head_dim = self.hidden_dim // self.num_heads
 
-        token_bytes = LLM_util.kv_cache_token_bytes(
+        token_bytes = llm_util.kv_cache_token_bytes(
             batch_size=batch_size,
             kv_heads=self.kv_heads,
             head_dim=head_dim,
@@ -58,7 +56,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
 
         intermediate_size = self.intermediate_size
-        gemm_shapes = gemm_shapes or LLM_util.process_decode_gemm_shapes(
+        gemm_shapes = gemm_shapes or llm_util.process_decode_gemm_shapes(
             self,
             batch_size=batch_size,
             current_seq_len=total_seq_len,
@@ -434,10 +432,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         if prefill_len == 0:
             print("Skipping prefill")
             return 0.0
-        elif prefill_len < 0:
-            raise ValueError(f"Prefill length is negative. Prefill len = seq_len ({self.seq_len}) - decode_len ({decode_len})")
 
-        self.readjust_type()
         num_SMs = self.hw_config.tech_config.core.num_bundles
         transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
             batch_size,
@@ -455,7 +450,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_energy = self.calc_energy(transformer_timings, output_act_bytes)
 
         head_dim = hidden_dim // num_heads
-        token_bytes = LLM_util.kv_cache_token_bytes(
+        token_bytes = llm_util.kv_cache_token_bytes(
             batch_size=batch_size,
             kv_heads=self.kv_heads,
             head_dim=head_dim,
@@ -587,7 +582,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             time_to_first_token += decode_samples[0].execution_time
 
         head_dim = self.hidden_dim // self.num_heads
-        token_bytes = LLM_util.kv_cache_token_bytes(
+        token_bytes = llm_util.kv_cache_token_bytes(
             batch_size=self._effective_transformer_batch(),
             kv_heads=self.kv_heads,
             head_dim=head_dim,
@@ -596,9 +591,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         prefill_len = self.seq_len - self.model.decode_len
         decode_len = self.model.decode_len
         num_layers = self.num_layers
-
-        if prefill_len < 0:
-            raise ValueError(f"Prefill length is negative. Prefill len = seq_len ({self.seq_len}) - decode_len ({decode_len})")
 
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers

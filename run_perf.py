@@ -13,11 +13,10 @@ import shutil
 import util
 from util import log_message, flush_log_queue, extend_log
 
-import graphviz_async
 from tile import TiledGEMM, formatBytes
-from time_calculation import TimeCalculation
-from time_calculation_LLM import TimeCalculationLLM
-from time_calculation_inf import TimeCalculationLLMInference
+from base_timing import TimeCalculation
+from inference_timing import TimeCalculationLLM
+from train_timing import TimeCalculationLLMInference
 
 # Cache handling policy for AstraSim integration.
 # Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
@@ -49,7 +48,7 @@ atexit.register(flush_log_queue)
 atexit.register(_report_total_wall_time)
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run performance analysis for LSTM, GEMM, or LLM models.")
+    parser = argparse.ArgumentParser(description="Run performance analysis for GEMM (sanity) or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
     return parser.parse_args()
@@ -80,56 +79,6 @@ def _validate_astrasim_dependencies(hw_config) -> None:
             "are not available. Install or build the AstraSim externals before running with execution_backend.model='astra'."
         ) from exc
 
-def _validate_network_topology(hw_config) -> None:
-    backend = getattr(hw_config, "execution_backend", None)
-    model = getattr(backend, "model", "analytical") if backend else "analytical"
-    network_layout = getattr(hw_config, "network_layout", None)
-
-    if str(model).lower() == "analytical" and network_layout:
-        for dim in getattr(network_layout, "dimensions", ()):
-            topo = str(getattr(dim, "topology_type", "ring")).lower()
-            if topo != "ring":
-                raise RuntimeError(
-                    "Non-ring network topologies are not supported in analytical mode. "
-                    "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
-                )
-
-
-def run_LSTM(
-    exp_hw_config_path,
-    exp_model_config_path,
-    exp_dir,
-    mode
-):
-    
-    # exp_path = os.path.expandvars(os.path.expanduser(exp_config))
-    exp_hw_path = os.path.expandvars(os.path.expanduser(exp_hw_config_path))
-    exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
-    exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
-    _validate_astrasim_dependencies(exp_hw_config)
-    _validate_network_topology(exp_hw_config)
-    exp_model_config = config.parse_config(exp_model_path, config_type=mode)
-    output_file = exp_dir + "/summary_%s.txt" % (
-        mode,
-    ) 
-
-
-    TC = TimeCalculation(exp_hw_config, exp_model_config, mode)
-    
-
-    tot_time, tot_param = TC.calcTime()
-    TC.printSysConfig(exp_hw_config, exp_model_config, output_file)
-
-    with open(output_file, "a+") as f:
-        f.write("\n\n==============================================\n")
-        f.write("Performance Results\n")
-        f.write("==============================================\n")
-        f.write("Time: {0:.8f}\n".format(tot_time))
-        f.write("Params (Billion): {0:.8f}\n".format(tot_param / 1e9))
-    print("Performance Results written to {}".format(output_file))
-    # Emit total time for astra_test parsing
-    print("Total time: {}".format(tot_time))
-
 def run_GEMM(
     exp_hw_config_path,
     exp_model_config_path,
@@ -140,8 +89,8 @@ def run_GEMM(
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     _validate_astrasim_dependencies(exp_hw_config)
-    _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
+    config.validate_configs(exp_hw_config, exp_model_config)
 
 
     TC = TimeCalculation(exp_hw_config, exp_model_config, mode)
@@ -149,42 +98,27 @@ def run_GEMM(
     # Forward timing
     forward_time = None
     forward_red = 0.0
-    if TC.kp1 == 1 and TC.kp2 == 1:  # no parallelism
-        forward_time = TC.getCf(TC.M, TC.K, TC.N)
-    elif TC.t == "CR":
-        gemm_time, forward_red = TC.getDistGEMM_f_kp1(TC.M, TC.K, TC.N, TC.kp1, "Cf_CR")
-        forward_time = gemm_time + forward_red
-    elif TC.t == "RC":
-        gemm_time, forward_red = TC.getDistGEMM_f_kp2(TC.M, TC.K, TC.N, TC.kp1, TC.kp2, "Cf_RC")
-        forward_time = gemm_time + forward_red
-    else:
-        print("Incorrect parallelism type, CR: Column-Row, RC: Row-Column")
-        sys.exit(1)
+    gemm_time, forward_red = TC.get_dist_gemm_forward(TC.M, TC.K, TC.N, "Cf")
+    forward_time = gemm_time + forward_red
 
     # Optional backward timing + dp reduction
     backward_time = 0.0
     dp_reduction_time = 0.0
     backward_red = 0.0
     if getattr(TC.model, "backward", False):
-        if TC.kp1 == 1 and TC.kp2 == 1:
-            grad_act_time, _, _, _ = TC.getGEMMTime(TC.M, TC.N, TC.K, "Cb_act")
-            grad_wt_time, _, _, _ = TC.getGEMMTime(TC.K, TC.M, TC.N, "Cb_wt")
+        if TC.tp <= 1:
+            grad_act_time, _, _, _ = TC.get_gemm_time(TC.M, TC.N, TC.K, "Cb_act")
+            grad_wt_time, _, _, _ = TC.get_gemm_time(TC.K, TC.M, TC.N, "Cb_wt")
             backward_time = grad_act_time + grad_wt_time
-        elif TC.t == "CR":
-            gemm_time, bg_red = TC.getDistGEMM_b_kp1(TC.M, TC.K, TC.N, TC.kp1, "Cb_CR")
-            backward_time = gemm_time + bg_red
-            backward_red = bg_red
-        elif TC.t == "RC":
-            gemm_time, bg_red = TC.getDistGEMM_b_kp2(TC.M, TC.K, TC.N, TC.kp1, TC.kp2, "Cb_RC")
+        else:
+            gemm_time, bg_red = TC.get_dist_gemm_backward(TC.M, TC.K, TC.N, "Cb")
             backward_time = gemm_time + bg_red
             backward_red = bg_red
         # Data-parallel reduction after backward, if applicable
         if TC.dp and TC.dp > 1:
-            dp_reduction_time = TC.getDataParallelReduction(
+            dp_reduction_time = TC.get_data_parallel_reduction(
                 k=TC.K,
                 n=TC.N,
-                dim1=TC.kp1,
-                dim2=TC.kp2,
                 name="GEMM Reduction",
             )
             backward_red += dp_reduction_time
@@ -221,8 +155,8 @@ def run_LLM(
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     _validate_astrasim_dependencies(exp_hw_config)
-    _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
+    config.validate_configs(exp_hw_config, exp_model_config)
 
     llm_run_type = getattr(exp_model_config.model_config, "run_type", "training")
     if str(llm_run_type).lower() == "inference":
@@ -370,17 +304,7 @@ if __name__ == "__main__":
             mode=mode,
         )
     
-    elif mode == "LSTM":
-        log_message("Using LSTM parameters for computation...")
-        run_LSTM(
-            exp_hw_config_path=config_hardware_path,
-            exp_model_config_path=config_model_path,
-            exp_dir=exp_dir,
-            mode=mode,
-        
-        )
     elif mode == "GEMM":
-        log_message("Using GEMM parameters for computation...")
         run_GEMM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,
@@ -388,7 +312,7 @@ if __name__ == "__main__":
             mode=mode,
         )
     else:
-        print("Invalid mode selected. Please choose 'LLM', 'LSTM', or 'GEMM'.")
+        print("Invalid mode selected. Please choose 'LLM' or 'GEMM'.")
         flush_log_queue()
         sys.exit(1)
 

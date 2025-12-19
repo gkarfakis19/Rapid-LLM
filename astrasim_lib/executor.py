@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 sys.setrecursionlimit(10000)
 
-import graphviz_async
 from graphviz import Digraph
+import util
 
 from .config_generation import ASTRA_DEBUG, generate_astrasim_configs_from_hw
 from . import gmap
@@ -42,7 +42,7 @@ from .et_utils import (
 )
 from .integration import get_remote_memory_path, run_astrasim_analytical, run_cache_astrasim
 from .layout_utils import derive_axes_filter
-from simulate_LLM import visualize_graph
+from simulate_train_graph import visualize_graph
 from util import relpath_display
 
 
@@ -515,7 +515,7 @@ def _visualize_et_files(et_paths: List[str]) -> None:
         et_path = et_paths[0]
         display_path = relpath_display(f"{et_path}.svg")
         message = f" | ET Graph saved to {display_path}"
-        graphviz_async.submit(
+        util.graphviz_submit(
             f"et:{os.path.basename(et_path)}",
             _render_et_file,
             et_path,
@@ -526,14 +526,14 @@ def _visualize_et_files(et_paths: List[str]) -> None:
     first_path = et_paths[0]
     display_first = relpath_display(f"{first_path}.svg")
     summary_message = f" | {len(et_paths)} ET graphs saved to {display_first} (..)"
-    graphviz_async.submit(
+    util.graphviz_submit(
         f"et:{os.path.basename(first_path)}",
         _render_et_file,
         first_path,
         print_message=summary_message,
     )
     for et_path in et_paths[1:]:
-        graphviz_async.submit(
+        util.graphviz_submit(
             f"et:{os.path.basename(et_path)}",
             _render_et_file,
             et_path,

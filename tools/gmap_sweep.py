@@ -39,7 +39,7 @@ from tqdm import tqdm  # noqa: E402
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config  # noqa: E402
-from time_calculation_LLM import TimeCalculationLLM  # noqa: E402
+from inference_timing import TimeCalculationLLM  # noqa: E402
 from parallelism_sweep import set_astrasim_cache_mode  # type: ignore
 
 # -----------------------------------------------------------------------------#
