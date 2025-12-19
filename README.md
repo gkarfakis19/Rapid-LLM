@@ -1,6 +1,6 @@
 # RAPID-LLM
 
-RAPID-LLM is a Python simulator for LLM training/inference performance, memory, and (rudimentary) energy modeling. It builds compute/communication graphs and runs either analytically or via AstraSim. It also supports running standalone GEMM operations.
+RAPID-LLM is a Python modeling tool for hardware- and network-aware LLM training/inference performance, memory, and (rudimentary) energy modeling. It builds compute/communication graphs and runs either analytically or via AstraSim. It also supports running standalone GEMM operations.
 
 ## Installation Guide
 
