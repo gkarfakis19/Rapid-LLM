@@ -1,5 +1,14 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+
+
+class CollectiveType(Enum):
+    ALL_REDUCE = "all_reduce"
+    ALL_GATHER = "all_gather"
+    REDUCE_SCATTER = "reduce_scatter"
+    ALL_TO_ALL = "all_to_all"
+    PIPELINE = "pipeline"
 
 
 @dataclass(frozen=True)
@@ -9,7 +18,7 @@ class CommSpec:
 
     Attributes:
         name: Unique identifier used when wiring graph edges.
-        kind: Collective type (e.g. all_reduce, reduce_scatter).
+        kind: Collective type (CollectiveType).
         size_bytes: Total bytes transferred (int >= 0).
         participants: Number of ranks involved (int >= 1).
         interconnect: Logical interconnect label (tp/dp/cp/lp/etc.).
@@ -17,7 +26,7 @@ class CommSpec:
     """
 
     name: str
-    kind: str
+    kind: CollectiveType
     size_bytes: int
     participants: int
     interconnect: str
@@ -26,8 +35,8 @@ class CommSpec:
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("CommSpec.name must be non-empty")
-        if not self.kind:
-            raise ValueError(f"CommSpec '{self.name}' missing kind")
+        if not isinstance(self.kind, CollectiveType):
+            raise TypeError(f"CommSpec.kind must be a CollectiveType (got {type(self.kind).__name__})")
         if self.size_bytes < 0:
             raise ValueError(f"CommSpec '{self.name}' has negative size_bytes ({self.size_bytes})")
         if self.participants <= 0:

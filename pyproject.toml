@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "deepflow"
+name = "rapid-llm"
 version = "0.1.0"
-description = "Add your description here"
+description = "RAPID-LLM simulator"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +26,13 @@ dependencies = [
     "tqdm>=4.67.1",
     "tzdata==2025.2",
 ]
+
+[project.scripts]
+rapid_llm = "rapid_llm.cli:main"
+
+[tool.setuptools]
+packages = ["rapid_llm"]
+py-modules = ["run_perf"]
 
 [tool.pytest.ini_options]
 testpaths = [

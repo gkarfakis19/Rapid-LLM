@@ -13,7 +13,7 @@ from inference_timing import (
 from simulate_inference_graph import DecodeSample, InferenceConfig, InferenceEngine
 import llm_util
 import json
-from timing_model import CommSpec, DirectionTiming, OperationTiming, OperationGroup
+from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
 
 def convert_prefix(value: float) -> float:
     """Assign SI unit prefixes to numerical values."""
@@ -53,7 +53,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             precision_bytes=self.precision.kv_cache,
         )
         seq_degree = self._sequence_parallel_degree()
-        comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
+        comm_kind = CollectiveType.ALL_REDUCE if seq_degree == 1 else CollectiveType.REDUCE_SCATTER
 
         intermediate_size = self.intermediate_size
         gemm_shapes = gemm_shapes or llm_util.process_decode_gemm_shapes(

@@ -7,7 +7,7 @@ from graphviz import Digraph
 import os
 
 import util
-import util
+from timing_model import CollectiveType
 debug = False
 BYTES_PER_GIB = 1024 ** 3
 
@@ -98,6 +98,8 @@ class Edge:
     self.is_dp = is_dp
     self.scheduled = False
     self.comm_size_bytes = comm_size_bytes
+    if comm_type is not None and not isinstance(comm_type, CollectiveType):
+        raise TypeError(f"Edge.comm_type must be a CollectiveType or None (got {type(comm_type).__name__})")
     self.comm_type = comm_type
     self.participants = participants
     self.comm_interconnect_type = comm_interconnect_type
@@ -563,6 +565,10 @@ class Graph:
                         ib, ll = interconnect_params[interconnect_type]
                     else:
                         raise ValueError(f"Invalid interconnect type: {interconnect_type}") 
+                    if not isinstance(child.comm_type, CollectiveType):
+                        raise TypeError(
+                            f"Comm edge {getattr(child, 'name', '<unnamed>')} missing CollectiveType comm_type"
+                        )
 
                     child.duration = network_model.collective(
                         kind=child.comm_type,
@@ -611,10 +617,10 @@ class Graph:
             children = list(getattr(target, "children", []))
             for child in children:
                 if skip_non_comm_children:
-                    if getattr(child, "comm_type", None) != "pipeline":
+                    if getattr(child, "comm_type", None) != CollectiveType.PIPELINE:
                         continue
                 if skip_comm_children:
-                    if getattr(child, "comm_type", None) == "pipeline":
+                    if getattr(child, "comm_type", None) == CollectiveType.PIPELINE:
                         continue
                 if gather_edge not in getattr(child, "parents", []):
                     gather_edge.add_child(child)
@@ -676,7 +682,7 @@ class Graph:
                 curr_entries = layer_entry_nodes[b][l]
 
                 if prev_node.hw_id == curr_node.hw_id:
-                    edge = Edge("cross_layer", op_id, 0, comm_type="pipeline")  # on same GPU
+                    edge = Edge("cross_layer", op_id, 0, comm_type=CollectiveType.PIPELINE)  # on same GPU
                 else:
                     edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')  # on different GPU
                 op_id += 1
@@ -689,7 +695,7 @@ class Graph:
             first_entries = layer_entry_nodes[b][0]   # first layer entry nodes list
             primary_entry = first_entries[0]
             if primary_entry.hw_id == embedding_node[b].hw_id:
-                edge = Edge("Emb_node0", op_id, 0, comm_type="pipeline")
+                edge = Edge("Emb_node0", op_id, 0, comm_type=CollectiveType.PIPELINE)
             else:
                 edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
@@ -700,7 +706,7 @@ class Graph:
 
             last_exit = layer_exit_nodes[b][-1]  # last layer transformer node
             if last_exit.hw_id == softmax_node[b].hw_id:
-                node_Softmax = Edge("node_Softmax", op_id, 0, comm_type="pipeline")  # same GPU
+                node_Softmax = Edge("node_Softmax", op_id, 0, comm_type=CollectiveType.PIPELINE)  # same GPU
             else:
                 node_Softmax = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
@@ -793,7 +799,7 @@ class Graph:
                 curr_node = _bwd_exit_node(b, l)         # current layer's qkv_proj.
                 next_ffn2  = _bwd_entry_node(b, l-1)            # next layer's layernorm.
                 if curr_node.hw_id == next_ffn2.hw_id:
-                    edge = Edge("cross_layer", op_id, 0, comm_type="pipeline")  
+                    edge = Edge("cross_layer", op_id, 0, comm_type=CollectiveType.PIPELINE)  
                 else:
                     edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
                 op_id += 1
@@ -802,7 +808,7 @@ class Graph:
 
             qkv_0_b = _bwd_exit_node(b, 0)     # first layer's qkv_proj
             if qkv_0_b.hw_id == emb_b.hw_id:
-                edge = Edge("Emb_node0", op_id, 0, comm_type="pipeline")
+                edge = Edge("Emb_node0", op_id, 0, comm_type=CollectiveType.PIPELINE)
             else:
                 edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
@@ -812,7 +818,7 @@ class Graph:
 
             prev_layer_norm2 = _bwd_entry_node(b, self.num_layer-1) # last layer's layernorm2
             if prev_layer_norm2.hw_id == softmax_node_b[b].hw_id:
-                layernorm_Softmax = Edge("layernorm2_Softmax", op_id, 0, comm_type="pipeline")  # same GPU
+                layernorm_Softmax = Edge("layernorm2_Softmax", op_id, 0, comm_type=CollectiveType.PIPELINE)  # same GPU
             else:
                 layernorm_Softmax = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
@@ -1691,7 +1697,7 @@ def visualize_graph(roots, filename="graph"):
             if getattr(node, "is_dp", False):
                 return "green"
             else:
-                if getattr(node, "comm_type", None) == "pipeline":
+                if getattr(node, "comm_type", None) == CollectiveType.PIPELINE:
                     return "white"
                 else:
                     return "yellow"

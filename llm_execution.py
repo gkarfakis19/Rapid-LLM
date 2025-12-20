@@ -12,6 +12,7 @@ from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
 from simulate_train_graph import Graph
+from timing_model import CollectiveType
 from util import log_message
 
 if TYPE_CHECKING:
@@ -744,7 +745,7 @@ class PipelineGraphFlattener:
             is_pipeline_edge = False
             if isinstance(child, llm_simulation.Edge):
                 comm_type = getattr(child, "comm_type", None)
-                if comm_type == "pipeline":
+                if comm_type == CollectiveType.PIPELINE:
                     is_pipeline_edge = True
             if is_pipeline_edge:
                 # Determine per-rank byte size (ceil split)
@@ -774,7 +775,7 @@ class PipelineGraphFlattener:
                         duration=0,
                         is_dp=False,
                         comm_size_bytes=per_rank_bytes,
-                        comm_type="pipeline",
+                        comm_type=CollectiveType.PIPELINE,
                         participants=2,
                         comm_interconnect_type="lp",
                     )

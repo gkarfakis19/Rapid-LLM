@@ -26,6 +26,7 @@ sys.setrecursionlimit(10000)
 
 from graphviz import Digraph
 import util
+from timing_model import CollectiveType
 
 from .config_generation import ASTRA_DEBUG, generate_astrasim_configs_from_hw
 from . import gmap
@@ -395,15 +396,21 @@ class _RankTrace:
                 write_et_node(fh, node)
 
 
-def get_collective_type(comm_type_str: str) -> int:
+def get_collective_type(comm_type: CollectiveType) -> int:
     """Map RAPID-LLM comm types to AstraSim protobuf enums."""
+    if comm_type is None:
+        raise ValueError("Collective comm_type is required")
+    if not isinstance(comm_type, CollectiveType):
+        raise TypeError(f"comm_type must be CollectiveType (got {type(comm_type).__name__})")
+    if comm_type == CollectiveType.PIPELINE:
+        raise ValueError("Pipeline comm_type should not be mapped to a collective enum")
     mapping = {
-        "all_reduce": pb.ALL_REDUCE,
-        "all_gather": pb.ALL_GATHER,
-        "reduce_scatter": pb.REDUCE_SCATTER,
-        "all_to_all": pb.ALL_TO_ALL
+        CollectiveType.ALL_REDUCE: pb.ALL_REDUCE,
+        CollectiveType.ALL_GATHER: pb.ALL_GATHER,
+        CollectiveType.REDUCE_SCATTER: pb.REDUCE_SCATTER,
+        CollectiveType.ALL_TO_ALL: pb.ALL_TO_ALL,
     }
-    return mapping.get(comm_type_str, pb.ALL_REDUCE)
+    return mapping[comm_type]
 
 
 def _attr_to_dict(node: pb.Node) -> Dict[str, Any]:
@@ -783,7 +790,7 @@ def convert_rapid_llm_graph_to_chakra_et(
     edge_stage: Dict[Any, int] = {}
     for obj in all_objects:
         comm = getattr(obj, "comm_type", None)
-        if comm and comm != "pipeline":
+        if comm and comm != CollectiveType.PIPELINE:
             stage = None
             parent = None
             if stage is None:
@@ -826,7 +833,7 @@ def convert_rapid_llm_graph_to_chakra_et(
         if not collector_obj.include_pipeline:
             return
         for obj in all_objects:
-            if getattr(obj, "comm_type", None) != "pipeline":
+            if getattr(obj, "comm_type", None) != CollectiveType.PIPELINE:
                 continue
             parents = getattr(obj, "parents", [])
             src_stage = None
@@ -922,7 +929,7 @@ def convert_rapid_llm_graph_to_chakra_et(
                 print(f"comm_type: {comm}")
             
             if comm:
-                if comm == "pipeline":
+                if comm == CollectiveType.PIPELINE:
                     if debug_en:
                         print(f"Processing pipeline comm")
 
@@ -1045,7 +1052,7 @@ def convert_rapid_llm_graph_to_chakra_et(
                 continue
 
             comm = getattr(cur, "comm_type", None)
-            if comm == "pipeline":
+            if comm == CollectiveType.PIPELINE:
                 srcs = [p for p in cur.parents if getattr(p, "hw_id", None) is not None and p.hw_id >= 0]
                 coll_srcs = [p for p in cur.parents if getattr(p, "local_hw_id", None) is not None and getattr(p, "local_hw_id") >= 0]
                 if srcs:
@@ -1273,7 +1280,7 @@ def convert_rapid_llm_graph_to_chakra_et(
 
         pipeline_debug = []
         for obj in all_objects:
-            if getattr(obj, "comm_type", None) == "pipeline":
+            if getattr(obj, "comm_type", None) == CollectiveType.PIPELINE:
                 sources = [getattr(src, "name", str(id(src))) for src in getattr(obj, "parents", [])]
                 targets = [getattr(dst, "name", str(id(dst))) for dst in getattr(obj, "children", [])]
                 pipeline_debug.append(
@@ -1340,7 +1347,7 @@ def convert_rapid_llm_graph_to_chakra_et(
         send_trace = rank_traces[src_rank]
         recv_trace = rank_traces[dst_rank]
         is_control = False
-        if size == 0 or edge_obj.comm_type != "pipeline":
+        if size == 0 or edge_obj.comm_type != CollectiveType.PIPELINE:
             # control dependancy
             size = 1 # has to be at least 1 byte for astrasim.
             is_control = True

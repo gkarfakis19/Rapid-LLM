@@ -10,6 +10,7 @@ import util
 from hw_component import Core, MemoryHierarchy, Network, DRAM
 from astrasim_lib import run_cache_astrasim
 from tile import AccessBytes, TiledGEMM, formatBytes
+from timing_model import CollectiveType
 
 
 class LinkInfo(NamedTuple):
@@ -102,7 +103,7 @@ class NetworkModel:
     def collective(
         self,
         *,
-        kind: str,
+        kind: CollectiveType,
         size_bytes: float,
         participants: int,
         ib: float,
@@ -112,11 +113,6 @@ class NetworkModel:
         debug_label: str = "",
         axis: Optional[str] = None,
     ) -> float:
-        if size_bytes <= 0:
-            return 0.0
-
-        # Pipeline and point-to-point operations now handled through unified path
-
         if participants is None:
             return 0.0
 
@@ -124,19 +120,32 @@ class NetworkModel:
         if part <= 1:
             return 0.0
 
-        collective_ops = {"all_reduce", "reduce_scatter", "all_gather", "all_to_all"}
+        if size_bytes <= 0:
+            return 0.0
+
+        # Pipeline and point-to-point operations now handled through unified path
+
+        if not isinstance(kind, CollectiveType):
+            raise TypeError(f"collective kind must be CollectiveType (got {type(kind).__name__})")
+        kind_value = kind.value
+        collective_ops = {
+            CollectiveType.ALL_REDUCE,
+            CollectiveType.REDUCE_SCATTER,
+            CollectiveType.ALL_GATHER,
+            CollectiveType.ALL_TO_ALL,
+        }
 
         network_bytes = float(math.ceil(size_bytes))
         local_bytes_int = int(math.ceil(local_bytes)) if local_bytes else 0
 
         if self._astra_policy in {"hybrid", "full"}:
-            if kind in collective_ops or kind == "pipeline":
+            if kind in collective_ops or kind == CollectiveType.PIPELINE:
                 # Pipeline uses 2 NPUs for point-to-point, others use part
-                npus = 2 if kind == "pipeline" else part
-                axis_filter = axis if kind != "pipeline" else None
-                network_time = self._astra_collective(kind, npus, network_bytes, axis_filter)
+                npus = 2 if kind == CollectiveType.PIPELINE else part
+                axis_filter = axis if kind != CollectiveType.PIPELINE else None
+                network_time = self._astra_collective(kind_value, npus, network_bytes, axis_filter)
             else:
-                raise ValueError(f"Unsupported collective operation: {kind}")
+                raise ValueError(f"Unsupported collective operation: {kind_value}")
         else:
             network_time = self._analytical_collective(
                 kind=kind,
@@ -152,7 +161,11 @@ class NetworkModel:
         # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
         local_time = 0.0
 
-        overhead_kinds = {"all_reduce", "reduce_scatter", "all_gather"}
+        overhead_kinds = {
+            CollectiveType.ALL_REDUCE,
+            CollectiveType.REDUCE_SCATTER,
+            CollectiveType.ALL_GATHER,
+        }
         overhead = self.O if (network_bytes and kind in overhead_kinds) else 0.0
 
         return network_time + local_time + overhead
@@ -161,25 +174,25 @@ class NetworkModel:
     def _analytical_collective(
         self,
         *,
-        kind: str,
+        kind: CollectiveType,
         size_bytes: float,
         participants: int,
         ib: float,
         ll: float,
         debug_label: str,
     ) -> float:
-        if kind == "all_reduce":
+        if kind == CollectiveType.ALL_REDUCE:
             return self._analytical_all_reduce(size_bytes, participants, ib, ll, debug_label)
-        if kind == "reduce_scatter":
+        if kind == CollectiveType.REDUCE_SCATTER:
             return self._analytical_reduce_scatter(size_bytes, participants, ib, ll, debug_label)
-        if kind == "all_gather":
+        if kind == CollectiveType.ALL_GATHER:
             return self._analytical_all_gather(size_bytes, participants, ib, ll, debug_label)
-        if kind == "all_to_all":
+        if kind == CollectiveType.ALL_TO_ALL:
             return self._analytical_all_to_all(size_bytes, participants, ib, ll, debug_label)
-        if kind == "pipeline":
+        if kind == CollectiveType.PIPELINE:
             return self._analytical_point_to_point(size_bytes, ib, ll)
         # Default fallback for unknown patterns
-        raise ValueError(f"Unsupported collective operation: {kind}")
+        raise ValueError(f"Unsupported collective operation: {kind.value}")
 
     def _analytical_all_reduce(self, size_bytes, participants, ib, ll, label):
         if ib == 0:
@@ -845,7 +858,7 @@ class TimeCalculation:
             point_time = self._gemm_pointwise_time(m, n, name)
             total_bytes = math.ceil(self.precision_bytes * m * n) * batch
             reduction_time = self.network_model.collective(
-                kind="all_reduce",
+                kind=CollectiveType.ALL_REDUCE,
                 size_bytes=total_bytes,
                 participants=int(self.tp),
                 ib=self.links["tp"].bandwidth,
@@ -860,7 +873,7 @@ class TimeCalculation:
             total_bytes = math.ceil(self.precision_bytes * m * n) * batch
             shard_bytes = math.ceil(total_bytes / self.tp)
             reduction_time = self.network_model.collective(
-                kind="all_gather",
+                kind=CollectiveType.ALL_GATHER,
                 size_bytes=shard_bytes,
                 participants=int(self.tp),
                 ib=self.links["tp"].bandwidth,
@@ -882,7 +895,7 @@ class TimeCalculation:
             total_bytes = math.ceil(self.precision_bytes * m * k) * batch
             shard_bytes = math.ceil(total_bytes / self.tp)
             reduction_time = self.network_model.collective(
-                kind="all_gather",
+                kind=CollectiveType.ALL_GATHER,
                 size_bytes=shard_bytes,
                 participants=int(self.tp),
                 ib=self.links["tp"].bandwidth,
@@ -896,7 +909,7 @@ class TimeCalculation:
             gemm_time = (grad_wt_time + grad_act_time) * batch
             total_bytes = math.ceil(self.precision_bytes * m * k) * batch
             reduction_time = self.network_model.collective(
-                kind="all_reduce",
+                kind=CollectiveType.ALL_REDUCE,
                 size_bytes=total_bytes,
                 participants=int(self.tp),
                 ib=self.links["tp"].bandwidth,
@@ -917,7 +930,7 @@ class TimeCalculation:
             raise ValueError(f"Unsupported GEMM shard axis: {self.gemm_shard_axis}")
         total_bytes = math.ceil(self.precision_bytes * param_count)
         reduction_time = self.network_model.collective(
-            kind="all_reduce",
+            kind=CollectiveType.ALL_REDUCE,
             size_bytes=total_bytes,
             participants=int(self.dp),
             ib=self.links["dp"].bandwidth,

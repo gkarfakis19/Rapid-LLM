@@ -11,8 +11,9 @@ from simulate_train_graph import Graph
 import llm_util
 from base_timing import TimeCalculation
 from itertools import zip_longest  # for element-wise aggregation of memory access lists
-from timing_model import CommSpec, DirectionTiming, OperationTiming, OperationGroup
+from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
 import yaml
+
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -42,101 +43,107 @@ SOFTMAX_FORWARD_MEM_ACCESSES = 4
 SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT = 4 
 SOFTMAX_BACKWARD_MEM_ACCESSES = 3
 
+ALL_REDUCE = CollectiveType.ALL_REDUCE
+ALL_GATHER = CollectiveType.ALL_GATHER
+REDUCE_SCATTER = CollectiveType.REDUCE_SCATTER
+ALL_TO_ALL = CollectiveType.ALL_TO_ALL
+PIPELINE = CollectiveType.PIPELINE
+
 # Map each parallelism mode to operation-level collective specs used across the
 # metadata pipeline. Each spec records the collective kind, the participant
 # scope (tp/cp/seq/etc.), and the interconnect label.
 COMM_RULE_DEFAULT_KEY = "__default__"
 COMMUNICATION_RULES: Dict[
-    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
+    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, object]]]]
 ] = {
     ParallelismMode.TENSOR: {
         COMM_RULE_DEFAULT_KEY: {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm1': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm2': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'qkv_proj': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'attention': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'output_proj': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MLP': {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_REDUCE, 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.TENSOR_SEQUENCE: {
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None}, # <- dangerous
         'layernorm1': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm2': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'qkv_proj': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'attention': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'output_proj': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MLP': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.CONTEXT: {
         COMM_RULE_DEFAULT_KEY: {
-            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'cp', 'interconnect': 'cp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'cp', 'interconnect': 'cp'},
         },
-        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'}},
-        'output_proj': {'forward': None, 'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'}},
-        'qkv_proj': {'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'}, 'backward': None},
+        'attention': {'forward': None, 'backward': {'kind': REDUCE_SCATTER, 'participants': 'cp', 'interconnect': 'cp'}},
+        'output_proj': {'forward': None, 'backward': {'kind': ALL_GATHER, 'participants': 'cp', 'interconnect': 'cp'}},
+        'qkv_proj': {'forward': {'kind': ALL_GATHER, 'participants': 'cp', 'interconnect': 'cp'}, 'backward': None},
     },
     ParallelismMode.TENSOR_CONTEXT_HYBRID: {
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
         'layernorm1': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm2': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': ALL_GATHER, 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MLP': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
-        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'}},
+        'attention': {'forward': None, 'backward': {'kind': REDUCE_SCATTER, 'participants': 'cp', 'interconnect': 'cp'}},
         'output_proj': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'cp'},
-            'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'},
+            'forward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'cp'},
+            'backward': {'kind': ALL_GATHER, 'participants': 'cp', 'interconnect': 'cp'},
         },
         'qkv_proj': {
-            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'tp'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'forward': {'kind': ALL_GATHER, 'participants': 'cp', 'interconnect': 'tp'},
+            'backward': {'kind': REDUCE_SCATTER, 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.SINGLE: {
@@ -146,37 +153,37 @@ COMMUNICATION_RULES: Dict[
 # MoE-specific overrides for router, MLP, and layer norm collectives.
 _MOE_ROUTER_RULE = {
     'forward': {
-        'kind': 'all_to_all',
+        'kind': ALL_TO_ALL,
         'participants': 'moe',
         'interconnect': 'tp',
     },
     'backward': {
-        'kind': 'reduce_scatter',
+        'kind': REDUCE_SCATTER,
         'participants': 'moe',
         'interconnect': 'tp',
     },
 }
 _MOE_MLP_RULE = {
     'forward': {
-        'kind': 'all_to_all',
+        'kind': ALL_TO_ALL,
         'participants': 'moe',
         'interconnect': 'tp',
     },
     'backward': {
-        'kind': 'all_to_all',
+        'kind': ALL_TO_ALL,
         'participants': 'moe',
         'interconnect': 'tp',
     },
 }
 _MOE_LAYER_NORM1_RULE = {
     'backward': {
-        'kind': 'all_to_all',
+        'kind': ALL_TO_ALL,
         'participants': 'moe',
         'interconnect': 'tp',
     },
 }
 MOE_COMMUNICATION_RULES: Dict[
-    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
+    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, object]]]]
 ] = {
     mode: {
         'router': _MOE_ROUTER_RULE,
@@ -379,7 +386,13 @@ class TimeCalculationLLM(TimeCalculation):
     def _ffn1_output_dim(self, intermediate_size: int) -> int:
         return 2 * intermediate_size if self.model_type == "llama" else intermediate_size
     # def sequence
-    def get_tensor_reduction_time(self, total_bytes: int, kind: str, name: str, participants: Optional[int] = None) -> float:
+    def get_tensor_reduction_time(
+        self,
+        total_bytes: int,
+        kind: CollectiveType,
+        name: str,
+        participants: Optional[int] = None,
+    ) -> float:
         """Return collective time for tensor-parallel reductions.
            receives total_bytes, which is the total size of the data to be reduced across all participants.
         """
@@ -509,7 +522,7 @@ class TimeCalculationLLM(TimeCalculation):
         
         
         attention_size_b = self.precision.grad_communication * batch_size * seq_len * hidden_dim * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
-        kind = "reduce_scatter"
+        kind = REDUCE_SCATTER
         participants = self.cp
         axis_hint = "cp"
         if attention_size_b > 0:
@@ -634,19 +647,19 @@ class TimeCalculationLLM(TimeCalculation):
         elif gemm_type == GemmType.QKV:  # column wise
             gemm_time = self.get_gemm_time(shard_m, k, shard_n, name)[0]
             total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
-            kind = "all_gather"
+            kind = ALL_GATHER
             participants = self.cp # all gather K V for each cp group
             axis_hint = "cp"
         elif gemm_type == GemmType.OUT_PROJ:
             gemm_time = self.get_gemm_time(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision.activations * shard_m * n)
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
             participants = self.tp # reduce scatter output activation for each tp group
             axis_hint = "tp"
         elif gemm_type == GemmType.FFN2:  # row wise
             gemm_time = self.get_gemm_time(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision.activations * shard_m * n)
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
             participants = self.tp  # reduce scatter output activation for each tp group
             axis_hint = "tp"
         elif gemm_type == GemmType.FFN1:  # column wise
@@ -708,7 +721,7 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(shard_m, n, k, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
             grad_time_wt = self.get_gemm_time(k, shard_m, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
             total_bytes = self.precision.grad_communication * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
             participants = self.cp
             axis_hint = "cp"
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
@@ -718,14 +731,14 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.get_gemm_time(k, shard_m, shard_n, name)[0]
             total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
             participants = self.tp
             axis_hint = "tp"
         elif gemm_type == GemmType.OUT_PROJ:
             grad_time_act = self.get_gemm_time(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.get_gemm_time(shard_k, shard_m, n, name)[0]
             total_bytes = self.get_kv_size_bytes() / self.tp
-            kind = "all_gather"
+            kind = ALL_GATHER
             participants = self.cp
             axis_hint = "cp"
         elif gemm_type == GemmType.FFN2:  # row wise
@@ -736,14 +749,14 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.get_gemm_time(k, shard_m, shard_n, name)[0]
             total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
             participants = self.tp
             axis_hint = "tp"
         elif gemm_type == GemmType.LINEAR_SOFTMAX:
             grad_time_act = self.get_gemm_time(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.get_gemm_time(shard_k, shard_m, n, name)[0]
             total_bytes = math.ceil(self.precision.grad_communication * shard_m * shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
-            kind = "all_gather"
+            kind = ALL_GATHER
             participants = self.cp * self.tp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
@@ -787,9 +800,9 @@ class TimeCalculationLLM(TimeCalculation):
         """
         tp_mode = self.get_parallelism_mode()
         if gemm_type == GemmType.LINEAR_SOFTMAX:
-            comm_kind_fwd = "all_gather"
+            comm_kind_fwd = ALL_GATHER
         else:
-            comm_kind_fwd = "all_reduce" if tp_mode == ParallelismMode.TENSOR else "reduce_scatter"
+            comm_kind_fwd = ALL_REDUCE if tp_mode == ParallelismMode.TENSOR else REDUCE_SCATTER
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         size_bytes = 0
         total_bytes = 0
@@ -858,9 +871,9 @@ class TimeCalculationLLM(TimeCalculation):
         act_bytes = 0
         total_bytes = 0
         if gemm_type == GemmType.LINEAR_SOFTMAX:
-            comm_kind_bwd = "all_reduce"
+            comm_kind_bwd = ALL_REDUCE
         else:
-            comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
+            comm_kind_bwd = ALL_REDUCE if seq_degree == 1 else REDUCE_SCATTER
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-parallel backward GEMM")
@@ -924,7 +937,7 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         if gemm_type == GemmType.QKV:
-            kind = "all_gather" 
+            kind = ALL_GATHER 
             reduction_time = self.network_model.collective(
                 kind=kind,
                 size_bytes=total_bytes,
@@ -962,7 +975,7 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.get_gemm_time(k, shard_m, n, name, disable_overhead=True)[0] * batch + self.O
             total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both K and V
-            kind = "reduce_scatter"
+            kind = REDUCE_SCATTER
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.get_gemm_time(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.get_gemm_time(k, shard_m, n, name, disable_overhead=True)[0] * batch + self.O
@@ -973,7 +986,7 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(shard_m, n, k, name)[0]
             grad_time_wt = self.get_gemm_time(k, shard_m, n, name)[0]
             total_bytes = self.get_kv_size_bytes()
-            kind = "all_gather"
+            kind = ALL_GATHER
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
@@ -1001,7 +1014,7 @@ class TimeCalculationLLM(TimeCalculation):
             per_rank_bytes = math.ceil(self.precision.activations * m * n * self.experts_per_gpu)
             total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp )) 
             reduction_time = self.network_model.collective(
-                kind="all_to_all",
+                kind=ALL_TO_ALL,
                 size_bytes=total_bytes,
                 participants=self.cp * self.tp,
                 ib=self.links["tp"].bandwidth,
@@ -1024,7 +1037,7 @@ class TimeCalculationLLM(TimeCalculation):
             per_rank_bytes = math.ceil(self.precision.activations * m * k * self.experts_per_gpu)
             total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp ))
             reduction_time = self.network_model.collective(
-                kind="all_to_all",
+                kind=ALL_TO_ALL,
                 size_bytes=total_bytes,
                 participants=self.tp * self.cp,
                 ib=self.links["tp"].bandwidth,
@@ -1309,7 +1322,7 @@ class TimeCalculationLLM(TimeCalculation):
             per_rank_bytes = self.precision.stats * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
-                kind="all_gather",
+                kind=ALL_GATHER,
                 size_bytes=total_bytes,
                 participants=self.tp,
                 ib=self.links["tp"].bandwidth,
@@ -1347,7 +1360,7 @@ class TimeCalculationLLM(TimeCalculation):
             total_bytes = int(math.ceil(per_rank_bytes * self.tp * self.cp))
             
             reduction_time = self.network_model.collective(
-                kind="all_to_all",
+                kind=ALL_TO_ALL,
                 size_bytes=total_bytes,
                 participants=self.tp * self.cp,
                 ib=self.links["tp"].bandwidth,
@@ -1360,7 +1373,7 @@ class TimeCalculationLLM(TimeCalculation):
             per_rank_bytes = self.precision.grad_communication * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
-                kind="all_gather",
+                kind=ALL_GATHER,
                 size_bytes=total_bytes,
                 participants=self.tp,
                 ib=self.links["tp"].bandwidth,
@@ -1390,7 +1403,7 @@ class TimeCalculationLLM(TimeCalculation):
         per_rank_bytes = math.ceil(self.precision.activations * gemm_ffn1[0] * gemm_ffn1[1] * self.experts_per_gpu)
         total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp )) 
         reduction_time = self.network_model.collective(
-            kind="all_to_all",
+            kind=ALL_TO_ALL,
             size_bytes=total_bytes,
             participants = self.tp * self.cp,
             ib=self.links["tp"].bandwidth,
@@ -1416,7 +1429,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         total_bytes = int(math.ceil(bytes_per_rank * self.tp))
         reduction_time = self.network_model.collective(
-            kind="reduce_scatter",
+            kind=REDUCE_SCATTER,
             size_bytes=total_bytes,
             participants=self.tp ,
             ib=self.links["tp"].bandwidth,
@@ -1972,7 +1985,7 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
     ) -> Dict[str, Dict[str, Any]]:
-        grad_collective = 'reduce_scatter' if (self.zero_stage >= 2 and self.dp > 1) else 'all_reduce'
+        grad_collective = REDUCE_SCATTER if (self.zero_stage >= 2 and self.dp > 1) else ALL_REDUCE
         metadata = {
             'transformer': {
                 'size': reduction_sizes,
@@ -1997,7 +2010,7 @@ class TimeCalculationLLM(TimeCalculation):
             },
             'cross_layer': {
                 'size': cross_layer_bytes,
-                'type': 'pipeline',
+                'type': PIPELINE,
                 'participants': 2,
                 'interconnect_type': 'lp',
                 'local_comp_time': 0
@@ -2006,7 +2019,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero2_embedding_gather_bytes:
             metadata['zero2_embedding_gather'] = {
                 'size': int(math.ceil(zero2_embedding_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2014,7 +2027,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero2_transformer_gather_bytes:
             metadata['zero2_transformer_gather'] = {
                 'size': int(math.ceil(zero2_transformer_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2022,7 +2035,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero2_softmax_gather_bytes:
             metadata['zero2_softmax_gather'] = {
                 'size': int(math.ceil(zero2_softmax_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2030,7 +2043,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero3_embedding_gather_bytes:
             metadata['zero3_embedding_gather'] = {
                 'size': int(math.ceil(zero3_embedding_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2038,7 +2051,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero3_transformer_gather_bytes:
             metadata['zero3_transformer_gather'] = {
                 'size': int(math.ceil(zero3_transformer_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2047,7 +2060,7 @@ class TimeCalculationLLM(TimeCalculation):
         if zero3_softmax_gather_bytes:
             metadata['zero3_softmax_gather'] = {
                 'size': int(math.ceil(zero3_softmax_gather_bytes)),
-                'type': 'all_gather',
+                'type': ALL_GATHER,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
@@ -2208,17 +2221,22 @@ class TimeCalculationLLM(TimeCalculation):
                 return ()
             kind = rule.get("kind")
             scope = rule.get("participants")
-            if not kind or not scope:
+            if kind is None or not scope:
                 return ()
+            if not isinstance(kind, CollectiveType):
+                raise TypeError(
+                    f"Comm rule for '{op_name}' must use CollectiveType (got {type(kind).__name__})"
+                )
+            kind_enum = kind
             participants = participants_lookup.get(scope, 0)
             if participants <= 1:
                 return ()
             interconnect = rule.get("interconnect", scope)
-            name = f"{op_name}_{direction}_{kind}"
+            name = f"{op_name}_{direction}_{kind_enum.value}"
             return (
                 CommSpec(
                     name=name,
-                    kind=kind,
+                    kind=kind_enum,
                     size_bytes=bytes_int,
                     participants=participants,
                     interconnect=interconnect,
