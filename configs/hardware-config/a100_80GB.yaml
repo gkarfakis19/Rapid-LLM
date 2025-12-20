@@ -133,7 +133,7 @@ execution_backend:
   model: astra # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_hierarchica  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d

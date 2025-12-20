@@ -22,7 +22,7 @@ cd Rapid-LLM
 - `source [/path/to/new/virtual/environment]/bin/activate`
 - `uv sync`
 
-If uv is used, make sure to use `uv run` instead of `python` to execute python scripts within the uv environment.
+If you want the example scripts to run through uv, set `RAPID_UV_RUN=1` before invoking them. Otherwise they default to `python`.
 
 #### Option B: Using pip
 
@@ -50,10 +50,18 @@ If you encounter protobuf failures while building AstraSim, try:
 
 ### Step 4. Verify the installation (LLM)
 
+Examples use `python` by default. To route them through uv, run them with `RAPID_UV_RUN=1`.
+
 - `./examples/llm.sh` (analytical backend, training on Llama2-7B)
 - `./examples/llm_inference.sh` (analytical backend, inference on Llama2-7B)
 - `./examples/llm_astra.sh` (AstraSim backend, training on Llama2-7B)
 - `./examples/llm_astra_inference.sh` (AstraSim backend, inference on Llama2-7B)
+
+Example with uv:
+
+```bash
+RAPID_UV_RUN=1 ./examples/llm.sh
+```
 
 ## Quick Start (LLM)
 

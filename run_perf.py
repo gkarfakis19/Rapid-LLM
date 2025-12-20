@@ -47,11 +47,11 @@ def _report_total_wall_time() -> None:
 atexit.register(flush_log_queue)
 atexit.register(_report_total_wall_time)
 
-def parse_arguments(argv=None):
+def parse_arguments():
     parser = argparse.ArgumentParser(description="Run performance analysis for GEMM (sanity) or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
-    return parser.parse_args(argv)
+    return parser.parse_args()
 
 def get_mode_from_config(model_config_path):
     """Read the mode from the model configuration file."""
@@ -281,8 +281,8 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     if warning_message:
         log_message(warning_message)
 
-def main(argv=None) -> int:
-    args = parse_arguments(argv)
+if __name__ == "__main__":
+    args = parse_arguments()
     # Load configurations
     config_hardware_path = args.hardware_config
     config_model_path = args.model_config
@@ -313,11 +313,6 @@ def main(argv=None) -> int:
     else:
         print("Invalid mode selected. Please choose 'LLM' or 'GEMM'.")
         flush_log_queue()
-        return 1
+        sys.exit(1)
 
     flush_log_queue()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
