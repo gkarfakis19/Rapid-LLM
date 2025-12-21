@@ -727,6 +727,13 @@ def _parse_network_layout(
                 index=index,
             )
         )
+    for idx, dim in enumerate(dimensions):
+        topo_name = str(getattr(dim, "topology_type", "")).strip().lower()
+        topo_name = topo_name.replace("-", "").replace("_", "")
+        if idx > 0 and topo_name in {"mesh2d", "torus2d", "kingmesh2d"}:
+            raise ValueError(
+                f"2D topology '{dim.topology_type}' is only supported on the first network dimension."
+            )
     return tuple(dimensions), faulty_links, overlap_config
 
 

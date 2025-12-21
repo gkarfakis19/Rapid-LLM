@@ -100,6 +100,11 @@ def _normalize_topology_name(topo: str) -> str:
     return "FullyConnected"
 
 
+def _is_2d_topology(topo: str) -> bool:
+    topo_str = str(topo).strip().lower().replace("-", "").replace("_", "")
+    return topo_str in {"mesh2d", "torus2d", "kingmesh2d"}
+
+
 def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Expand multi-dimensional mesh/torus entries into per-dimension entries."""
 
@@ -402,6 +407,23 @@ def generate_astrasim_configs_from_hw(
     npus_list = [entry["npus"] for entry in network_entries]
     bw_list = [entry["bandwidth"] for entry in network_entries]
     lat_list = [entry["latency"] for entry in network_entries]
+    non_recursive_from: Optional[int] = None
+    if topo_list:
+        first_topo = None
+        if selected_dims:
+            first_dim = selected_dims[0][0]
+            first_topo = _normalize_topology_name(first_dim.topology_type)
+        if first_topo and _is_2d_topology(first_topo) and not transform_2d_to_1d:
+            if first_topo in {"Torus2D", "Mesh2D"}:
+                non_recursive_from = 2 # TORUS2D, MESH2D - ASSUME RECURSIVE INTERNAL
+            else:
+                non_recursive_from = 1 # KINGMESH
+        else:
+            non_recursive_from = 0 # NO RECURSION EVER FOR OTHER CASES.
+        if non_recursive_from > len(topo_list):
+            raise ValueError(
+                f"non_recursive_from={non_recursive_from} exceeds network dimensions ({len(topo_list)})."
+            )
 
     signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
     dim_signature = "_".join(signature_parts) if signature_parts else f"{target}"
@@ -421,6 +443,8 @@ def generate_astrasim_configs_from_hw(
         f"bandwidth: [ {bw_str} ]  # GB/s\n"
         f"latency: [ {lat_str} ]   # ns\n"
     )
+    if non_recursive_from is not None:
+        net_content += f"non_recursive_from: {non_recursive_from}\n"
 
     faulty_links_tuple: Tuple[Tuple[int, int, float], ...] = tuple(layout_faults)
     if faulty_links_tuple:
@@ -477,8 +501,8 @@ def generate_astrasim_configs_from_hw(
     system = {
         "scheduling-policy": "LIFO",
         "endpoint-delay": 10,
-        "active-chunks-per-dimension": 1,
-        "preferred-dataset-splits": 1,
+        "active-chunks-per-dimension": 4,
+        "preferred-dataset-splits": 4,
         "all-reduce-implementation": ar_impl,
         "all-gather-implementation": ag_impl,
         "reduce-scatter-implementation": rs_impl,
