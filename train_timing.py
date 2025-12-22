@@ -10,6 +10,7 @@ from inference_timing import (
     COMMUNICATION_RULES,
     COMM_RULE_DEFAULT_KEY,
 )
+from memory_estimation import MemoryEstimator
 from simulate_inference_graph import DecodeSample, InferenceConfig, InferenceEngine
 import llm_util
 import json
@@ -509,6 +510,118 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self.pipeline_interconnect = dispatcher.interconnect_params
 
         total_time = result.total_time
+
+        mem_estimator = MemoryEstimator(self)
+        prefill_memory_data = mem_estimator.build_memory_data(
+            mode="inference",
+            batch_size=batch_size,
+            seq_len=prefill_len,
+            kv_cache_tokens=prefill_len,
+        )
+        prefill_root = dispatcher.build_flattened_root_for_memory()
+        _, prefill_peak_gb = mem_estimator.simulate_peak(
+            prefill_root,
+            prefill_memory_data,
+            mode="inference",
+            filename="memory_graph_prefill",
+        )
+
+        decode_peak_gb = prefill_peak_gb
+        if decode_len > 0:
+            decode_gemm_shapes = llm_util.process_decode_gemm_shapes(
+                self,
+                batch_size=batch_size,
+                current_seq_len=self.seq_len,
+                d_model=hidden_dim,
+                num_heads=num_heads,
+                kv_heads=kv_heads,
+                intermediate_size=intermediate_size,
+                vocab_size=vocab_size,
+                model_type=self.model_type,
+            )
+            (
+                decode_pipeline_graph,
+                decode_pipeline_root,
+                _,
+                _,
+                decode_transformer_graph,
+                decode_transformer_forward_root,
+                decode_transformer_backward_root,
+                decode_interconnect_params,
+            ), _ = self.prepare_decode_graphs(
+                batch_size=batch_size,
+                total_seq_len=self.seq_len,
+                gemm_shapes=decode_gemm_shapes,
+            )
+            decode_dispatcher = LLMExecutionDispatcher(
+                time_calc=self,
+                pipeline_graph=decode_pipeline_graph,
+                pipeline_root=decode_pipeline_root,
+                interconnect_params=decode_interconnect_params,
+                transformer_graph=decode_transformer_graph,
+                transformer_forward_root=decode_transformer_forward_root,
+                transformer_backward_root=decode_transformer_backward_root,
+            )
+            decode_memory_root = decode_dispatcher.build_flattened_root_for_memory()
+            decode_memory_data = mem_estimator.build_memory_data(
+                mode="inference",
+                batch_size=batch_size,
+                seq_len=1,
+                gemm_shapes=decode_gemm_shapes,
+                kv_cache_tokens=self.seq_len,
+            )
+            original_pipeline_graph = self.pipeline_graph
+            try:
+                self.pipeline_graph = decode_pipeline_graph
+                _, decode_peak_gb = mem_estimator.simulate_peak(
+                    decode_memory_root,
+                    decode_memory_data,
+                    mode="inference",
+                    filename="memory_graph_decode",
+                )
+            finally:
+                self.pipeline_graph = original_pipeline_graph
+
+        max_peak_gb = max(prefill_peak_gb, decode_peak_gb)
+        self.memory_peak_gb = max_peak_gb
+
+        hardware_mem_bytes = getattr(self.DRAM, "size", None)
+        if hardware_mem_bytes is None and hasattr(self.hw_config, "tech_config"):
+            tech_cfg = self.hw_config.tech_config
+            if hasattr(tech_cfg, "DRAM"):
+                hardware_mem_bytes = getattr(tech_cfg.DRAM, "size", None)
+
+        if hardware_mem_bytes is not None:
+            hardware_mem_gib = float(hardware_mem_bytes) / float(1024 ** 3)
+            self.memory_capacity_per_device_gb = hardware_mem_gib
+            mem_delta = hardware_mem_gib - max_peak_gb
+            self.memory_headroom_gb = mem_delta
+            self.memory_capacity_exceeded = mem_delta < 0
+            self.memory_capacity_violation_gb = abs(mem_delta) if mem_delta < 0 else 0.0
+
+            memory_dir = os.path.join(self.output_dir, "memory-summary")
+            os.makedirs(memory_dir, exist_ok=True)
+            info_lines = [
+                "Simulation mode: inference",
+                f"Hardware memory capacity (per gpu): {hardware_mem_gib:.2f} GiB",
+                f"Prefill peak memory usage (per gpu): {prefill_peak_gb:.2f} GiB",
+                f"Final decode peak memory usage (per gpu): {decode_peak_gb:.2f} GiB",
+                f"Max peak memory usage (per gpu): {max_peak_gb:.2f} GiB",
+            ]
+            if mem_delta < 0:
+                info_lines.append(
+                    f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB"
+                )
+            else:
+                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GiB")
+            info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
+            with open(info_path, "w", encoding="utf-8") as info_file:
+                info_file.write("\n".join(info_lines) + "\n")
+        else:
+            self.memory_capacity_per_device_gb = None
+            self.memory_headroom_gb = None
+            self.memory_capacity_exceeded = False
+            self.memory_capacity_violation_gb = 0.0
 
         return total_time, total_energy
 

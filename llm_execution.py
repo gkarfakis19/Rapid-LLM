@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
 import simulate_train_graph as llm_simulation
+from memory_estimation import mem_kind_from_op_name
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
@@ -34,6 +35,9 @@ def _copy_node_metadata(source: llm_simulation.Node, target: llm_simulation.Node
         "stage_id",
         "tp_rank",
         "cp_rank",
+        "mem_kind",
+        "recompute",
+        "param_gather",
     ):
         if hasattr(source, attr):
             setattr(target, attr, getattr(source, attr))
@@ -672,12 +676,15 @@ class PipelineGraphFlattener:
                     hw_id=hw_id,
                     duration=duration,
                     fwd=(direction == "forward"),
+                    mem_kind=mem_kind_from_op_name(entry_name),
                 )
                 gemm_node.stage_id = stage_id
                 gemm_node.tp_rank = tp_rank
                 gemm_node.micro_batch_index = micro_batch
                 gemm_node.layer_index = layer_index
                 gemm_node.direction = direction
+                gemm_node.recompute = bool(getattr(node, "recompute", False))
+                gemm_node.param_gather = (gemm_idx == 0)
 
                 if previous is not None:
                     previous.add_child(gemm_node)
@@ -865,6 +872,8 @@ class PipelineGraphFlattener:
             "direction",
             "stage_id",
             "tp_rank",
+            "mem_kind",
+            "recompute",
         ):
             if hasattr(source, attr):
                 setattr(target, attr, getattr(source, attr))
@@ -1559,6 +1568,45 @@ class LLMExecutionDispatcher:
             graph_root=flattened_root,
             mode=ExecutionMode.FULL_ASTRASIM_FLATTENED,
         )
+
+    def build_flattened_root_for_memory(self) -> Any:
+        if self.flattened_root is not None:
+            return self.flattened_root
+
+        existing_flattened = getattr(self.time_calc, "flattened_pipeline_root", None)
+        if existing_flattened is not None:
+            self.flattened_root = existing_flattened
+            return existing_flattened
+
+        if not self.pipeline_root:
+            raise RuntimeError("Pipeline graph root is not available for memory flattening")
+        if not self.transformer_graph:
+            raise RuntimeError("Transformer graph metadata is required for memory flattening")
+
+        flattener = PipelineGraphFlattener(
+            pipeline_graph=self.pipeline_graph,
+            transformer_graph=self.transformer_graph,
+            rank_layout=self._rank_layout,
+        )
+        flattened_root = flattener.build(self.pipeline_root)
+        if flattened_root is None:
+            raise RuntimeError("Memory flattening produced an empty graph")
+
+        flattened_root = apply_overlap_transforms(
+            flattened_root,
+            self.time_calc.get_parallelism_mode(),
+            getattr(self.time_calc, "tp_overlap", 0.0),
+            getattr(self.time_calc, "tp_sp_overlap", 0.0),
+            getattr(self.time_calc, "cp_overlap", 0.0),
+        )
+        flattener._propagate_local_hw_ids(flattened_root)
+
+        unique_hw_ids = self._collect_hw_ids(flattened_root)
+        if not unique_hw_ids:
+            raise RuntimeError("Flattened memory graph exposes no compute nodes with hardware IDs")
+
+        self.flattened_root = flattened_root
+        return flattened_root
 
     def _collect_hw_ids(self, root: Any) -> Set[int]:
         visited: Set[int] = set()

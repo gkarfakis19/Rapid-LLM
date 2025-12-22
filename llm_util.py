@@ -123,9 +123,23 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     return processed
 
-def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, intermediate_size, n_heads, precision, zero_stage, flash_attention, full_recomputation, model_type="gpt"):#  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
-    """ memory estimation of transformer layer for single gpu case in inference mode is supported.
-    other modes or layers are work in progress."""
+def get_transformer_mem_layer(
+    dp,
+    tp,
+    lp=1,
+    mb=1,
+    batch_size=1,
+    hidden_dim=1,
+    seq_len=1,
+    intermediate_size=1,
+    n_heads=1,
+    precision=None,
+    zero_stage=0,
+    flash_attention=False,
+    full_recomputation=False,
+    model_type="gpt",
+):  #  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
+    """Approximate transformer-layer memory sizing for training/inference."""
     #Activations refer to output activations that need to be stored
 
     if full_recomputation:
@@ -133,9 +147,8 @@ def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, 
     elif flash_attention:
         act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #assuming selective recompute
     else:
-        act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) 
-    
-    act_memory_layer *= lp / mb #pipedream style pipelining activation memory
+        act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2)
+
     act_memory_layer_inf = seq_len * batch_size * intermediate_size / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
     ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
     
@@ -206,85 +219,192 @@ def get_embedding_weight_mem(
     return input_embed + output_head
     
 def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
-    # Model Params
-    default_global_batch = getattr(
-        exp_model_config.model_config,
-        "global_batch_size",
-        getattr(exp_model_config.model_config, "batch_size"),
+    """Run graph-based memory estimation for prefill + final decode peaks."""
+    mode = kwargs.get("mode", "LLM")
+    output_dir = kwargs.get(
+        "output_dir",
+        os.path.join(os.getcwd(), "output", "memory_estimator_smoke"),
     )
-    batch_size = int(
-        kwargs.get(
-            "global_batch_size",
-            kwargs.get("batch_size", default_global_batch),
+
+    model_cfg = exp_model_config.model_config
+    sched_cfg = getattr(exp_hw_config, "sch_config", None)
+
+    def _set_if_present(obj, attr, key):
+        if key in kwargs and hasattr(obj, attr):
+            setattr(obj, attr, int(kwargs[key]))
+
+    if "batch_size" in kwargs:
+        _set_if_present(model_cfg, "batch_size", "batch_size")
+        _set_if_present(model_cfg, "global_batch_size", "batch_size")
+    if "global_batch_size" in kwargs:
+        _set_if_present(model_cfg, "global_batch_size", "global_batch_size")
+        _set_if_present(model_cfg, "batch_size", "global_batch_size")
+
+    for key in (
+        "seq_len",
+        "decode_len",
+        "num_layers",
+        "hidden_dim",
+        "num_heads",
+        "kv_heads",
+        "intermediate_size",
+        "vocab_size",
+    ):
+        _set_if_present(model_cfg, key, key)
+
+    if sched_cfg is not None:
+        for key in ("dp", "tp", "cp", "lp", "mb"):
+            if key in kwargs and hasattr(sched_cfg, key):
+                setattr(sched_cfg, key, int(kwargs[key]))
+
+    from train_timing import TimeCalculationLLMInference
+    from llm_execution import LLMExecutionDispatcher
+    from memory_estimation import MemoryEstimator
+
+    tc = TimeCalculationLLMInference(exp_hw_config, exp_model_config, mode, output_dir=output_dir)
+
+    batch_size = tc._effective_transformer_batch()
+    vocab_size = tc.vocab_size
+    hidden_dim = tc.hidden_dim
+    seq_len = tc.seq_len
+    num_heads = tc.num_heads
+    kv_heads = tc.kv_heads
+    intermediate_size = tc.intermediate_size
+    decode_len = int(getattr(tc.model, "decode_len", 0) or 0)
+    prefill_len = max(0, int(seq_len) - decode_len)
+
+    mem_estimator = MemoryEstimator(tc)
+    num_SMs = tc.hw_config.tech_config.core.num_bundles
+
+    prefill_peak_gb = 0.0
+    if prefill_len > 0:
+        transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
+            batch_size,
+            vocab_size,
+            hidden_dim,
+            prefill_len,
+            num_heads,
+            kv_heads,
+            intermediate_size,
+            num_SMs,
         )
-    )
-    hidden_dim                   = int(kwargs.get('hidden_dim', exp_model_config.model_config.hidden_dim))
-    vocab_size                   = int(kwargs.get('vocab_size', exp_model_config.model_config.vocab_size))
-    n_layers                   = int(kwargs.get('num_layer', exp_model_config.model_config.num_layers))
-    n_heads                     = int(kwargs.get('num_heads', exp_model_config.model_config.num_heads))
-    # projection          = exp_model_config.model_config.projection
-    seq_len                   = int(kwargs.get('seq_len', exp_model_config.model_config.seq_len))
-    intermediate_size                   = int(kwargs.get('intermediate_size', exp_model_config.model_config.intermediate_size))
-    # G                   = exp_model_config.model_config.num_gates
-    precision           = exp_hw_config.sw_config.precision
-
-    # MiniBatch
-    dp                  = int(kwargs.get('dp', exp_hw_config.sch_config.dp))
-    # print("Data Parallelism Degree:", dp)
-    dp = 8 #for testing
-    mini_batch               = math.ceil(batch_size / dp)
-    mb             = int(kwargs.get('microbatches', exp_hw_config.sch_config.mb))
-    micro_batch              = math.ceil(mini_batch / mb)
-
-    tied_embeddings = exp_model_config.model_config.tied_embeddings
-
-    transformer_mem_layer, transformer_act_layer, transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
-        get_transformer_mem_layer(
-            dp = dp,
-            tp = 1,
-            zero_stage=1,
-            batch_size=micro_batch,
+        (
+            pipeline_graph,
+            pipeline_root,
+            _,
+            _,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        ) = tc._prepare_execution_graphs(
+            node_breakdown=node_breakdown,
+            transformer_timings=transformer_timings,
+            batch_size=batch_size,
+            seq_len=prefill_len,
             hidden_dim=hidden_dim,
-            seq_len=seq_len,
             intermediate_size=intermediate_size,
-            n_heads=n_heads,
-            precision=precision,
-            model_type=exp_model_config.model_config.model_type,
+            vocab_size=vocab_size,
+            include_pipeline_backward=False,
+            include_transformer_backward=False,
         )
-    )
-    softmax_mem = get_linear_softmax_mem(
-        batch_size=micro_batch,
-        seq_len=seq_len,
-        hidden_dim=hidden_dim,
-        vocab_size=vocab_size,
-        precision=precision,
-        t=1
-    )
+        dispatcher = LLMExecutionDispatcher(
+            time_calc=tc,
+            pipeline_graph=pipeline_graph,
+            pipeline_root=pipeline_root,
+            interconnect_params=interconnect_params,
+            transformer_graph=transformer_graph,
+            transformer_forward_root=transformer_forward_root,
+            transformer_backward_root=transformer_backward_root,
+        )
+        prefill_root = dispatcher.build_flattened_root_for_memory()
+        prefill_memory_data = mem_estimator.build_memory_data(
+            mode="inference",
+            batch_size=batch_size,
+            seq_len=prefill_len,
+            kv_cache_tokens=prefill_len,
+        )
+        tc.pipeline_graph = pipeline_graph
+        _, prefill_peak_gb = mem_estimator.simulate_peak(
+            prefill_root,
+            prefill_memory_data,
+            mode="inference",
+            filename="memory_graph_prefill",
+        )
 
+    decode_peak_gb = 0.0
+    if decode_len > 0:
+        decode_gemm_shapes = process_decode_gemm_shapes(
+            tc,
+            batch_size=batch_size,
+            current_seq_len=seq_len,
+            d_model=hidden_dim,
+            num_heads=num_heads,
+            kv_heads=kv_heads,
+            intermediate_size=intermediate_size,
+            vocab_size=vocab_size,
+            model_type=tc.model_type,
+        )
+        (
+            decode_pipeline_graph,
+            decode_pipeline_root,
+            _,
+            _,
+            decode_transformer_graph,
+            decode_transformer_forward_root,
+            decode_transformer_backward_root,
+            decode_interconnect_params,
+        ), _ = tc.prepare_decode_graphs(
+            batch_size=batch_size,
+            total_seq_len=seq_len,
+            gemm_shapes=decode_gemm_shapes,
+        )
+        decode_dispatcher = LLMExecutionDispatcher(
+            time_calc=tc,
+            pipeline_graph=decode_pipeline_graph,
+            pipeline_root=decode_pipeline_root,
+            interconnect_params=decode_interconnect_params,
+            transformer_graph=decode_transformer_graph,
+            transformer_forward_root=decode_transformer_forward_root,
+            transformer_backward_root=decode_transformer_backward_root,
+        )
+        decode_root = decode_dispatcher.build_flattened_root_for_memory()
+        decode_memory_data = mem_estimator.build_memory_data(
+            mode="inference",
+            batch_size=batch_size,
+            seq_len=1,
+            gemm_shapes=decode_gemm_shapes,
+            kv_cache_tokens=seq_len,
+        )
+        tc.pipeline_graph = decode_pipeline_graph
+        _, decode_peak_gb = mem_estimator.simulate_peak(
+            decode_root,
+            decode_memory_data,
+            mode="inference",
+            filename="memory_graph_decode",
+        )
 
+    max_peak_gb = max(prefill_peak_gb, decode_peak_gb)
+    hardware_mem_bytes = getattr(tc.DRAM, "size", None)
+    if hardware_mem_bytes is None and hasattr(tc.hw_config, "tech_config"):
+        tech_cfg = tc.hw_config.tech_config
+        if hasattr(tech_cfg, "DRAM"):
+            hardware_mem_bytes = getattr(tech_cfg.DRAM, "size", None)
 
-    embedding_mem = get_embedding_act_mem(
-        batch_size=micro_batch,
-        seq_len=seq_len,
-        hidden_dim=hidden_dim,
-        p=1,
-        t=1,
-        precision=precision
-    )
+    capacity_gb = None
+    headroom_gb = None
+    if hardware_mem_bytes is not None:
+        capacity_gb = float(hardware_mem_bytes) / float(1024 ** 3)
+        headroom_gb = capacity_gb - max_peak_gb
 
-    embedding_weight_mem = get_embedding_weight_mem(
-        vocab_size=vocab_size,
-        hidden_dim=hidden_dim,
-        precision=precision,
-        tied_embeddings=tied_embeddings,
-        param_replica_factor=dp
-    )
-
-    tot_mem = transformer_mem_layer*n_layers + softmax_mem + embedding_mem + embedding_weight_mem
-
-    
-
-    return tot_mem, embedding_mem, transformer_mem_layer*n_layers,transformer_act_layer*n_layers,transformer_static_layer*n_layers, gradient_mem_layer*n_layers, optimizer_mem_layer*n_layers, weight_memory_layer*n_layers, softmax_mem#, projection_mem, wt_mem, act_mem, point_mem
+    return {
+        "prefill_peak_gb": prefill_peak_gb,
+        "decode_peak_gb": decode_peak_gb,
+        "max_peak_gb": max_peak_gb,
+        "capacity_gb": capacity_gb,
+        "headroom_gb": headroom_gb,
+        "output_dir": output_dir,
+    }
 
 
 # ====================================================================
@@ -421,17 +541,20 @@ if __name__ == "__main__":
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    mem, embedding_mem, transformer_mem, transformer_act_mem, transformer_static_mem, gradient_mem, optimizer_mem, weight_memory, softmax_mem = _test_mem_req_total(
-                exp_hw_config,
-                exp_model_config,
-
-            )
-    print(f"Total Memory Requirement: {mem/1e9:.2f} GB")
-    print(f"Embedding Memory Requirement: {embedding_mem/1e9:.2f} GB")
-    print(f"Transformer Memory Requirement: {transformer_mem/1e9:.2f} GB")
-    print(f"Transformer Activation Memory Requirement: {transformer_act_mem/1e9:.2f} GB")
-    print(f"Transformer Static Memory Requirement(grad+optim+weight): {transformer_static_mem/1e9:.2f} GB")
-    print(f"Transformer Gradient Memory Requirement: {gradient_mem/1e9:.2f} GB")
-    print(f"Transformer Optimizer Memory Requirement: {optimizer_mem/1e9:.2f} GB")
-    print(f"Transformer Weight Memory Requirement: {weight_memory/1e9:.2f} GB")
-    print(f"Softmax Memory Requirement: {softmax_mem/1e9:.2f} GB")
+    summary = _test_mem_req_total(
+        exp_hw_config,
+        exp_model_config,
+    )
+    print("Memory Estimator Smoke Test")
+    print(f"Prefill peak memory (per gpu): {summary['prefill_peak_gb']:.2f} GiB")
+    print(f"Final decode peak memory (per gpu): {summary['decode_peak_gb']:.2f} GiB")
+    print(f"Max peak memory (per gpu): {summary['max_peak_gb']:.2f} GiB")
+    if summary["capacity_gb"] is None:
+        print("Hardware memory capacity (per gpu): unknown")
+    else:
+        print(f"Hardware memory capacity (per gpu): {summary['capacity_gb']:.2f} GiB")
+    if summary["headroom_gb"] is None:
+        print("Memory headroom: unknown")
+    else:
+        print(f"Memory headroom: {summary['headroom_gb']:.2f} GiB")
+    print(f"Output dir: {summary['output_dir']}")

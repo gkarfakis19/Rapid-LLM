@@ -8,11 +8,22 @@ import os
 
 import util
 from timing_model import CollectiveType
+from memory_estimation import MemKind, mem_kind_from_op_name, NON_TRANSFORMER_KINDS, TRANSFORMER_OP_KINDS
 debug = False
 BYTES_PER_GIB = 1024 ** 3
 
 class Node:
-    def __init__(self, name, op_id, hw_id, duration, fwd=True):
+    def __init__(
+        self,
+        name,
+        op_id,
+        hw_id,
+        duration,
+        fwd=True,
+        mem_kind=None,
+        recompute=False,
+        param_gather=False,
+    ):
         self.name = name
         self.op_id = op_id
         self.hw_id = hw_id
@@ -24,6 +35,9 @@ class Node:
         self.memory = 0  # memory usage
         self.fwd = fwd  # forward or backward
         self.scheduled = False
+        self.mem_kind = mem_kind
+        self.recompute = bool(recompute)
+        self.param_gather = bool(param_gather)
 
     def add_child(self, obj):
         self.children.append(obj)
@@ -250,6 +264,9 @@ class Graph:
                 "layer_index",
                 "direction",
                 "tp_rank",
+                "mem_kind",
+                "recompute",
+                "param_gather",
                 "flatten_placeholder",
                 "comm_interconnect_type",
                 "comm_type",
@@ -269,7 +286,16 @@ class Graph:
                 return cached
 
             if isinstance(obj, Node):
-                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration_storage(), fwd=obj.fwd)
+                clone = Node(
+                    obj.name,
+                    obj.op_id,
+                    obj.hw_id,
+                    obj.duration_storage(),
+                    fwd=obj.fwd,
+                    mem_kind=getattr(obj, "mem_kind", None),
+                    recompute=getattr(obj, "recompute", False),
+                    param_gather=getattr(obj, "param_gather", False),
+                )
                 clone.memory = getattr(obj, "memory", 0)
             elif isinstance(obj, Edge):
                 clone = Edge(
@@ -445,7 +471,16 @@ class Graph:
                 return cached
 
             if isinstance(obj, Node):
-                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration_storage(), fwd=obj.fwd)
+                clone = Node(
+                    obj.name,
+                    obj.op_id,
+                    obj.hw_id,
+                    obj.duration_storage(),
+                    fwd=obj.fwd,
+                    mem_kind=getattr(obj, "mem_kind", None),
+                    recompute=getattr(obj, "recompute", False),
+                    param_gather=getattr(obj, "param_gather", False),
+                )
                 clone.memory = getattr(obj, "memory", 0)
             elif isinstance(obj, Edge):
                 clone = Edge(
@@ -470,6 +505,9 @@ class Graph:
                 "layer_index",
                 "direction",
                 "tp_rank",
+                "mem_kind",
+                "recompute",
+                "param_gather",
                 "flatten_placeholder",
                 "comm_interconnect_type",
                 "comm_type",
@@ -650,10 +688,22 @@ class Graph:
             data_batch_node[i-1].add_child(data_batch_node[i])
 
         for b in range(self.num_batch): #connect each data batch node with corresponding nodes
-            linear_softmax = Node(f"linear_softmax{b}", op_id, self.lp-1, linear_softmax_f_time)
+            linear_softmax = Node(
+                f"linear_softmax{b}",
+                op_id,
+                self.lp - 1,
+                linear_softmax_f_time,
+                mem_kind=MemKind.SOFTMAX,
+            )
             op_id += 1
             softmax_node.append(linear_softmax)
-            emb = Node(f"embedding{b}", op_id, 0, embedding_f_time)      # hw_id = 0
+            emb = Node(
+                f"embedding{b}",
+                op_id,
+                0,
+                embedding_f_time,
+                mem_kind=MemKind.EMBEDDING,
+            )  # hw_id = 0
             op_id += 1
             embedding_node.append(emb)
             data_batch_node[b].add_child(embedding_node[b])
@@ -664,7 +714,13 @@ class Graph:
 
             for l in range(self.num_layer):
                 hw_id = self._stage_for_layer(l)
-                transformer_node = Node(f"transformer_layer{l}", op_id, hw_id, transformer_f_time)
+                transformer_node = Node(
+                    f"transformer_layer{l}",
+                    op_id,
+                    hw_id,
+                    transformer_f_time,
+                    mem_kind=MemKind.TRANSFORMER,
+                )
                 transformer_node.micro_batch_index = b
                 transformer_node.layer_index = l
                 transformer_node.direction = "forward"
@@ -752,10 +808,24 @@ class Graph:
             return transformer_nodes_b[mb_idx][layer_idx]
 
         for b in reversed(range(self.num_batch)): #connect each data batch node with corresponding nodes
-            emb_b = Node("embedding_b", op_id, 0, embedding_b_time, fwd=False)      # hw_id = 0
+            emb_b = Node(
+                "embedding_b",
+                op_id,
+                0,
+                embedding_b_time,
+                fwd=False,
+                mem_kind=MemKind.EMBEDDING,
+            )  # hw_id = 0
             op_id += 1
             embedding_node_b[b] = emb_b
-            linear_softmax_b = Node("linear_softmax_b", op_id, self.lp-1, linear_softmax_b_time, fwd=False)
+            linear_softmax_b = Node(
+                "linear_softmax_b",
+                op_id,
+                self.lp - 1,
+                linear_softmax_b_time,
+                fwd=False,
+                mem_kind=MemKind.SOFTMAX,
+            )
             op_id += 1
             softmax_node_b[b] = linear_softmax_b
             softmax_node[b].add_child(linear_softmax_b)
@@ -771,6 +841,8 @@ class Graph:
                         hw_id,
                         transformer_f_time,
                         fwd=True,
+                        mem_kind=MemKind.TRANSFORMER,
+                        recompute=True,
                     )
                     recompute_node.micro_batch_index = b
                     recompute_node.layer_index = l
@@ -785,6 +857,7 @@ class Graph:
                     hw_id,
                     transformer_b_base_time,
                     fwd=False,
+                    mem_kind=MemKind.TRANSFORMER,
                 )
                 transformer_node_b.micro_batch_index = b
                 transformer_node_b.layer_index = l
@@ -1104,7 +1177,14 @@ class Graph:
                             last_node = _bwd_exit_node(0, min_l)
                     
                     if last_node:
-                        opt_node = Node(f"optimizer_stage{stage}", op_id, stage, optimizer_time, fwd=False)
+                        opt_node = Node(
+                            f"optimizer_stage{stage}",
+                            op_id,
+                            stage,
+                            optimizer_time,
+                            fwd=False,
+                            mem_kind=MemKind.OPTIMIZER,
+                        )
                         op_id += 1
                         last_node.add_child(opt_node)
 
@@ -1141,6 +1221,8 @@ class Graph:
                             hw_id=rank,
                             duration=fwd_duration,
                             fwd=True,
+                            mem_kind=mem_kind_from_op_name(entry_name),
+                            param_gather=(idx == 0),
                         )
                         node.tp_rank = tp_idx
                         node.cp_rank = cp_idx
@@ -1184,6 +1266,8 @@ class Graph:
                             hw_id=rank,
                             duration=bwd_duration,
                             fwd=False,
+                            mem_kind=mem_kind_from_op_name(entry_name),
+                            param_gather=(idx == 0),
                         )
                         node.tp_rank = tp_idx
                         node.cp_rank = cp_idx
@@ -1393,11 +1477,14 @@ class Graph:
                     details="static_mem",
                 )
 
-            def allocate_activation(self, gpu_id: int, node: Any, timestamp: float) -> None:
-                if mode != "training":
-                    size_bytes = memory_data.get("activation_mem_per_layer_inference", 0)
-                else:
-                    size_bytes = memory_data.get("activation_mem_per_layer", 0) 
+            def allocate_activation(
+                self,
+                gpu_id: int,
+                node: Any,
+                timestamp: float,
+                size_bytes: float,
+                action: str = "allocate_activation",
+            ) -> None:
                 node_identifier = getattr(node, "op_id", None)
                 if node_identifier is None:
                     node_identifier = id(node)
@@ -1410,15 +1497,21 @@ class Graph:
                     getattr(node, "op_id", "N/A"),
                     getattr(node, "fwd", "N/A"),
                 )
-                self._record_change(gpu_id, "allocate_activation", size_bytes, timestamp, details=details)
+                self._record_change(gpu_id, action, size_bytes, timestamp, details=details)
                 self._update_peak(gpu_id)
 
-            def release_activation(self, gpu_id: int, node: Any, timestamp: float) -> None:
-                size_bytes = memory_data.get("activation_mem_per_layer", 0)
+            def release_activation(
+                self,
+                gpu_id: int,
+                node: Any,
+                timestamp: float,
+                size_bytes: float,
+                action: str = "release_activation",
+            ) -> None:
                 node_identifier = getattr(node, "op_id", None)
                 if node_identifier is None:
                     node_identifier = id(node)
-                
+
                 if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
                     return
                 self.current[gpu_id] = max(0.0, self.current[gpu_id] - size_bytes)
@@ -1427,7 +1520,25 @@ class Graph:
                     getattr(node, "op_id", "N/A"),
                     getattr(node, "fwd", "N/A"),
                 )
-                self._record_change(gpu_id, "release_activation", -size_bytes, timestamp, details=details)
+                self._record_change(gpu_id, action, -size_bytes, timestamp, details=details)
+
+            def allocate_ephemeral(self, gpu_id: int, node: Any, timestamp: float, size_bytes: float) -> None:
+                self.allocate_activation(
+                    gpu_id,
+                    node,
+                    timestamp,
+                    size_bytes,
+                    action="allocate_ephemeral",
+                )
+
+            def release_ephemeral(self, gpu_id: int, node: Any, timestamp: float, size_bytes: float) -> None:
+                self.release_activation(
+                    gpu_id,
+                    node,
+                    timestamp,
+                    size_bytes,
+                    action="release_ephemeral",
+                )
 
             def summary(self) -> List[Dict[str, float]]:
                 summary: List[Dict[str, float]] = []
@@ -1486,14 +1597,40 @@ class Graph:
                     if handle:
                         handle.close()
 
+        persistent_by_kind = memory_data.get("persistent_bytes_by_kind", {}) or {}
+        transient_by_kind = memory_data.get("transient_bytes_by_kind", {}) or {}
+        valid_kinds = set(persistent_by_kind) | set(transient_by_kind)
+        param_gather_bytes = float(memory_data.get("param_gather_bytes", 0.0) or 0.0)
+
         def _is_transformer_block(node: Any) -> bool:
             """Return True when node represents a transformer compute block."""
             if not isinstance(node, Node):
                 return False
-            name = getattr(node, "name", "")
-            if not isinstance(name, str):
+            mem_kind = getattr(node, "mem_kind", None)
+            if not isinstance(mem_kind, MemKind):
                 return False
-            return "transformer" in name.lower()
+            if mem_kind in NON_TRANSFORMER_KINDS:
+                return False
+            return mem_kind in TRANSFORMER_OP_KINDS or mem_kind in valid_kinds
+
+        def _node_mem_kind(node: Any) -> Optional[MemKind]:
+            if not isinstance(node, Node):
+                return None
+            mem_kind = getattr(node, "mem_kind", None)
+            return mem_kind if isinstance(mem_kind, MemKind) else None
+
+        def _bytes_for_kind(kind: MemKind, mapping: Dict[MemKind, float], label: str) -> float:
+            if kind not in mapping:
+                return 0.0
+            return float(mapping[kind] or 0.0)
+
+        def _persistent_bytes_for_node(node: Any) -> float:
+            mem_kind = _node_mem_kind(node)
+            return _bytes_for_kind(mem_kind, persistent_by_kind, "persistent")
+
+        def _transient_bytes_for_node(node: Any) -> float:
+            mem_kind = _node_mem_kind(node)
+            return _bytes_for_kind(mem_kind, transient_by_kind, "transient")
 
         def _count_transformer_layers_per_device(root_obj: Any, num_devices: int) -> List[int]:
             layer_sets: List[Set[Any]] = [set() for _ in range(num_devices)]
@@ -1528,6 +1665,8 @@ class Graph:
         transformer_layers_per_device = _count_transformer_layers_per_device(root, base_devices)
         static_mem_per_layer = memory_data.get("static_mem_per_layer", 0)
         weight_mem_per_layer = memory_data.get("weight_mem_per_layer", 0)
+        kv_cache_bytes_per_layer = memory_data.get("kv_cache_bytes_per_layer", 0.0)
+        extra_static_bytes_per_device = memory_data.get("extra_static_bytes_per_device", {}) or {}
         total_tracked_layers = sum(transformer_layers_per_device)
         if total_tracked_layers == 0:
             transformer_layers_per_device = [1 for _ in range(base_devices)]
@@ -1539,13 +1678,17 @@ class Graph:
         for idx in range(base_devices):
             
             if mode == "inference":
-                static_bytes = weight_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else weight_mem_per_layer
-                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+                layer_count = transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else 1
+                static_bytes = weight_mem_per_layer * layer_count
+                if kv_cache_bytes_per_layer:
+                    static_bytes += kv_cache_bytes_per_layer * layer_count
             elif mode == "training":
-                static_bytes = static_mem_per_layer * transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else static_mem_per_layer
-                memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
+                layer_count = transformer_layers_per_device[idx] if idx < len(transformer_layers_per_device) else 1
+                static_bytes = static_mem_per_layer * layer_count
             else:
                 raise ValueError(f"Invalid mode '{mode}' for memory simulation")
+            static_bytes += extra_static_bytes_per_device.get(idx, 0.0)
+            memory_snapshot.add_static(idx, static_bytes, timestamp=0.0)
             
         self.memory_monitor_snapshot = memory_snapshot
 
@@ -1580,19 +1723,27 @@ class Graph:
 
             if isinstance(event, Node):
                 GPU_list[int(event.hw_id)] = True
-                is_transformer_block = _is_transformer_block(event) #TODO: embedding and softmax layers
+                persistent_bytes = _persistent_bytes_for_node(event)
+                transient_bytes = _transient_bytes_for_node(event)
                 if mode == "training":
-                    if not event.fwd:
-                        if is_transformer_block:
-                            memory_snapshot.release_activation(int(event.hw_id), event, time)
-                    elif event.fwd:
-                        if is_transformer_block:
-                            memory_snapshot.allocate_activation(int(event.hw_id), event, time)
+                    if event.fwd and persistent_bytes:
+                        memory_snapshot.allocate_activation(int(event.hw_id), event, time, persistent_bytes)
+                    if event.fwd and transient_bytes:
+                        memory_snapshot.allocate_activation(int(event.hw_id), event, time, transient_bytes)
+                        memory_snapshot.release_activation(int(event.hw_id), event, time, transient_bytes)
+                    if not event.fwd and persistent_bytes:
+                        memory_snapshot.release_activation(int(event.hw_id), event, time, persistent_bytes)
                 elif mode == "inference":
-                    if event.fwd:
-                        if is_transformer_block:
-                            memory_snapshot.allocate_activation(int(event.hw_id), event, time)
-                            memory_snapshot.release_activation(int(event.hw_id), event, time)
+                    if event.fwd and transient_bytes:
+                        memory_snapshot.allocate_activation(int(event.hw_id), event, time, transient_bytes)
+                        memory_snapshot.release_activation(int(event.hw_id), event, time, transient_bytes)
+                if mode == "training" and param_gather_bytes is not None and getattr(event, "param_gather", False):
+                    memory_snapshot.release_ephemeral(
+                        int(event.hw_id),
+                        event,
+                        time,
+                        param_gather_bytes,
+                    )
 
                 
             for event in ready_list[:]:
@@ -1613,6 +1764,13 @@ class Graph:
                 elif isinstance(event, Node): 
                     if GPU_list[int(event.hw_id)] == True:
                         new_time = time + event.duration
+                        if mode == "training" and param_gather_bytes and getattr(event, "param_gather", False):
+                            memory_snapshot.allocate_ephemeral(
+                                int(event.hw_id),
+                                event,
+                                time,
+                                param_gather_bytes,
+                            )
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
                         enqueued = True

@@ -252,12 +252,12 @@ Comparing the two runs will show how increasing tensor parallelism changes the p
 - **Work in progress:** Multi-GPU expert parallelism and validation.
 
 ### Memory Estimation
-- **Status:** Enabled but WIP. Sends indicative warning message if memory is exceeded.
-- **Supported:** Transformer activation (including KV cache) and static memory estimation with hybrid parallelism in training mode, and inference with tensor parallelism.
+- **Status:** Enabled.
+- **Supported:** Per-GPU peak from flattened graphs for training and inference. Training uses persistent vs transient activations (full/selective recompute supported). Inference uses `max(prefill peak, final decode peak)` and includes KV-cache bytes. 
+- **Not modeled:** Embedding/softmax activations or weights, comm buffers, allocator effects/fragmentation, MoE memory beyond single-GPU, or CP inference.
 
 ### KV-Cache
-- **Supported:** KV-cache runtime impact is modeled for all supported parallelism and model types.
-- **Work in progress:** KV-cache memory estimation is not yet supported.
+- **Supported:** KV-cache runtime impact and memory estimation (graph-based peak uses per-layer KV cache bytes).
 
 ### Energy Estimation
 - **Supported:** WIP Rudimentary inference-only model. Not yet validated.
@@ -268,6 +268,6 @@ Comparing the two runs will show how increasing tensor parallelism changes the p
 - **Work in progress:** KV cache precision cannot yet be set (config value is ignored).
 
 ### Validation
-- **Status:** Validation scripts are available in validation_scripts folder. We also validate against Megatron-LM and other paper data for inference and training, including networking, for up to 3000 GPUs. Below is a validation plot against Koyeb's single NVIDIA A100 data on Llama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`.
+- **Status:** Validation scripts are available in validation_scripts folder. We also validate against Megatron-LM and other paper data for inference and training, including networking, for up to 3000 GPUs. Below is a validation plot against Koyeb's single NVIDIA A100 data on Llama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`. A memory-estimator smoke test lives at `validation_scripts/memory_estimator_smoke.py`.
 
 ![Koyeb Validation](validation_scripts/koyeb_a100_sxm_no_parallelism.png)
