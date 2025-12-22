@@ -16,8 +16,8 @@ from util import log_message, flush_log_queue, extend_log
 
 from tile import TiledGEMM, formatBytes
 from base_timing import TimeCalculation
-from inference_timing import TimeCalculationLLM
-from train_timing import TimeCalculationLLMInference
+from train_timing import TimeCalculationLLM
+from inference_timing import TimeCalculationLLMInference
 from memory_estimation import estimate_memory
 
 # Cache handling policy for AstraSim integration.

@@ -17,7 +17,7 @@ from timing_model import CollectiveType
 from util import log_message
 
 if TYPE_CHECKING:
-    from inference_timing import TimeCalculationLLM
+    from train_timing import TimeCalculationLLM
 
 
 def _mode_label(mode: Any) -> str:

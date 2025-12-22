@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from inference_timing import TimeCalculationLLM
+from train_timing import TimeCalculationLLM
 from llm_util import process_gemm_shapes
 
 import seaborn as sns

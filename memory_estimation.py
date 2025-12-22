@@ -292,7 +292,7 @@ def estimate_training_memory(
     mode: str = "LLM",
     output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    from inference_timing import TimeCalculationLLM
+    from train_timing import TimeCalculationLLM
 
     tc = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=output_dir)
     return tc.estimate_memory_only()

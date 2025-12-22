@@ -257,7 +257,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             if key in kwargs and hasattr(sched_cfg, key):
                 setattr(sched_cfg, key, int(kwargs[key]))
 
-    from train_timing import TimeCalculationLLMInference
+    from inference_timing import TimeCalculationLLMInference
     from llm_execution import LLMExecutionDispatcher
     from memory_estimation import MemoryEstimator
 

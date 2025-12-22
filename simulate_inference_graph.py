@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from simulate_train_graph import Graph
 import llm_util
-from inference_timing import LLMExecutionDispatcher
+from train_timing import LLMExecutionDispatcher
 
 @dataclass
 class InferenceConfig:
