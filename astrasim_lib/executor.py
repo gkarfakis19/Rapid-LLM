@@ -1465,12 +1465,31 @@ def convert_rapid_llm_graph_to_chakra_et(
                         if dep in collective_info:
                             deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
                         else:
-                            deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
+                            # if dep.hw_id exists, do this. Else look at local_hw_id.
+                            if hasattr(dep, "hw_id"):
+                                deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
+                            else:
+                                try:
+                                    deps.append(compute_et_ids[(dep, rank_for(dep.local_hw_id, dp_idx))])
+                                except KeyError as e:
+                                    print(f"Compute et id not found for {info}")
+                                    print(f"Missing dep: {dep}")
+                                    # print(f"Compute et ids: {compute_et_ids}")
+                                    raise e
                     for dep in info.get("collective_deps", set()):
                         if dep in collective_info:
-                            deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
+                            try:
+                                deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
+                            except KeyError as e:
+                                print(f"Collective et id not found for {info}")
+                                print(f"Missing dep: {dep}")
+                                # print(f"Collective et ids: {collective_et_ids}")
+                                raise e
                         else:
-                            deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
+                            if hasattr(dep, "hw_id"):
+                                deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
+                            else:
+                                deps.append(compute_et_ids[(dep, rank_for(dep.local_hw_id, dp_idx))])
                     # for parent in info["pipeline_deps"]:
                     #     deps.append(ensure_pipeline(parent, task, dp_idx))
                     unique_deps = []

@@ -399,6 +399,7 @@ class PipelineGraphFlattener:
     def _ensure_zero3_per_rank_edges(
         self,
         edge: llm_simulation.Edge,
+        cross_device = False,
         rank_heads = None,
         rank_tails = None,
         hw_ids = None
@@ -406,12 +407,14 @@ class PipelineGraphFlattener:
 
         transformer_mode = ""
         per_rank_edges: List[llm_simulation.Edge] = []
+        is_backward = False
         if rank_tails and rank_heads:
             # this is used in expand_transformer_node
             # use them as anchors
             wire_anchors = rank_tails
             direction = getattr(edge, "direction", None)
             if direction and str(direction).lower() == "backward":
+                is_backward = True
                 wire_anchors = rank_heads
             iterable = wire_anchors
             transformer_mode = True
@@ -441,15 +444,29 @@ class PipelineGraphFlattener:
             gather_edge.micro_batch_index = getattr(edge, "micro_batch_index", None)
             gather_edge.layer_index = getattr(edge, "layer_index", None)
             gather_edge.direction = getattr(edge, "direction", None)
+            gather_edge.tp_shard = True
             if transformer_mode:
-                if getattr(item, "hw_id", None) is not None:
-                    gather_edge.local_hw_id = item.hw_id
+                if not "bwd" in edge.name: # HACK!!!!
+                    offset = self._par_degree
                 else:
-                    gather_edge.local_hw_id = getattr(item, "local_hw_id", None)
+                    offset = -self._par_degree
+                # print(f"TM Edge name: {edge.name}, item: {item}")
+                if getattr(item, "hw_id", None) is not None:
+                    # if cross device, dont map to item hw id but next hw ids!
+                    if cross_device:
+                        gather_edge.local_hw_id = (item.hw_id) + offset
+                    else:
+                        gather_edge.local_hw_id = item.hw_id
+                else:
+                    if cross_device:
+                        gather_edge.local_hw_id = (getattr(item, "local_hw_id", None)) + offset
+                    else:
+                        gather_edge.local_hw_id = getattr(item, "local_hw_id", None)
                 # has the same children as item
                 for child in getattr(item, "children", []):
                     gather_edge.add_child(child)
             else:
+                # print(f"EM Edge name: {edge.name}, item: {item}")
                 gather_edge.local_hw_id = item
                 # we cannot attach children here as we don't have them yet.
 
@@ -618,6 +635,11 @@ class PipelineGraphFlattener:
                     stack.append(parents)
 
             if isinstance(obj, llm_simulation.Edge):
+                if getattr(obj, "comm_type", None) == CollectiveType.PIPELINE:
+                    continue
+                if getattr(obj, "tp_shard", False) and getattr(obj, "tp_rank", None) is not None:
+                    # Preserve per-rank ZeRO-3 gather placement; parents may be shared across TP ranks.
+                    continue
                 new_hw = None
                 for parent in getattr(obj, "parents", []) or []:
                     parent_hw = getattr(parent, "hw_id", None)
@@ -737,7 +759,7 @@ class PipelineGraphFlattener:
         # edge between compute nodes for ET conversion.
         for child in dp_children:
             if self._should_shard_zero3_transformer(child):
-                per_rank_edges = self._ensure_zero3_per_rank_edges(child, rank_heads, rank_tails)
+                per_rank_edges = self._ensure_zero3_per_rank_edges(child, rank_heads=rank_heads, rank_tails=rank_tails, hw_ids=None)
 
             child_clone = self._clone(child)
             if child_clone is None:
@@ -831,7 +853,8 @@ class PipelineGraphFlattener:
             self._attach(downstream_parents, child_clone)
 
         for zero3_edge in zero3_attachments:
-            per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_edge, rank_heads, rank_tails, hw_ids=None)
+            is_cross_device = zero3_edge.local_hw_id != stage_id
+            per_rank_edges = self._ensure_zero3_per_rank_edges(zero3_edge, cross_device=is_cross_device, rank_heads=rank_heads, rank_tails=rank_tails, hw_ids=None)
             self._clone_cache[id(zero3_edge)] = per_rank_edges
 
         heads_tuple = tuple(rank_heads)
