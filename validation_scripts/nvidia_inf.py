@@ -452,4 +452,4 @@ def _plot_error_bars(rows: List[Dict[str, object]], path: Path, title: str) -> P
 
 
 if __name__ == "__main__":
-    run(enable_plot=True, network_ignored=True)
+    run(enable_plot=True, network_ignored=False)

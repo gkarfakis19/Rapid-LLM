@@ -15,15 +15,15 @@ sw_param:
     # Model parameter precision
     parameters: as_tensor_format
     # Accumulated gradients (persistent FP32 buffer)
-    gradients: fp32
+    gradients: as_tensor_format
     # Ephemeral per-microbatch gradients
     grad_microbatch: as_tensor_format
     # Gradient communication precision
     grad_communication: as_tensor_format
     # Optimizer states (momentum, variance)
-    optimizer_states: fp32
+    optimizer_states: as_tensor_format
     # Training statistics
-    stats: fp32
+    stats: as_tensor_format
     # FP32 master weight copy (0 = disabled)
     master_parameters: 0.0
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
@@ -39,13 +39,13 @@ tech_param:
     FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 4
     dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
-    util: 0.77
+    util: 1
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB     # (/s)
     dynamic_energy_per_bit: 4.5e-12     # (J)
     latency: 100e-9     # (s)
-    util: 0.3
+    util: 1
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB
@@ -97,7 +97,7 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: Ring
+        type: FullyConnected
         bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)

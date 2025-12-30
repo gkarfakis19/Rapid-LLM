@@ -67,7 +67,7 @@ def cached_rows():
     try:
       result = nvidia_inf.run(
         enable_plot=False,
-        network_ignored=True,
+        network_ignored=False,
         device=device,
         emit_logs=False,
       )
