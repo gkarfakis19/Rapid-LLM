@@ -652,7 +652,11 @@ class TimeCalculationLLM(TimeCalculation):
         mem_bytes = float(elements) * (
             2.0 * float(self.precision.gradients) + float(self.precision.grad_communication)
         )
-        return self.roofline(0, mem_bytes, name=name, mem_level=self.num_levels - 1)
+        time_s = self.roofline(0, mem_bytes, name=name, mem_level=self.num_levels - 1)
+        overhead = getattr(self, "grad_acc_overhead", 0.0) or 0.0
+        if overhead:
+            time_s += float(overhead)
+        return time_s
 
     def _grad_accum_elems_for_gemm(
         self,

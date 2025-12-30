@@ -1280,6 +1280,7 @@ class SWConfig:
     full_recomputation: bool
     dp_microbatch: str
     const_mem_offset: float
+    grad_acc_overhead: float
 
     @classmethod
     def from_dict(cls, sw_block: Dict[str, object]) -> "SWConfig":
@@ -1307,6 +1308,16 @@ class SWConfig:
                 raise ValueError(
                     f"sw_param.const_mem_offset must be a float-compatible value (got {const_mem_offset_raw!r})"
                 ) from exc
+        grad_acc_overhead_raw = sw_block.get("grad_acc_overhead", 0.0)
+        if grad_acc_overhead_raw is None:
+            grad_acc_overhead = 0.0
+        else:
+            try:
+                grad_acc_overhead = float(grad_acc_overhead_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"sw_param.grad_acc_overhead must be a float-compatible value (got {grad_acc_overhead_raw!r})"
+                ) from exc
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
@@ -1315,6 +1326,7 @@ class SWConfig:
             full_recomputation=full_recomputation,
             dp_microbatch=dp_microbatch,
             const_mem_offset=const_mem_offset,
+            grad_acc_overhead=grad_acc_overhead,
         )
 
 
