@@ -98,7 +98,7 @@ network:
       size: auto
       topology:
         type: FullyConnected
-        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        bandwidth: 250 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0

@@ -74,9 +74,9 @@ MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
 
 TARGET_NUM_GPUS = 64
 SAMPLE_COUNT = 50
-FAULT_ITER = 125
-FAULT_WORKERS = 75
-FAULT_MAG = [0.5, 0.1]  # May also be a (mean, std) tuple
+FAULT_ITER = 500
+FAULT_WORKERS = 105
+FAULT_MAG = (0.5, 0.0)  # May also be a (mean, std) tuple
 NUM_FAULTS = [1]
 
 MIN_ALLOWED_TP = 4

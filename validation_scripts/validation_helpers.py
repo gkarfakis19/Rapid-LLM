@@ -22,6 +22,7 @@ if PROJECT_ROOT not in sys.path:
 from tools.parallelism_sweep import set_astrasim_cache_mode  # type: ignore
 
 VALIDATION_WORKERS_ENV = "RAPID_VALIDATION_WORKERS"
+VALIDATION_QUIET_ENV = "RAPID_VALIDATION_QUIET"
 DEFAULT_WORKER_COUNT = 8
 
 ResultParser = Callable[[str, "ValidationSpec"], Dict[str, Any]]
@@ -150,37 +151,45 @@ def _prepare_config(
 
 
 def _read_env_worker_setting() -> Tuple[int, str]:
+  quiet = str(os.environ.get(VALIDATION_QUIET_ENV, "")).lower() in {"1", "true", "yes"}
   env_raw = os.environ.get(VALIDATION_WORKERS_ENV)
   if env_raw is None:
     return DEFAULT_WORKER_COUNT, f"{VALIDATION_WORKERS_ENV} unset (default {DEFAULT_WORKER_COUNT})"
   try:
     value = int(env_raw)
   except (TypeError, ValueError):
-    print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} must be a positive integer (got {env_raw!r}); using default {DEFAULT_WORKER_COUNT}.")
+    if not quiet:
+      print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} must be a positive integer (got {env_raw!r}); using default {DEFAULT_WORKER_COUNT}.")
     return DEFAULT_WORKER_COUNT, f"{VALIDATION_WORKERS_ENV} invalid ({env_raw!r}) -> default {DEFAULT_WORKER_COUNT}"
   if value <= 0:
-    print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} must be > 0 (got {env_raw!r}); using default {DEFAULT_WORKER_COUNT}.")
+    if not quiet:
+      print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} must be > 0 (got {env_raw!r}); using default {DEFAULT_WORKER_COUNT}.")
     return DEFAULT_WORKER_COUNT, f"{VALIDATION_WORKERS_ENV} <= 0 ({env_raw!r}) -> default {DEFAULT_WORKER_COUNT}"
   return value, f"{VALIDATION_WORKERS_ENV}={value}"
 
 
 def _determine_worker_count(spec_count: int, explicit_max: Optional[int]) -> int:
+  quiet = str(os.environ.get(VALIDATION_QUIET_ENV, "")).lower() in {"1", "true", "yes"}
   env_workers, env_desc = _read_env_worker_setting()
   requested = explicit_max if explicit_max is not None else env_workers
   request_desc = f"max_workers={explicit_max}" if explicit_max is not None else env_desc
   if requested <= 0:
-    print(f"[validation] WARNING: requested worker budget {requested} is not positive; bumping to 1.")
+    if not quiet:
+      print(f"[validation] WARNING: requested worker budget {requested} is not positive; bumping to 1.")
     requested = 1
   cpu_limit = max(1, os.cpu_count() or 1)
   if explicit_max is None and requested > cpu_limit:
-    print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} requested {requested} worker(s) but only {cpu_limit} CPU core(s) detected. Capping to {cpu_limit}.")
+    if not quiet:
+      print(f"[validation] WARNING: {VALIDATION_WORKERS_ENV} requested {requested} worker(s) but only {cpu_limit} CPU core(s) detected. Capping to {cpu_limit}.")
     requested = cpu_limit
   elif explicit_max is not None and requested > cpu_limit:
-    print(f"[validation] WARNING: max_workers requested {requested} worker(s) but only {cpu_limit} CPU core(s) detected. Capping to {cpu_limit}.")
+    if not quiet:
+      print(f"[validation] WARNING: max_workers requested {requested} worker(s) but only {cpu_limit} CPU core(s) detected. Capping to {cpu_limit}.")
     requested = cpu_limit
   worker_count = max(1, min(spec_count, requested))
-  print(f"[validation] Using {worker_count} worker(s) for {spec_count} experiment(s) "
-        f"(requested {request_desc}, cpu_limit={cpu_limit}).")
+  if not quiet:
+    print(f"[validation] Using {worker_count} worker(s) for {spec_count} experiment(s) "
+          f"(requested {request_desc}, cpu_limit={cpu_limit}).")
   return worker_count
 
 
