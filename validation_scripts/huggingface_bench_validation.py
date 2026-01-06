@@ -937,12 +937,13 @@ def build_hw_config_dict(
     # Override parallelism
     config['parallelism'] = {
         'auto': False,
-        'dp': row.dp,
         'tp': row.tp,
         'lp': row.pp,
         'cp': 1,
         'mb': rapid_mb,
         'tp_sp': True,
+        'train': {'dp': row.dp, 'ep': 1, 'tp_ep': True},
+        'inference': {'replica_count': 1, 'moe_dp': 1},
     }
 
     if 'sw_param' not in config:

@@ -84,7 +84,17 @@ def make_temp_hw_config(
     updated = copy.deepcopy(base_hw_dict)
     parallel_block = updated.setdefault("parallelism", {})
     for key, value in parallel_settings.items():
-        parallel_block[key] = int(value)
+        if key in {"tp", "cp", "lp", "mb", "tp_sp"}:
+            parallel_block[key] = int(value)
+
+    train_block = parallel_block.setdefault("train", {})
+    train_block["dp"] = int(parallel_settings.get("dp", train_block.get("dp", 1)) or 1)
+    train_block.setdefault("ep", 1)
+    train_block.setdefault("tp_ep", True)
+
+    inference_block = parallel_block.setdefault("inference", {})
+    inference_block.setdefault("replica_count", 1)
+    inference_block.setdefault("moe_dp", 1)
 
     if hw_mutator:
         hw_mutator(updated)

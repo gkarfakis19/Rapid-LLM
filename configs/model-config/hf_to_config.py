@@ -41,6 +41,8 @@ def _infer_model_type(model_type_field: Optional[str]) -> Tuple[str, Optional[st
         return "gpt", alias
     lowered = model_type_field.lower()
     normalized = lowered.replace("-", "").replace("_", "")
+    if "glm" in normalized:
+        return "glm4_moe", "glm"
     if "qwen2" in normalized:
         return "llama", "qwen2"
     if "phi3" in normalized:
@@ -75,6 +77,22 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
 
     lang_cfg = cfg.get("language_config", {})
 
+    head_dim = _first(
+        cfg,
+        "head_dim",
+        "attention_head_dim",
+        "head_size",
+        "kv_channels",
+        default=_first(
+            lang_cfg,
+            "head_dim",
+            "attention_head_dim",
+            "head_size",
+            "kv_channels",
+            default=None,
+        ),
+    )
+
     kv_heads = _first(
         cfg,
         "num_key_value_heads",
@@ -99,6 +117,18 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
         attention_block["kv_heads"] = int(kv_heads)
     else:
         attention_block["kv_heads"] = None
+
+    if model_type == "glm4_moe":
+        if head_dim is None:
+            raise SystemExit(
+                "Unable to deduce head_dim for model_type 'glm4_moe' from config.json."
+            )
+        try:
+            attention_block["head_dim"] = int(head_dim)
+        except (TypeError, ValueError):
+            raise SystemExit(
+                f"Invalid head_dim value for model_type 'glm4_moe': {head_dim!r}."
+            )
 
     use_flashattention = args.use_flashattention
     if use_flashattention is None:
@@ -327,7 +357,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.write(yaml_dump)
 
     if alias:
-        print(f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to RAPID-LLM model_type 'llama'.")
+        print(
+            f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to RAPID-LLM model_type '{inferred_model_type}'."
+        )
 
     lang_cfg = cfg.get("language_config", {})
     if alias == "phi3":

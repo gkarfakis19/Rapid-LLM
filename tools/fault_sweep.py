@@ -192,7 +192,11 @@ def _parallelism_product(names: Iterable[object], parallelism: Dict[str, object]
         axis = str(entry).strip().lower()
         if not axis:
             continue
-        value = parallelism.get(axis, 1)
+        if axis in {"dp", "ep"}:
+            train_block = parallelism.get("train", {}) if isinstance(parallelism, dict) else {}
+            value = train_block.get(axis, 1)
+        else:
+            value = parallelism.get(axis, 1)
         try:
             factor = int(value)
         except (TypeError, ValueError):
@@ -303,7 +307,13 @@ def _collect_possible_fault_links(hw_dict: Dict[str, object]) -> set[Tuple[int, 
 
 def _run_fault_injection_self_test() -> None:
     mesh2d_ring_hw = {
-        "parallelism": {"tp": 2, "cp": 2, "dp": 2, "lp": 1},
+        "parallelism": {
+            "tp": 2,
+            "cp": 2,
+            "lp": 1,
+            "train": {"dp": 2, "ep": 1, "tp_ep": True},
+            "inference": {"replica_count": 1, "moe_dp": 1},
+        },
         "network": {
             "dimensions": [
                 {
@@ -330,7 +340,13 @@ def _run_fault_injection_self_test() -> None:
     )
 
     ring_ring_hw = {
-        "parallelism": {"tp": 4, "cp": 1, "dp": 4, "lp": 1},
+        "parallelism": {
+            "tp": 4,
+            "cp": 1,
+            "lp": 1,
+            "train": {"dp": 4, "ep": 1, "tp_ep": True},
+            "inference": {"replica_count": 1, "moe_dp": 1},
+        },
         "network": {
             "dimensions": [
                 {
@@ -1124,8 +1140,17 @@ def _generate_hw_yaml_from_task(base_hw_dict: Dict[str, object], task: Dict[str,
     settings = dict(task.get("settings", {}) or {})
     parallel_block = hw_copy.setdefault("parallelism", {})
     if isinstance(parallel_block, dict):
-        for key, value in settings.items():
-            parallel_block[key] = value
+        for key in ("tp", "cp", "lp", "mb", "tp_sp"):
+            if key in settings:
+                parallel_block[key] = settings[key]
+        train_block = parallel_block.setdefault("train", {})
+        if "dp" in settings:
+            train_block["dp"] = settings["dp"]
+        train_block.setdefault("ep", 1)
+        train_block.setdefault("tp_ep", True)
+        inference_block = parallel_block.setdefault("inference", {})
+        inference_block.setdefault("replica_count", 1)
+        inference_block.setdefault("moe_dp", 1)
 
     mutator = None
     faults: Sequence[Tuple[int, float, int]] = ()

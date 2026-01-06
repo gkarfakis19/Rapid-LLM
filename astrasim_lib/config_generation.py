@@ -16,7 +16,7 @@ from .bootstrap import ensure_chakra_available
 # same setup entry point for consistency.
 ensure_chakra_available()
 
-ASTRA_DEBUG = False
+ASTRA_DEBUG = True
 
 
 def _save_json(path: str, data: Dict[str, Any]) -> None:
@@ -94,6 +94,8 @@ def _normalize_topology_name(topo: str) -> str:
         return "Ring"
     if topo_str in ("switch",):
         return "Switch"
+    if topo_flat == "superpod":
+        return "SuperPOD"
     if topo_flat == "fcring2d":
         return "FCRing2D"
     if topo_str in ("torus2d"):
@@ -190,6 +192,21 @@ def _resolve_2d_dims(
     return int(resolved[0]), int(resolved[1])
 
 
+def _suggest_divisors(value: int) -> List[int]:
+    if value < 1:
+        return []
+    divisors: List[int] = []
+    root = int(math.isqrt(value))
+    for candidate in range(1, root + 1):
+        if value % candidate != 0:
+            continue
+        divisors.append(candidate)
+        other = value // candidate
+        if other != candidate:
+            divisors.append(other)
+    return sorted(divisors)
+
+
 def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Expand multi-dimensional mesh/torus entries into per-dimension entries."""
 
@@ -200,6 +217,84 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
         dims_value = entry.get("dims")
         bw_value = entry.get("bandwidth")
         lat_value = entry.get("latency")
+
+        if isinstance(topo, str) and topo.lower() == "superpod":
+            dim = entry.get("dim")
+            dim_label = getattr(dim, "label", getattr(dim, "id", "<unnamed>"))
+            variant_raw = getattr(dim, "superpod_variant", None)
+            variant = str(variant_raw).strip().lower() if variant_raw is not None else ""
+            if variant != "h100":
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' superpod_variant must be 'h100' (got {variant_raw!r})"
+                )
+
+            leaf_size = getattr(dim, "superpod_leaf_size", None)
+            leaf_switches_per_su = getattr(dim, "superpod_leaf_switches_per_su", None)
+            spine_switches_per_su = getattr(dim, "superpod_spine_switches_per_su", None)
+            if leaf_size is None or leaf_switches_per_su is None or spine_switches_per_su is None:
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' is missing leaf/spine configuration values"
+                )
+            leaf_size = int(leaf_size)
+            leaf_switches_per_su = int(leaf_switches_per_su)
+            spine_switches_per_su = int(spine_switches_per_su)
+            if leaf_size < 1 or leaf_switches_per_su < 1 or spine_switches_per_su < 1:
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' leaf/spine configuration must be > 0"
+                )
+
+            try:
+                total_boxes = int(npus_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' requires an integer size (got {npus_value!r})"
+                ) from exc
+            if total_boxes < 1:
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' size must be >= 1 (got {total_boxes})"
+                )
+            if total_boxes % leaf_size != 0:
+                divisors = _suggest_divisors(total_boxes)
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' size mismatch: N_boxes={total_boxes} "
+                    f"is not divisible by leaf_size={leaf_size}. Suggested leaf_size divisors: {divisors}"
+                )
+
+            num_su = total_boxes // leaf_size
+            if num_su > 16:
+                print(
+                    "H100 RA introduces a core tier at 16 SU. "
+                    "This model uses only leaf+spine and may be optimistic."
+                )
+
+            if not isinstance(bw_value, (list, tuple)) or len(bw_value) != 2:
+                raise ValueError(
+                    f"SuperPOD dimension '{dim_label}' bandwidth must be a two-entry list/tuple"
+                )
+            bw_leaf, bw_spine = bw_value
+            total_spines = num_su * spine_switches_per_su
+            eff_bw_leaf = float(bw_leaf) * float(leaf_switches_per_su)
+            eff_bw_spine = float(bw_spine) * float(total_spines)
+
+            expanded.append(
+                {
+                    **entry,
+                    "topology": "Switch",
+                    "npus": leaf_size,
+                    "bandwidth": eff_bw_leaf,
+                    "latency": lat_value,
+                }
+            )
+            expanded.append(
+                {
+                    **entry,
+                    "topology": "Switch",
+                    "npus": num_su,
+                    "bandwidth": eff_bw_spine,
+                    "latency": lat_value,
+                }
+            )
+            continue
 
         if isinstance(topo, str) and topo.lower() == "fcring2d":
             if dims_value is None:
@@ -339,12 +434,23 @@ def generate_astrasim_configs_from_hw(
         if str(axis).strip()
     )
 
-    axis_sizes_full: Dict[str, int] = {
-        "tp": int(sch_config.tp),
-        "cp": int(sch_config.cp),
-        "lp": int(sch_config.lp),
-        "dp": int(sch_config.dp),
-    }
+    active = getattr(hw_obj, "active_parallelism", None)
+    if isinstance(active, dict) and active:
+        axis_sizes_full = {
+            "tp": int(active.get("tp", 1) or 1),
+            "cp": int(active.get("cp", 1) or 1),
+            "ep": int(active.get("ep", 1) or 1),
+            "lp": int(active.get("lp", 1) or 1),
+            "dp": int(active.get("dp", 1) or 1),
+        }
+    else:
+        axis_sizes_full = {
+            "tp": int(sch_config.tp),
+            "cp": int(sch_config.cp),
+            "ep": int(sch_config.train.ep),
+            "lp": int(sch_config.lp),
+            "dp": int(sch_config.train.dp),
+        }
     synthetic_only = axes_filter_normalized is not None and set(axes_filter_normalized) == {"synthetic2"}
     if synthetic_only:
         preferred_set = set(preferred_axes_synth)
@@ -375,16 +481,25 @@ def generate_astrasim_configs_from_hw(
             base_bw = float(base_bw_values)
         base_latency = float(getattr(base_dim, "latency", None))
         base_topology = getattr(base_dim, "topology_type", None)
+        normalized_topology = str(base_topology or "").strip().lower().replace("-", "").replace("_", "")
+        if normalized_topology in {"superpod", "mesh2d", "torus2d", "kingmesh2d", "fcring2d"}:
+            synthetic_topology = "Switch"
+        else:
+            synthetic_topology = base_topology or "Switch"
         base_collectives = getattr(base_dim, "collective_override", {}) or {}
         synthetic_dim = SimpleNamespace(
             label="synthetic2",
             parallelisms=("synthetic2",),
             size=2,
-            topology_type=base_topology,
+            topology_type=synthetic_topology,
             effective_bandwidth=base_bw,
             bandwidth=base_bw,
             latency=base_latency,
             collective_override=base_collectives,
+            superpod_variant=getattr(base_dim, "superpod_variant", None),
+            superpod_leaf_size=getattr(base_dim, "superpod_leaf_size", None),
+            superpod_leaf_switches_per_su=getattr(base_dim, "superpod_leaf_switches_per_su", None),
+            superpod_spine_switches_per_su=getattr(base_dim, "superpod_spine_switches_per_su", None),
             faulty_links=(),
         )
         dimensions = [synthetic_dim]
@@ -397,9 +512,10 @@ def generate_astrasim_configs_from_hw(
             axis_sizes = {axis: axis_sizes_full.get(axis, 1) for axis in axes_filter_normalized}
             axis_sizes.setdefault("tp", 1)
             axis_sizes.setdefault("cp", 1)
+            axis_sizes.setdefault("ep", 1)
             axis_sizes.setdefault("lp", 1)
             axis_sizes.setdefault("dp", 1)
-        axis_order_preference = ["tp", "cp", "lp", "dp"]
+        axis_order_preference = ["tp", "cp", "ep", "lp", "dp"]
 
     allowed_axes = set(axis_sizes.keys()) if axes_filter_normalized else None
     # print(f"Allowed axes: {allowed_axes}")
@@ -418,7 +534,7 @@ def generate_astrasim_configs_from_hw(
             if axis not in axis_sizes:
                 raise ValueError(
                     f"Unsupported parallelism axis '{axis}' referenced by network dimension '{dim.label}'. "
-                    "Supported axes are tp, cp, lp, dp."
+                    "Supported axes are tp, cp, ep, lp, dp."
                 )
             effective *= axis_sizes[axis]
         dim_infos.append((dim, axes, effective, dim_idx))
@@ -569,6 +685,8 @@ def generate_astrasim_configs_from_hw(
                 non_recursive_from = 2 # TORUS2D, MESH2D - ASSUME RECURSIVE INTERNAL
             else:
                 non_recursive_from = 1 # KINGMESH
+        elif first_topo and first_topo == "SuperPOD":
+            non_recursive_from = 2 # SUPERPOD
         else:
             non_recursive_from = 0 # NO RECURSION EVER FOR OTHER CASES.
         if non_recursive_from > len(topo_list):

@@ -423,8 +423,27 @@ def record_validation(request):
   return _record
 
 
+def _collect_func_test_stats(terminalreporter):
+  prefix = "tests/test_func_test.py::test_func_test"
+  stats = terminalreporter.stats
+  passed = [rep for rep in stats.get("passed", []) if rep.nodeid.startswith(prefix)]
+  failed = [rep for rep in stats.get("failed", []) if rep.nodeid.startswith(prefix)]
+  skipped = [rep for rep in stats.get("skipped", []) if rep.nodeid.startswith(prefix)]
+  xfailed = [rep for rep in stats.get("xfailed", []) if rep.nodeid.startswith(prefix)]
+  xpassed = [rep for rep in stats.get("xpassed", []) if rep.nodeid.startswith(prefix)]
+  total = len(passed) + len(failed) + len(skipped) + len(xfailed) + len(xpassed)
+  if total == 0:
+    return None
+  return {
+    "total": total,
+    "passed": len(passed) + len(xpassed),
+    "xfailed": len(xfailed),
+  }
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus):
-  if not _VALIDATION_METRICS:
+  func_stats = _collect_func_test_stats(terminalreporter)
+  if not _VALIDATION_METRICS and not func_stats:
     return
   tr = terminalreporter
   tr.write_sep("=", "Test results")
@@ -433,6 +452,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus):
     if expected is not None:
       line += f" (expected <= {expected:.2f}%)"
     tr.write_line(line)
+  if func_stats:
+    tr.write_line(
+      f"{func_stats['passed']}/{func_stats['total']} functionality tests passed ({func_stats['xfailed']} xfailed)"
+    )
 
 __all__ = [
   "ValidationSpec",

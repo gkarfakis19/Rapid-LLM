@@ -263,6 +263,19 @@ def _assign_collective_labels(
     group_key_to_label: Dict[Tuple[str, Tuple[int, ...]], str] = {}
     label_suffix_counter: Dict[str, int] = defaultdict(int)
 
+    def _composite_members(stage: int, dp_idx: int, axes: Sequence[str]) -> List[int]:
+        coords = stage_axis_coords.get(stage, {})
+        key_base = tuple((ax, coords.get(ax, 0)) for ax in axis_order if ax not in axes)
+        members: List[int] = []
+        for stage_id, stage_coords in stage_axis_coords.items():
+            stage_key = tuple((ax, stage_coords.get(ax, 0)) for ax in axis_order if ax not in axes)
+            if stage_key != key_base:
+                continue
+            ranks = stage_to_ranks.get(stage_id, [])
+            if dp_idx < len(ranks):
+                members.append(ranks[dp_idx])
+        return sorted(set(members))
+
     for base_name, edges in tp_collective_groups.items():
         if not edges:
             continue
@@ -272,13 +285,24 @@ def _assign_collective_labels(
             stage = info["stage"]
             coords = stage_axis_coords.get(stage, {})
             key_base = tuple((ax, coords.get(ax, 0)) for ax in axis_order if ax != axis)
+            participants = int(info.get("participants", 0) or 0)
+
+            composite_axes: Optional[Tuple[str, ...]] = None
+            if axis == "ep":
+                tp_size = max(1, int(axis_sizes.get("tp", 1)))
+                ep_size = max(1, int(axis_sizes.get("ep", 1)))
+                if tp_size > 1 and participants == tp_size * ep_size:
+                    composite_axes = ("tp", "ep")
 
             members_per_dp: List[Tuple[int, Tuple[int, ...]]] = []
             for dp_idx in range(dp_count):
                 members = None
-                axis_map = axis_groups.get(axis)
-                if axis_map is not None:
-                    members = axis_map.get((dp_idx, key_base))
+                if composite_axes is not None:
+                    members = _composite_members(stage, dp_idx, composite_axes)
+                else:
+                    axis_map = axis_groups.get(axis)
+                    if axis_map is not None:
+                        members = axis_map.get((dp_idx, key_base))
                 if not members:
                     ranks = stage_to_ranks.get(stage, [])
                     if dp_idx < len(ranks):

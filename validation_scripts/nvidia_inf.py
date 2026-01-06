@@ -178,12 +178,13 @@ def _build_spec(device: str, model: str, tp: int, idx: int, network_ignored: boo
 
     hw_overrides: Dict[str, Dict[str, object]] = {
         "parallelism": {
-            "dp": 1,
             "tp": int(tp),
             "tp_sp": True,
             "cp": 1,
             "lp": 1,
             "mb": 1,
+            "train": {"dp": 1, "ep": 1, "tp_ep": True},
+            "inference": {"replica_count": 1, "moe_dp": 1},
         }
     }
     if network_ignored:
@@ -238,12 +239,13 @@ def _build_nvidia_spec(
 
     hw_overrides: Dict[str, Dict[str, object]] = {
         "parallelism": {
-            "dp": 1,
             "tp": int(tp),
             "tp_sp": True,
             "cp": 1,
             "lp": 1,
             "mb": 1,
+            "train": {"dp": 1, "ep": 1, "tp_ep": True},
+            "inference": {"replica_count": 1, "moe_dp": 1},
         }
     }
     if network_ignored:

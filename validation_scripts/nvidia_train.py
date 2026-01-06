@@ -124,12 +124,13 @@ def _build_spec(
 
   hw_overrides = {
     "parallelism": {
-      "dp": int(dp),
       "tp": int(tp),
       "tp_sp": bool(tp_sp),
       "cp": int(cp),
       "lp": int(pp),
       "mb": max(1, int(mb)),
+      "train": {"dp": int(dp), "ep": 1, "tp_ep": True},
+      "inference": {"replica_count": 1, "moe_dp": 1},
     },
     "sw_param": {
       # sw_param.full_recomputation toggles full activation recompute during backward.

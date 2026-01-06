@@ -264,12 +264,13 @@ def _build_spec(
 
     hw_overrides = {
         "parallelism": {
-            "dp": int(dp),
             "tp": int(tp),
             "tp_sp": False,
             "cp": int(cp),
             "lp": int(pp),
             "mb": int(eff_mb),  # align microbatch count with pipeline stages
+            "train": {"dp": int(dp), "ep": 1, "tp_ep": True},
+            "inference": {"replica_count": 1, "moe_dp": 1},
         },
         "sw_param": {
             # DDP -> zero_stage 0, FSDP -> zero_stage 3

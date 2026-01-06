@@ -176,12 +176,18 @@ def _update_hw_dict(
 ) -> Dict[str, Any]:
     cfg = copy.deepcopy(base_hw)
     par = cfg.setdefault("parallelism", {})
-    par["dp"] = 1
     par["tp"] = int(parallelism["tp"])
     par["cp"] = int(parallelism["cp"])
     par["lp"] = int(parallelism["lp"])
     if mb_override is not None:
         par["mb"] = int(mb_override)
+    train_block = par.setdefault("train", {})
+    train_block["dp"] = 1
+    train_block.setdefault("ep", 1)
+    train_block.setdefault("tp_ep", True)
+    inference_block = par.setdefault("inference", {})
+    inference_block.setdefault("replica_count", 1)
+    inference_block.setdefault("moe_dp", 1)
 
     net = cfg.setdefault("network", {})
     dims = list(net.get("dimensions") or [])

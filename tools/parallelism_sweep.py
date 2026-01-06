@@ -60,7 +60,7 @@ HW_LABELS = []   # Optional: labels aligned with HW_CONFIGS.
 MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
 
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
-# Keys should match the entries under the YAML "parallelism" section.
+# Values map to the training parallelism block (parallelism.train.dp, etc.).
 PARALLELISM_SWEEP = {
     "tp": [2**i for i in range(0, 6)],
     "cp": [2**i for i in range(0, 6)],
@@ -354,11 +354,38 @@ def cartesian_product(option_map):
         yield dict(zip(keys, values))
 
 
+def build_parallelism_settings(flat_settings: Dict[str, object]) -> Dict[str, object]:
+    parallelism: Dict[str, object] = {}
+    for key in ("tp", "cp", "lp", "mb", "tp_sp"):
+        if key in flat_settings:
+            parallelism[key] = flat_settings[key]
+    train_block = {
+        "dp": int(flat_settings.get("dp", 1) or 1),
+        "ep": int(flat_settings.get("ep", 1) or 1),
+        "tp_ep": bool(flat_settings.get("tp_ep", True)),
+    }
+    parallelism["train"] = train_block
+    parallelism["inference"] = {"replica_count": 1, "moe_dp": 1}
+    return parallelism
+
+
+def _parallelism_snapshot(parallelism: Dict[str, object]) -> Dict[str, int]:
+    train_block = parallelism.get("train")
+    if not isinstance(train_block, dict) or "dp" not in train_block:
+        raise ValueError("parallelism.train.dp must be set for sweep entries.")
+    return {
+        "tp": int(parallelism.get("tp", 1) or 1),
+        "cp": int(parallelism.get("cp", 1) or 1),
+        "dp": int(train_block["dp"]),
+        "lp": int(parallelism.get("lp", 1) or 1),
+    }
+
+
 def total_gpu_count(parallel_cfg):
+    values = _parallelism_snapshot(parallel_cfg)
     total = 1
     for axis in ("tp", "cp", "dp", "lp"):
-        value = int(parallel_cfg.get(axis, 1) or 1)
-        total *= max(1, value)
+        total *= max(1, int(values.get(axis, 1)))
     return total
 
 
@@ -384,8 +411,24 @@ def make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=None):
     """Return (parsed HW config, YAML string) for the given override."""
     updated = copy.deepcopy(base_hw_dict)
     parallel_block = updated.setdefault("parallelism", {})
-    for key, value in parallel_settings.items():
-        parallel_block[key] = value
+    for key in ("tp", "cp", "lp", "mb", "tp_sp"):
+        if key in parallel_settings:
+            parallel_block[key] = parallel_settings[key]
+
+    train_settings = parallel_settings.get("train")
+    if not isinstance(train_settings, dict):
+        raise ValueError("parallelism.train is required for sweep entries")
+    train_block = parallel_block.setdefault("train", {})
+    train_block["dp"] = int(train_settings["dp"])
+    train_block["ep"] = int(train_settings.get("ep", 1))
+    train_block["tp_ep"] = bool(train_settings.get("tp_ep", True))
+
+    inference_settings = parallel_settings.get("inference")
+    if not isinstance(inference_settings, dict):
+        raise ValueError("parallelism.inference is required for sweep entries")
+    inference_block = parallel_block.setdefault("inference", {})
+    inference_block["replica_count"] = int(inference_settings["replica_count"])
+    inference_block["moe_dp"] = int(inference_settings["moe_dp"])
 
     if hw_mutator:
         hw_mutator(updated)
@@ -417,10 +460,11 @@ def _rgb_from_parallelism(entries, gamma: float = 0.85):
       R = log2(tp+cp), G = log2(lp), B = log2(dp)
     Each channel is min-max normalized over the dataset, then gamma-adjusted.
     """
-    tps = np.array([max(1, int(e["parallelism"].get("tp", 1))) for e in entries], dtype=float)
-    cps = np.array([max(1, int(e["parallelism"].get("cp", 1))) for e in entries], dtype=float)
-    dps = np.array([max(1, int(e["parallelism"].get("dp", 1))) for e in entries], dtype=float)
-    lps = np.array([max(1, int(e["parallelism"].get("lp", 1))) for e in entries], dtype=float)
+    snapshots = [_parallelism_snapshot(e["parallelism"]) for e in entries]
+    tps = np.array([max(1, int(snap["tp"])) for snap in snapshots], dtype=float)
+    cps = np.array([max(1, int(snap["cp"])) for snap in snapshots], dtype=float)
+    dps = np.array([max(1, int(snap["dp"])) for snap in snapshots], dtype=float)
+    lps = np.array([max(1, int(snap["lp"])) for snap in snapshots], dtype=float)
 
     r_raw = np.log2(tps + cps)
     g_raw = np.log2(lps)
@@ -756,6 +800,7 @@ def plot_results(results, output_path):
     rows = []
     for i, item in enumerate(plot_entries):
         p = item["parallelism"]
+        snap = _parallelism_snapshot(p)
         ng = int(item["num_gpus"])
         metric_val = float(item[metric_key])
         if not math.isfinite(metric_val):
@@ -764,10 +809,10 @@ def plot_results(results, output_path):
             "row_id": i,
             "num_gpus": ng,
             "gpu_exp": _gpu_exp(ng),
-            "tp": int(p.get("tp", 1)),
-            "cp": int(p.get("cp", 1)),
-            "dp": int(p.get("dp", 1)),
-            "lp": int(p.get("lp", 1)),
+            "tp": snap["tp"],
+            "cp": snap["cp"],
+            "dp": snap["dp"],
+            "lp": snap["lp"],
             "memory_exceeded": bool(item.get("memory_exceeded", False)),
             metric_key: metric_val,
         })
@@ -1233,7 +1278,8 @@ def _worker_init(hw_dict, model_config_path, mode):
 
 
 def _worker_task(parallel_items: Tuple[Tuple[str, object], ...]):
-    parallel_settings = {k: v for k, v in parallel_items}
+    flat_settings = {k: v for k, v in parallel_items}
+    parallel_settings = build_parallelism_settings(flat_settings)
     try:
         metrics = evaluate_parallelism(
             _GLOBAL_HW_DICT,
@@ -1338,7 +1384,7 @@ def main():
     skipped_out_of_range = 0
     skipped_square_constraint = 0
     for items in task_items:
-        settings = dict(items)
+        settings = build_parallelism_settings(dict(items))
         num_gpus = total_gpu_count(settings)
         if enforce_square and not tp_cp_product_is_power_of_two_square(settings.get("tp"), settings.get("cp")):
             skipped_square_constraint += 1
@@ -1454,7 +1500,7 @@ def main():
             try:
                 tasks_to_eval: List[Tuple[Tuple[str, object], ...]] = []
                 for items in filtered_tasks:
-                    settings = dict(items)
+                    settings = build_parallelism_settings(dict(items))
                     num_gpus = total_gpu_count(settings)
                     key = _cache_key(hw_path, model_cache_id, settings)
                     cached_entry = runtime_cache.get(key)
@@ -1581,7 +1627,7 @@ def main():
                     model_config_obj = config.parse_config(model_config_path, config_type=mode)
                     with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
                         for items in tasks_to_eval:
-                            settings = dict(items)
+                            settings = build_parallelism_settings(dict(items))
                             num_gpus = total_gpu_count(settings)
                             progress.update(1)
                             try:

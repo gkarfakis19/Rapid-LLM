@@ -31,7 +31,10 @@ TP: Optional[int] = None
 CP: Optional[int] = None
 LP: Optional[int] = None
 DP: Optional[int] = None
+EP: Optional[int] = None
 MB: Optional[int] = None
+INFERENCE_REPLICA_COUNT: Optional[int] = None
+INFERENCE_MOE_DP: Optional[int] = None
 NUM_EXPERTS: Optional[int] = None
 TOP_K: Optional[int] = None
 
@@ -61,7 +64,10 @@ class SmokeConfig:
     cp: Optional[int] = CP
     lp: Optional[int] = LP
     dp: Optional[int] = DP
+    ep: Optional[int] = EP
     mb: Optional[int] = MB
+    inference_replica_count: Optional[int] = INFERENCE_REPLICA_COUNT
+    inference_moe_dp: Optional[int] = INFERENCE_MOE_DP
     flash_attention: str = FLASH_ATTENTION
     full_recomputation: str = FULL_RECOMPUTATION
     attention_tile_size: int = ATTENTION_TILE_SIZE
@@ -130,10 +136,22 @@ def _apply_overrides(model_cfg, sched_cfg, cfg: SmokeConfig):
             moe_cfg.first_k_dense_replace = int(getattr(model_cfg, "num_layers", 1))
 
     if sched_cfg is not None:
-        for key in ("dp", "tp", "cp", "ep", "lp", "mb"):
-            value = getattr(cfg, key)
+        for key in ("tp", "cp", "lp", "mb"):
+            value = getattr(cfg, key, None)
             if value is not None and hasattr(sched_cfg, key):
                 setattr(sched_cfg, key, int(value))
+        train_cfg = getattr(sched_cfg, "train", None)
+        if train_cfg is not None:
+            if cfg.dp is not None:
+                train_cfg.dp = int(cfg.dp)
+            if cfg.ep is not None:
+                train_cfg.ep = int(cfg.ep)
+        inference_cfg = getattr(sched_cfg, "inference", None)
+        if inference_cfg is not None:
+            if cfg.inference_replica_count is not None:
+                inference_cfg.replica_count = int(cfg.inference_replica_count)
+            if cfg.inference_moe_dp is not None:
+                inference_cfg.moe_dp = int(cfg.inference_moe_dp)
 
 
 def _configure_flash_attention(model_cfg, enabled: bool, tile_size: int) -> None:

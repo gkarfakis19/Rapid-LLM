@@ -3,7 +3,7 @@ model_param:
   run_type: training
   tied_embeddings: false
   model_type: llama
-  global_batch_size: 32
+  global_batch_size: 80
   gradient_accumulation_steps: 1
   seq_len: 4096
   decode_len: 1024
