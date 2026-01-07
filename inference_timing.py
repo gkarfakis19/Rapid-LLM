@@ -228,7 +228,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 seq_len=output_seq_len,
             )
             moe_group = self._moe_routing_group()
-            axis = "ep" if moe_group == self.ep else None
+            axis = None
             dispatch_fwd_bytes = int(
                 math.ceil(self.precision.activations * tokens_dispatched * self.hidden_dim)
             )

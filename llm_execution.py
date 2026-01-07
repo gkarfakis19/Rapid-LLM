@@ -1022,6 +1022,7 @@ class LLMExecutionDispatcher:
         self._axis_dimension_map: Dict[str, int] = {}
         self._transformer_stage_dp_faults: Dict[Tuple[int, int], Tuple[Tuple[int, int, float], ...]] = {}
         self._transformer_stage_timings: Dict[Tuple[int, int], TransformerTimings] = {}
+        self._transformer_stage_moe_timings: Dict[Tuple[int, int], TransformerTimings] = {}
         self._transformer_baseline_timings: Optional[TransformerTimings] = None
         self._transformer_moe_baseline_timings: Optional[TransformerTimings] = None
         self.no_data_parallel = bool(no_data_parallel)
@@ -1485,21 +1486,22 @@ class LLMExecutionDispatcher:
                 self.time_calc.network_model,
                 self.interconnect_params,
             )
-            transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_backward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
             self.transformer_graph.save_graph(
                 transformer_timed_forward_root,
                 self.time_calc.output_dir,
                 "/hierarchical_graph_transformer_forward",
             )
-            self.transformer_graph.save_graph(
-                transformer_timed_backward_root,
-                self.time_calc.output_dir,
-                "/hierarchical_graph_transformer_backward",
-            )
+            if self.transformer_backward_root is not None:
+                transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+                    self.transformer_backward_root,
+                    self.time_calc.network_model,
+                    self.interconnect_params,
+                )
+                self.transformer_graph.save_graph(
+                    transformer_timed_backward_root,
+                    self.time_calc.output_dir,
+                    "/hierarchical_graph_transformer_backward",
+                )
             if self.moe_transformer_graph and self.moe_transformer_forward_root:
                 moe_forward_root = self.moe_transformer_graph.convert_comm_sizes_to_times(
                     self.moe_transformer_forward_root,
@@ -1780,6 +1782,7 @@ class LLMExecutionDispatcher:
         persist = self.time_calc.persist_astrasim_artifacts
         os.makedirs(self.time_calc.output_dir, exist_ok=True)
         self._transformer_stage_timings = {}
+        self._transformer_stage_moe_timings = {}
         self._transformer_baseline_timings = None
         self._transformer_moe_baseline_timings = None
 
@@ -1816,8 +1819,7 @@ class LLMExecutionDispatcher:
 
         moe_timings: Optional[TransformerTimings] = None
         if has_moe:
-            if getattr(self, "_transformer_stage_dp_faults", {}):
-                raise ValueError("MoE transformer timing does not support faulty links yet.")
+            stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
             moe_fwd_dir, moe_bwd_dir = self._transformer_artifact_dirs(label="moe", persist=persist)
             moe_timings, moe_fwd_per_rank, moe_bwd_per_rank = self._execute_transformer_run(
                 moe_fwd_dir,
@@ -1831,6 +1833,17 @@ class LLMExecutionDispatcher:
             self.time_calc.transformer_astrasim_per_rank_backward_moe = moe_bwd_per_rank
             self.time_calc.transformer_astrasim_time_forward_moe = moe_timings.forward
             self.time_calc.transformer_astrasim_time_backward_moe = moe_timings.backward
+            for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
+                label = f"moe_fault{fault_index}_dp{dp_idx}_stage{stage_id}"
+                stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=label, persist=persist)
+                stage_timings, _, _ = self._execute_transformer_run(
+                    stage_fwd_dir,
+                    stage_bwd_dir,
+                    forward_root=self.moe_transformer_forward_root,
+                    backward_root=self.moe_transformer_backward_root,
+                    faulty_links_override=fault_links,
+                )
+                self._transformer_stage_moe_timings[(dp_idx, stage_id)] = stage_timings
 
         return baseline_timings, moe_timings
 
@@ -1906,6 +1919,7 @@ class LLMExecutionDispatcher:
         baseline_timings = timings or self._transformer_baseline_timings
         moe_baseline_timings = moe_timings or self._transformer_moe_baseline_timings
         stage_timings = getattr(self, "_transformer_stage_timings", {})
+        stage_moe_timings = getattr(self, "_transformer_stage_moe_timings", {})
 
         comp_times = getattr(self.pipeline_graph, "comp_times", None)
         if isinstance(comp_times, dict):
@@ -1936,6 +1950,7 @@ class LLMExecutionDispatcher:
                 root,
                 visited,
                 stage_timings,
+                stage_moe_timings,
                 baseline_timings,
                 moe_baseline_timings,
                 dp_count,
@@ -1946,6 +1961,7 @@ class LLMExecutionDispatcher:
         node: Any,
         visited: Set[int],
         stage_timings: Dict[Tuple[int, int], TransformerTimings],
+        stage_moe_timings: Dict[Tuple[int, int], TransformerTimings],
         dense_timings: Optional[TransformerTimings],
         moe_timings: Optional[TransformerTimings],
         dp_count: int,
@@ -1976,8 +1992,11 @@ class LLMExecutionDispatcher:
                     for dp_idx in range(dp_count):
                         default = timing_source.forward if is_forward else timing_source.backward
                         timing_override = None
-                        if not is_moe_layer and hw_stage is not None:
-                            timing_override = stage_timings.get((dp_idx, hw_stage))
+                        if hw_stage is not None:
+                            if is_moe_layer:
+                                timing_override = stage_moe_timings.get((dp_idx, hw_stage))
+                            else:
+                                timing_override = stage_timings.get((dp_idx, hw_stage))
                         if timing_override:
                             values.append(timing_override.forward if is_forward else timing_override.backward)
                         else:
@@ -1992,4 +2011,12 @@ class LLMExecutionDispatcher:
                     node.duration = per_dp_values[0]
 
         for child in getattr(node, "children", []):
-            self._assign_transformer_durations(child, visited, stage_timings, dense_timings, moe_timings, dp_count)
+            self._assign_transformer_durations(
+                child,
+                visited,
+                stage_timings,
+                stage_moe_timings,
+                dense_timings,
+                moe_timings,
+                dp_count,
+            )

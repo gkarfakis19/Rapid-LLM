@@ -38,6 +38,7 @@ from tqdm import tqdm
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from train_timing import TimeCalculationLLM
+from inference_timing import TimeCalculationLLMInference
 from llm_util import process_gemm_shapes
 
 import seaborn as sns
@@ -365,7 +366,10 @@ def build_parallelism_settings(flat_settings: Dict[str, object]) -> Dict[str, ob
         "tp_ep": bool(flat_settings.get("tp_ep", True)),
     }
     parallelism["train"] = train_block
-    parallelism["inference"] = {"replica_count": 1, "moe_dp": 1}
+    parallelism["inference"] = {
+        "replica_count": int(flat_settings.get("replica_count", 1) or 1),
+        "moe_dp": int(flat_settings.get("moe_dp", 1) or 1),
+    }
     return parallelism
 
 
@@ -579,6 +583,39 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
             # print(f"Warning: failed to write debug.yaml: {exc}", file=sys.stderr)
     temp_dir = tempfile.mkdtemp(prefix="parallelism_sweep_")
     try:
+        run_type = str(getattr(getattr(model_config_obj, "model_config", None), "run_type", "training")).lower()
+        if run_type == "inference":
+            calculator = TimeCalculationLLMInference(hw_config, model_config_obj, mode, output_dir=temp_dir)
+            with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
+                inference_timing = calculator.calc_total_inference_time()
+                runtime = float(inference_timing["total_inference_time"])
+            mem_exceeded = bool(getattr(calculator, "memory_capacity_exceeded", False))
+            mem_violation = float(getattr(calculator, "memory_capacity_violation_gb", 0.0) or 0.0)
+            if mem_exceeded and not EVALUATE_MEMORY_EXCEEDED:
+                return {
+                    "runtime": float("nan"),
+                    "performance": float("nan"),
+                    "total_flops": float("nan"),
+                    "peak_flops": gpu_peak_flops(hw_config),
+                    "mfu": float("nan"),
+                    "achieved_flops": float("nan"),
+                    "memory_exceeded": True,
+                    "memory_violation_gb": mem_violation,
+                    "hw_yaml": debug_yaml,
+                }
+            performance = (1.0 / runtime) if runtime > 0.0 else float("nan")
+            return {
+                "runtime": runtime,
+                "performance": performance,
+                "total_flops": float("nan"),
+                "peak_flops": gpu_peak_flops(hw_config),
+                "mfu": float("nan"),
+                "achieved_flops": float("nan"),
+                "memory_exceeded": mem_exceeded,
+                "memory_violation_gb": mem_violation,
+                "hw_yaml": debug_yaml,
+            }
+
         calculator = TimeCalculationLLM(hw_config, model_config_obj, mode, output_dir=temp_dir)
         mem_exceeded = bool(getattr(calculator, "memory_capacity_exceeded", False))
         mem_violation = float(getattr(calculator, "memory_capacity_violation_gb", 0.0) or 0.0)

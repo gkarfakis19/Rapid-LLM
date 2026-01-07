@@ -41,6 +41,7 @@ import config  # noqa: E402
 from parallelism_sweep import (  # noqa: E402
     MODEL_CONFIG_PATH,
     ASTRA_CACHE_MODE,
+    build_parallelism_settings,
     determine_model_mode,
     evaluate_parallelism,
     make_temp_hw_config,
@@ -65,28 +66,225 @@ yaml.SafeDumper.add_representer(FlowSeq, _represent_flow_seq)
 def _quantize_weight(value: float, decimals: int = 2) -> float:
     return round(float(value), decimals)
 
+def _safe_int(value: object, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _model_run_type(model_config_obj: object) -> str:
+    model_cfg = getattr(model_config_obj, "model_config", None)
+    run_type = getattr(model_cfg, "run_type", "training") if model_cfg is not None else "training"
+    return str(run_type).lower()
+
+
+def _base_parallelism_defaults(base_hw_dict: Optional[Dict[str, object]]) -> Dict[str, object]:
+    defaults: Dict[str, object] = {
+        "tp": 1,
+        "cp": 1,
+        "lp": 1,
+        "mb": 1,
+        "tp_sp": True,
+        "dp": 1,
+        "ep": 1,
+        "tp_ep": True,
+        "replica_count": 1,
+        "moe_dp": 1,
+    }
+    if not isinstance(base_hw_dict, dict):
+        return defaults
+    parallelism = base_hw_dict.get("parallelism")
+    if not isinstance(parallelism, dict):
+        return defaults
+    defaults["tp"] = _safe_int(parallelism.get("tp", defaults["tp"]), defaults["tp"])
+    defaults["cp"] = _safe_int(parallelism.get("cp", defaults["cp"]), defaults["cp"])
+    defaults["lp"] = _safe_int(parallelism.get("lp", defaults["lp"]), defaults["lp"])
+    defaults["mb"] = _safe_int(parallelism.get("mb", defaults["mb"]), defaults["mb"])
+    defaults["tp_sp"] = bool(parallelism.get("tp_sp", defaults["tp_sp"]))
+    train_block = parallelism.get("train")
+    if isinstance(train_block, dict):
+        defaults["dp"] = _safe_int(train_block.get("dp", defaults["dp"]), defaults["dp"])
+        defaults["ep"] = _safe_int(train_block.get("ep", defaults["ep"]), defaults["ep"])
+        defaults["tp_ep"] = bool(train_block.get("tp_ep", defaults["tp_ep"]))
+    inference_block = parallelism.get("inference")
+    if isinstance(inference_block, dict):
+        defaults["replica_count"] = _safe_int(
+            inference_block.get("replica_count", defaults["replica_count"]),
+            defaults["replica_count"],
+        )
+        defaults["moe_dp"] = _safe_int(inference_block.get("moe_dp", defaults["moe_dp"]), defaults["moe_dp"])
+    return defaults
+
+
+def _resolve_flat_parallelism(
+    settings: Dict[str, object],
+    base_hw_dict: Optional[Dict[str, object]],
+    run_type: str,
+) -> Dict[str, object]:
+    flat = _base_parallelism_defaults(base_hw_dict)
+    for key in ("tp", "cp", "lp", "mb"):
+        if key in settings:
+            flat[key] = _safe_int(settings[key], flat.get(key, 1))
+    if "tp_sp" in settings:
+        flat["tp_sp"] = bool(settings["tp_sp"])
+    if "tp_ep" in settings:
+        flat["tp_ep"] = bool(settings["tp_ep"])
+    if "replica_count" in settings:
+        flat["replica_count"] = _safe_int(settings["replica_count"], flat.get("replica_count", 1))
+
+    if "mb" not in settings and "lp" in settings:
+        flat["mb"] = 1 if int(flat.get("lp", 1) or 1) == 1 else int(flat.get("lp", 1) or 1)
+
+    if run_type == "inference" and SWEEP_MOE_DP:
+        moe_dp = settings.get("dp", settings.get("moe_dp", flat.get("moe_dp", 1)))
+        flat["moe_dp"] = _safe_int(moe_dp, flat.get("moe_dp", 1))
+        flat["ep"] = flat["moe_dp"]
+        flat["dp"] = 1
+    else:
+        if "dp" in settings:
+            flat["dp"] = _safe_int(settings["dp"], flat.get("dp", 1))
+        if "ep" in settings:
+            flat["ep"] = _safe_int(settings["ep"], flat.get("ep", 1))
+        if "moe_dp" in settings:
+            flat["moe_dp"] = _safe_int(settings["moe_dp"], flat.get("moe_dp", 1))
+    return flat
+
+
+def _normalize_parallelism_settings(
+    base_hw_dict: Dict[str, object],
+    settings: Dict[str, object],
+    run_type: str,
+) -> Dict[str, object]:
+    if isinstance(settings.get("train"), dict) and isinstance(settings.get("inference"), dict):
+        return settings
+    flat = _resolve_flat_parallelism(settings, base_hw_dict, run_type)
+    return build_parallelism_settings(flat)
+
+
+def _axis_sizes_from_settings(
+    settings: Dict[str, object],
+    base_hw_dict: Optional[Dict[str, object]],
+    run_type: str,
+) -> Dict[str, int]:
+    flat = _resolve_flat_parallelism(settings, base_hw_dict, run_type)
+    return {
+        "tp": _safe_int(flat.get("tp", 1), 1),
+        "cp": _safe_int(flat.get("cp", 1), 1),
+        "dp": _safe_int(flat.get("dp", 1), 1),
+        "lp": _safe_int(flat.get("lp", 1), 1),
+        "ep": _safe_int(flat.get("ep", 1), 1),
+    }
+
+
+def _dp_label() -> str:
+    return "moe_dp" if RUN_TYPE == "inference" and SWEEP_MOE_DP else "dp"
+
+
+def _format_parallelism_label(settings: Dict[str, object]) -> str:
+    tp = settings.get("tp")
+    cp = settings.get("cp")
+    dp = settings.get("dp")
+    lp = settings.get("lp")
+    dp_label = _dp_label()
+    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
+        return f"tp{int(tp)}-cp{int(cp)}-{dp_label}{int(dp)}-pp{int(lp)}"
+    return f"tp{tp}-cp{cp}-{dp_label}{dp}-pp{lp}"
+
+
+def _format_parallelism_tag(settings: Dict[str, object]) -> str:
+    tp = settings.get("tp")
+    cp = settings.get("cp")
+    dp = settings.get("dp")
+    lp = settings.get("lp")
+    dp_label = "moe" if RUN_TYPE == "inference" and SWEEP_MOE_DP else "dp"
+    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
+        return f"tp{int(tp)}_cp{int(cp)}_{dp_label}{int(dp)}_lp{int(lp)}"
+    return f"tp{tp}_cp{cp}_{dp_label}{dp}_lp{lp}"
+
+
+def _ensure_ep_in_network(network: Dict[str, object]) -> None:
+    dimensions = network.get("dimensions")
+    if not isinstance(dimensions, list):
+        return
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        parallelisms = dim.get("parallelisms")
+        if isinstance(parallelisms, list) and "ep" in parallelisms:
+            return
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        parallelisms = dim.get("parallelisms")
+        if not isinstance(parallelisms, list):
+            continue
+        if any(axis in ("tp", "cp") for axis in parallelisms):
+            parallelisms.append("ep")
+            return
+
+
+def _apply_network_override(base_hw_dict: Dict[str, object], network_config_path: Optional[str]) -> None:
+    if not network_config_path:
+        return
+    override_doc = read_yaml(network_config_path)
+    if not isinstance(override_doc, dict):
+        raise ValueError(f"Network override {network_config_path} did not parse to a mapping.")
+    network_override = override_doc.get("network")
+    if not isinstance(network_override, dict):
+        raise ValueError(f"Network override {network_config_path} missing a 'network' section.")
+    base_hw_dict["network"] = copy.deepcopy(network_override)
+
+
+def _tag_output_path(base_path: str, tag: str) -> str:
+    p = Path(base_path)
+    safe_tag = str(tag).replace(os.sep, "_")
+    return str(p.with_name(f"{p.stem}_{safe_tag}{p.suffix}"))
+
 # -----------------------------------------------------------------------------
 # Fault sweep configuration
 # -----------------------------------------------------------------------------
 
-HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
-MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
+GLM_MODE = True
+MAX_ATTEMPTS = 1
 
-TARGET_NUM_GPUS = 64
+if GLM_MODE:
+    HARDWARE_CONFIG_PATH = "configs/hardware-config/H100_SXM5_80GB_moe.yaml"
+    MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_331B_inf.yaml"
+    NETWORK_CONFIG_PATH: Optional[str] = "configs/hardware-config/a100_80GB.yaml"
+    TARGET_NUM_GPUS = 64
+    MIN_ALLOWED_TP = 1
+    MAX_ALLOWED_TP = 32
+    MIN_ALLOWED_CP = 1
+    MAX_ALLOWED_CP = 1
+    MIN_ALLOWED_DP = 1
+    MAX_ALLOWED_DP = 32
+    MIN_ALLOWED_LP = 1
+    MAX_ALLOWED_LP = 4
+else:
+    HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
+    MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
+    NETWORK_CONFIG_PATH: Optional[str] = None
+    TARGET_NUM_GPUS = 64
+    MIN_ALLOWED_TP = 4
+    MAX_ALLOWED_TP = 16
+    MIN_ALLOWED_CP = 1
+    MAX_ALLOWED_CP = 1
+    MIN_ALLOWED_DP = 1
+    MAX_ALLOWED_DP = 128
+    MIN_ALLOWED_LP = 1
+    MAX_ALLOWED_LP = 16
+
+RUN_TYPE = "inference"
+SWEEP_MOE_DP = False
+BASE_HW_DICT: Optional[Dict[str, object]] = None
+
 SAMPLE_COUNT = 50
 FAULT_ITER = 500
 FAULT_WORKERS = 105
 FAULT_MAG = (0.5, 0.0)  # May also be a (mean, std) tuple
 NUM_FAULTS = [1]
 
-MIN_ALLOWED_TP = 4
-MAX_ALLOWED_TP = 16
-MIN_ALLOWED_CP = 1
-MAX_ALLOWED_CP = 1
-MIN_ALLOWED_DP = 1
-MAX_ALLOWED_DP = 128
-MIN_ALLOWED_LP = 1
-MAX_ALLOWED_LP = 16
 ALLOWED_FAULT_DIMS: Optional[List[int]] = None
 
 PLOT_OUTPUT_PATH = "tools/fault_sweep.png"
@@ -521,10 +719,11 @@ def _neighbors_for_topology(topo_type: str, node_count: int) -> Tuple[Tuple[int,
 
 def _candidate_fault_dimensions(settings: Dict[str, int]) -> List[Tuple[int, int]]:
     candidates: List[Tuple[int, int]] = []
-    dim0_nodes = int(settings.get("tp", 1)) * int(settings.get("cp", 1))
+    axis_sizes = _axis_sizes_from_settings(settings, BASE_HW_DICT, RUN_TYPE)
+    dim0_nodes = axis_sizes["tp"] * axis_sizes["cp"] * axis_sizes["ep"]
     if dim0_nodes >= 2 and (ALLOWED_FAULT_DIMS is None or 0 in ALLOWED_FAULT_DIMS):
         candidates.append((0, dim0_nodes))
-    dim1_nodes = int(settings.get("lp", 1)) * int(settings.get("dp", 1))
+    dim1_nodes = axis_sizes["lp"] * axis_sizes["dp"]
     if dim1_nodes >= 2 and (ALLOWED_FAULT_DIMS is None or 1 in ALLOWED_FAULT_DIMS):
         candidates.append((1, dim1_nodes))
     return candidates
@@ -532,6 +731,14 @@ def _candidate_fault_dimensions(settings: Dict[str, int]) -> List[Tuple[int, int
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAPID-LLM fault sensitivity sweep")
+    parser.add_argument("--hardware-config", type=str, default=HARDWARE_CONFIG_PATH)
+    parser.add_argument("--model-config", type=str, default=MODEL_CONFIG_PATH)
+    parser.add_argument(
+        "--network-config",
+        type=str,
+        default=NETWORK_CONFIG_PATH,
+        help="Optional hardware config path to copy the network section from.",
+    )
     parser.add_argument("--target-num-gpus", type=int, default=TARGET_NUM_GPUS)
     parser.add_argument("--sample-count", type=int, default=SAMPLE_COUNT)
     parser.add_argument("--fault-iter", type=int, default=FAULT_ITER)
@@ -575,6 +782,43 @@ def _divisors(n: int) -> List[int]:
             divs.add(i)
             divs.add(n // i)
     return sorted(divs)
+
+
+def _moe_num_experts(model_config_obj: object) -> Optional[int]:
+    model_cfg = getattr(model_config_obj, "model_config", None)
+    if model_cfg is None:
+        return None
+    if not bool(getattr(model_cfg, "use_moe", False)):
+        return None
+    try:
+        num_experts = int(getattr(model_cfg, "num_experts", 1))
+    except (TypeError, ValueError):
+        return None
+    return num_experts if num_experts > 1 else None
+
+
+def _moe_group_valid_for_inference(tp: int, moe_dp: int, moe_num_experts: int) -> bool:
+    moe_group = int(tp) * int(moe_dp)
+    if moe_group <= 0:
+        return False
+    if moe_group > moe_num_experts:
+        return False
+    return moe_num_experts % moe_group == 0
+
+
+def _enumerate_parallelism_vectors_full_range(num_gpus: int) -> List[Tuple[int, int, int, int]]:
+    vectors: List[Tuple[int, int, int, int]] = []
+    for tp in range(MIN_ALLOWED_TP, MAX_ALLOWED_TP + 1):
+        for cp in range(MIN_ALLOWED_CP, MAX_ALLOWED_CP + 1):
+            for dp in range(MIN_ALLOWED_DP, MAX_ALLOWED_DP + 1):
+                denom = tp * cp * dp
+                if denom <= 0:
+                    continue
+                if num_gpus % denom != 0:
+                    continue
+                lp = num_gpus // denom
+                vectors.append((tp, cp, dp, lp))
+    return vectors
 
 
 def _enumerate_parallelism_vectors(num_gpus: int) -> List[Tuple[int, int, int, int]]:
@@ -637,8 +881,20 @@ def _select_representative_vectors(candidates: List[Tuple[int, int, int, int]], 
     return selected[:count]
 
 
-def _filtered_parallelism_vectors(num_gpus: int) -> List[Tuple[int, int, int, int]]:
-    tuples = _enumerate_parallelism_vectors(num_gpus)
+def _filtered_parallelism_vectors(
+    num_gpus: int,
+    run_type: str,
+    moe_num_experts: Optional[int],
+) -> List[Tuple[int, int, int, int]]:
+    use_moe_filter = (
+        bool(moe_num_experts)
+        and run_type == "inference"
+        and SWEEP_MOE_DP
+    )
+    if use_moe_filter:
+        tuples = _enumerate_parallelism_vectors_full_range(num_gpus)
+    else:
+        tuples = _enumerate_parallelism_vectors(num_gpus)
     filtered: List[Tuple[int, int, int, int]] = []
     for tp, cp, dp, lp in tuples:
         if not (MIN_ALLOWED_TP <= tp <= MAX_ALLOWED_TP):
@@ -651,6 +907,9 @@ def _filtered_parallelism_vectors(num_gpus: int) -> List[Tuple[int, int, int, in
             continue
         if ENFORCE_SQUARE_TP_CP and not tp_cp_product_is_power_of_two_square(tp, cp):
             continue
+        if use_moe_filter and moe_num_experts is not None:
+            if not _moe_group_valid_for_inference(tp, dp, moe_num_experts):
+                continue
         filtered.append((tp, cp, dp, lp))
     return filtered
 
@@ -674,7 +933,9 @@ def generate_parallelism_samples(
     mode: str,
     workers: Optional[int] = None,
 ) -> List[Dict[str, int]]:
-    vectors = _filtered_parallelism_vectors(num_gpus)
+    run_type = _model_run_type(model_config_obj)
+    moe_num_experts = _moe_num_experts(model_config_obj)
+    vectors = _filtered_parallelism_vectors(num_gpus, run_type, moe_num_experts)
     if not vectors:
         return []
     # Keep ordering stable but cover space by using representative sampling.
@@ -708,7 +969,7 @@ def generate_parallelism_samples(
         with ProcessPoolExecutor(
             max_workers=worker_count,
             initializer=_parallelism_worker_init,
-            initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+            initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode, run_type, SWEEP_MOE_DP),
         ) as executor:
             while (prioritized or in_flight) and len(selected) < sample_count:
                 while (
@@ -863,7 +1124,9 @@ def check_memory_capacity(base_hw_dict, model_config_obj, mode, parallel_setting
 
     This is much faster than running full timing calculations.
     """
-    hw_config, _ = make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=hw_mutator)
+    run_type = _model_run_type(model_config_obj)
+    normalized = _normalize_parallelism_settings(base_hw_dict, parallel_settings, run_type)
+    hw_config, _ = make_temp_hw_config(base_hw_dict, normalized, hw_mutator=hw_mutator)
 
     try:
         # Use the dispatcher function which automatically determines inference vs training
@@ -920,12 +1183,14 @@ _WORKER_MODEL_CONFIG = None
 _WORKER_MODE = None
 
 
-def _parallelism_worker_init(base_hw_dict, model_config_path, mode):
-    global _WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE
+def _parallelism_worker_init(base_hw_dict, model_config_path, mode, run_type, sweep_moe_dp):
+    global _WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE, RUN_TYPE, SWEEP_MOE_DP
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
     _WORKER_HW_DICT = base_hw_dict
     _WORKER_MODEL_CONFIG = config.parse_config(model_config_path, config_type=mode)
     _WORKER_MODE = mode
+    RUN_TYPE = str(run_type or "training").lower()
+    SWEEP_MOE_DP = bool(sweep_moe_dp)
 
 
 def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[str, object]) -> Dict[str, object]:
@@ -948,11 +1213,13 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
         mutator = None
         if kind == "fault":
             mutator = make_fault_mutator(faults)
+        run_type = _model_run_type(model_config_obj)
+        normalized = _normalize_parallelism_settings(base_hw_dict, settings, run_type)
         metrics = evaluate_parallelism(
             base_hw_dict,
             model_config_obj,
             mode,
-            settings,
+            normalized,
             hw_mutator=mutator,
         )
         mem_violation = metrics.get("memory_violation_gb", 0.0) or 0.0
@@ -1116,7 +1383,7 @@ def _dump_debug_hw_config(result: Dict[str, object]) -> Optional[Path]:
     lp = settings.get("lp")
     label = f"{kind}_{_DEBUG_FILE_INDEX:03d}"
     if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
-        label += f"_tp{int(tp)}_cp{int(cp)}_dp{int(dp)}_lp{int(lp)}"
+        label += f"_{_format_parallelism_tag(settings)}"
     num_faults = result.get("num_faults")
     if kind == "fault" and isinstance(num_faults, int):
         label += f"_{num_faults}faults"
@@ -1131,26 +1398,12 @@ def _dump_debug_hw_config(result: Dict[str, object]) -> Optional[Path]:
 def _generate_hw_yaml_from_task(base_hw_dict: Dict[str, object], task: Dict[str, object]) -> Optional[str]:
     if base_hw_dict is None:
         return None
-    try:
-        hw_copy: Dict[str, object] = copy.deepcopy(base_hw_dict)
-    except Exception as exc:
-        print(f"Warning: failed to clone base hardware config: {exc}", file=sys.stderr)
-        return None
-
     settings = dict(task.get("settings", {}) or {})
-    parallel_block = hw_copy.setdefault("parallelism", {})
-    if isinstance(parallel_block, dict):
-        for key in ("tp", "cp", "lp", "mb", "tp_sp"):
-            if key in settings:
-                parallel_block[key] = settings[key]
-        train_block = parallel_block.setdefault("train", {})
-        if "dp" in settings:
-            train_block["dp"] = settings["dp"]
-        train_block.setdefault("ep", 1)
-        train_block.setdefault("tp_ep", True)
-        inference_block = parallel_block.setdefault("inference", {})
-        inference_block.setdefault("replica_count", 1)
-        inference_block.setdefault("moe_dp", 1)
+    try:
+        normalized = _normalize_parallelism_settings(base_hw_dict, settings, RUN_TYPE)
+    except Exception as exc:
+        print(f"Warning: failed to normalize parallelism settings for debug dump: {exc}", file=sys.stderr)
+        return None
 
     mutator = None
     faults: Sequence[Tuple[int, float, int]] = ()
@@ -1163,13 +1416,8 @@ def _generate_hw_yaml_from_task(base_hw_dict: Dict[str, object], task: Dict[str,
         mutator = make_fault_mutator(faults)
 
     try:
-        if mutator is not None:
-            mutator(hw_copy)
-    except Exception as exc:
-        print(f"Warning: failed to apply fault mutator for debug dump: {exc}", file=sys.stderr)
-
-    try:
-        return yaml.safe_dump(hw_copy, default_flow_style=False, sort_keys=False)
+        _, debug_yaml = make_temp_hw_config(base_hw_dict, normalized, hw_mutator=mutator)
+        return debug_yaml
     except Exception as exc:
         print(f"Warning: failed to serialize debug hardware config: {exc}", file=sys.stderr)
         return None
@@ -1192,7 +1440,7 @@ def _failure_label_from_settings(kind: str, settings: Dict[str, object], num_fau
     dp = settings.get("dp")
     lp = settings.get("lp")
     if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
-        label += f"_tp{int(tp)}_cp{int(cp)}_dp{int(dp)}_lp{int(lp)}"
+        label += f"_{_format_parallelism_tag(settings)}"
     if kind == "fault" and isinstance(num_faults, int):
         label += f"_{num_faults}faults"
     return label
@@ -1293,10 +1541,11 @@ def summarise_fault_runs(runtimes: Iterable[float]) -> Tuple[float, float, float
 
 def write_fault_report(records: List[Dict[str, object]], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    dp_label = _dp_label()
     header = [
         "tp",
         "cp",
-        "dp",
+        dp_label,
         "lp",
         "baseline_runtime",
         "fault_min",
@@ -1393,8 +1642,14 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     global ALLOWED_FAULT_DIMS, PLOT_OUTPUT_PATH, REPORT_OUTPUT_PATH, RESULTS_JSON_PATH
     global RANDOM_SEED, ENFORCE_SQUARE_TP_CP, DEBUG_MODE, DEBUG_RUN_DIR, DEBUG_SAVED_PATHS
     global _DEBUG_FILE_INDEX, FAILURE_DUMP_DIR, FAILURE_SAVED_PATHS, _FAILURE_FILE_INDEX
+    global HARDWARE_CONFIG_PATH, MODEL_CONFIG_PATH, NETWORK_CONFIG_PATH
+    global RUN_TYPE, SWEEP_MOE_DP, BASE_HW_DICT
 
     args = parse_args(cli_args)
+
+    HARDWARE_CONFIG_PATH = args.hardware_config
+    MODEL_CONFIG_PATH = args.model_config
+    NETWORK_CONFIG_PATH = args.network_config
 
     TARGET_NUM_GPUS = args.target_num_gpus
     SAMPLE_COUNT = args.sample_count
@@ -1446,9 +1701,18 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     _install_signal_handlers()
     _run_fault_injection_self_test()
 
-    base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
     mode = determine_model_mode(MODEL_CONFIG_PATH)
     model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
+    RUN_TYPE = _model_run_type(model_config_obj)
+    SWEEP_MOE_DP = RUN_TYPE == "inference"
+
+    base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
+    _apply_network_override(base_hw_dict, NETWORK_CONFIG_PATH)
+    if RUN_TYPE == "inference" and SWEEP_MOE_DP:
+        network_block = base_hw_dict.get("network")
+        if isinstance(network_block, dict):
+            _ensure_ep_in_network(network_block)
+    BASE_HW_DICT = base_hw_dict
 
     # existing_results = _load_existing_results(RESULTS_JSON_PATH)
     # if existing_results:
@@ -1640,7 +1904,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                 executor = ProcessPoolExecutor(
                     max_workers=worker_count,
                     initializer=_parallelism_worker_init,
-                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode, RUN_TYPE, SWEEP_MOE_DP),
                 )
                 try:
                     _ACTIVE_EXECUTOR = executor
@@ -1677,7 +1941,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     if not NUM_FAULTS or FAULT_ITER <= 0:
         print("No fault iterations configured; skipping fault evaluations.")
     else:
-        print("Beginning fault evaluations with fairness policy (max retries per iteration: 10).")
+        print(f"Beginning fault evaluations with fairness policy (max retries per iteration: {MAX_ATTEMPTS}).")
 
     eligible_configs = []
     for settings in parallelism_samples:
@@ -1702,7 +1966,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                 fault_executor = ProcessPoolExecutor(
                     max_workers=fault_worker_count,
                     initializer=_parallelism_worker_init,
-                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode, RUN_TYPE, SWEEP_MOE_DP),
                 )
                 _ACTIVE_EXECUTOR = fault_executor
 
@@ -1832,7 +2096,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                             last_error = "unknown error"
                         break
                 attempt = state.get("attempt", 1)
-                if attempt >= 10:
+                if attempt >= MAX_ATTEMPTS:
                     msg = (
                         f"Omitting fault iteration {iter_idx} for num_faults={repeats} across all configs "
                         f"after {attempt} failed attempt(s)."
@@ -1921,7 +2185,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             "fault_min": fault_min,
             "fault_max": fault_max,
             "fault_mean": fault_mean,
-            "label": f"tp{settings['tp']}-cp{settings['cp']}-dp{settings['dp']}-pp{settings['lp']}",
+            "label": _format_parallelism_label(settings),
         }
         records.append(record)
 

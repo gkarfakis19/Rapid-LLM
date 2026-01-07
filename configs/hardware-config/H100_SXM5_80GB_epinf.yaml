@@ -83,29 +83,29 @@ memory_hierarchy:
 parallelism:
   auto: false
   ### LLM PARAMS ###
-  tp: 16 # tensor parallelism
+  tp: 4 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  lp: 1 # pipeline parallelism. Number of pipeline stages
+  lp: 5 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 1 # micro-batches (for best results set to >= lp). 
+  mb: 9 # micro-batches (for best results set to >= lp). 
 
   train:
     dp: 1 # data parallelism
-    ep: 1 # expert parallelism
+    ep: 2 # expert parallelism
     # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
-    tp_ep: false
+    tp_ep: true
   inference:
     replica_count: 1 # inference throughput scaling only
-    moe_dp: 1 # inference expert pool expansion (EP_eff = tp * moe_dp)
+    moe_dp: 2 # inference expert pool expansion (EP_eff = tp * moe_dp)
 network:
   dimensions:
     - id: dim0
       label: torus2d_tp
       size: auto
       topology:
-        type: FC
-        bandwidth: 300 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        type: Torus2D
+        bandwidth: 200 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0

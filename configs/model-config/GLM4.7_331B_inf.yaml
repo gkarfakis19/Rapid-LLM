@@ -5,8 +5,8 @@ model_param:
   model_type: glm4_moe
   global_batch_size: 16
   gradient_accumulation_steps: 1
-  seq_len: 131072
-  # seq_len: 33072
+  # seq_len: 131072
+  seq_len: 33072
   decode_len: 4096
   hidden_dim: 5120
   attention:

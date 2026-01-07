@@ -16,7 +16,7 @@ from .bootstrap import ensure_chakra_available
 # same setup entry point for consistency.
 ensure_chakra_available()
 
-ASTRA_DEBUG = True
+ASTRA_DEBUG = False
 
 
 def _save_json(path: str, data: Dict[str, Any]) -> None:

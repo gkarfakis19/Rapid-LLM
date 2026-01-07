@@ -2125,8 +2125,8 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
         dp_dense = train_dp * train_ep if model.use_moe else train_dp
         if batch_size % dp_dense != 0:
             if model.use_moe:
-                raise ValueError("Batch size must be divisible by dp*ep when MoE is enabled")
-            raise ValueError("Batch size must be divisible by data parallelism degree")
+                raise ValueError(f"Batch size must be divisible by dp*ep when MoE is enabled: {batch_size} % {dp_dense} != 0")
+            raise ValueError(f"Batch size must be divisible by data parallelism degree: {batch_size} % {train_dp} != 0")
         mini_batch = batch_size // dp_dense
         if mini_batch % mb != 0:
             raise ValueError(f"Batch size must be divisible by micro-batch size: {mini_batch} % {mb} != 0")
@@ -2178,18 +2178,20 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             tokens_dispatched = tokens_owner * int(model.top_k)
             if tokens_dispatched % moe_ranks != 0:
                 raise ValueError(
-                    "MoE routed tokens must divide evenly across the MoE routing group for batched expert GEMMs "
-                    f"(tokens_dispatched={tokens_dispatched}, moe_group={moe_ranks}, "
-                    f"effective_batch={effective_batch}, seq_len={model.seq_len}, top_k={model.top_k}, cp={cp})."
+                    "MoE routed tokens must divide evenly across the MoE routing group for batched expert GEMMs\n"
+                    f"(tokens_owner = effective_batch * seq_per_rank = {effective_batch} * {seq_per_rank})\n"
+                    f"(tokens_dispatched = tokens_owner * top_k = {tokens_owner} * {model.top_k})\n"
+                    f"(tokens_dispatched={tokens_dispatched} % moe_group={moe_ranks} != 0)"
                 )
             tokens_local = tokens_dispatched // moe_ranks
             experts_per_rank = model.num_experts // moe_ranks
             if tokens_local % experts_per_rank != 0:
                 raise ValueError(
-                    "MoE routed tokens per rank must divide evenly across experts for batched expert GEMMs "
-                    f"(tokens_local={tokens_local}, experts_per_rank={experts_per_rank}, "
-                    f"moe_num_experts={model.num_experts}, moe_group={moe_ranks}, "
-                    f"effective_batch={effective_batch}, seq_len={model.seq_len}, top_k={model.top_k}, cp={cp})."
+                    "MoE routed tokens per rank must divide evenly across experts for batched expert GEMMs\n"
+                    f"(tokens_owner = effective_batch * seq_per_rank = {effective_batch} * {seq_per_rank})\n"
+                    f"(tokens_dispatched = tokens_owner * top_k = {tokens_owner} * {model.top_k})\n"
+                    f"(tokens_local = tokens_dispatched // moe_ranks = {tokens_dispatched} // {moe_ranks})\n"
+                    f"(tokens_local={tokens_local} % experts_per_rank={experts_per_rank} != 0)\n"
                 )
         backend = getattr(hw_config, "execution_backend", None)
         if backend and str(getattr(backend, "model", "")).lower() == "astra":
