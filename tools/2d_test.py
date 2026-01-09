@@ -65,8 +65,13 @@ hfval.ASTRA_CACHE_MODE = "NO_CACHE"
 hfval.ASTRA_TMP_ROOT = Path("tmp") / "2d_test_runs"
 hfval.CLEANUP_ASTRA_TMP = True
 
-TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D", "HyperCube")
-COMP_TOPO = ("Torus2D", "KingMesh2D", "HyperCube")
+# TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D", "HyperCube")
+# COMP_TOPO = ("Torus2D", "KingMesh2D", "HyperCube")
+
+
+TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D")
+COMP_TOPO = ("Torus2D", "KingMesh2D")
+
 
 COMP_TOPO_SPECS = {
     "Torus2D": {

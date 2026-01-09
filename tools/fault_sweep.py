@@ -303,7 +303,7 @@ if GLM_MODE:
         MIN_ALLOWED_EP = 1
         MAX_ALLOWED_EP = 1
 else:
-    HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
+    HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/a100_80GB_fault.yaml"
     MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
     NETWORK_CONFIG_PATH: Optional[str] = None
     TARGET_NUM_GPUS = 128
@@ -337,8 +337,10 @@ PLOT_OUTPUT_PATH = str(OUTPUT_BASE_DIR / "fault_sweep.png")
 FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(PLOT_OUTPUT_PATH, "filtered")
 REPORT_OUTPUT_PATH = str(OUTPUT_BASE_DIR / "fault_sweep.tsv")
 HARD_PLOT_OUTPUT_PATH = str(OUTPUT_BASE_DIR / "fault_sweep_hard.png")
+HARD_FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(HARD_PLOT_OUTPUT_PATH, "filtered")
 HARD_REPORT_OUTPUT_PATH = str(OUTPUT_BASE_DIR / "fault_sweep_hard.tsv")
 COMBINED_PLOT_OUTPUT_PATH = str(OUTPUT_BASE_DIR / "fault_sweep_combined.png")
+COMBINED_FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(COMBINED_PLOT_OUTPUT_PATH, "filtered")
 FAULT_OUTPUT_DIR = str(OUTPUT_BASE_DIR / "astra_cache_faults")
 RESULTS_JSON_PATH = OUTPUT_BASE_DIR / "results.json"
 
@@ -1951,6 +1953,14 @@ def _print_top_records(records: List[Dict[str, object]], label: str) -> None:
         print(f"  {record.get('label', '')}: baseline={baseline}s, fault_mean={fault_mean}s")
 
 
+def _filter_records_by_labels(
+    records: List[Dict[str, object]],
+    labels: Sequence[str],
+) -> List[Dict[str, object]]:
+    record_map = {record.get("label", ""): record for record in records}
+    return [record_map[label] for label in labels if label in record_map]
+
+
 def plot_fault_sensitivity(
     records: List[Dict[str, object]],
     output_path: str,
@@ -2144,6 +2154,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     global _DEBUG_FILE_INDEX, FAILURE_DUMP_DIR, FAILURE_SAVED_PATHS, _FAILURE_FILE_INDEX
     global HARDWARE_CONFIG_PATH, MODEL_CONFIG_PATH, NETWORK_CONFIG_PATH
     global RUN_TYPE, SWEEP_MOE_DP, BASE_HW_DICT, PLOT_ONLY, PLOT_NUM
+    global HARD_FILTERED_PLOT_OUTPUT_PATH, COMBINED_FILTERED_PLOT_OUTPUT_PATH
 
     args = parse_args(cli_args)
 
@@ -2213,15 +2224,17 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
 
     if PLOT_ONLY:
         records = read_fault_report(REPORT_OUTPUT_PATH)
+        filtered_records: List[Dict[str, object]] = []
         if records:
             plot_fault_sensitivity(records, PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
             if PLOT_NUM > 0:
-                plot_records = _select_top_by_baseline(records, PLOT_NUM)
-                _print_top_records(plot_records, "soft faults")
-                plot_fault_sensitivity(plot_records, FILTERED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+                filtered_records = _select_top_by_baseline(records, PLOT_NUM)
+                _print_top_records(filtered_records, "soft faults")
+                plot_fault_sensitivity(filtered_records, FILTERED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
         else:
             print("No records found for plot-only mode (soft faults).", file=sys.stderr)
         hard_records: List[Dict[str, object]] = []
+        filtered_hard_records: List[Dict[str, object]] = []
         if _hard_faults_enabled() and os.path.exists(HARD_REPORT_OUTPUT_PATH):
             hard_records = read_fault_report(HARD_REPORT_OUTPUT_PATH)
             if hard_records:
@@ -2234,10 +2247,30 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                     fault_fill_color="#fff2b2",
                     fault_label="Hard fault mean ± range",
                 )
+                if PLOT_NUM > 0 and filtered_records:
+                    labels = [record.get("label", "") for record in filtered_records]
+                    filtered_hard_records = _filter_records_by_labels(hard_records, labels)
+                    if filtered_hard_records:
+                        plot_fault_sensitivity(
+                            filtered_hard_records,
+                            HARD_FILTERED_PLOT_OUTPUT_PATH,
+                            TARGET_NUM_GPUS,
+                            fault_color="#f1c40f",
+                            fault_range_color="#f7dc6f",
+                            fault_fill_color="#fff2b2",
+                            fault_label="Hard fault mean ± range",
+                        )
             else:
                 print("No records found for plot-only mode (hard faults).", file=sys.stderr)
         if records and hard_records:
             plot_fault_sensitivity_combined(records, hard_records, COMBINED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+        if filtered_records and filtered_hard_records:
+            plot_fault_sensitivity_combined(
+                filtered_records,
+                filtered_hard_records,
+                COMBINED_FILTERED_PLOT_OUTPUT_PATH,
+                TARGET_NUM_GPUS,
+            )
         return 0
 
     base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
@@ -2827,6 +2860,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     write_fault_report(records, REPORT_OUTPUT_PATH)
     print(f"Wrote fault sweep report to {REPORT_OUTPUT_PATH}")
     plot_fault_sensitivity(records, PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+    filtered_records: List[Dict[str, object]] = []
     if PLOT_NUM > 0:
         filtered_records = _select_top_by_baseline(records, PLOT_NUM)
         _print_top_records(filtered_records, "soft faults")
@@ -2844,7 +2878,28 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             fault_fill_color="#fff2b2",
             fault_label="Hard fault mean ± range",
         )
+        filtered_hard_records: List[Dict[str, object]] = []
+        if PLOT_NUM > 0 and filtered_records:
+            labels = [record.get("label", "") for record in filtered_records]
+            filtered_hard_records = _filter_records_by_labels(hard_records, labels)
+            if filtered_hard_records:
+                plot_fault_sensitivity(
+                    filtered_hard_records,
+                    HARD_FILTERED_PLOT_OUTPUT_PATH,
+                    TARGET_NUM_GPUS,
+                    fault_color="#f1c40f",
+                    fault_range_color="#f7dc6f",
+                    fault_fill_color="#fff2b2",
+                    fault_label="Hard fault mean ± range",
+                )
         plot_fault_sensitivity_combined(records, hard_records, COMBINED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+        if filtered_records and filtered_hard_records:
+            plot_fault_sensitivity_combined(
+                filtered_records,
+                filtered_hard_records,
+                COMBINED_FILTERED_PLOT_OUTPUT_PATH,
+                TARGET_NUM_GPUS,
+            )
     else:
         print("No hard fault records to report.", file=sys.stderr)
     if FAILURE_SAVED_PATHS and FAILURE_DUMP_DIR:
