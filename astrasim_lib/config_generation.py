@@ -220,6 +220,23 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
         bw_value = entry.get("bandwidth")
         lat_value = entry.get("latency")
 
+        if isinstance(topo, str) and topo.lower().startswith("kingmesh"):
+            if dims_value is None:
+                raise ValueError("KingMesh2D requires an explicit 2D size (e.g., size: [8, auto]).")
+            if not isinstance(dims_value, (list, tuple)) or len(dims_value) != 2:
+                raise ValueError("KingMesh2D size must be a two-item tuple/list.")
+            dim_x = int(dims_value[0])
+            dim_y = int(dims_value[1])
+            if dim_x < 1 or dim_y < 1:
+                raise ValueError("KingMesh2D size entries must be >= 1.")
+            expanded.append(
+                {
+                    **entry,
+                    "npus": (dim_x, dim_y),
+                }
+            )
+            continue
+
         if isinstance(topo, str) and topo.lower() == "superpod":
             dim = entry.get("dim")
             dim_label = getattr(dim, "label", getattr(dim, "id", "<unnamed>"))
@@ -623,7 +640,11 @@ def generate_astrasim_configs_from_hw(
         full_size = int(getattr(dim, "size", product_size) or product_size)
         dims_value = getattr(dim, "size_2d", None)
         dims_tuple: Optional[Tuple[int, int]] = None
-        use_shape = dims_value is not None and product_size == full_size
+        use_shape = dims_value is not None and (product_size == full_size or topo == "KingMesh2D")
+        if topo == "KingMesh2D" and dims_value is None:
+            raise ValueError(
+                f"KingMesh2D requires an explicit 2D size for network dimension '{dim.label}'."
+            )
         if use_shape:
             dims_tuple = _resolve_2d_dims(
                 dims_value,
@@ -655,6 +676,10 @@ def generate_astrasim_configs_from_hw(
             getattr(dim, "bandwidth", None),
             float(getattr(dim, "util", 1.0)),
         )
+        if topo == "KingMesh2D" and isinstance(effective_bw, (list, tuple)):
+            raise ValueError(
+                f"KingMesh2D requires a scalar bandwidth for network dimension '{dim.label}'."
+            )
         if transform_2d_to_1d and isinstance(effective_bw, (list, tuple)):
             effective_bw = effective_bw[0] if effective_bw else 0.0
         latency_s = float(dim.latency)
@@ -696,7 +721,15 @@ def generate_astrasim_configs_from_hw(
                 f"non_recursive_from={non_recursive_from} exceeds network dimensions ({len(topo_list)})."
             )
 
-    signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
+    if any(isinstance(entry, (list, tuple)) for entry in npus_list):
+        signature_parts = []
+        for entry in npus_list:
+            if isinstance(entry, (list, tuple)):
+                signature_parts.append("x".join(str(int(v)) for v in entry))
+            else:
+                signature_parts.append(str(entry))
+    else:
+        signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
     dim_signature = "_".join(signature_parts) if signature_parts else f"{target}"
 
     unique_suffix = f"_{uuid.uuid4().hex}" if ephemeral_outputs else ""
@@ -704,7 +737,12 @@ def generate_astrasim_configs_from_hw(
     sys_json = os.path.join(out_dir, f"system_native_collectives_{dim_signature}{unique_suffix}.json")
 
     topo_str = ", ".join(topo_list)
-    npus_str = ", ".join(str(v) for v in npus_list)
+    def _format_npus_entry(value: object) -> str:
+        if isinstance(value, (list, tuple)):
+            values = ", ".join(str(int(v)) for v in value)
+            return f"[ {values} ]"
+        return str(value)
+    npus_str = ", ".join(_format_npus_entry(v) for v in npus_list)
     bw_str = ", ".join(str(v) for v in bw_list)
     lat_str = ", ".join(str(v) for v in lat_list)
 
