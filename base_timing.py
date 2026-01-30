@@ -127,6 +127,9 @@ class model_LLM:
         self.intermediate_size = exp_config.model_config.intermediate_size
         self.n_tokens = exp_config.model_config.n_tokens
         self.run_type = exp_config.model_config.run_type
+        self.disable_embedding_unembedding = bool(
+            getattr(exp_config.model_config, "disable_embedding_unembedding", False)
+        )
         self.attention_type = exp_config.model_config.attention.attention_type
         self.kv_heads = (
             exp_config.model_config.attention.kv_heads
@@ -353,7 +356,7 @@ class TimeCalculation:
         self.attached = True
 
         run_type = "training"
-        if str(mode).upper() == "LLM":
+        if str(mode).upper() in {"LLM", "VIT"}:
             model_cfg = getattr(model_config, "model_config", None)
             run_type = str(getattr(model_cfg, "run_type", "training")).lower()
         self.run_type = run_type
@@ -437,7 +440,7 @@ class TimeCalculation:
             self.N = self.model.N
             self.gemm_shard_axis = self.model.gemm_shard_axis
 
-        if mode == "LLM":
+        if mode in {"LLM", "VIT"}:
             self.global_batch_size = self.model.global_batch_size
             self.gradient_accumulation_steps = self.model.gradient_accumulation_steps
             self.batch_size = self.global_batch_size // self.gradient_accumulation_steps
@@ -518,6 +521,7 @@ class TimeCalculation:
         model_classes = {
             "GEMM": model_GEMM,
             "LLM": model_LLM,
+            "VIT": model_LLM,
         }
         if model_type not in model_classes:
             raise ValueError(f"Unsupported model type: {model_type}")

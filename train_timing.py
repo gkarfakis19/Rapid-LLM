@@ -262,6 +262,15 @@ class TimeCalculationLLM(TimeCalculation):
 
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
+        self.disable_embedding_unembedding = bool(
+            getattr(self.model, "disable_embedding_unembedding", False)
+        )
+        self.disable_kv_cache = str(getattr(self, "mode", "")).upper() == "VIT"
+
+        if self.disable_kv_cache and self.execution_mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
+            raise ValueError(
+                "ViT inference does not support execution_backend.astra.mode='full_astrasim_flattened'."
+            )
 
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
@@ -468,8 +477,12 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_params_local = params_per_layer_per_rank * layers_per_stage
             transformer_params_local = min(transformer_params_local, total_transformer_params)
 
-        embedding_params = vocab_size * hidden_dim / tp
-        output_params = 0.0 if self.tied_embeddings else embedding_params
+        if self.disable_embedding_unembedding:
+            embedding_params = 0.0
+            output_params = 0.0
+        else:
+            embedding_params = vocab_size * hidden_dim / tp
+            output_params = 0.0 if self.tied_embeddings else embedding_params
 
         if pp == 1:
             total_params_per_rank = transformer_params_local + embedding_params + output_params
@@ -488,6 +501,8 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
+        if getattr(self, "disable_kv_cache", False):
+            return 0
         head_dim = getattr(self, "head_dim", None)
         if head_dim is None:
             head_dim = self.hidden_dim // self.num_heads
@@ -651,7 +666,23 @@ class TimeCalculationLLM(TimeCalculation):
         Br = min(Bc, d) # q tile size
         Tr = math.ceil(shard_seq / Br) #number of q tiles
         Tc =  math.ceil(shard_seq / Bc) #number of kv tiles
-        
+
+        # For LLM (causal) flash-attn, skip tiles that are strictly above the diagonal (upper triangular).
+        # We still count full work for diagonal tiles; we do not model any fine-grained masking within a tile.
+        causal = str(getattr(self, "mode", "")).upper() == "LLM"
+        if causal:
+            active_tiles = 0
+            for r in range(Tr):
+                max_q = (r + 1) * Br - 1
+                max_c = max_q // Bc
+                if max_c < 0:
+                    continue
+                if max_c >= Tc:
+                    max_c = Tc - 1
+                active_tiles += max_c + 1
+        else:
+            active_tiles = Tc * Tr
+
 
         attention_forward_reduction_time = 0
         attention_size_f = 0
@@ -663,23 +694,24 @@ class TimeCalculationLLM(TimeCalculation):
         # attention score gemm
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
         attn_score_time_per_tile = self.get_gemm_time(Br, d, Bc, "attention_score_f",read_bytes_l2=load_q_bytes, flashattn_enable=True)[0] 
-        attn_score_time = attn_score_time_per_tile * Tc * Tr #attention score gemm time for one head
+        attn_score_time = attn_score_time_per_tile * active_tiles #attention score gemm time for one head
 
         # Softmax time
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # attention output gemm
         output_bytes = Br * d * self.precision.activations #load value for one tile S is already in shared memory
         attn_output_time_per_tile = self.get_gemm_time(Br, Bc, d, "attention_output", read_bytes_l2=output_bytes, write_bytes_l2=output_bytes, flashattn_enable=True)[0] 
-        attn_output_time = attn_output_time_per_tile * Tc * Tr #attention output gemm time for one head
+        attn_output_time = attn_output_time_per_tile * active_tiles #attention output gemm time for one head
         
         
-        attn_score_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        attn_score_time += self.O
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
-        attn_output_time *= batch_size * num_heads / max(1, self.tp) + self.O
-
+        attn_output_time *= batch_size * num_heads / max(1, self.tp)
+        attn_output_time += self.O
 
         attention_forward_gemm_time = initial_load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
         attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
@@ -702,6 +734,22 @@ class TimeCalculationLLM(TimeCalculation):
         Br = min(Bc, d) # q tile size
         Tr = math.ceil(shard_seq / Br) #number of q tiles
         Tc =  math.ceil(shard_seq / Bc) #number of kv tiles
+
+        # For LLM (causal) flash-attn, skip tiles that are strictly above the diagonal (upper triangular).
+        # We still count full work for diagonal tiles; we do not model any fine-grained masking within a tile.
+        causal = str(getattr(self, "mode", "")).upper() == "LLM"
+        if causal:
+            active_tiles = 0
+            for r in range(Tr):
+                max_q = (r + 1) * Br - 1
+                max_c = max_q // Bc
+                if max_c < 0:
+                    continue
+                if max_c >= Tc:
+                    max_c = Tc - 1
+                active_tiles += max_c + 1
+        else:
+            active_tiles = Tc * Tr
         
         attention_backward_reduction_time = 0
         attention_size_b = 0
@@ -714,40 +762,45 @@ class TimeCalculationLLM(TimeCalculation):
         # attention score recompute
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
         attn_score_time_per_tile = self.get_gemm_time(Br, d, Bc, "attention_score_b",read_bytes_l2=load_q_bytes, flashattn_enable=True)[0] #recompute S = QK^T for backward [Br, Bc]
-        attn_score_time = attn_score_time_per_tile * Tc * Tr #attention score gemm time for one head
+        attn_score_time = attn_score_time_per_tile * active_tiles #attention score gemm time for one head
         
         # Softmax recompute time 
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax_recompute", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax_recompute", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # dV dP
         load_o_bytes = Br * d * self.precision.activations #load output for one tile assuming v is already in shared memory
         act_dO_time_per_tile = self.get_gemm_time(Bc, Br, d, "attention_output_b", read_bytes_l2=load_o_bytes, flashattn_enable=True)[0] #dV = P^T * dO  [Bc, d]
         act_dP_time_per_tile = self.get_gemm_time(Br, d, Bc, "attention_score_b", read_bytes_l2=0, flashattn_enable=True)[0] #dP = dO * V^T [Br, Bc]
-        act_dO_time = act_dO_time_per_tile * Tc * Tr #dV time for one head
-        act_dP_time = act_dP_time_per_tile * Tc * Tr #dP time for one head
+        act_dO_time = act_dO_time_per_tile * active_tiles #dV time for one head
+        act_dP_time = act_dP_time_per_tile * active_tiles #dP time for one head
         
         # compute dS
         elements = Br * Bc
         flops = (SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT ) * elements 
-        softmax_time_backward = self.roofline(flops, 1, "attention_scale_softmax_b", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        softmax_time_backward = self.roofline(flops, 1, "attention_scale_softmax_b", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # dQ
         act_dQ_time_per_tile = self.get_gemm_time(Br, Bc, d, "attention_score_b", read_bytes_l2=0, flashattn_enable=True)[0] #dQ = dS * K [Br, d]
-        act_dQ_time = act_dQ_time_per_tile * Tc * Tr #dQ time for one head
+        act_dQ_time = act_dQ_time_per_tile * active_tiles #dQ time for one head
         
         
-        attn_score_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        attn_score_time += self.O
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
-        act_dO_time *= batch_size * num_heads / max(1, self.tp) + self.O
-        act_dP_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        act_dO_time *= batch_size * num_heads / max(1, self.tp)
+        act_dO_time += self.O
+        act_dP_time *= batch_size * num_heads / max(1, self.tp)
+        act_dP_time += self.O
         softmax_time_backward *= batch_size * num_heads / max(1, self.tp)
-        act_dQ_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        act_dQ_time *= batch_size * num_heads / max(1, self.tp)
+        act_dQ_time += self.O
         if self.full_recomputation:  #attention recompute is already included in full recomputation   
             recompute_time = 0
         else:
             recompute_time = attn_score_time + attn_scale_softmax_time #selective recomputation only recompute attention score and softmax
+            
         attention_backward_gemm_time = initial_load_time + recompute_time + act_dO_time + act_dP_time + softmax_time_backward + act_dQ_time
         attention_backward_time = attention_backward_gemm_time + attention_backward_reduction_time
         
@@ -2711,8 +2764,20 @@ class TimeCalculationLLM(TimeCalculation):
             ),
         )
 
-        embedding_f, embedding_mem = self.get_embedding_f(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
-        embedding_b = self.get_embedding_b(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
+        embedding_f, embedding_mem = self.get_embedding_f(
+            vocab_size=vocab_size,
+            seq_len=seq_len,
+            hidden_dim=hidden_dim,
+        )
+        embedding_b = self.get_embedding_b(
+            vocab_size=vocab_size,
+            seq_len=seq_len,
+            hidden_dim=hidden_dim,
+        )
+        if self.disable_embedding_unembedding:
+            embedding_f = 0.0
+            embedding_b = 0.0
+            embedding_mem = {}
         transformer_timings["embedding"] = OperationTiming(
             "embedding",
             forward=DirectionTiming(
@@ -2816,6 +2881,10 @@ class TimeCalculationLLM(TimeCalculation):
 
         linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
+        if self.disable_embedding_unembedding:
+            linear_softmax_f = 0.0
+            linear_softmax_b = 0.0
+            linear_softmax_mem = {}
         transformer_timings["linear_softmax"] = OperationTiming(
             "linear_softmax",
             forward=DirectionTiming(
@@ -3617,6 +3686,8 @@ class TimeCalculationLLM(TimeCalculation):
             "pipeline_style_recompute": pipeline_style_recompute_flag,
             "dp_microbatch_mode": getattr(self, "dp_microbatch", "every_mb"),
             "moe_layer_mask": moe_layer_mask,
+            "model_type": self.model_type,
+            "disable_embedding_unembedding": self.disable_embedding_unembedding,
         }
 
         pipeline_graph_obj = llm_simulation.Graph(

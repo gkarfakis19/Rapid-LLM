@@ -100,7 +100,7 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: Torus2D
+        type: Ring
         bandwidth: 50 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
@@ -132,7 +132,7 @@ network:
       collective_override: {} # overrides execution_backend.collectives when provided
 
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
     mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

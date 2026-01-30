@@ -13,7 +13,7 @@ model_param:
     num_heads: 96
     kv_heads: 8
     head_dim: 128
-    use_flashattention: true
+    use_flashattention: true # Enable FlashAttention optimization (when false, we model naive attention without causal masking or flash optimizations)
     attention_tile_size: 128
   intermediate_size: 10944
   moe:

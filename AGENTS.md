@@ -10,3 +10,6 @@ RAPID-LLM quick brief for future agents
 - Inference: `TimeCalculationLLMInference` handles prefill + sampled decode steps (linear interpolation between samples). DP acts as replica multiplier only; CP decode is noted WIP. FlashAttention disabled for decode.
 - Artifacts/logs: outputs under `output/` (mode subdir). AstraSim artifacts live in `astra_cache/` and optionally `output/LLM/astra_hier` or `astra_flat` when persistence flags are set. Current logs/marker: `log/this_folder_contains_astrasim_logs`, `log/log.log` hold prior runs. Debug hardware snapshots in `dbg_hw_conf/20251105_173209/` (e.g., `baseline_001_tp64_cp1_dp1_lp1.yaml`, `baseline_053_tp1_cp1_dp64_lp1.yaml`).
 - Key environment flags: `RAPID_VISUALIZE_GRAPHS`, `RAPID_PERSIST_ASTRASIM_ARTIFACTS`, `RAPID_PERSIST_ARTIFACT_VIZ`, `RAPID_ASTRA_CACHE_MODE` (default CACHE_READWRITE).
+
+
+Use the python interpreter in $REPO_ROOT$/venv/bin/python to run the scripts, not the system python/python3 binaries.

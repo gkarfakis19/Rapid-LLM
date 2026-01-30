@@ -1344,6 +1344,7 @@ class LLMConfig:
     run_type: str
     model_type: str
     tied_embeddings: bool
+    disable_embedding_unembedding: bool
     num_layers: int
     hidden_dim: int
     global_batch_size: int
@@ -1433,8 +1434,10 @@ class LLMConfig:
 
         mode_raw = _parse_str_field("model_param", model_dict, "mode")
         mode = mode_raw.strip().upper()
-        if mode != "LLM":
-            raise ValueError(f"model_param.mode must be 'LLM' for LLM configs (got {mode_raw!r})")
+        if mode not in {"LLM", "VIT"}:
+            raise ValueError(
+                f"model_param.mode must be 'LLM' or 'ViT' for LLM-based configs (got {mode_raw!r})"
+            )
 
         run_type_raw = _parse_str_field("model_param", model_dict, "run_type")
         run_type = run_type_raw.strip().lower()
@@ -1452,9 +1455,9 @@ class LLMConfig:
         model_type = model_type_raw.strip().lower()
         if model_type in {"glm4", "glm"}:
             model_type = "glm4_moe"
-        if model_type not in {"gpt", "llama", "glm4_moe"}:
+        if model_type not in {"gpt", "llama", "glm4_moe", "vit"}:
             raise ValueError(
-                "model_param.model_type must be either 'gpt', 'llama', or 'glm4_moe' "
+                "model_param.model_type must be either 'gpt', 'llama', 'vit', or 'glm4_moe' "
                 f"(got {model_type_raw!r})"
             )
 
@@ -1515,7 +1518,21 @@ class LLMConfig:
                 ) from exc
 
         if run_type == "inference" and decode_len is None:
-            raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
+            if model_type == "vit":
+                decode_len = 0
+            else:
+                raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
+
+        disable_embedding_unembedding = _coerce_bool(
+            model_dict.get("disable_embedding_unembedding", model_dict.get("disable_embedding_unembedding_ops", False)),
+            "model_param.disable_embedding_unembedding",
+        )
+        if model_type == "vit":
+            if run_type != "inference":
+                raise ValueError("model_param.model_type='vit' is supported for inference only.")
+            if decode_len not in (0, None):
+                raise ValueError("model_param.decode_len must be 0 for ViT inference runs.")
+            disable_embedding_unembedding = True
 
         moe_block = model_dict.get("moe", {})
         if moe_block is None:
@@ -1560,6 +1577,7 @@ class LLMConfig:
             run_type=run_type,
             model_type=model_type,
             tied_embeddings=tied_embeddings,
+            disable_embedding_unembedding=disable_embedding_unembedding,
             num_layers=num_layers,
             hidden_dim=hidden_dim,
             global_batch_size=global_batch_size,
@@ -2030,7 +2048,7 @@ def parse_config(filename, config_type):
     elif config_type == "GEMM":
         model_config = GEMMConfig.from_dict(config_dict["model_param"])
         config = ModelConfig(model_config=model_config, inference_config=None)
-    elif config_type == "LLM":
+    elif config_type in {"LLM", "VIT"}:
         model_config = LLMConfig.from_dict(config_dict["model_param"])
         inference_config = None
         if model_config.run_type == "inference":
@@ -2039,23 +2057,6 @@ def parse_config(filename, config_type):
     else:
         raise ValueError("Invalid config type: {}".format(config_type))
     
-    # model_config = ModelConfig(**config_dict["model_param"])
-    # sw_config = SWConfig(**config_dict["sw_param"])
-    # sch_config = SchedulingConfig(**config_dict["parallelism"])
-    # tech_config = TechConfig.from_dict(config_dict["tech_param"])
-    # power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
-    # area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
-    # perimeter_config = PerimeterBreakdownConfig.from_dict(
-    #     config_dict["perimeter_breakdown"]
-    # )
-    # system_config = SystemHierarchyConfig.from_dict(config_dict["system_hierarchy"])
-    # memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
-    #     config_dict["memory_hierarchy"]
-    # )
-    # network_topology_config = NetworkTopologyConfig.from_dict(
-    #     config_dict["network_topology"]
-    # )
-
     return config
 
 
@@ -2126,6 +2127,11 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             )
         if model.decode_len is not None and model.decode_len > model.seq_len:
             raise ValueError("model_param.decode_len must be <= seq_len for inference")
+        if model.model_type == "vit":
+            if model.decode_len not in (0, None):
+                raise ValueError("model_param.decode_len must be 0 for ViT inference")
+            if model.use_moe:
+                raise ValueError("ViT inference does not support MoE/EP. Set model_param.moe.num_experts=1.")
     else:
         if cp > 1 and train_ep > 1:
             raise ValueError(

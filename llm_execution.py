@@ -521,7 +521,7 @@ class PipelineGraphFlattener:
 
         if isinstance(obj, llm_simulation.Node):
             base_name = str(getattr(obj, "name", "") or "")
-            if base_name.startswith("transformer_layer"):
+            if base_name.startswith("transformer_layer") or base_name.startswith("vit_block"):
                 expanded = self._expand_transformer_node(obj)
                 self._clone_cache[obj_id] = expanded
                 return expanded
@@ -1990,7 +1990,7 @@ class LLMExecutionDispatcher:
 
         if isinstance(node, llm_simulation.Node):
             base_name = str(getattr(node, "name", "") or "")
-            if base_name.startswith("transformer_layer"):
+            if base_name.startswith("transformer_layer") or base_name.startswith("vit_block"):
                 is_moe_layer = bool(getattr(node, "is_moe_layer", False))
                 timing_source = moe_timings if is_moe_layer and moe_timings is not None else dense_timings
                 if timing_source is None:

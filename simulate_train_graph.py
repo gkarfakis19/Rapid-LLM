@@ -165,6 +165,10 @@ class Graph:
         self.full_recomputation = bool(self.misc_metadata.get("full_recomputation", False))
         self.flattened_mode = bool(self.misc_metadata.get("flattened_mode", False))
         self.pipeline_style_recompute = bool(self.misc_metadata.get("pipeline_style_recompute", False))
+        self.model_type = str(self.misc_metadata.get("model_type", "") or "").lower()
+        self.disable_embedding_unembedding = bool(
+            self.misc_metadata.get("disable_embedding_unembedding", False)
+        )
 
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
@@ -674,6 +678,7 @@ class Graph:
         recompute_enabled = include_backward and self.full_recomputation and (
             self.flattened_mode or self.pipeline_style_recompute
         )
+        block_prefix = "vit_block" if self.model_type == "vit" else "transformer_layer"
 
 
         def attach_parallel_edge(target, gather_edge, skip_non_comm_children=None, skip_comm_children=None):
@@ -746,7 +751,7 @@ class Graph:
                 is_moe_layer = self._is_moe_layer(l)
                 transformer_duration = transformer_f_moe if is_moe_layer else transformer_f_dense
                 transformer_node = Node(
-                    f"transformer_layer{l}",
+                    f"{block_prefix}{l}",
                     op_id,
                     hw_id,
                     transformer_duration,
@@ -868,7 +873,7 @@ class Graph:
                 recompute_node = None
                 if recompute_enabled and recompute_nodes_b is not None:
                     recompute_node = Node(
-                        f"transformer_layer{l}_recompute",
+                        f"{block_prefix}{l}_recompute",
                         op_id,
                         hw_id,
                         transformer_f_moe if self._is_moe_layer(l) else transformer_f_dense,
@@ -886,7 +891,7 @@ class Graph:
 
                 is_moe_layer = self._is_moe_layer(l)
                 transformer_node_b = Node(
-                    f"transformer_layer{l}_b",
+                    f"{block_prefix}{l}_b",
                     op_id,
                     hw_id,
                     transformer_b_moe if is_moe_layer else transformer_b_dense,

@@ -1,0 +1,25 @@
+model_param:
+  mode: "ViT"
+  model_type: "vit"
+  run_type: "inference"
+  tied_embeddings: true
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 197
+  decode_len: 0
+  hidden_dim: 768
+  attention:
+    attention_type: "mha"
+    num_heads: 12
+    use_flashattention: false # Enable FlashAttention optimization (when false, we model naive attention without causal masking or flash optimizations)
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0
+  intermediate_size: 3072
+  vocab_size: 1000
+  num_layers: 12
+  disable_embedding_unembedding: true

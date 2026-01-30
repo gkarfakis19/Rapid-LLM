@@ -12,7 +12,7 @@ model_param:
     attention_type: "gqa"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
     num_heads: 32 # Total number of attention heads
     kv_heads: 8  # Number of key/value heads (used only when attention_type = "gqa")
-    use_flashattention: true  # Enable FlashAttention optimization
+    use_flashattention: true # Enable FlashAttention optimization (when false, we model naive attention without causal masking or flash optimizations)
     attention_tile_size: 128  # Tile size used in attention computation
   moe:
     num_experts: 1

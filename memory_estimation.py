@@ -102,6 +102,9 @@ class MemoryEstimator:
         flash_attention = bool(getattr(tc, "flash_attention", False))
         full_recomputation = bool(getattr(tc, "full_recomputation", False))
         use_moe = bool(getattr(tc, "use_moe", False))
+        disable_embedding_unembedding = bool(
+            getattr(tc, "disable_embedding_unembedding", False)
+        )
         if mode == "inference":
             dp = 1
             tp_ep = False
@@ -179,6 +182,9 @@ class MemoryEstimator:
         )
         embedding_static_bytes = float(embedding_params_per_rank) * per_param_static_bytes
         lm_head_static_bytes = float(output_params_per_rank) * per_param_static_bytes
+        if disable_embedding_unembedding:
+            embedding_static_bytes = 0.0
+            lm_head_static_bytes = 0.0
 
         if use_moe:
             moe_intermediate = int(getattr(tc, "moe_intermediate_size", tc.intermediate_size))
@@ -447,8 +453,8 @@ class MemoryEstimator:
                 MemKind.OUTPUT_PROJ: out_proj_bytes,  # (batch, seq, hidden_dim)
                 MemKind.LAYERNORM2: out_proj_bytes,  # (batch, seq, hidden_dim)
                 MemKind.MLP: ffn2_bytes,
-                MemKind.EMBEDDING: out_proj_bytes,
-                MemKind.SOFTMAX: softmax_out_bytes,
+                MemKind.EMBEDDING: 0.0 if disable_embedding_unembedding else out_proj_bytes,
+                MemKind.SOFTMAX: 0.0 if disable_embedding_unembedding else softmax_out_bytes,
                 MemKind.OPTIMIZER: 0.0,
                 MemKind.MOE_DISPATCH: 0.0,
                 MemKind.MOE_COMBINE: 0.0,
@@ -634,7 +640,9 @@ class MemoryEstimator:
                 visited.add(current_id)
 
                 name = getattr(current, "name", "")
-                if isinstance(name, str) and name.startswith("transformer_layer"):
+                if isinstance(name, str) and (
+                    name.startswith("transformer_layer") or name.startswith("vit_block")
+                ):
                     mem_kind = getattr(current, "mem_kind", None)
                     if mem_kind == MemKind.TRANSFORMER:
                         return True

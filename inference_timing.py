@@ -34,6 +34,10 @@ from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTim
 
 def convert_prefix(value: float) -> float:
     """Assign SI unit prefixes to numerical values."""
+    if value == 0:
+        return "0"
+    if value < 0:
+        return f"{value:.2f}"
     if value > 1:
         prefixes = ["", "k", "M", "G"]
         index = min(int(math.log10(value) // 3), len(prefixes) - 1)
@@ -417,6 +421,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.vocab_size,
         )
         linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(linear_shape)
+        if getattr(self, "disable_embedding_unembedding", False):
+            linear_softmax_f = 0.0
+            linear_softmax_mem = {}
         transformer_timings["linear_softmax"] = OperationTiming(
             "linear_softmax",
             forward=_make_forward(
@@ -599,6 +606,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 inter_comm_bytes += op.forward.comm_bytes
 
         for name in solo_ops:
+            if getattr(self, "disable_embedding_unembedding", False) and name in {"embedding", "linear_softmax"}:
+                continue
             op = transformer_timings.get(name)
             if op is None:
                 continue
@@ -689,6 +698,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 head_dim=head_dim,
                 precision_bytes=self.precision.kv_cache,
             )
+            if getattr(self, "disable_kv_cache", False):
+                token_bytes = 0.0
 
             (
                 pipeline_graph,
@@ -758,7 +769,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 mode="inference",
                 batch_size=batch_size,
                 seq_len=prefill_len,
-                kv_cache_tokens=prefill_len,
+                kv_cache_tokens=0 if getattr(self, "disable_kv_cache", False) else prefill_len,
             )
             prefill_root = dispatcher.build_flattened_root_for_memory()
             _, prefill_peak_gb = mem_estimator.simulate_peak(
@@ -888,7 +899,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         if decode_len == 0:
             print("Skipping decode")
-            return 0.0, []
+            return 0.0, 0.0, []
 
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
@@ -951,6 +962,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             head_dim=head_dim,
             precision_bytes=self.precision.kv_cache,
         )
+        if getattr(self, "disable_kv_cache", False):
+            token_bytes = 0.0
         prefill_len = self.seq_len - self.model.decode_len
         decode_len = self.model.decode_len
         num_layers = self.num_layers
@@ -979,17 +992,24 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             f"[decode] time: {decode_time:.4f}s, "
             f"[total] time: {total_time:.4f}s"
         )
-        print(
-            f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes)}, "
-            f"decode_store={_to_gib(decode_store_bytes)}, "
-            f"decode_fetch={_to_gib(decode_fetch_bytes)}"
-        )
+        if not getattr(self, "disable_kv_cache", False):
+            print(
+                f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes)}, "
+                f"decode_store={_to_gib(decode_store_bytes)}, "
+                f"decode_fetch={_to_gib(decode_fetch_bytes)}"
+            )
         
         total_energy = prefill_energy + decode_energy
+        prefill_denom = self._effective_transformer_batch() * prefill_len
+        decode_denom = self._effective_transformer_batch() * decode_len
+        total_denom = self._effective_transformer_batch() * (prefill_len + decode_len)
+        prefill_energy_tok = prefill_energy / prefill_denom if prefill_denom > 0 else 0.0
+        decode_energy_tok = decode_energy / decode_denom if decode_denom > 0 else 0.0
+        total_energy_tok = total_energy / total_denom if total_denom > 0 else 0.0
         print(
-            f"[prefill] energy: {convert_prefix(prefill_energy)}J, energy/tok: {convert_prefix(prefill_energy / (self._effective_transformer_batch() * prefill_len))}J",
-            f"[decode] energy: {convert_prefix(decode_energy)}J, energy/tok: {convert_prefix(decode_energy / (self._effective_transformer_batch() * decode_len))}J",
-            f"[total] energy: {convert_prefix(total_energy)}J, energy/tok: {convert_prefix(total_energy / (self._effective_transformer_batch() * (prefill_len + decode_len)))}J",
+            f"[prefill] energy: {convert_prefix(prefill_energy)}J, energy/tok: {convert_prefix(prefill_energy_tok)}J",
+            f"[decode] energy: {convert_prefix(decode_energy)}J, energy/tok: {convert_prefix(decode_energy_tok)}J",
+            f"[total] energy: {convert_prefix(total_energy)}J, energy/tok: {convert_prefix(total_energy_tok)}J",
         )
 
 

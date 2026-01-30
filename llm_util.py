@@ -411,7 +411,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             mode="inference",
             batch_size=batch_size,
             seq_len=prefill_len,
-            kv_cache_tokens=prefill_len,
+            kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else prefill_len,
         )
         tc.pipeline_graph = pipeline_graph
         _, prefill_peak_gb = mem_estimator.simulate_peak(
@@ -469,7 +469,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             batch_size=batch_size,
             seq_len=1,
             gemm_shapes=decode_gemm_shapes,
-            kv_cache_tokens=seq_len,
+            kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else seq_len,
         )
         tc.pipeline_graph = decode_pipeline_graph
         _, decode_peak_gb = mem_estimator.simulate_peak(

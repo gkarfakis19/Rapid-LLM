@@ -87,7 +87,7 @@ def get_mode_from_config(model_config_path):
     if not model_param or "mode" not in model_param:
         raise ValueError("Error: 'mode' is not specified in the model configuration file under 'model_param'.")
     
-    return model_param["mode"]
+    return str(model_param["mode"]).strip().upper()
 
 
 def _validate_astrasim_dependencies(hw_config) -> None:
@@ -351,7 +351,7 @@ if __name__ == "__main__":
         shutil.rmtree(exp_dir)
     os.makedirs(exp_dir, exist_ok=True)
 
-    if mode == "LLM":
+    if mode in {"LLM", "VIT"}:
         run_LLM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,
