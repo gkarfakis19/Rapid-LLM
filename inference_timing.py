@@ -18,7 +18,8 @@
 import math
 import os
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple, Mapping, Set
+import yaml
+from typing import Any, Dict, List, Optional, Tuple, Mapping, Set
 from train_timing import (
     LLMExecutionDispatcher,
     TimeCalculationLLM,
@@ -31,6 +32,7 @@ from simulate_inference_graph import DecodeSample, InferenceConfig, InferenceEng
 import llm_util
 import json
 from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
+from tile import AccessBytes, formatBytes
 
 def convert_prefix(value: float) -> float:
     """Assign SI unit prefixes to numerical values."""
@@ -117,6 +119,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             *,
             flops: float = 0.0,
             memory: Optional[Mapping[str, float]] = None,
+            memory_profile: Optional[AccessBytes] = None,
         ) -> DirectionTiming:
             bytes_int = int(math.ceil(float(comm_bytes or 0.0)))
             return DirectionTiming(
@@ -125,11 +128,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=bytes_int,
                 flops=flops,
                 memory_accesses=dict(memory) if memory else {},
+                memory_profile=memory_profile,
             )
 
         # QKV projection
-        qkv_proj_time, qkv_proj_reduction, qkv_proj_size, qkv_proj_flops, qkv_proj_mem = self.parallelism_gemm_forward(
-            gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
+        qkv_proj_time, qkv_proj_reduction, qkv_proj_size, qkv_proj_flops, qkv_proj_mem, qkv_proj_profile = self.parallelism_gemm_forward(
+            gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV, return_profile=True
         )
         transformer_timings["qkv_proj"] = OperationTiming(
             "qkv_proj",
@@ -140,16 +144,17 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=qkv_proj_size,
                 flops=qkv_proj_flops,
                 memory=self._mem_levels(qkv_proj_mem),
+                memory_profile=qkv_proj_profile,
             ),
             backward=None,
         )
 
         # Attention components
-        attention_score_time, attention_score_reduction, attention_score_size, attention_score_flops, attention_score_mem = self.parallelism_gemm_forward(
-            gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
+        attention_score_time, attention_score_reduction, attention_score_size, attention_score_flops, attention_score_mem, attention_score_profile = self.parallelism_gemm_forward(
+            gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE, return_profile=True
         )
-        attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem = self.parallelism_gemm_forward(
-            gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
+        attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem, attention_output_profile = self.parallelism_gemm_forward(
+            gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT, return_profile=True
         )
         attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
 
@@ -159,6 +164,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         attention_forward_time = attention_forward_compute + attention_reduction
         attention_flops = (attention_score_flops or 0.0) + (attention_output_flops or 0.0)
         attention_mem = self._combine_mem(attention_score_mem, attention_output_mem)
+        attention_profile = self._combine_profiles(attention_score_profile, attention_output_profile)
 
         transformer_timings["attention"] = OperationTiming(
             "attention",
@@ -169,6 +175,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=attention_comm_bytes,
                 flops=attention_flops,
                 memory=attention_mem,
+                memory_profile=attention_profile,
             ),
             backward=None,
         )
@@ -186,8 +193,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         transformer_timings["attention_scale_softmax"] = attention_scale_softmax_op
 
         # Output projection
-        out_proj_time, out_proj_reduction, out_proj_size, out_proj_flops, out_proj_mem = self.parallelism_gemm_forward(
-            gemm_output_proj, "decode_output_projection_f", gemm_type=GemmType.OUT_PROJ
+        out_proj_time, out_proj_reduction, out_proj_size, out_proj_flops, out_proj_mem, out_proj_profile = self.parallelism_gemm_forward(
+            gemm_output_proj, "decode_output_projection_f", gemm_type=GemmType.OUT_PROJ, return_profile=True
         )
         transformer_timings["output_proj"] = OperationTiming(
             "output_proj",
@@ -198,6 +205,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=out_proj_size,
                 flops=out_proj_flops,
                 memory=self._mem_levels(out_proj_mem),
+                memory_profile=out_proj_profile,
             ),
             backward=None,
         )
@@ -212,11 +220,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         moe_tokens_local = None
         moe_tokens_shared = None
         if not use_moe_layer:
-            ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem = self.parallelism_gemm_forward(
-                gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1
+            ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem, ffn1_profile = self.parallelism_gemm_forward(
+                gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1, return_profile=True
             )
-            ffn2_time, ffn2_reduction, ffn2_size, ffn2_flops, ffn2_mem = self.parallelism_gemm_forward(
-                gemm_ffn2, "decode_ffn2_f", gemm_type=GemmType.FFN2
+            ffn2_time, ffn2_reduction, ffn2_size, ffn2_flops, ffn2_mem, ffn2_profile = self.parallelism_gemm_forward(
+                gemm_ffn2, "decode_ffn2_f", gemm_type=GemmType.FFN2, return_profile=True
             )
         else:
             gemm_router = gemm_shapes.get("router")
@@ -257,21 +265,23 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 debug_label="decode_moe_dispatch_f_all_to_all",
                 axis=axis,
             )
-            ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem = self.get_moe_ffn_f(
+            ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem, ffn1_profile = self.get_moe_ffn_f(
                 gemm_ffn1,
                 "decode_ffn1_f",
                 gemm_type=GemmType.FFN1,
                 batch_size=batch_size,
                 seq_len=output_seq_len,
                 allow_padding=allow_padding,
+                return_profile=True,
             )
-            ffn2_time, ffn2_reduction, ffn2_size, ffn2_flops, ffn2_mem = self.get_moe_ffn_f(
+            ffn2_time, ffn2_reduction, ffn2_size, ffn2_flops, ffn2_mem, ffn2_profile = self.get_moe_ffn_f(
                 gemm_ffn2,
                 "decode_ffn2_f",
                 gemm_type=GemmType.FFN2,
                 batch_size=batch_size,
                 seq_len=output_seq_len,
                 allow_padding=allow_padding,
+                return_profile=True,
             )
             combine_fwd_time = self.network_model.collective(
                 kind=CollectiveType.ALL_TO_ALL,
@@ -323,6 +333,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=ffn1_size,
                 flops=ffn1_flops,
                 memory=self._mem_levels(ffn1_mem),
+                memory_profile=locals().get("ffn1_profile"),
             ),
             backward=None,
         )
@@ -335,6 +346,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 comm_bytes=ffn2_size,
                 flops=ffn2_flops,
                 memory=self._mem_levels(ffn2_mem),
+                memory_profile=locals().get("ffn2_profile"),
             ),
             backward=None,
         )
@@ -473,6 +485,73 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         return transformer_timings, node_breakdown
 
+    def _energy_per_byte_levels(self) -> Tuple[float, float, float, float]:
+        """Return (L0,L1,L2,L3) energy per byte from tech config."""
+        tc = self.hw_config.tech_config
+        e_l0 = float(getattr(tc.SRAMR, "dynamic_energy_per_bit", 0.0) or 0.0) * 8.0
+        e_l1 = float(getattr(tc.SRAML1, "dynamic_energy_per_bit", 0.0) or 0.0) * 8.0
+        e_l2 = float(getattr(tc.SRAML2, "dynamic_energy_per_bit", 0.0) or 0.0) * 8.0
+        e_l3 = float(getattr(tc.DRAM, "dynamic_energy_per_bit", 0.0) or 0.0) * 8.0
+        return e_l0, e_l1, e_l2, e_l3
+
+    def _network_energy_per_byte(self) -> float:
+        """Approximate interconnect energy per byte (use first dimension)."""
+        e_bit = float(self.network.energies_per_bit[0]) if self.network.energies_per_bit else 0.0
+        return e_bit * 8.0
+
+    def _compute_energy_breakdown(self, transformer_timings: Dict[str, OperationTiming]) -> Dict[str, Any]:
+        """Compute per-op and total energy breakdown (compute/memory/communication)."""
+        e_flop = float(self.core.nominal_energy_per_flop)
+        e_levels = self._energy_per_byte_levels()
+        e_comm = self._network_energy_per_byte()
+
+        def _memory_energy(forward: DirectionTiming) -> Tuple[float, Dict[str, float]]:
+            # Prefer structured profile; fallback to totals dict
+            totals: Tuple[float, float, float, float]
+            if forward.memory_profile is not None:
+                t = forward.memory_profile.totals()
+                totals = (float(t[0]), float(t[1]), float(t[2]), float(t[3]))
+            else:
+                # ensure 4 levels
+                lv = [forward.memory_accesses.get(f"L{i}", 0.0) for i in range(4)]
+                totals = (float(lv[0]), float(lv[1]), float(lv[2]), float(lv[3]))
+            per_level = [totals[i] * e_levels[i] for i in range(4)]
+            mem_total = float(sum(per_level))
+            return mem_total, {f"L{i}": float(val) for i, val in enumerate(per_level)}
+
+        by_op: Dict[str, Any] = {}
+        total_compute = 0.0
+        total_memory = 0.0
+        total_comm = 0.0
+        for name, op in transformer_timings.items():
+            fwd = op.forward
+            if fwd is None:
+                continue
+            compute_e = float(fwd.flops or 0.0) * e_flop
+            mem_e, per_level = _memory_energy(fwd)
+            comm_e = float(fwd.comm_bytes or 0.0) * e_comm
+            total_e = compute_e + mem_e + comm_e
+            by_op[name] = {
+                "compute_j": compute_e,
+                "memory_j": mem_e,
+                "memory_levels_j": per_level,
+                "communication_j": comm_e,
+                "total_j": total_e,
+            }
+            total_compute += compute_e
+            total_memory += mem_e
+            total_comm += comm_e
+
+        return {
+            "ops": by_op,
+            "totals": {
+                "compute_j": total_compute,
+                "memory_j": total_memory,
+                "communication_j": total_comm,
+                "total_j": total_compute + total_memory + total_comm,
+            },
+        }
+
 
     def prepare_decode_graphs(
         self,
@@ -536,6 +615,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         output_act_bytes = decode_gemm_shapes_dense["qkv_proj"][0] * decode_gemm_shapes_dense["qkv_proj"][1] * self.precision_bytes
         energy = self.calc_energy(transformer_timings, output_act_bytes)
+        self._write_forward_memory_report(transformer_timings, "forward_memory_decode.yaml")
+        if moe_transformer_timings:
+            self._write_forward_memory_report(moe_transformer_timings, "forward_memory_decode_moe.yaml")
 
         if self._generate_graphs:
             results_path = os.path.join(self.output_dir, "decode_transformer_results.txt")
@@ -619,9 +701,202 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         
         return total_energy
 
+    def _write_forward_memory_report(self, transformer_timings: Dict[str, OperationTiming], filename: str) -> None:
+        """
+        Emit a YAML artifact summarizing read/write bytes per op for the forward pass.
+        """
+        if not transformer_timings:
+            return
+        def _flash_attention_profile(op_name: str) -> Optional[AccessBytes]:
+            if op_name != "attention":
+                return None
+            # Approximate DRAM traffic for standard attention (non-fused score/out tiles).
+            # Reads: Q, K, V, attention scores; Writes: attention scores, attention output.
+            batch = self._effective_transformer_batch()
+            seq_len = self.seq_len
+            # crude heuristic: use decode_len to decide whether we're in decode or prefill reports
+            if "decode" in filename:
+                seq_len = 1  # per-token decode op shapes
+            else:
+                seq_len = max(1, self.seq_len - self.model.decode_len)
+            num_heads = self.num_heads
+            kv_heads = self.kv_heads or num_heads
+            head_dim = self.hidden_dim // num_heads
+            q_size = num_heads * head_dim
+            kv_size = kv_heads * head_dim
+            bytes_per = self.precision_bytes
+            q_bytes = batch * seq_len * q_size * bytes_per
+            k_bytes = batch * seq_len * kv_size * bytes_per
+            v_bytes = batch * seq_len * kv_size * bytes_per
+            score_bytes = batch * kv_heads * seq_len * seq_len * bytes_per
+            out_bytes = batch * seq_len * q_size * bytes_per
+            dram_reads = q_bytes + k_bytes + v_bytes + score_bytes  # read scores once
+            dram_writes = score_bytes + out_bytes
+            # Add KV-cache fetch/store during decode: fetch prior K/V, store new K/V.
+            if "decode" in filename:
+                prefill_len = max(0, self.seq_len - self.model.decode_len)
+                kv_fetch = batch * kv_heads * head_dim * bytes_per * 2 * prefill_len
+                kv_store = batch * kv_heads * head_dim * bytes_per * 2  # new token
+                dram_reads += kv_fetch
+                dram_writes += kv_store
+            else:
+                # Prefill: write K/V for each token of length seq_len
+                kv_store = batch * kv_heads * head_dim * bytes_per * 2 * seq_len
+                dram_writes += kv_store
+            return AccessBytes(
+                reads=(0.0, 0.0, 0.0, float(dram_reads)),
+                writes=(0.0, 0.0, 0.0, float(dram_writes)),
+            )
+        def _ffn1_double_profile(op_name: str, seq_len_eff: int) -> Optional[AccessBytes]:
+            if op_name != "ffn1":
+                return None
+            # Build memory profile for a single FFN1 GEMM with intermediate_size,
+            # then double it to represent gate + up projections separately.
+            try:
+                _, _, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    seq_len_eff,
+                    self.hidden_dim,
+                    self.intermediate_size,
+                    name="ffn1_synth",
+                    return_profile=True,
+                )
+            except Exception:
+                return None
+            if mem_profile is not None:
+                reads = tuple(2.0 * r for r in mem_profile.reads)
+                writes = tuple(2.0 * w for w in mem_profile.writes)
+            elif mem_accesses:
+                reads = tuple(2.0 * float(v) for v in mem_accesses)
+                writes = (0.0, 0.0, 0.0, 0.0)
+            else:
+                return None
+            return AccessBytes(reads=reads, writes=writes)
+
+        def _qkv_split_profile(op_name: str, seq_len_eff: int) -> Optional[AccessBytes]:
+            if op_name != "qkv_proj":
+                return None
+            batch = self._effective_transformer_batch()
+            num_heads = self.num_heads
+            kv_heads = self.kv_heads or num_heads
+            head_dim = self.hidden_dim // num_heads
+            q_size = num_heads * head_dim
+            kv_size = kv_heads * head_dim
+            try:
+                # Q projection
+                _, _, _, _, q_mem_accesses, q_profile = self.get_gemm_time(
+                    seq_len_eff,
+                    self.hidden_dim,
+                    q_size,
+                    name="q_proj_synth",
+                    return_profile=True,
+                )
+                # K projection
+                _, _, _, _, k_mem_accesses, k_profile = self.get_gemm_time(
+                    seq_len_eff,
+                    self.hidden_dim,
+                    kv_size,
+                    name="k_proj_synth",
+                    return_profile=True,
+                )
+                # V projection
+                _, _, _, _, v_mem_accesses, v_profile = self.get_gemm_time(
+                    seq_len_eff,
+                    self.hidden_dim,
+                    kv_size,
+                    name="v_proj_synth",
+                    return_profile=True,
+                )
+            except Exception:
+                return None
+
+            def _reads_writes(profile, fallback_accesses):
+                if profile is not None:
+                    return profile.reads, profile.writes
+                if fallback_accesses:
+                    return tuple(float(x) for x in fallback_accesses), (0.0, 0.0, 0.0, 0.0)
+                return None, None
+
+            components = []
+            for prof, acc in ((q_profile, q_mem_accesses), (k_profile, k_mem_accesses), (v_profile, v_mem_accesses)):
+                r, w = _reads_writes(prof, acc)
+                if r is None:
+                    return None
+                components.append((r, w))
+
+            reads = tuple(sum(comp[0][i] for comp in components) for i in range(4))
+            writes = tuple(sum(comp[1][i] for comp in components) for i in range(4))
+            return AccessBytes(reads=reads, writes=writes)
+        report: Dict[str, Any] = {}
+        total_bytes = 0
+        for name, timing in transformer_timings.items():
+            forward = timing.forward
+            if forward is None:
+                continue
+            profile = getattr(forward, "memory_profile", None)
+            # Effective sequence length for this report (decode: 1 token, prefill: seq_len - decode_len)
+            seq_eff = 1 if "decode" in filename else max(1, self.seq_len - self.model.decode_len)
+            synth_ffn1 = _ffn1_double_profile(name, seq_eff)
+            synth_qkv = _qkv_split_profile(name, seq_eff)
+            if synth_ffn1 is not None:
+                profile = synth_ffn1
+            if synth_qkv is not None:
+                profile = synth_qkv
+            # For SwiGLU FFN1 (fused gate+up), approximate as two separate GEMMs
+            # by adding an extra read of the input activations (A is read twice).
+            if profile is None:
+                profile = _flash_attention_profile(name)
+            if profile is None:
+                # Fallback: build a synthetic profile from memory_accesses if available
+                access = getattr(forward, "memory_accesses", {}) or {}
+                totals = tuple(float(access.get(f"L{i}", 0.0)) for i in range(4))
+                if not any(totals):
+                    continue
+                reads = totals
+                writes = (0.0, 0.0, 0.0, 0.0)
+            else:
+                totals = profile.totals()
+                reads = profile.reads
+                writes = profile.writes
+            op_total = sum(totals)
+            total_bytes += op_total
+            reads_map = {f"L{i}": formatBytes(b) for i, b in enumerate(reads)}
+            writes_map = {f"L{i}": formatBytes(b) for i, b in enumerate(writes)}
+            totals_map = {f"L{i}": formatBytes(b) for i, b in enumerate(totals)}
+            report[name] = {
+                "reads": reads_map,
+                "writes": writes_map,
+                "totals": totals_map,
+                "total_bytes": int(op_total),
+                "total_bytes_hr": formatBytes(int(op_total)),
+            }
+        report["summary"] = {
+            "total_bytes": int(total_bytes),
+            "total_bytes_hr": formatBytes(int(total_bytes)),
+        }
+        if not report["summary"]["total_bytes"]:
+            return
+        os.makedirs(self.output_dir, exist_ok=True)
+        out_path = os.path.join(self.output_dir, filename)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            yaml.dump(report, fh, sort_keys=True)
+
+    def _combine_profiles(self, *profiles: Optional[AccessBytes]) -> Optional[AccessBytes]:
+        combined: Optional[AccessBytes] = None
+        for p in profiles:
+            if p is None:
+                continue
+            if combined is None:
+                combined = p
+                continue
+            combined = AccessBytes(
+                reads=tuple(cr + pr for cr, pr in zip(combined.reads, p.reads)),
+                writes=tuple(cw + pw for cw, pw in zip(combined.writes, p.writes)),
+            )
+        return combined
 
 
-    def calc_time(self) -> Tuple[float, float]:
+
+    def calc_time(self) -> Tuple[float, float, Optional[Dict[str, Any]]]:
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
@@ -633,6 +908,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         total_time = 0.0
         total_energy = 0.0
+        prefill_energy_breakdown: Optional[Dict[str, Any]] = None
         prefill_peak_gb = 0.0
         mem_estimator = MemoryEstimator(self)
 
@@ -649,6 +925,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.transformer_backward_root_moe = None
             self.transformer_analytical_time_forward = None
             self.transformer_analytical_time_backward = None
+            self._last_prefill_timings = None
         else:
             num_SMs = self.hw_config.tech_config.core.num_bundles
             transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
@@ -661,6 +938,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size,
                 num_SMs,
                 use_moe_override=False,
+                return_profile=True,
             )
             moe_transformer_timings = None
             moe_node_breakdown = None
@@ -675,10 +953,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                     self.moe_intermediate_size,
                     num_SMs,
                     use_moe_override=True,
-                )
+                    return_profile=True,
+            )
 
             output_act_bytes = batch_size * prefill_len * hidden_dim * self.precision_bytes
             total_energy = self.calc_energy(transformer_timings, output_act_bytes)
+            prefill_energy_breakdown = self._compute_energy_breakdown(transformer_timings)
+            self._write_forward_memory_report(transformer_timings, "forward_memory_prefill.yaml")
+            if moe_transformer_timings:
+                self._write_forward_memory_report(moe_transformer_timings, "forward_memory_prefill_moe.yaml")
 
             head_dim = getattr(self, "head_dim", None)
             if head_dim is None:
@@ -727,6 +1010,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.transformer_backward_root_moe = moe_transformer_backward_root
             self.transformer_analytical_time_forward = node_breakdown.get("transformer_time_f")
             self.transformer_analytical_time_backward = None
+            # keep a handle for downstream reporting
+            self._last_prefill_timings = transformer_timings
 
             dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
@@ -871,7 +1156,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.memory_capacity_exceeded = False
             self.memory_capacity_violation_gb = 0.0
 
-        return total_time, total_energy
+        return total_time, total_energy, prefill_energy_breakdown
 
     def calc_decode_time(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -932,7 +1217,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             dict: Breakdown of inference timing components
         """
         # Calculate prefill time (existing functionality)
-        prefill_time, prefill_energy = self.calc_time()
+        prefill_time, prefill_energy, prefill_breakdown = self.calc_time()
 
         # Calculate decode time (new functionality)
         decode_time, decode_energy, decode_samples = self.calc_decode_time()
@@ -992,16 +1277,154 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             f"[total] energy: {convert_prefix(total_energy)}J, energy/tok: {convert_prefix(total_energy / (self._effective_transformer_batch() * (prefill_len + decode_len)))}J",
         )
 
+        def _sum_memory_levels_from_profile(transformer_profiles: Dict[str, OperationTiming]) -> Dict[str, float]:
+            """Aggregate byte accesses per cache level across ops."""
+            levels = {f"L{i}": 0.0 for i in range(4)}
+            for timing in transformer_profiles.values():
+                forward = timing.forward
+                if forward is None:
+                    continue
+                profile = getattr(forward, "memory_profile", None)
+                if profile is not None:
+                    totals = profile.totals()
+                    for i in range(4):
+                        levels[f"L{i}"] += float(totals[i])
+                else:
+                    for i in range(4):
+                        levels[f"L{i}"] += float(forward.memory_accesses.get(f"L{i}", 0.0))
+            return levels
+
+        # Prefill memory bytes already aggregated over sequence length.
+        prefill_mem_levels = _sum_memory_levels_from_profile(
+            getattr(self, "_last_prefill_timings", {}) or {}
+        )
+
+
+        # Build energy results YAML with per-op breakdowns (prefill) and decode totals.
+        try:
+            # For decode per-op, approximate with one-step decode at current seq_len
+            decode_gemm_shapes = llm_util.process_decode_gemm_shapes(
+                self,
+                batch_size=self._effective_transformer_batch(),
+                current_seq_len=self.seq_len,
+                d_model=self.hidden_dim,
+                num_heads=self.num_heads,
+                kv_heads=self.kv_heads,
+                intermediate_size=self.moe_intermediate_size if self.use_moe else self.intermediate_size,
+                vocab_size=self.vocab_size,
+                model_type=self.model_type,
+            )
+            decode_timings_step, _ = self._build_decode_transformer_results(
+                batch_size=self._effective_transformer_batch(),
+                total_seq_len=self.seq_len,
+                use_moe_layer=False,
+                gemm_shapes=decode_gemm_shapes,
+            )
+            decode_breakdown_step = self._compute_energy_breakdown(decode_timings_step)
+            decode_mem_levels_step = _sum_memory_levels_from_profile(decode_timings_step)
+            # Scale per-op by decode_len to get totals across decode
+            def _scale_breakdown(b: Dict[str, Any], factor: float) -> Dict[str, Any]:
+                ops_scaled = {}
+                for k, v in b["ops"].items():
+                    ml = {lvl: val * factor for lvl, val in v["memory_levels_j"].items()}
+                    ops_scaled[k] = {
+                        "compute_j": v["compute_j"] * factor,
+                        "memory_j": v["memory_j"] * factor,
+                        "memory_levels_j": ml,
+                        "communication_j": v["communication_j"] * factor,
+                        "total_j": v["total_j"] * factor,
+                    }
+                tot = b["totals"]
+                totals_scaled = {k: float(tot[k]) * factor for k in tot}
+                return {"ops": ops_scaled, "totals": totals_scaled}
+            decode_breakdown = _scale_breakdown(decode_breakdown_step, float(decode_len))
+        except Exception:
+            decode_breakdown = {
+                "ops": {},
+                "totals": {
+                    "compute_j": 0.0,
+                    "memory_j": 0.0,
+                    "communication_j": 0.0,
+                    "total_j": float(decode_energy),
+                },
+            }
+            decode_mem_levels_step = {f"L{i}": 0.0 for i in range(4)}
+
+        energy_yaml = {
+            "prefill": prefill_breakdown or {"ops": {}, "totals": {"total_j": float(prefill_energy)}},
+            "decode": {
+                **decode_breakdown,
+                "avg_energy_per_token_j": float(decode_energy) / float(max(1, decode_len)),
+            },
+            "total": {
+                "total_j": float(total_energy),
+            },
+        }
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            with open(os.path.join(self.output_dir, "energy_results.yaml"), "w", encoding="utf-8") as fh:
+                yaml.dump(energy_yaml, fh, sort_keys=True)
+            # Also emit a CSV-style text for quick inspection
+            csv_lines = []
+            csv_lines.append("phase,op,compute_j,memory_j,communication_j,total_j")
+            for phase in ("prefill", "decode"):
+                ops = energy_yaml.get(phase, {}).get("ops", {}) or {}
+                totals = energy_yaml.get(phase, {}).get("totals", {}) or {}
+                for op_name, vals in ops.items():
+                    csv_lines.append(
+                        f"{phase},{op_name},{vals.get('compute_j',0.0)},{vals.get('memory_j',0.0)},{vals.get('communication_j',0.0)},{vals.get('total_j',0.0)}"
+                    )
+                # phase totals row
+                if totals:
+                    csv_lines.append(
+                        f"{phase},_total,{totals.get('compute_j',0.0)},{totals.get('memory_j',0.0)},{totals.get('communication_j',0.0)},{totals.get('total_j',0.0)}"
+                    )
+            with open(os.path.join(self.output_dir, "energy_results.csv"), "w", encoding="utf-8") as fh_csv:
+                fh_csv.write("\n".join(csv_lines) + "\n")
+        except Exception:
+            pass
+
+        # Memory bytes and memory energy per level for the full pass.
+        levels = [f"L{i}" for i in range(4)]
+
+        def _sum_energy_levels(breakdown: Dict[str, Any]) -> Dict[str, float]:
+            totals = {lvl: 0.0 for lvl in levels}
+            for vals in (breakdown or {}).get("ops", {}).values():
+                for lvl, energy in vals.get("memory_levels_j", {}).items():
+                    totals[lvl] = totals.get(lvl, 0.0) + float(energy)
+            return totals
+
+        decode_mem_levels_total = {lvl: decode_mem_levels_step.get(lvl, 0.0) * float(decode_len) for lvl in levels}
+        total_mem_levels = {lvl: prefill_mem_levels.get(lvl, 0.0) + decode_mem_levels_total.get(lvl, 0.0) for lvl in levels}
+
+        prefill_energy_levels = _sum_energy_levels(prefill_breakdown)
+        decode_energy_levels = _sum_energy_levels(decode_breakdown)
+        total_energy_levels = {lvl: prefill_energy_levels.get(lvl, 0.0) + decode_energy_levels.get(lvl, 0.0) for lvl in levels}
 
         return {
             "prefill_time": prefill_time,
             "decode_time": decode_time,
             "total_inference_time": total_time,
             "time_to_first_token": time_to_first_token,
+            "prefill_energy_j": float(prefill_energy),
+            "decode_energy_j": float(decode_energy),
+            "total_energy_j": float(total_energy),
+            "avg_decode_energy_per_token_j": float(decode_energy) / float(max(1, decode_len)),
             "kv_cache_prefill_store_bytes": prefill_store_bytes,
             "kv_cache_decode_store_bytes": decode_store_bytes,
             "kv_cache_decode_fetch_bytes": decode_fetch_bytes,
             "decode_tokens_per_s": decode_rates,
+            "memory_bytes_levels": {
+                "prefill": prefill_mem_levels,
+                "decode_per_token": decode_mem_levels_step,
+                "decode_total": decode_mem_levels_total,
+                "total": total_mem_levels,
+            },
+            "memory_energy_levels": {
+                "prefill": prefill_energy_levels,
+                "decode": decode_energy_levels,
+                "total": total_energy_levels,
+            },
         }
 
     @staticmethod

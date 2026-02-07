@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from tile import AccessBytes
+
 
 class CollectiveType(Enum):
     ALL_REDUCE = "all_reduce"
@@ -80,6 +82,7 @@ class DirectionTiming:
     comm_bytes: int = 0
     flops: float = 0.0
     memory_accesses: Mapping[str, float] = field(default_factory=dict)
+    memory_profile: Optional[AccessBytes] = None
     notes: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -94,6 +97,15 @@ class DirectionTiming:
         for level_bytes in self.memory_accesses.values():
             if level_bytes < 0:
                 raise ValueError("DirectionTiming memory_accesses entries must be >= 0")
+        if self.memory_profile is not None:
+            if not isinstance(self.memory_profile, AccessBytes):
+                raise TypeError("DirectionTiming memory_profile must be an AccessBytes instance or None")
+            for r in self.memory_profile.reads:
+                if r < 0:
+                    raise ValueError("DirectionTiming memory_profile reads must be >= 0")
+            for w in self.memory_profile.writes:
+                if w < 0:
+                    raise ValueError("DirectionTiming memory_profile writes must be >= 0")
 
     def total_time(self) -> float:
         """Return compute + comm time."""
@@ -114,6 +126,14 @@ class DirectionTiming:
             "comm_bytes": self.comm_bytes,
             "flops": self.flops,
             "memory_accesses": dict(self.memory_accesses),
+            "memory_profile": (
+                {
+                    "reads": list(self.memory_profile.reads),
+                    "writes": list(self.memory_profile.writes),
+                }
+                if self.memory_profile is not None
+                else None
+            ),
             "notes": dict(self.notes),
         }
 

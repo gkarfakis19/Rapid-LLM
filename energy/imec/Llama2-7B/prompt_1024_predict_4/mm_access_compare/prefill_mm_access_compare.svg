@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+<rect x="0" y="0" width="1200" height="520" fill="white" />
+<text x="40" y="30" font-size="18" font-family="sans-serif" font-weight="600">prefill aten::mm memory access (GEMMCalc vs DeepFlow vs NCU)</text>
+<rect x="870" y="20" width="12" height="12" fill="#4C78A8"/>
+<text x="888" y="31" font-size="12" font-family="sans-serif">GEMMCalc</text>
+<rect x="980" y="20" width="12" height="12" fill="#9ECAE9"/>
+<text x="998" y="31" font-size="12" font-family="sans-serif">DeepFlow</text>
+<rect x="1090" y="20" width="12" height="12" fill="#F58518"/>
+<text x="1108" y="31" font-size="12" font-family="sans-serif">NCU</text>
+<rect x="40" y="50" width="353" height="390" fill="#ffffff" stroke="#dddddd" />
+<text x="48" y="68" font-size="14" font-family="sans-serif" font-weight="600">DRAM (32B sectors)</text>
+<line x1="85" y1="80" x2="85" y2="405" stroke="#333" />
+<line x1="85" y1="405" x2="383" y2="405" stroke="#333" />
+<line x1="85" y1="80.0" x2="383" y2="80.0" stroke="#eee" />
+<text x="79" y="80.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">1.170e+09</text>
+<line x1="85" y1="161.25" x2="383" y2="161.25" stroke="#eee" />
+<text x="79" y="161.25" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">8.775e+08</text>
+<line x1="85" y1="242.5" x2="383" y2="242.5" stroke="#eee" />
+<text x="79" y="242.5" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">5.850e+08</text>
+<line x1="85" y1="323.75" x2="383" y2="323.75" stroke="#eee" />
+<text x="79" y="323.75" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">2.925e+08</text>
+<line x1="85" y1="405.0" x2="383" y2="405.0" stroke="#eee" />
+<text x="79" y="405.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">0</text>
+<text x="159.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Load</text>
+<rect x="129.5" y="159.7753753080887" width="24.0" height="245.2246246919113" fill="#4C78A8" />
+<rect x="159.5" y="80.0" width="24.0" height="325.0" fill="#9ECAE9" />
+<rect x="189.5" y="221.85146525812715" width="24.0" height="183.14853474187285" fill="#F58518" />
+<text x="308.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Store</text>
+<rect x="278.5" y="380.25452330271116" width="24.0" height="24.74547669728882" fill="#4C78A8" />
+<rect x="308.5" y="290.28876316379115" width="24.0" height="114.71123683620883" fill="#9ECAE9" />
+<rect x="338.5" y="371.33659096114604" width="24.0" height="33.66340903885397" fill="#F58518" />
+<rect x="423" y="50" width="353" height="390" fill="#ffffff" stroke="#dddddd" />
+<text x="431" y="68" font-size="14" font-family="sans-serif" font-weight="600">L2 (32B sectors)</text>
+<line x1="468" y1="80" x2="468" y2="405" stroke="#333" />
+<line x1="468" y1="405" x2="766" y2="405" stroke="#333" />
+<line x1="468" y1="80.0" x2="766" y2="80.0" stroke="#eee" />
+<text x="462" y="80.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">9.149e+09</text>
+<line x1="468" y1="161.25" x2="766" y2="161.25" stroke="#eee" />
+<text x="462" y="161.25" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">6.862e+09</text>
+<line x1="468" y1="242.5" x2="766" y2="242.5" stroke="#eee" />
+<text x="462" y="242.5" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">4.574e+09</text>
+<line x1="468" y1="323.75" x2="766" y2="323.75" stroke="#eee" />
+<text x="462" y="323.75" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">2.287e+09</text>
+<line x1="468" y1="405.0" x2="766" y2="405.0" stroke="#eee" />
+<text x="462" y="405.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">0</text>
+<text x="542.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Load</text>
+<rect x="512.5" y="80.0" width="24.0" height="325.0" fill="#4C78A8" />
+<rect x="542.5" y="357.43266475644697" width="24.0" height="47.56733524355301" fill="#9ECAE9" />
+<rect x="572.5" y="146.39031256099145" width="24.0" height="258.60968743900855" fill="#F58518" />
+<text x="691.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Store</text>
+<rect x="661.5" y="401.8355569484241" width="24.0" height="3.1644430515759314" fill="#4C78A8" />
+<rect x="691.5" y="390.28187679083095" width="24.0" height="14.718123209169054" fill="#9ECAE9" />
+<rect x="721.5" y="395.60377700554267" width="24.0" height="9.396222994457343" fill="#F58518" />
+<rect x="806" y="50" width="353" height="390" fill="#ffffff" stroke="#dddddd" />
+<text x="814" y="68" font-size="14" font-family="sans-serif" font-weight="600">SHMEM (bytes)</text>
+<line x1="851" y1="80" x2="851" y2="405" stroke="#333" />
+<line x1="851" y1="405" x2="1149" y2="405" stroke="#333" />
+<line x1="851" y1="80.0" x2="1149" y2="80.0" stroke="#eee" />
+<text x="845" y="80.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">4.765e+11</text>
+<line x1="851" y1="161.25" x2="1149" y2="161.25" stroke="#eee" />
+<text x="845" y="161.25" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">3.574e+11</text>
+<line x1="851" y1="242.5" x2="1149" y2="242.5" stroke="#eee" />
+<text x="845" y="242.5" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">2.383e+11</text>
+<line x1="851" y1="323.75" x2="1149" y2="323.75" stroke="#eee" />
+<text x="845" y="323.75" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">1.191e+11</text>
+<line x1="851" y1="405.0" x2="1149" y2="405.0" stroke="#eee" />
+<text x="845" y="405.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">0</text>
+<text x="925.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Load</text>
+<rect x="895.5" y="115.06346328195826" width="24.0" height="289.93653671804174" fill="#4C78A8" />
+<rect x="925.5" y="263.8242898890053" width="24.0" height="141.17571011099471" fill="#9ECAE9" />
+<rect x="955.5" y="105.18147065125783" width="24.0" height="299.8185293487422" fill="#F58518" />
+<text x="1074.5" y="425" font-size="11" font-family="sans-serif" text-anchor="middle">Store</text>
+<rect x="1044.5" y="405.0" width="24.0" height="0.0" fill="#4C78A8" />
+<rect x="1074.5" y="80.0" width="24.0" height="325.0" fill="#9ECAE9" />
+<rect x="1104.5" y="396.2726640825111" width="24.0" height="8.727335917488931" fill="#F58518" />
+</svg>

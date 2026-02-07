@@ -581,7 +581,7 @@ class TimeCalculation:
         return max_time
     
     def get_gemm_time(self, dim1, dim2, dim3, name="", 
-                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
+                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False, return_profile: bool = False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
@@ -654,6 +654,7 @@ class TimeCalculation:
 
         # best_choice, best_mem_access must be set if there was at least one candidate
         mem_access = best_mem_access  # type: ignore
+        mem_profile = best_rw_access  # type: ignore
 
         if self.debug:
             print(repr(best_gemm))
@@ -667,6 +668,20 @@ class TimeCalculation:
         # 2 -> inner 'n' (activation stationary)
         best_inner_code = best_choice[0]  # type: ignore[index]
         best_tile_dims = best_choice[1]  # type: ignore[index]
+
+        if flashattn_enable and mem_profile is not None:
+            # Override L2/HBM totals in the structured profile to match the adjusted totals.
+            reads = list(mem_profile.reads)
+            writes = list(mem_profile.writes)
+            if len(reads) >= 4 and len(writes) >= 4:
+                reads[3] = 0
+                writes[3] = 0
+                reads[2] = read_bytes_l2
+                writes[2] = write_bytes_l2
+            mem_profile = AccessBytes(reads=tuple(reads), writes=tuple(writes))
+
+        if return_profile:
+            return best_time, best_inner_code, best_tile_dims, mem_access, mem_profile
         return best_time, best_inner_code, best_tile_dims, mem_access #, best_rw_access
     
     def get_tile_size(self, lid):

@@ -29,6 +29,7 @@ from memory_estimation import MemoryEstimator
 from base_timing import TimeCalculation
 from itertools import zip_longest  # for element-wise aggregation of memory access lists
 from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
+from tile import AccessBytes
 import yaml
 
 def _env_flag(name: str) -> bool:
@@ -819,16 +820,16 @@ class TimeCalculationLLM(TimeCalculation):
         return 0
     
     # assuming no context parallelism for now
-    def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
+    def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, *, return_profile: bool = False) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
-            return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
+            return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type, return_profile=return_profile) # also return flops and mem accesses
         elif parallelism_mode == ParallelismMode.CONTEXT:
-            return self._context_parallelism_gemm_forward(gemm, name, gemm_type)
+            return self._context_parallelism_gemm_forward(gemm, name, gemm_type, return_profile=return_profile)
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type)
+            return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type, return_profile=return_profile)
         elif parallelism_mode == ParallelismMode.SINGLE:
-            return self.single_gpu_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
+            return self.single_gpu_gemm_forward(gemm, name, gemm_type, return_profile=return_profile) # also return flops and mem accesses
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
@@ -846,15 +847,38 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
-    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, *, return_profile: bool = False) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         total_flops = 2 * batch * m * k * n
         mem_accesses = []
+        mem_profile = None
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time = self.get_gemm_time(m, k, n, name, disable_overhead=True)[0] * batch + self.O
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    m,
+                    k,
+                    n,
+                    name,
+                    disable_overhead=True,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    m,
+                    k,
+                    n,
+                    name,
+                    disable_overhead=True,
+                )
+            gemm_time = gemm_time * batch + self.O
         else :
-            gemm_time,_,_, mem_accesses = self.get_gemm_time(m, k, n, name)
+            if return_profile:
+                gemm_time,_,_, mem_accesses, mem_profile = self.get_gemm_time(m, k, n, name, return_profile=True)
+            else:
+                gemm_time,_,_, mem_accesses = self.get_gemm_time(m, k, n, name)
+        if return_profile:
+            return gemm_time, 0, 0, total_flops, mem_accesses, mem_profile
         return gemm_time, 0, 0, total_flops, mem_accesses
     
     def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
@@ -882,6 +906,8 @@ class TimeCalculationLLM(TimeCalculation):
         gemm: Tuple[int, ...],
         name: str,
         gemm_type: Optional[GemmType] = None,
+        *,
+        return_profile: bool = False,
     ) -> Tuple[float, float, float, float, Any]:
         """
         Megatron-LM style TPxCP hybrid forward GEMM behavior.
@@ -914,6 +940,7 @@ class TimeCalculationLLM(TimeCalculation):
         reduction_time = 0
         total_flops = 2 * batch * m * k * n
         mem_accesses: Any = []
+        mem_profile = None
 
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
@@ -923,63 +950,117 @@ class TimeCalculationLLM(TimeCalculation):
         axis_hint = None
 
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-                disable_overhead=True,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    disable_overhead=True,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-                disable_overhead=True,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    disable_overhead=True,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
         elif gemm_type == GemmType.QKV:  # column wise
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.shard_n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                )
             total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
             kind = ALL_GATHER
             participants = self.cp # all gather K V for each cp group
             axis_hint = "cp"
         elif gemm_type == GemmType.OUT_PROJ:
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.shard_k,
-                shard_spec.n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                )
             total_bytes = math.ceil(self.precision.activations * shard_spec.shard_m * n)
             kind = REDUCE_SCATTER
             participants = self.tp # reduce scatter output activation for each tp group
             axis_hint = "tp"
         elif gemm_type == GemmType.FFN2:  # row wise
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.shard_k,
-                shard_spec.n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                )
             total_bytes = math.ceil(self.precision.activations * shard_spec.shard_m * n)
             kind = REDUCE_SCATTER
             participants = self.tp  # reduce scatter output activation for each tp group
             axis_hint = "tp"
         elif gemm_type == GemmType.FFN1:  # column wise
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.shard_n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                )
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         
@@ -994,6 +1075,8 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
             axis=axis_hint,
         )
+        if return_profile:
+            return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses, mem_profile
         return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses
     def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         """
@@ -1166,7 +1249,7 @@ class TimeCalculationLLM(TimeCalculation):
             axis=axis_hint,
         )
         return gemm_time, reduction_time, total_bytes
-    def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+    def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, *, return_profile: bool = False) -> Tuple[float, float]:
         """
         Tensor-parallel forward GEMM behavior.
 
@@ -1202,43 +1285,80 @@ class TimeCalculationLLM(TimeCalculation):
         reduction_time = 0
         total_flops = 2 * batch * m * k * n
         mem_accesses = []
+        mem_profile = None
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-parallel forward GEMM")
         
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time,_,_, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-                disable_overhead=True,
-            )
+            if return_profile:
+                gemm_time,_,_, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    disable_overhead=True,
+                    return_profile=True,
+                )
+            else:
+                gemm_time,_,_, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
-            gemm_time,_,_, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.shard_n,
-                name,
-            )
+            if return_profile:
+                gemm_time,_,_, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time,_,_, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                )
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
-            gemm_time,_,_, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.shard_k,
-                shard_spec.n,
-                name,
-            )
+            if return_profile:
+                gemm_time,_,_, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time,_,_, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.shard_k,
+                    shard_spec.n,
+                    name,
+                )
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp
         elif gemm_type == GemmType.LINEAR_SOFTMAX: #assuming linear softmax is always column wise sharded
-            gemm_time,_,_, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.shard_n,
-                name,
-            )
+            if return_profile:
+                gemm_time,_,_, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time,_,_, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.shard_n,
+                    name,
+                )
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp * self.cp
         else:
@@ -1249,6 +1369,8 @@ class TimeCalculationLLM(TimeCalculation):
             reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, participants=participants, name=name)
 
 
+        if return_profile:
+            return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses, mem_profile
         return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses
     
     def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
@@ -1372,6 +1494,8 @@ class TimeCalculationLLM(TimeCalculation):
         gemm: Tuple[int, ...],
         name: str,
         gemm_type: Optional[GemmType] = None,
+        *,
+        return_profile: bool = False,
     ) -> Tuple[float, float, float, float, Any]:
         """
         Megatron-LM style context-parallel (CP) forward GEMM behavior.
@@ -1390,34 +1514,62 @@ class TimeCalculationLLM(TimeCalculation):
         reduction_time = 0
         total_flops = 2 * batch * m * k * n
         mem_accesses: Any = []
+        mem_profile = None
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
             raise ValueError("gemm_type is required for context-parallel forward GEMM")
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-                disable_overhead=True,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    disable_overhead=True,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
             gemm_time = gemm_time * batch + self.O
         elif gemm_type == GemmType.QKV:  # qkv gemm
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
             total_bytes = self.get_kv_size_bytes()
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN1, GemmType.FFN2):
-            gemm_time, _, _, mem_accesses = self.get_gemm_time(
-                shard_spec.shard_m,
-                shard_spec.k,
-                shard_spec.n,
-                name,
-            )
+            if return_profile:
+                gemm_time, _, _, mem_accesses, mem_profile = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                    return_profile=True,
+                )
+            else:
+                gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                    shard_spec.shard_m,
+                    shard_spec.k,
+                    shard_spec.n,
+                    name,
+                )
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         if gemm_type == GemmType.QKV:
@@ -1433,6 +1585,8 @@ class TimeCalculationLLM(TimeCalculation):
                 axis="cp",
             )
 
+        if return_profile:
+            return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses, mem_profile
         return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses
 
     def _context_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
@@ -1547,6 +1701,16 @@ class TimeCalculationLLM(TimeCalculation):
             return levels
         return {k: v * scale for k, v in levels.items()}
 
+    def _scale_mem_profile(self, mem_profile: Optional[AccessBytes], scale: int) -> Optional[AccessBytes]:
+        if mem_profile is None:
+            return None
+        if scale == 1:
+            return mem_profile
+        return AccessBytes(
+            reads=tuple(int(r * scale) for r in mem_profile.reads),
+            writes=tuple(int(w * scale) for w in mem_profile.writes),
+        )
+
     def _fused_batched_comm_time(
         self,
         total_bytes: int,
@@ -1597,25 +1761,41 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_type: Optional[GemmType] = None,
         *,
         use_tp: bool = True,
+        return_profile: bool = False,
     ) -> Tuple[float, float, int, float, Dict[str, float]]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if batch <= 0 or m <= 0 or k <= 0 or n <= 0:
+            if return_profile:
+                return 0.0, 0.0, 0, 0.0, {}, None
             return 0.0, 0.0, 0, 0.0, {}
         if use_tp:
             result = self.parallelism_gemm_forward(
                 (m, k, n),
                 name,
                 gemm_type=gemm_type,
+                return_profile=return_profile,
             )
-            if len(result) != 5:
-                raise ValueError(f"Unsupported parallelism_gemm_forward return length: {len(result)}")
-            per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = result
+            if return_profile:
+                if len(result) != 6:
+                    raise ValueError(f"Unsupported parallelism_gemm_forward return length: {len(result)}")
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem, per_profile = result
+            else:
+                if len(result) != 5:
+                    raise ValueError(f"Unsupported parallelism_gemm_forward return length: {len(result)}")
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = result
+                per_profile = None
         else:
-            per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = self.single_gpu_gemm_forward(
+            sg_result = self.single_gpu_gemm_forward(
                 (m, k, n),
                 name,
                 gemm_type=gemm_type,
+                return_profile=return_profile,
             )
+            if return_profile:
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem, per_profile = sg_result
+            else:
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = sg_result
+                per_profile = None
         scale = int(batch)
         comm_bytes = int(math.ceil(float(per_comm_bytes or 0.0))) * scale
         comm_time = per_comm_time * scale
@@ -1623,6 +1803,15 @@ class TimeCalculationLLM(TimeCalculation):
             fused_time = self._fused_batched_comm_time(comm_bytes, gemm_type, direction="forward")
             if fused_time:
                 comm_time = fused_time
+        if return_profile:
+            return (
+                per_time * scale,
+                comm_time,
+                comm_bytes,
+                per_flops * scale,
+                self._scale_mem_accesses(per_mem, scale),
+                self._scale_mem_profile(per_profile, scale),
+            )
         return (
             per_time * scale,
             comm_time,
@@ -1672,6 +1861,7 @@ class TimeCalculationLLM(TimeCalculation):
         batch_size: int,
         seq_len: int,
         allow_padding: Optional[bool] = None,
+        return_profile: bool = False,
     ):
         _batch, _m, k, n = self._expand_gemm_descriptor(gemm)
         if allow_padding is None:
@@ -1688,35 +1878,75 @@ class TimeCalculationLLM(TimeCalculation):
         m_per_expert = tokens_per_expert * max(1, int(self.cp))
         gemm_override = (experts_per_rank, m_per_expert, k, n)
         use_tp_sharded = bool(getattr(self, "tp_ep", True))
-        gemm_time, tp_comm_time, tp_comm_bytes, total_flops, mem_accesses_total = self._batched_gemm_forward_compute(
-            gemm_override,
-            name,
-            gemm_type=gemm_type,
-            use_tp=use_tp_sharded,
-        )
+        if return_profile:
+            (
+                gemm_time,
+                tp_comm_time,
+                tp_comm_bytes,
+                total_flops,
+                mem_accesses_total,
+                mem_profile_total,
+            ) = self._batched_gemm_forward_compute(
+                gemm_override,
+                name,
+                gemm_type=gemm_type,
+                use_tp=use_tp_sharded,
+                return_profile=True,
+            )
+        else:
+            gemm_time, tp_comm_time, tp_comm_bytes, total_flops, mem_accesses_total = self._batched_gemm_forward_compute(
+                gemm_override,
+                name,
+                gemm_type=gemm_type,
+                use_tp=use_tp_sharded,
+                return_profile=False,
+            )
+            mem_profile_total = None
 
         if tokens_shared > 0:
             shared_m = tokens_owner * max(1, int(self.cp))
             shared_name = f"{name}_shared" if name else "moe_ffn_shared"
             gemm_override_shared = (int(self.n_shared_experts), shared_m, k, n)
-            (
-                shared_gemm_time,
-                shared_comm_time,
-                shared_comm_bytes,
-                shared_flops,
-                mem_accesses_shared,
-            ) = self._batched_gemm_forward_compute(
-                gemm_override_shared,
-                shared_name,
-                gemm_type=gemm_type,
-                use_tp=use_tp_sharded,
-            )
+            if return_profile:
+                (
+                    shared_gemm_time,
+                    shared_comm_time,
+                    shared_comm_bytes,
+                    shared_flops,
+                    mem_accesses_shared,
+                    mem_profile_shared,
+                ) = self._batched_gemm_forward_compute(
+                    gemm_override_shared,
+                    shared_name,
+                    gemm_type=gemm_type,
+                    use_tp=use_tp_sharded,
+                    return_profile=True,
+                )
+            else:
+                (
+                    shared_gemm_time,
+                    shared_comm_time,
+                    shared_comm_bytes,
+                    shared_flops,
+                    mem_accesses_shared,
+                ) = self._batched_gemm_forward_compute(
+                    gemm_override_shared,
+                    shared_name,
+                    gemm_type=gemm_type,
+                    use_tp=use_tp_sharded,
+                    return_profile=False,
+                )
+                mem_profile_shared = None
             gemm_time += shared_gemm_time
             tp_comm_time += shared_comm_time
             tp_comm_bytes += shared_comm_bytes
             total_flops += shared_flops
             mem_accesses_total = self._combine_mem(mem_accesses_total, mem_accesses_shared)
+            if return_profile:
+                mem_profile_total = self._combine_profiles(mem_profile_total, mem_profile_shared)
 
+        if return_profile:
+            return gemm_time, tp_comm_time, tp_comm_bytes, total_flops, mem_accesses_total, mem_profile_total
         return gemm_time, tp_comm_time, tp_comm_bytes, total_flops, mem_accesses_total
 
     def get_moe_ffn_b(
@@ -2273,10 +2503,27 @@ class TimeCalculationLLM(TimeCalculation):
                     combined[k] = combined.get(k, 0.0) + (v or 0.0)
             return combined
         
+    def _combine_profiles(self, *profiles: Optional[AccessBytes]) -> Optional[AccessBytes]:
+        combined: Optional[AccessBytes] = None
+        for p in profiles:
+            if p is None:
+                continue
+            if combined is None:
+                combined = p
+                continue
+            combined = AccessBytes(
+                reads=tuple(cr + pr for cr, pr in zip(combined.reads, p.reads)),
+                writes=tuple(cw + pw for cw, pw in zip(combined.writes, p.writes)),
+            )
+        return combined
+        
     def _mem_levels(self, arr):
         # Accept both dict-like and sequence-like inputs since GEMM helpers return lists while
         # aggregated OperationTiming instances already carry dicts. MappingABC/SequenceABC cover
         # any object implementing the mapping/sequence protocol (e.g., dict, defaultdict, numpy arrays).
+        if isinstance(arr, AccessBytes):
+            totals = arr.totals()
+            return {f"L{i}": float(v) for i, v in enumerate(totals)}
         if isinstance(arr, MappingABC):
             return {str(k): float(v) for k, v in arr.items()}
         if isinstance(arr, (int, float)):
@@ -2299,6 +2546,8 @@ class TimeCalculationLLM(TimeCalculation):
         intermediate_size,
         num_SMs,
         use_moe_override: Optional[bool] = None,
+        *,
+        return_profile: bool = False,
     ):
         """Compute latency for all GEMM operations and node breakdown times."""
 
@@ -2342,18 +2591,21 @@ class TimeCalculationLLM(TimeCalculation):
         moe_tokens_local: Optional[int] = None
         moe_tokens_shared: Optional[int] = None
 
-        def _extract_forward(ret: Sequence[Any]) -> Tuple[float, float, float, float, Any]:
+        def _extract_forward(ret: Sequence[Any]) -> Tuple[float, float, float, float, Any, Any]:
+            if len(ret) == 6:
+                time, reduction, size, flops, mem, profile = ret
+                return time, reduction, size, flops, mem, profile
             if len(ret) == 5:
                 time, reduction, size, flops, mem = ret
-                return time, reduction, size, flops, mem
+                return time, reduction, size, flops, mem, None
             if len(ret) == 3:
                 time, reduction, size = ret
-                return time, reduction, size, 0.0, []
+                return time, reduction, size, 0.0, [], None
             raise ValueError(f"Unsupported return length: {len(ret)}")
 
         # QKV
-        qkv_proj_gemm_f, qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f = _extract_forward(
-            self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV)
+        qkv_proj_gemm_f, qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f, qkv_proj_profile_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV, return_profile=return_profile)
         )
         qkv_proj_gemm_b, qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(
             gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV
@@ -2364,6 +2616,7 @@ class TimeCalculationLLM(TimeCalculation):
             comm_bytes=int(qkv_proj_size_f or 0),
             flops=qkv_proj_flops_f,
             memory_accesses=dict(self._mem_levels(qkv_proj_mem_f)),
+            memory_profile=qkv_proj_profile_f,
         )
         qkv_backward = DirectionTiming(
             compute_time=qkv_proj_gemm_b,
@@ -2373,8 +2626,8 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_timings["qkv_proj"] = OperationTiming("qkv_proj", forward=qkv_forward, backward=qkv_backward)
 
         if not self.flash_attention:
-            attn_score_gemm_f, attn_score_reduction_f, attn_score_size_f, attn_score_flops_f, attn_score_mem_f = _extract_forward(
-                self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE)
+            attn_score_gemm_f, attn_score_reduction_f, attn_score_size_f, attn_score_flops_f, attn_score_mem_f, attn_score_profile_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE, return_profile=return_profile)
             )
             attn_score_gemm_b, attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(
                 gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE
@@ -2385,6 +2638,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=int(attn_score_size_f or 0),
                 flops=attn_score_flops_f,
                 memory_accesses=dict(self._mem_levels(attn_score_mem_f)),
+                memory_profile=attn_score_profile_f,
             )
             attn_score_backward = DirectionTiming(
                 compute_time=attn_score_gemm_b,
@@ -2415,8 +2669,8 @@ class TimeCalculationLLM(TimeCalculation):
                 ),
             )
 
-            attn_out_gemm_f, attn_out_reduction_f, attn_out_size_f, attn_out_flops_f, attn_out_mem_f = _extract_forward(
-                self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT)
+            attn_out_gemm_f, attn_out_reduction_f, attn_out_size_f, attn_out_flops_f, attn_out_mem_f, attn_out_profile_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT, return_profile=return_profile)
             )
             attn_out_gemm_b, attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(
                 gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT
@@ -2427,6 +2681,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=int(attn_out_size_f or 0),
                 flops=attn_out_flops_f,
                 memory_accesses=dict(self._mem_levels(attn_out_mem_f)),
+                memory_profile=attn_out_profile_f,
             )
             attn_out_backward = DirectionTiming(
                 compute_time=attn_out_gemm_b,
@@ -2454,6 +2709,7 @@ class TimeCalculationLLM(TimeCalculation):
             attention_comm_bytes_f = attn_score_size_f + attn_out_size_f
             attention_comm_bytes_b = attn_score_size_b + attn_out_size_b
             attention_mem = self._combine_mem(attn_score_mem_f, attn_out_mem_f)
+            attention_profile = self._combine_profiles(attn_score_profile_f, attn_out_profile_f)
             transformer_timings["attention"] = OperationTiming(
                 "attention",
                 forward=DirectionTiming(
@@ -2462,6 +2718,7 @@ class TimeCalculationLLM(TimeCalculation):
                     comm_bytes=int(attention_comm_bytes_f or 0),
                     memory_accesses=dict(self._mem_levels(attention_mem)),
                     flops=(attn_score_flops_f + attn_out_flops_f),
+                    memory_profile=attention_profile,
                 ),
                 backward=DirectionTiming(
                     compute_time=attention_backward_compute,
@@ -2502,8 +2759,8 @@ class TimeCalculationLLM(TimeCalculation):
                 ),
             )
 
-        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f, out_proj_flops_f, out_proj_mem_f = _extract_forward(
-            self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ)
+        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f, out_proj_flops_f, out_proj_mem_f, out_proj_profile_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ, return_profile=return_profile)
         )
         out_proj_gemm_b, out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(
             gemm_output_proj, "output_projection_b", gemm_type=GemmType.OUT_PROJ
@@ -2516,6 +2773,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=int(out_proj_size_f or 0),
                 flops=out_proj_flops_f,
                 memory_accesses=dict(self._mem_levels(out_proj_mem_f)),
+                memory_profile=out_proj_profile_f,
             ),
             backward=DirectionTiming(
                 compute_time=out_proj_gemm_b,
@@ -2524,14 +2782,14 @@ class TimeCalculationLLM(TimeCalculation):
             ),
         )
         if not use_moe_layer: 
-            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
-                self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
+            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f, ffn1_profile_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1, return_profile=return_profile)
             )
             ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(
                 gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1
             )
-            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
-                self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f, ffn2_profile_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2, return_profile=return_profile)
             )
             ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(
                 gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
@@ -2581,7 +2839,7 @@ class TimeCalculationLLM(TimeCalculation):
                 debug_label="moe_dispatch_b_all_to_all",
                 axis=axis,
             )
-            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
+            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f, ffn1_profile_f = _extract_forward(
                 self.get_moe_ffn_f(
                     gemm_ffn1,
                     "ffn1_f",
@@ -2589,6 +2847,7 @@ class TimeCalculationLLM(TimeCalculation):
                     batch_size=batch_size,
                     seq_len=seq_len,
                     allow_padding=allow_padding,
+                    return_profile=return_profile,
                 )
             )
             ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.get_moe_ffn_b(
@@ -2619,7 +2878,7 @@ class TimeCalculationLLM(TimeCalculation):
                 debug_label="moe_combine_b_all_to_all",
                 axis=axis,
             )
-            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
+            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f, ffn2_profile_f = _extract_forward(
                 self.get_moe_ffn_f(
                     gemm_ffn2,
                     "ffn2_f",
@@ -2627,6 +2886,7 @@ class TimeCalculationLLM(TimeCalculation):
                     batch_size=batch_size,
                     seq_len=seq_len,
                     allow_padding=allow_padding,
+                    return_profile=return_profile,
                 )
             )
             ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.get_moe_ffn_b(
@@ -2686,6 +2946,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=int(ffn1_size_f or 0),
                 flops=ffn1_flops_f,
                 memory_accesses=dict(self._mem_levels(ffn1_mem_f)),
+                memory_profile=ffn1_profile_f if 'ffn1_profile_f' in locals() else None,
             ),
             backward=DirectionTiming(
                 compute_time=ffn1_gemm_b,
@@ -2703,6 +2964,7 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=int(ffn2_size_f or 0),
                 flops=ffn2_flops_f,
                 memory_accesses=dict(self._mem_levels(ffn2_mem_f)),
+                memory_profile=ffn2_profile_f if 'ffn2_profile_f' in locals() else None,
             ),
             backward=DirectionTiming(
                 compute_time=ffn2_gemm_b,

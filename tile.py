@@ -198,7 +198,8 @@ def generate_tile_space(mem_layer, num_levels: int, dim1: int, dim2: int, dim3: 
         for x in tiles[2]:
             t1, t2, t3 = x
             if not original:
-                tiles[1] = mem_layer[1].get_gemm_based_tile_dims(t1, t2, t3)
+                # tiles[1] = mem_layer[1].get_gemm_based_tile_dims(t1, t2, t3)
+                tiles[1] = mem_layer[1].get_cta_dims(dim1, dim2, dim3) # TODO: why can return no options?
             tile_strategy = [
                 (x, y, z) for y in tiles[1] for z in tiles[2]
             ]
@@ -300,7 +301,7 @@ def _simulate_accesses_sig(inner_code: int, M: int, K: int, N: int,
                            l2_M: int, l2_K: int, l2_N: int,
                            l1_M: int, l1_K: int, l1_N: int,
                            dtype_size: int, FMA_x: int, FMA_y: int, dataflow_code: Union[int, Dataflow],
-                           capacity: int, total_bytes: int) -> Tuple[float, int, int, int]:
+                           capacity: int, num_mcu_per_bundle: int, total_bytes: int) -> Tuple[float, int, int, int]:
     """Compute memory traffic at each level (sys, L1/shared, L2, DRAM)."""
     sys_bytes = _sysarray_accesses_sig(M, N, K, FMA_x, FMA_y, dataflow_code, dtype_size)
 
@@ -309,12 +310,15 @@ def _simulate_accesses_sig(inner_code: int, M: int, K: int, N: int,
     num_tiles_N = -(-N // l2_N)
     max_reload = num_tiles_M * num_tiles_N * num_tiles_K
 
-    reuse_M = -(-l2_M // l1_M)
-    reuse_K = -(-l2_K // l1_K)
-    reuse_N = -(-l2_N // l1_N)
-    read_bytes = (l1_M * l1_K * dtype_size + l1_K * l1_N * dtype_size) * (reuse_M * reuse_N * reuse_K)
-    write_bytes = (l1_M * l1_N * dtype_size) * (reuse_M * reuse_N)
-    l1_shared_total = (read_bytes + write_bytes) * max_reload
+    # reuse_M = -(-l2_M // l1_M)
+    # reuse_K = -(-l2_K // l1_K)
+    # reuse_N = -(-l2_N // l1_N)
+    # read_bytes = (l1_M * l1_K * dtype_size + l1_K * l1_N * dtype_size) * (reuse_M * reuse_N * reuse_K)
+    # write_bytes = (l1_M * l1_N * dtype_size) * (reuse_M * reuse_N)
+    # l1_shared_total = (read_bytes + write_bytes) * max_reload
+    grid_size = -(-M // l1_M) * -(-N // l1_N)
+    cta_load = (l1_M * l1_K * -(-l1_N // FMA_x) + l1_N * l1_K * -(-l1_M // FMA_x)) / num_mcu_per_bundle
+    shared_read = cta_load * grid_size * -(-K // l1_K) * dtype_size
 
     # L2 accesses (reads+writes lumped to match return contract)
     l2_read, l2_write = _l2_accesses_sig(M, N, K, l1_M, l1_K, l1_N, dtype_size)
@@ -323,8 +327,8 @@ def _simulate_accesses_sig(inner_code: int, M: int, K: int, N: int,
     hbm_read, hbm_write = _hbm_accesses_sig_simplified(M, N, K, l1_M, l1_K, l1_N, dtype_size, total_bytes, l2_read, capacity)
 
     return AccessBytes(
-        reads=(sys_bytes, read_bytes * max_reload, l2_read, hbm_read),
-        writes=(0, write_bytes * max_reload, l2_write, hbm_write)
+        reads=(sys_bytes, shared_read, l2_read, hbm_read),
+        writes=(0, 0, l2_write, hbm_write)
     )
 
 
@@ -351,6 +355,7 @@ class TiledGEMM:
             else int(order_dims)
         )
         self.FMA_x, self.FMA_y = core.FMA_dims
+        self.num_mcu_per_bundle = core.num_mcu_per_bundle
         # Normalize dataflow to enum code (small ints make cheap cache keys)
         self.dataflow = core.dataflow
         self._dataflow_code = as_dataflow_code(self.dataflow)
@@ -433,7 +438,7 @@ class TiledGEMM:
             self.l2_M, self.l2_K, self.l2_N,
             self.l1_M, self.l1_K, self.l1_N,
             self.dtype_size, self.FMA_x, self.FMA_y, self._dataflow_code,
-            self.capacity, self.total_bytes,
+            self.capacity, self.num_mcu_per_bundle,self.total_bytes,
         )
 
 

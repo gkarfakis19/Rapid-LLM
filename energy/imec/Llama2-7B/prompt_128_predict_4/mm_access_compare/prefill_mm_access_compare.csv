@@ -1,0 +1,13 @@
+step,prefill
+summary_csv,imec/Llama2-7B/prompt_128_predict_4/prefill_summary.csv
+bucketized_ncu_csv,imec/Llama2-7B/prompt_128_predict_4/bucketized_ncu/prefill_bucketized_ncu.csv
+mm_unique_shapes,4
+mm_rows_total,225
+
+metric,GEMMCalc,DeepFlow,NCU
+dram_load_sectors_32B,4.221e+08,4.203e+08,4.226e+08
+dram_store_sectors_32B,6.941e+06,1.290e+07,4.937e+05
+l2_load_sectors_32B,1.327e+09,4.375e+08,1.298e+09
+l2_store_sectors_32B,1.113e+07,1.290e+07,1.710e+07
+shmem_load_bytes,5.421e+10,2.600e+10,9.171e+10
+shmem_store_bytes,0,5.997e+10,1.423e+09

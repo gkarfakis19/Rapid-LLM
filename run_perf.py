@@ -302,6 +302,25 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             category="results",
         )
 
+    # Emit memory bytes/energy by cache level to stdout/log.
+    def _fmt_gib(b: float) -> str:
+        return f"{b / (1024 ** 3):.2f} GiB"
+
+    mem_levels = inference_timing.get("memory_bytes_levels", {}).get("total")
+    if mem_levels:
+        log_message(
+            "Memory bytes by level: "
+            + ", ".join(f"{lvl}={_fmt_gib(mem_levels.get(lvl, 0.0))}" for lvl in ("L0", "L1", "L2", "L3")),
+            category="results",
+        )
+    mem_energy_levels = inference_timing.get("memory_energy_levels", {}).get("total")
+    if mem_energy_levels:
+        log_message(
+            "Memory energy by level (J): "
+            + ", ".join(f"{lvl}={mem_energy_levels.get(lvl, 0.0):.3f}" for lvl in ("L0", "L1", "L2", "L3")),
+            category="results",
+        )
+
     topology_lines = util.network_topology_summary_inference(exp_hw_config)
 
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
@@ -314,6 +333,37 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write(f"Inference Time for batch: {total_time:.2f}s\n")
         handle.write(f"Prefill Time: {inference_timing['prefill_time']:.3f}s\n")
         handle.write(f"Decode Time: {inference_timing['decode_time']:.3f}s\n")
+        if "prefill_energy_j" in inference_timing and "decode_energy_j" in inference_timing:
+            handle.write(
+                f"Prefill Energy: {inference_timing['prefill_energy_j']:.3f} J\n"
+            )
+            handle.write(
+                f"Decode Energy: {inference_timing['decode_energy_j']:.3f} J\n"
+            )
+            handle.write(
+                f"Total Energy: {inference_timing['total_energy_j']:.3f} J\n"
+            )
+            handle.write(
+                f"Avg Decode Energy per Token: {inference_timing['avg_decode_energy_per_token_j']:.6f} J/token\n"
+            )
+        # Memory bytes and energy per level (L0 closest → L3 DRAM).
+        mem_levels = inference_timing.get("memory_bytes_levels", {}).get("total")
+        if mem_levels:
+            def _fmt_bytes(b: float) -> str:
+                gib = b / (1024 ** 3)
+                return f"{gib:.2f} GiB"
+            handle.write(
+                "Memory Bytes by Level: "
+                + ", ".join(f"{lvl}={_fmt_bytes(mem_levels.get(lvl, 0.0))}" for lvl in ("L0", "L1", "L2", "L3"))
+                + "\n"
+            )
+        mem_energy_levels = inference_timing.get("memory_energy_levels", {}).get("total")
+        if mem_energy_levels:
+            handle.write(
+                "Memory Energy by Level: "
+                + ", ".join(f"{lvl}={mem_energy_levels.get(lvl, 0.0):.3f} J" for lvl in ("L0", "L1", "L2", "L3"))
+                + "\n"
+            )
         if replica_count > 1:
             handle.write(f"Inference Replicas: {replica_count}\n")
         handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.3f}s\n")

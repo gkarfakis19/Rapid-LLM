@@ -16,7 +16,63 @@
 import math
 from typing import Tuple
 
-import numpy as np
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None
+
+
+def _cbrt_real(x: float) -> float:
+    return math.copysign(abs(x) ** (1.0 / 3.0), x)
+
+
+def _cubic_real_roots(p0: float, p1: float, p2: float, p3: float):
+    """Return real roots of p0*x^3 + p1*x^2 + p2*x + p3 = 0 (best-effort)."""
+    if p0 == 0:
+        raise ValueError("p0 must be non-zero for a cubic")
+
+    a = p1 / p0
+    b = p2 / p0
+    c = p3 / p0
+
+    # Depressed cubic: x = y - a/3 => y^3 + p*y + q = 0
+    a_over_3 = a / 3.0
+    p = b - (a * a) / 3.0
+    q = (2.0 * a * a * a) / 27.0 - (a * b) / 3.0 + c
+
+    disc = (q / 2.0) ** 2 + (p / 3.0) ** 3
+    eps = 1e-12
+
+    if disc > eps:
+        sqrt_disc = math.sqrt(disc)
+        u = _cbrt_real(-q / 2.0 + sqrt_disc)
+        v = _cbrt_real(-q / 2.0 - sqrt_disc)
+        y = u + v
+        return [y - a_over_3]
+
+    if abs(disc) <= eps:
+        u = _cbrt_real(-q / 2.0)
+        y1 = 2.0 * u
+        y2 = -u
+        x1 = y1 - a_over_3
+        x2 = y2 - a_over_3
+        # Could be a triple root; de-dup within tolerance.
+        roots = [x1, x2, x2]
+        uniq = []
+        for r in roots:
+            if not any(abs(r - u0) < 1e-9 for u0 in uniq):
+                uniq.append(r)
+        return uniq
+
+    # disc < 0: three distinct real roots
+    # y_k = 2*sqrt(-p/3) * cos((theta + 2*pi*k)/3), where cos(theta) = (-q/2)/sqrt(-(p/3)^3)
+    phi = math.acos(max(-1.0, min(1.0, (-q / 2.0) / math.sqrt(-(p / 3.0) ** 3))))
+    t = 2.0 * math.sqrt(-p / 3.0)
+    roots = []
+    for k in (0, 1, 2):
+        y = t * math.cos((phi + 2.0 * math.pi * k) / 3.0)
+        roots.append(y - a_over_3)
+    return roots
 
 
 class Base:
@@ -36,11 +92,16 @@ class Base:
 
     def solve_poly(self, p0, p1, p2, p3):
         # solve p0.x^3 + p1.x^2 + p2.x + p3 = 0
-        roots = np.roots([p0, p1, p2, p3])
-        real_roots = roots.real[
-            abs(roots.imag) < 1e-10
-        ]  # where I chose 1-e10 as a threshold
-        return real_roots[0]
+        if np is not None:
+            roots = np.roots([p0, p1, p2, p3])
+            real_roots = roots.real[abs(roots.imag) < 1e-10]
+            if len(real_roots) == 0:
+                raise ValueError("No real roots found")
+            return float(real_roots[0])
+
+        real_roots = _cubic_real_roots(float(p0), float(p1), float(p2), float(p3))
+        positives = [r for r in real_roots if r > 0]
+        return min(positives) if positives else real_roots[0]
 
 
 class Memory(Base):
@@ -121,9 +182,55 @@ class Memory(Base):
                 final_tiles.difference_update(to_remove)
                 final_tiles.add(candidate)
         return final_tiles
+    
+    def get_cta_dims(self, M, K, N):
+        size = self.size_per_bundle
+        m_dims = [int(M >> i) for i in range(M.bit_length()) if (M >> i) >= 64]
+        k_dims = [int(K >> i) for i in range(K.bit_length()) if (K >> i) >= 32]
+        n_dims = [int(N >> i) for i in range(N.bit_length()) if (N >> i) >= 64]
+
+        # For small GEMMs (e.g., decode where M can be 1), the thresholds above can
+        # produce empty candidate lists and therefore no valid tiles. Fall back to
+        # the full problem dimensions so the caller can still explore some options.
+        if not m_dims:
+            m_dims = [int(M)]
+        if not k_dims:
+            k_dims = [int(K)]
+        if not n_dims:
+            n_dims = [int(N)]
+
+        valid_tiles = {}
+        for m in m_dims[::-1]:
+            for k in k_dims[::-1]:
+                for n in n_dims[::-1]:
+                    bytes_required = self.precision * (m * k + k * n)
+                    if bytes_required <= size:
+                        key = (m, k, n)
+                        waves_per_sm = self.calc_waves_per_sm(M, K, N, m, k, n)
+                        if waves_per_sm == -1:
+                            continue
+                        valid_tiles[key] = waves_per_sm
+        
+        if valid_tiles == {}:
+            return []
+                        
+        min_waves = min(valid_tiles.values())
+        if min_waves <= 1:
+            final_tiles = {k: v for k, v in valid_tiles.items() if v <= 1}
+            best_wave_util = max(final_tiles.values())
+            final_tiles = {k:v for k, v in final_tiles.items() if v == best_wave_util}
+        else:
+            final_tiles =  {k:v for k, v in valid_tiles.items() if v == min_waves}
+        return list(final_tiles.keys())
 
     def get_power2_tile_dims(self):
-        np.random.seed(1)
+        if np is not None:
+            np.random.seed(1)
+            rand_pows = lambda mp: [pow(2, i) for i in np.random.randint(0, mp, 2)]
+        else:
+            import random
+            random.seed(1)
+            rand_pows = lambda mp: [pow(2, random.randrange(0, mp)), pow(2, random.randrange(0, mp))]
         tile_dim_candidates = set()
         num_candidates = 20
         M = self.size_per_bundle / self.precision
@@ -136,7 +243,7 @@ class Memory(Base):
         while len(tile_dim_candidates) < num_candidates:
             z = -1
             while z < 0:
-                s = [pow(2, i) for i in np.random.randint(0, max_power, 2)]
+                s = rand_pows(max_power)
                 # store goes through cache at level 0 and 1 (register and shared memory)
                 assert self.level >= 0 and self.level <= 3
                 if self.level <= 1:

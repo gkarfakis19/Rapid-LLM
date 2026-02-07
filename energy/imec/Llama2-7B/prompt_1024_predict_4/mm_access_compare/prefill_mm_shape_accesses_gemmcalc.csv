@@ -1,0 +1,10 @@
+step,prefill
+summary_csv,imec/Llama2-7B/prompt_1024_predict_4/prefill_summary.csv
+hardware_config,/w/ee.00/puneet/nanoproj/users/yaoe888/Rapid-LLM/configs/hardware-config/a100_80GB_no_parallelism.yaml
+dtype_bytes,2
+
+M,K,N,rows,dram_load_sectors,dram_store_sectors,l2_load_sectors,l2_store_sectors,shmem_load_bytes,shmem_store_bytes
+1024,4096,4096,128,2056192,262144,25165824,262144,1073741824,0
+1024,4096,11008,64,5898240,704512,61865984,704512,2919235584,0
+1024,4096,32000,1,16646144,2048000,164626432,2048000,8489271296,0
+1024,11008,4096,32,7045120,262144,56360960,262144,2885681152,0

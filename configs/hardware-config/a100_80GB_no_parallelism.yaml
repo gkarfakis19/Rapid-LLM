@@ -40,19 +40,19 @@ tech_param:
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB
-    dynamic_energy_per_bit: 4.5e-12
+    dynamic_energy_per_bit: 8164e-15 # 209e-11 per 32B
     latency: 100e-9
     util: 1
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB
-    dynamic_energy_per_bit: 130e-15
+    dynamic_energy_per_bit: 1437e-15 # 368e-12
     latency: 0
     util: 1
   SRAM-L1:
     size: 20736 KB
     bandwidth: 18 TB
-    dynamic_energy_per_bit: 130e-15
+    dynamic_energy_per_bit: 320e-15 # 821e-13
     latency: 0
     util: 1
   SRAM-R:

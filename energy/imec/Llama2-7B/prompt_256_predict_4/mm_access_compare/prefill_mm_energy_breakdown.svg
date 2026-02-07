@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="460" viewBox="0 0 820 460">
+<rect x="0" y="0" width="820" height="460" fill="white" />
+<text x="50" y="30" font-size="18" font-family="sans-serif" font-weight="600">prefill aten::mm energy breakdown (GEMMCalc vs DeepFlow vs NCU)</text>
+<text x="50" y="48" font-size="12" font-family="sans-serif" fill="#444">Energy model: DRAM=2090 pJ/sector, L2=368 pJ/sector, SHMEM=82.1 pJ/32B</text>
+<line x1="50" y1="55" x2="50" y2="390" stroke="#333" />
+<line x1="50" y1="390" x2="770" y2="390" stroke="#333" />
+<line x1="50" y1="55.0" x2="770" y2="55.0" stroke="#eee" />
+<text x="42" y="55.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">2.368e+06</text>
+<line x1="50" y1="138.75" x2="770" y2="138.75" stroke="#eee" />
+<text x="42" y="138.75" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">1.776e+06</text>
+<line x1="50" y1="222.5" x2="770" y2="222.5" stroke="#eee" />
+<text x="42" y="222.5" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">1.184e+06</text>
+<line x1="50" y1="306.25" x2="770" y2="306.25" stroke="#eee" />
+<text x="42" y="306.25" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">5.919e+05</text>
+<line x1="50" y1="390.0" x2="770" y2="390.0" stroke="#eee" />
+<text x="42" y="390.0" font-size="10" font-family="monospace" text-anchor="end" dominant-baseline="middle">0</text>
+<rect x="520" y="18" width="12" height="12" fill="#E45756"/>
+<text x="538" y="29" font-size="12" font-family="sans-serif">DRAM</text>
+<rect x="605" y="18" width="12" height="12" fill="#72B7B2"/>
+<text x="623" y="29" font-size="12" font-family="sans-serif">L2</text>
+<rect x="690" y="18" width="12" height="12" fill="#54A24B"/>
+<text x="708" y="29" font-size="12" font-family="sans-serif">SHMEM</text>
+<rect x="130.0" y="258.3730925748986" width="80.0" height="131.62690742510145" fill="#E45756" stroke="none" />
+<rect x="130.0" y="124.03418700359589" width="80.0" height="134.3389055713027" fill="#72B7B2" stroke="none" />
+<rect x="130.0" y="85.45454545454552" width="80.0" height="38.57964154905036" fill="#54A24B" stroke="none" />
+<rect x="130.0" y="55" width="80.0" height="335" fill="none" stroke="#4C78A8" stroke-width="1.5" />
+<text x="170.0" y="412" font-size="12" font-family="sans-serif" text-anchor="middle">GEMMCalc</text>
+<text x="170.0" y="47" font-size="11" font-family="monospace" text-anchor="middle" fill="#333">2.152e+06 uJ</text>
+<rect x="370.0" y="212.38985644887248" width="80.0" height="177.61014355112752" fill="#E45756" stroke="none" />
+<rect x="370.0" y="178.554158359418" width="80.0" height="33.83569808945447" fill="#72B7B2" stroke="none" />
+<rect x="370.0" y="116.68710945098843" width="80.0" height="61.86704890842958" fill="#54A24B" stroke="none" />
+<rect x="370.0" y="55" width="80.0" height="335" fill="none" stroke="#9ECAE9" stroke-width="1.5" />
+<text x="410.0" y="412" font-size="12" font-family="sans-serif" text-anchor="middle">DeepFlow</text>
+<text x="410.0" y="47" font-size="11" font-family="monospace" text-anchor="middle" fill="#333">1.932e+06 uJ</text>
+<rect x="610.0" y="257.88665630186995" width="80.0" height="132.11334369813008" fill="#E45756" stroke="none" />
+<rect x="610.0" y="153.630301614495" width="80.0" height="104.25635468737494" fill="#72B7B2" stroke="none" />
+<rect x="610.0" y="112.75760051142424" width="80.0" height="40.87270110307077" fill="#54A24B" stroke="none" />
+<rect x="610.0" y="55" width="80.0" height="335" fill="none" stroke="#F58518" stroke-width="1.5" />
+<text x="650.0" y="412" font-size="12" font-family="sans-serif" text-anchor="middle">NCU</text>
+<text x="650.0" y="47" font-size="11" font-family="monospace" text-anchor="middle" fill="#333">1.959e+06 uJ</text>
+</svg>
