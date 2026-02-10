@@ -234,7 +234,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem = self.parallelism_gemm_forward(
                 gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT, decode=True
             )
-            attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
+            attention_scale_softmax_f = self._decode_scale_softmax_f_vector(gemm_attention_score)
 
             attention_reduction = attention_score_reduction + attention_output_reduction
             attention_comm_bytes = attention_score_size + attention_output_size
