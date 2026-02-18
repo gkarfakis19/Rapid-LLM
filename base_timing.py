@@ -138,6 +138,11 @@ class model_LLM:
         )
         self.use_flashattention = getattr(exp_config.model_config.attention, "use_flashattention", False)
         self.attention_tile_size = getattr(exp_config.model_config.attention, "attention_tile_size", None)
+        self.kv_lora_rank = getattr(exp_config.model_config.attention, "kv_lora_rank", None)
+        self.q_lora_rank = getattr(exp_config.model_config.attention, "q_lora_rank", None)
+        self.qk_nope_head_dim = getattr(exp_config.model_config.attention, "qk_nope_head_dim", None)
+        self.qk_rope_head_dim = getattr(exp_config.model_config.attention, "qk_rope_head_dim", None)
+        self.v_head_dim = getattr(exp_config.model_config.attention, "v_head_dim", None)
 
         self.moe_num_experts = int(getattr(exp_config.model_config, "num_experts", 1))
         self.moe_top_k = int(getattr(exp_config.model_config, "top_k", 1))
@@ -479,6 +484,11 @@ class TimeCalculation:
             self.flash_attention = getattr(self.model, "use_flashattention", False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, "kv_heads") else self.num_heads
             self.attention_tile_size = getattr(self.model, "attention_tile_size", None)
+            self.kv_lora_rank = getattr(self.model, "kv_lora_rank", None)
+            self.q_lora_rank = getattr(self.model, "q_lora_rank", None)
+            self.qk_nope_head_dim = getattr(self.model, "qk_nope_head_dim", None)
+            self.qk_rope_head_dim = getattr(self.model, "qk_rope_head_dim", None)
+            self.v_head_dim = getattr(self.model, "v_head_dim", None)
             raw_num_experts = getattr(self.model, "moe_num_experts", 1)
             raw_top_k = getattr(self.model, "moe_top_k", 1)
             self.moe_num_experts = max(1, int(raw_num_experts))

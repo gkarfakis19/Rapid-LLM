@@ -103,6 +103,30 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
     shared_heads = num_heads // kv_heads # how many heads share the same K,V
     gemms = OrderedDict()
 
+    attention_type = str(getattr(self, "attention_type", "mha")).lower()
+    run_type = str(
+        getattr(self, "run_type", getattr(getattr(self, "model", None), "run_type", "training"))
+    ).lower()
+
+    if attention_type == "mla":
+        latent_dim = self.q_lora_rank + self.kv_lora_rank 
+        up_dim_q = (self.qk_nope_head_dim + self.qk_rope_head_dim) * num_heads
+        up_dim_kv = (self.qk_nope_head_dim + self.v_head_dim) * num_heads
+        if run_type == "training":
+            gemms["D_proj"] = (batch_size, seq_len, d_model, latent_dim + self.qk_rope_head_dim)  # Down projection for MLA attention
+            gemms["U_proj_q"] = (batch_size, seq_len, self.q_lora_rank, up_dim_q)  # Up projection for query in MLA attention
+            gemms["U_proj_kv"] = (batch_size, seq_len, self.kv_lora_rank , up_dim_kv)  # Up projection for key/value in MLA attention
+        else:
+            gemms["D_proj_q"] = (batch_size, seq_len, d_model, self.q_lora_rank)  # Down projection Query
+            gemms["D_proj_kv"] = (batch_size, seq_len, d_model, self.kv_lora_rank)  # Down projection Key/Value
+            gemms["U_proj_q_rope"] = (batch_size, seq_len, self.q_lora_rank, self.qk_rope_head_dim * num_heads)
+            gemms["K_rope_proj"] = (batch_size, seq_len, d_model, self.qk_rope_head_dim * num_heads)
+            gemms["attention_score_1"] = (batch_size*num_heads, seq_len, self.q_lora_rank, self.kv_lora_rank )  # Attention score between projected query and key/value in MLA attention
+            gemms["attention_score_2"] = (batch_size* num_heads, seq_len, self.kv_lora_rank , seq_len)  
+            gemms["attention_score_rope"]   = (batch_size * num_heads, seq_len, self.qk_rope_head_dim, seq_len)
+            gemms["attention_ctx_latent"] = (batch_size * num_heads, seq_len, seq_len, self.kv_lora_rank)   # P_h @ cKV -> (S,rkv)
+            gemms["O_proj_absorbed"]      = (batch_size * num_heads, seq_len, self.kv_lora_rank, d_model)   # (S,rkv) @ B_h -> (S,M)
+
     gemms["qkv_proj"] = (batch_size, seq_len, d_model, q_size + 2 * kv_size)
 
     gemms["attention_score"] = (
@@ -545,8 +569,23 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     )
     shared_heads = num_heads // kv_heads
     gemms = OrderedDict()
+    attention_type = str(getattr(self, "attention_type", "mha")).lower()
+    run_type = str(
+        getattr(self, "run_type", getattr(getattr(self, "model", None), "run_type", "training"))
+    ).lower()
 
     # Decode-specific GEMM shapes with KV-cache handling (always enabled)
+    if attention_type == "mla" and run_type == "inference":
+        gemms["D_proj_q"] = (batch_size, 1, d_model, self.q_lora_rank)
+        gemms["D_proj_kv"] = (batch_size, 1, d_model, self.kv_lora_rank)
+        gemms["U_proj_q_rope"] = (batch_size, 1, self.q_lora_rank, self.qk_rope_head_dim * num_heads)
+        gemms["K_rope_proj"] = (batch_size, 1, d_model, self.qk_rope_head_dim * num_heads)
+
+        gemms["attention_score_1"] = (batch_size * num_heads, 1, self.q_lora_rank, self.kv_lora_rank)
+        gemms["attention_score_2"] = (batch_size * num_heads, 1, self.kv_lora_rank, current_seq_len)
+        gemms["attention_score_rope"] = (batch_size * num_heads, 1, self.qk_rope_head_dim, current_seq_len)
+        gemms["attention_ctx_latent"] = (batch_size * num_heads, 1, current_seq_len, self.kv_lora_rank)
+        gemms["O_proj_absorbed"] = (batch_size * num_heads, 1, self.kv_lora_rank, d_model)
 
     # QKV Projection: Only the new token (seq_len = 1)
     gemms["qkv_proj"] = (batch_size, 1, d_model, q_size + 2 * kv_size)
@@ -620,8 +659,11 @@ def process_decode_gemm_shapes(
     )
 
     processed = OrderedDict()
+    decode_attention_keys = ATTENTION_GEMM_KEYS.union(
+        {"attention_score_1", "attention_score_2", "attention_score_rope", "attention_ctx_latent"}
+    )
     for key, shape in gemm_shapes_4d.items():
-        if key in ATTENTION_GEMM_KEYS:
+        if key in decode_attention_keys:
             # Keep attention GEMMs in 4D for proper computation
             processed[key] = tuple(shape)
         else:

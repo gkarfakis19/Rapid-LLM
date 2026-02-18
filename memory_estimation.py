@@ -386,6 +386,12 @@ class MemoryEstimator:
                 moe_intermediate_size=tc.intermediate_size,
                 model_type=tc.model_type,
                 head_dim=getattr(tc, "head_dim", None),
+                attention_type=getattr(tc, "attention_type", "mha"),
+                q_lora_rank=getattr(tc, "q_lora_rank", None),
+                kv_lora_rank=getattr(tc, "kv_lora_rank", None),
+                qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
+                qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
+                v_head_dim=getattr(tc, "v_head_dim", None),
             )
             gemm_shapes_dense = llm_util.process_gemm_shapes(
                 dense_ctx,
