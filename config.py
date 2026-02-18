@@ -1177,6 +1177,11 @@ class LLMAttentionConfig:
     num_heads: int
     kv_heads: Optional[int] = None
     head_dim: Optional[int] = None
+    kv_lora_rank: Optional[int] = None
+    q_lora_rank: Optional[int] = None
+    qk_nope_head_dim: Optional[int] = None
+    qk_rope_head_dim: Optional[int] = None
+    v_head_dim: Optional[int] = None
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
 
@@ -1186,11 +1191,10 @@ class LLMAttentionConfig:
 
         attn_type_raw = _parse_str_field("model_param.attention", attention_dict, "attention_type")
         attn_type = attn_type_raw.strip().lower()
-        if attn_type == "mla":
-            raise NotImplementedError("attention_type='mla' is not yet supported. Please use 'mha' or 'gqa'.")
-        if attn_type not in {"mha", "gqa"}:
+        if attn_type not in {"mha", "gqa", "mla"}:
             raise ValueError(
-                f"model_param.attention.attention_type must be either 'mha' or 'gqa' (got {attn_type_raw!r})"
+                "model_param.attention.attention_type must be one of "
+                f"'mha', 'gqa', or 'mla' (got {attn_type_raw!r})"
             )
 
         num_heads = _parse_int_field("model_param.attention", attention_dict, "num_heads")
@@ -1227,6 +1231,64 @@ class LLMAttentionConfig:
         else:
             kv_heads = num_heads
 
+        def _parse_optional_positive_int(raw_value: object, field_name: str) -> Optional[int]:
+            if raw_value is None:
+                return None
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.{field_name} must be an integer when provided "
+                    f"(got {raw_value!r})"
+                ) from exc
+            if parsed <= 0:
+                raise ValueError(
+                    f"model_param.attention.{field_name} must be a positive integer"
+                )
+            return parsed
+
+        kv_lora_rank = _parse_optional_positive_int(
+            attention_dict.get("kv_lora_rank", None),
+            "kv_lora_rank",
+        )
+        q_lora_rank = _parse_optional_positive_int(
+            attention_dict.get("q_lora_rank", None),
+            "q_lora_rank",
+        )
+        qk_nope_head_dim = _parse_optional_positive_int(
+            attention_dict.get("qk_nope_head_dim", None),
+            "qk_nope_head_dim",
+        )
+        qk_rope_head_dim = _parse_optional_positive_int(
+            attention_dict.get("qk_rope_head_dim", None),
+            "qk_rope_head_dim",
+        )
+        v_head_dim = _parse_optional_positive_int(
+            attention_dict.get("v_head_dim", None),
+            "v_head_dim",
+        )
+        if attn_type == "mla":
+            if kv_lora_rank is None:
+                raise ValueError(
+                    "model_param.attention.kv_lora_rank must be specified when attention_type='mla'"
+                )
+            if q_lora_rank is None:
+                raise ValueError(
+                    "model_param.attention.q_lora_rank must be specified when attention_type='mla'"
+                )
+            if qk_nope_head_dim is None:
+                raise ValueError(
+                    "model_param.attention.qk_nope_head_dim must be specified when attention_type='mla'"
+                )
+            if qk_rope_head_dim is None:
+                raise ValueError(
+                    "model_param.attention.qk_rope_head_dim must be specified when attention_type='mla'"
+                )
+            if v_head_dim is None:
+                raise ValueError(
+                    "model_param.attention.v_head_dim must be specified when attention_type='mla'"
+                )
+
         raw_flash = attention_dict.get(
             "use_flashattention",
             attention_dict.get("used_flash_attention", False),
@@ -1261,6 +1323,11 @@ class LLMAttentionConfig:
             num_heads=num_heads,
             kv_heads=kv_heads,
             head_dim=head_dim,
+            kv_lora_rank=kv_lora_rank,
+            q_lora_rank=q_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
             use_flashattention=use_flashattention,
             attention_tile_size=attention_tile_size,
         )
@@ -1406,6 +1473,26 @@ class LLMConfig:
     @property
     def use_flashattention(self) -> bool:
         return bool(getattr(self.attention, "use_flashattention", False))
+
+    @property
+    def kv_lora_rank(self) -> Optional[int]:
+        return getattr(self.attention, "kv_lora_rank", None)
+
+    @property
+    def q_lora_rank(self) -> Optional[int]:
+        return getattr(self.attention, "q_lora_rank", None)
+
+    @property
+    def qk_nope_head_dim(self) -> Optional[int]:
+        return getattr(self.attention, "qk_nope_head_dim", None)
+
+    @property
+    def qk_rope_head_dim(self) -> Optional[int]:
+        return getattr(self.attention, "qk_rope_head_dim", None)
+
+    @property
+    def v_head_dim(self) -> Optional[int]:
+        return getattr(self.attention, "v_head_dim", None)
 
     @property
     def use_moe(self) -> bool:
@@ -2138,6 +2225,11 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     if not isinstance(model, LLMConfig):
         raise ValueError("Unsupported model config type for validation")
+
+    if model.attention.attention_type == "mla" and (tp > 1 or cp > 1):
+        raise ValueError(
+            "attention_type='mla' currently requires parallelism.tp=1 and parallelism.cp=1."
+        )
 
     if model.use_moe and model.top_k > model.num_experts:
         raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")
