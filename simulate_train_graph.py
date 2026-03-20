@@ -174,6 +174,7 @@ class Graph:
         self.num_layer = self.misc_metadata.get("num_layer", 0)
         self.layer_per_device = self.num_layer / self.pp if self.pp else self.num_layer
         self.dp_microbatch_mode = str(self.misc_metadata.get("dp_microbatch_mode", "every_mb")).lower()
+        self.grad_accum_cycle = str(self.misc_metadata.get("grad_accum_cycle", "final") or "final").lower()
         self.dp_zero_stage = int(self.misc_metadata.get("dp_zero_stage", 0) or 0)
         self.moe_layer_mask = list(self.misc_metadata.get("moe_layer_mask", []) or [])
 
@@ -219,6 +220,26 @@ class Graph:
         if layer_idx < 0 or layer_idx >= len(self.moe_layer_mask):
             return False
         return bool(self.moe_layer_mask[layer_idx])
+
+    def _is_nonfinal_grad_accum_cycle(self) -> bool:
+        return self.grad_accum_cycle == "nonfinal"
+
+    def _dp_comm_required_every_cycle(self, comm_key: str) -> bool:
+        comm_data = self.comm_metadata.get(comm_key) or {}
+        return bool(comm_data.get("ga_required_every_cycle", False))
+
+    def _should_emit_dp_comm(self, comm_key: str, micro_batch_idx: int) -> bool:
+        if self.dp <= 1:
+            return False
+        required_every_cycle = self._dp_comm_required_every_cycle(comm_key)
+        if self._is_nonfinal_grad_accum_cycle():
+            return required_every_cycle
+        if required_every_cycle:
+            return True
+        if self.dp_microbatch_mode != "last_mb":
+            return True
+        # Backward pass processes micro-batches in reverse, so b==0 corresponds to "last_mb".
+        return int(micro_batch_idx) == 0
 
     def create_comm_edge(self, name, op_id, comm_key, is_dp=False, local_hw_id=None):
         """Create a communication edge with optional local computation node.
@@ -700,8 +721,6 @@ class Graph:
         if include_backward:
             embedding_node_b = [[] for _ in range(self.num_batch)]
             softmax_node_b = [[] for _ in range(self.num_batch)]
-            R_edge = [[] for _ in range(self.num_batch)]
-            G_edge = [[] for _ in range(self.num_batch)]
 
             transformer_nodes_b = [[] for _ in range(self.num_batch)]  #
             for b in range(self.num_batch):
@@ -939,7 +958,10 @@ class Graph:
             layernorm_Softmax.add_child(prev_layer_norm2)
 
         zero3_embedding_key = "zero3_embedding_gather"
-        if zero3_embedding_key in self.comm_metadata:
+        if (
+            zero3_embedding_key in self.comm_metadata
+            and self._should_emit_dp_comm(zero3_embedding_key, 0)
+        ):
             zero3_entry_embedding_edge = self.create_comm_edge(
                 f"{zero3_embedding_key}_b0_fwd_entry",
                 op_id,
@@ -956,42 +978,45 @@ class Graph:
         for b in range(self.num_batch):
             # Data parallel collectives (all reduce for DDP/ZeRO-1, reduce-scatter + all-gather for ZeRO-2/3)
             if self.dp > 1:
-                apply_dp_all_mbs = self.dp_microbatch_mode != "last_mb" or self.dp_zero_stage >= 3
-                if not apply_dp_all_mbs and b != 0: # mb is backwards in backpass
-                    continue
                 zero2_embedding_key = "zero2_embedding_gather"
                 zero2_transformer_key = "zero2_transformer_gather"
                 zero2_softmax_key = "zero2_softmax_gather"
-                embedding_edge = self.create_comm_edge(
-                    "embedding",
-                    op_id,
-                    "embedding",
-                    is_dp=True,
-                )
-                R_edge[b].append(embedding_edge)
-                op_id += 1
-                postfix = ""
-                if zero2_embedding_key in self.comm_metadata: # ZeRO-2/3, use reduce-scatter.
+                postfix = "_all_reduce"
+                if zero2_embedding_key in self.comm_metadata or zero3_embedding_key in self.comm_metadata:
                     postfix = "_reduce_scatter"
-                    gather_edge = self.create_comm_edge(
-                        zero2_embedding_key,
+
+                embedding_edge = None
+                if self._should_emit_dp_comm("embedding", b):
+                    embedding_edge = self.create_comm_edge(
+                        "embedding",
                         op_id,
-                        zero2_embedding_key,
+                        "embedding",
                         is_dp=True,
-                        local_hw_id=embedding_node[b].hw_id,
                     )
                     op_id += 1
-                    embedding_edge.add_child(gather_edge)
-                elif zero3_embedding_key in self.comm_metadata: # No ZeRO-2/3, use all-reduce.
-                    postfix = "_reduce_scatter"
-                else:
-                    postfix = "_all_reduce"
+                    if (
+                        zero2_embedding_key in self.comm_metadata
+                        and self._should_emit_dp_comm(zero2_embedding_key, b)
+                    ):
+                        gather_edge = self.create_comm_edge(
+                            zero2_embedding_key,
+                            op_id,
+                            zero2_embedding_key,
+                            is_dp=True,
+                            local_hw_id=embedding_node[b].hw_id,
+                        )
+                        op_id += 1
+                        embedding_edge.add_child(gather_edge)
 
                 zero3_embedding_key = "zero3_embedding_gather"
                 zero3_transformer_key = "zero3_transformer_gather"
                 zero3_softmax_key = "zero3_softmax_gather"
+                transformer_reducers = []
                 for layer_idx in range(self.num_layer):
                     comm_key = "transformer_moe" if self._is_moe_layer(layer_idx) else "transformer_dense"
+                    if not self._should_emit_dp_comm(comm_key, b):
+                        transformer_reducers.append(None)
+                        continue
                     reducer = self.create_comm_edge(
                         f"transformer_b{b}_layer{layer_idx}"+postfix,
                         op_id,
@@ -999,10 +1024,13 @@ class Graph:
                         is_dp=True,
                         local_hw_id=_bwd_exit_node(b, layer_idx).hw_id,
                     )
-                    R_edge[b].append(reducer)
+                    transformer_reducers.append(reducer)
                     op_id += 1
 
-                    if zero2_transformer_key in self.comm_metadata:
+                    if (
+                        zero2_transformer_key in self.comm_metadata
+                        and self._should_emit_dp_comm(zero2_transformer_key, b)
+                    ):
                         gather_edge = self.create_comm_edge(
                             zero2_transformer_key,
                             op_id,
@@ -1013,10 +1041,16 @@ class Graph:
                         op_id += 1
                         reducer.add_child(gather_edge)
 
-                if zero3_transformer_key in self.comm_metadata:
+                if (
+                    zero3_transformer_key in self.comm_metadata
+                    and self._should_emit_dp_comm(zero3_transformer_key, b)
+                ):
                     # create the edge for the embedding gather of the next batch (except for the last batch)
                     zero3_embedding_gather_edge = None
-                    if b < self.num_batch - 1:
+                    if (
+                        b < self.num_batch - 1
+                        and self._should_emit_dp_comm(zero3_embedding_key, b + 1)
+                    ):
                         zero3_embedding_gather_edge = self.create_comm_edge(
                             f"{zero3_embedding_key}_b{b+1}_fwd",
                             op_id,
@@ -1057,27 +1091,35 @@ class Graph:
                                 attach_parallel_edge(host, zero3_embedding_gather_edge, skip_comm_children=True)
                              
 
-                softmax_edge = self.create_comm_edge(
-                    "softmax"+postfix,
-                    op_id,
-                    "softmax",
-                    is_dp=True,
-                    local_hw_id=softmax_node[b].hw_id,
-                )
-                R_edge[b].append(softmax_edge)
-                op_id += 1
-                if zero2_softmax_key in self.comm_metadata:
-                    gather_edge = self.create_comm_edge(
-                        zero2_softmax_key,
+                softmax_edge = None
+                if self._should_emit_dp_comm("softmax", b):
+                    softmax_edge = self.create_comm_edge(
+                        "softmax"+postfix,
                         op_id,
-                        zero2_softmax_key,
+                        "softmax",
                         is_dp=True,
                         local_hw_id=softmax_node[b].hw_id,
                     )
                     op_id += 1
-                    softmax_edge.add_child(gather_edge)
+                    if (
+                        zero2_softmax_key in self.comm_metadata
+                        and self._should_emit_dp_comm(zero2_softmax_key, b)
+                    ):
+                        gather_edge = self.create_comm_edge(
+                            zero2_softmax_key,
+                            op_id,
+                            zero2_softmax_key,
+                            is_dp=True,
+                            local_hw_id=softmax_node[b].hw_id,
+                        )
+                        op_id += 1
+                        softmax_edge.add_child(gather_edge)
 
-                if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+                if (
+                    zero3_softmax_key in self.comm_metadata
+                    and self.num_layer > 0
+                    and self._should_emit_dp_comm(zero3_softmax_key, b)
+                ):
                     host = transformer_nodes[b][self.num_layer - 1]
                     gather_edge = self.create_comm_edge(
                         f"{zero3_softmax_key}_b{b}_fwd",
@@ -1089,10 +1131,13 @@ class Graph:
                     op_id += 1
                     attach_parallel_edge(host, gather_edge)
 
-                softmax_node_b[b].add_child(R_edge[b][-1])
-                embedding_node_b[b].add_child(R_edge[b][0])
-                for layer_idx in range(self.num_layer):
-                    _bwd_exit_node(b, layer_idx).add_child(R_edge[b][layer_idx + 1])
+                if softmax_edge is not None:
+                    softmax_node_b[b].add_child(softmax_edge)
+                if embedding_edge is not None:
+                    embedding_node_b[b].add_child(embedding_edge)
+                for layer_idx, reducer in enumerate(transformer_reducers):
+                    if reducer is not None:
+                        _bwd_exit_node(b, layer_idx).add_child(reducer)
 
             if self.ep > 1 and self.dp > 1:
                 apply_ep_all_mbs = self.dp_microbatch_mode != "last_mb" or self.dp_zero_stage >= 3
@@ -1153,7 +1198,11 @@ class Graph:
         zero3_softmax_key = "zero3_softmax_gather"
 
         zero3_softmax_bwd_entry = None
-        if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+        if (
+            zero3_softmax_key in self.comm_metadata
+            and self.num_layer > 0
+            and self._should_emit_dp_comm(zero3_softmax_key, 0)
+        ):
             zero3_softmax_bwd_entry = self.create_comm_edge(
                 f"{zero3_softmax_key}_b0_bwd_entry",
                 op_id,
@@ -1166,7 +1215,10 @@ class Graph:
         for b in range(self.num_batch):
             zero3_softmax_bwd_edge = None
             if b > 0:
-                if zero3_softmax_key in self.comm_metadata:
+                if (
+                    zero3_softmax_key in self.comm_metadata
+                    and self._should_emit_dp_comm(zero3_softmax_key, b)
+                ):
                     host = softmax_node[b]
                     gather_edge = self.create_comm_edge(
                         f"{zero3_softmax_key}_b{b}_bwd",
@@ -1178,7 +1230,11 @@ class Graph:
                     op_id += 1
                     zero3_softmax_bwd_edge = gather_edge
 
-            if zero3_transformer_key in self.comm_metadata and self.num_layer > 0:
+            if (
+                zero3_transformer_key in self.comm_metadata
+                and self.num_layer > 0
+                and self._should_emit_dp_comm(zero3_transformer_key, b)
+            ):
                 for layer_idx in reversed(range(self.num_layer)):
                     host = softmax_node_b[b] if layer_idx == self.num_layer - 1 else _bwd_exit_node(b, layer_idx + 1)
                     target = _bwd_entry_node(b, layer_idx)
@@ -1200,7 +1256,11 @@ class Graph:
                             attach_parallel_edge(host, zero3_softmax_bwd_edge, skip_comm_children=True)
 
 
-            if zero3_embedding_key in self.comm_metadata and self.num_layer > 0:
+            if (
+                zero3_embedding_key in self.comm_metadata
+                and self.num_layer > 0
+                and self._should_emit_dp_comm(zero3_embedding_key, b)
+            ):
                 host = _bwd_exit_node(b, 0)
                 gather_edge = self.create_comm_edge(
                     f"{zero3_embedding_key}_b{b}_bwd",

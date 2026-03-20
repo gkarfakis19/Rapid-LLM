@@ -3010,6 +3010,9 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_softmax_gather_bytes: float = 0.0,
     ) -> Dict[str, Dict[str, Any]]:
         grad_collective = REDUCE_SCATTER if (self.zero_stage >= 2 and self.dp > 1) else ALL_REDUCE
+        def _dp_comm_flag(required_every_cycle: bool) -> Dict[str, bool]:
+            return {"ga_required_every_cycle": bool(required_every_cycle)}
+
         metadata = {
             'transformer_dense': {
                 'size': reduction_sizes_dense,
@@ -3017,6 +3020,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': local_comp_dense,
+                **_dp_comm_flag(False),
             },
             'transformer_moe': {
                 'size': reduction_sizes_moe,
@@ -3024,20 +3028,23 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': local_comp_moe,
+                **_dp_comm_flag(False),
             },
             'embedding': {
                 'size': embedding_size,
                 'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
-                'local_comp_time': 0
+                'local_comp_time': 0,
+                **_dp_comm_flag(False),
             },
             'softmax': {
                 'size': softmax_size,
                 'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
-                'local_comp_time': 0
+                'local_comp_time': 0,
+                **_dp_comm_flag(False),
             },
             'cross_layer': {
                 'size': cross_layer_bytes,
@@ -3070,6 +3077,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                **_dp_comm_flag(False),
             }
         if zero2_transformer_gather_bytes:
             metadata['zero2_transformer_gather'] = {
@@ -3078,6 +3086,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                **_dp_comm_flag(False),
             }
         if zero2_softmax_gather_bytes:
             metadata['zero2_softmax_gather'] = {
@@ -3086,6 +3095,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                **_dp_comm_flag(False),
             }
         if zero3_embedding_gather_bytes:
             metadata['zero3_embedding_gather'] = {
@@ -3094,6 +3104,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                **_dp_comm_flag(True),
             }
         if zero3_transformer_gather_bytes:
             metadata['zero3_transformer_gather'] = {
@@ -3103,6 +3114,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
                 'tp_shard': True,
+                **_dp_comm_flag(True),
             }
         if zero3_softmax_gather_bytes:
             metadata['zero3_softmax_gather'] = {
@@ -3111,6 +3123,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'participants': self.dp,
                 'interconnect_type': 'dp',
                 'local_comp_time': 0,
+                **_dp_comm_flag(True),
             }
         return metadata
 
@@ -3706,6 +3719,10 @@ class TimeCalculationLLM(TimeCalculation):
             "model_type": self.model_type,
             "disable_embedding_unembedding": self.disable_embedding_unembedding,
         }
+        misc_metadata_final = dict(misc_metadata)
+        misc_metadata_final["grad_accum_cycle"] = "final"
+        misc_metadata_nonfinal = dict(misc_metadata)
+        misc_metadata_nonfinal["grad_accum_cycle"] = "nonfinal"
 
         pipeline_graph_obj = llm_simulation.Graph(
             mode="pipeline",
@@ -3716,7 +3733,7 @@ class TimeCalculationLLM(TimeCalculation):
             ep=graph_ep,
             comp_times=comp_times,
             comm_metadata=comm_metadata,
-            misc_metadata=misc_metadata,
+            misc_metadata=misc_metadata_final,
         )
         
         graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(
@@ -3726,16 +3743,18 @@ class TimeCalculationLLM(TimeCalculation):
         pipeline_graph_obj_no_dp = None
         graph_root_no_dp = None
         if need_no_dp_variant:
-            pipeline_graph_obj_no_dp = llm_simulation.Graph( # if gradient accumulation is used, we need a no-dp variant of the graph for the non-last step, since dp all-reduce is only done on the last step
+            pipeline_graph_obj_no_dp = llm_simulation.Graph(
+                # For grad accumulation we run non-final cycles with optimizer disabled,
+                # while selectively skipping skippable DP ops at graph-construction time.
                 mode="pipeline",
-                dp=1,
+                dp=self.dp,
                 pp=self.pp,
                 tp=self.tp,
                 cp=self.cp,
                 ep=graph_ep,
                 comp_times=comp_times_no_dp or comp_times,
                 comm_metadata=comm_metadata,
-                misc_metadata=misc_metadata,
+                misc_metadata=misc_metadata_nonfinal,
             )
             
             graph_root_no_dp = pipeline_graph_obj_no_dp.construct_fwd_bwd_graph(
@@ -3981,7 +4000,7 @@ class TimeCalculationLLM(TimeCalculation):
         time_fw_bw_no_dp: Optional[float] = None
         if self.gradient_accumulation_steps > 1:
             if not (self.pipeline_graph_no_dp and self.pipeline_root_no_dp):
-                raise RuntimeError("Gradient accumulation steps > 1 requires a no-DP pipeline graph")
+                raise RuntimeError("Gradient accumulation steps > 1 requires a non-final accumulation pipeline graph")
             transformer_graph_no_dp = self.transformer_graph_no_dp or self.transformer_graph
             transformer_forward_root_no_dp = self.transformer_forward_root_no_dp or self.transformer_forward_root
             transformer_backward_root_no_dp = self.transformer_backward_root_no_dp or self.transformer_backward_root
@@ -4050,8 +4069,10 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.gradient_accumulation_steps > 1: 
             if time_fw_bw_no_dp is None:
-                raise RuntimeError("Missing no-DP timing for gradient accumulation computation")
-            self.tot_time = time_fw_bw_no_dp * (self.gradient_accumulation_steps - 1) + time_fw_bw #total time is (time for no-dp steps) + (time for last step with dp)
+                raise RuntimeError("Missing non-final accumulation timing for gradient accumulation computation")
+            self.tot_time = (
+                time_fw_bw_no_dp * (self.gradient_accumulation_steps - 1) + time_fw_bw
+            )  # total time is (non-final accumulation cycles) + (final cycle)
         else:
             self.tot_time = time_fw_bw
         return self.tot_time

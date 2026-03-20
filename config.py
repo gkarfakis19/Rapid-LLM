@@ -2244,15 +2244,15 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
                 "Set parallelism.cp=1 or parallelism.train.ep=1."
             )
 
-    if (
-        model.gradient_accumulation_steps > 1
-        and getattr(hw_config.sw_config, "dp_zero_stage", 0) >= 2
-    ):
-        # ZeRO-2/3 do funky things with DP comms and aren't captured by the current
-        # no-DP + DP step model for gradient accumulation.
-        raise ValueError(
-            "Gradient accumulation steps > 1 is not supported with ZeRO-2/3 (dp_zero_stage >= 2)."
-        )
+    if model.gradient_accumulation_steps > 1:
+        zero_stage = int(getattr(hw_config.sw_config, "dp_zero_stage", 0) or 0)
+        # ZeRO-2 communication is still modeled with a coarse final-step approximation.
+        # ZeRO-3 is supported via per-DP-op grad-acc scheduling in pipeline graph construction.
+        if zero_stage == 2:
+            raise ValueError(
+                "Gradient accumulation steps > 1 is not supported with ZeRO-2 (dp_zero_stage == 2). "
+                "Use ZeRO-1/DP or ZeRO-3."
+            )
 
     if model.global_batch_size % model.gradient_accumulation_steps != 0:
         raise ValueError(
