@@ -69,8 +69,40 @@ class Memory(Base):
         bytes_required = self.precision * (m * k + k * n)
         grid_size = math.ceil(M / m) * math.ceil(N / n)
 
-        compute_time = 2 * (m * n * k) / 312e12
-        load_time = (self.precision * (m * k + k * n)) / (7050 * 1024 ** 3)
+        # Derive wave-model terms from the configured hardware instead of
+        # hardcoded A100 constants.
+        matrix_peak_flops_per_s = float(self.core.matrix_operating_throughput)
+        l2_bandwidth_bytes_per_s = float(self.exp_config.tech_config.SRAML2.bandwidth)
+        register_bytes_total = float(self.exp_config.tech_config.SRAMR.size)
+        num_bundles = int(self.core.num_bundle)
+
+        if matrix_peak_flops_per_s <= 0:
+            raise ValueError(
+                f"Invalid core matrix operating throughput ({matrix_peak_flops_per_s}); "
+                "check tech_param.core settings"
+            )
+        if l2_bandwidth_bytes_per_s <= 0:
+            raise ValueError(
+                f"Invalid tech_param.SRAM-L2.bandwidth ({l2_bandwidth_bytes_per_s}); must be > 0"
+            )
+        if num_bundles <= 0:
+            raise ValueError(
+                f"Invalid core bundle count ({num_bundles}); check tech_param.core.num_bundles"
+            )
+        if register_bytes_total <= 0:
+            raise ValueError(
+                f"Invalid tech_param.SRAM-R.size ({register_bytes_total}); must be > 0"
+            )
+
+        register_budget_per_bundle_regs = int(register_bytes_total / num_bundles / 4)
+        if register_budget_per_bundle_regs <= 0:
+            raise ValueError(
+                "Derived per-bundle register budget is non-positive "
+                f"({register_budget_per_bundle_regs}); check tech_param.SRAM-R.size and core bundle count"
+            )
+
+        compute_time = 2 * (m * n * k) / matrix_peak_flops_per_s
+        load_time = bytes_required / l2_bandwidth_bytes_per_s
 
         stages = 3 if load_time < compute_time else 5
         smem_required = bytes_required * stages
@@ -79,13 +111,13 @@ class Memory(Base):
         
         reg_accum = m * n
         reg_input = 16 * (m + n)
-        if reg_accum + reg_input > 65536:
+        if reg_accum + reg_input > register_budget_per_bundle_regs:
             return -1
 
         smem_blocks = self.size_per_bundle // smem_required
-        reg_blocks = 65536 // (reg_accum + reg_input)
+        reg_blocks = register_budget_per_bundle_regs // (reg_accum + reg_input)
 
-        return grid_size / min(smem_blocks, reg_blocks) / 108
+        return grid_size / min(smem_blocks, reg_blocks) / num_bundles
 
 
     def get_gemm_based_tile_dims(self, M, K, N):
