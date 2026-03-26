@@ -69,8 +69,40 @@ class Memory(Base):
         bytes_required = self.precision * (m * k + k * n)
         grid_size = math.ceil(M / m) * math.ceil(N / n)
 
-        compute_time = 2 * (m * n * k) / 312e12
-        load_time = (self.precision * (m * k + k * n)) / (7050 * 1024 ** 3)
+        # Derive wave-model terms from the configured hardware instead of
+        # hardcoded A100 constants.
+        matrix_peak_flops_per_s = float(self.core.matrix_operating_throughput)
+        l2_bandwidth_bytes_per_s = float(self.exp_config.tech_config.SRAML2.bandwidth)
+        register_bytes_total = float(self.exp_config.tech_config.SRAMR.size)
+        num_bundles = int(self.core.num_bundle)
+
+        if matrix_peak_flops_per_s <= 0:
+            raise ValueError(
+                f"Invalid core matrix operating throughput ({matrix_peak_flops_per_s}); "
+                "check tech_param.core settings"
+            )
+        if l2_bandwidth_bytes_per_s <= 0:
+            raise ValueError(
+                f"Invalid tech_param.SRAM-L2.bandwidth ({l2_bandwidth_bytes_per_s}); must be > 0"
+            )
+        if num_bundles <= 0:
+            raise ValueError(
+                f"Invalid core bundle count ({num_bundles}); check tech_param.core.num_bundles"
+            )
+        if register_bytes_total <= 0:
+            raise ValueError(
+                f"Invalid tech_param.SRAM-R.size ({register_bytes_total}); must be > 0"
+            )
+
+        register_budget_per_bundle_regs = int(register_bytes_total / num_bundles / 4)
+        if register_budget_per_bundle_regs <= 0:
+            raise ValueError(
+                "Derived per-bundle register budget is non-positive "
+                f"({register_budget_per_bundle_regs}); check tech_param.SRAM-R.size and core bundle count"
+            )
+
+        compute_time = 2 * (m * n * k) / matrix_peak_flops_per_s
+        load_time = bytes_required / l2_bandwidth_bytes_per_s
 
         stages = 3 if load_time < compute_time else 5
         smem_required = bytes_required * stages
@@ -79,13 +111,13 @@ class Memory(Base):
         
         reg_accum = m * n
         reg_input = 16 * (m + n)
-        if reg_accum + reg_input > 65536:
+        if reg_accum + reg_input > register_budget_per_bundle_regs:
             return -1
 
         smem_blocks = self.size_per_bundle // smem_required
-        reg_blocks = 65536 // (reg_accum + reg_input)
+        reg_blocks = register_budget_per_bundle_regs // (reg_accum + reg_input)
 
-        return grid_size / min(smem_blocks, reg_blocks) / 108
+        return grid_size / min(smem_blocks, reg_blocks) / num_bundles
 
 
     def get_gemm_based_tile_dims(self, M, K, N):
@@ -188,51 +220,88 @@ class Core(Base):
         self.tot_power = exp_config.power_breakdown.core  # * self.TDP
         self.tot_area = exp_config.area_breakdown.core  # * self.proc_chip_area_budget
 
-        self.FMA_dims = exp_config.tech_config.core.FMA_dims
-        self.dataflow = exp_config.tech_config.core.dataflow
+        core_cfg = exp_config.tech_config.core
+        self.matrix_unit = core_cfg.matrix_unit
+        self.vector_unit = core_cfg.vector_unit
 
-        self.nominal_flop_rate_per_mcu = exp_config.tech_config.core.nominal_flop_rate_per_mcu # TODO: Define it as a function of precision
-        self.nominal_energy_per_flop = exp_config.tech_config.core.nominal_energy_per_flop
-        self.nominal_power_per_mcu = exp_config.tech_config.core.nominal_power_per_mcu
-        self.util = exp_config.tech_config.core.util
+        self.FMA_dims = self.matrix_unit.FMA_dims
+        self.dataflow = self.matrix_unit.dataflow
+
+        # Backward-compatible aliases map to matrix-math engine fields.
+        self.nominal_flop_rate_per_mcu = self.matrix_unit.nominal_flop_rate_per_mcu
+        self.util = self.matrix_unit.util
+
+        self.matrix_nominal_flop_rate_per_mcu = self.matrix_unit.nominal_flop_rate_per_mcu
+        self.matrix_util = self.matrix_unit.util
+        self.vector_util = self.vector_unit.util
+
+        self.nominal_energy_per_flop = core_cfg.nominal_energy_per_flop
+        self.nominal_power_per_mcu = core_cfg.nominal_power_per_mcu
 
         # self.operating_voltage            = exp_config.tech_config.core.operating_voltage
-        self.nominal_voltage = exp_config.tech_config.core.nominal_voltage
-        self.threshold_voltage = exp_config.tech_config.core.threshold_voltage
-        self.margin_voltage = exp_config.tech_config.core.margin_voltage
+        self.nominal_voltage = core_cfg.nominal_voltage
+        self.threshold_voltage = core_cfg.threshold_voltage
+        self.margin_voltage = core_cfg.margin_voltage
 
         # Assumption: performance scales linearly with area
-        self.operating_area_per_mcu = exp_config.tech_config.core.operating_area_per_mcu
-        if exp_config.tech_config.core.nominal_area_per_mcu:
-            self.nominal_area_per_mcu = exp_config.tech_config.core.nominal_area_per_mcu
+        self.operating_area_per_mcu = core_cfg.operating_area_per_mcu
+        if core_cfg.nominal_area_per_mcu:
+            self.nominal_area_per_mcu = core_cfg.nominal_area_per_mcu
             self.area_scaling = self.operating_area_per_mcu / self.nominal_area_per_mcu
         else:
             self.area_scaling = 1
             self.nominal_area_per_mcu = self.operating_area_per_mcu
 
-        self.num_mcu_per_bundle = exp_config.tech_config.core.num_mcu_per_bundle
-        if exp_config.tech_config.core.num_bundles:
-            self.num_bundle = exp_config.tech_config.core.num_bundles
+        self.num_mcu_per_bundle = core_cfg.num_mcu_per_bundle
+        if core_cfg.num_bundles:
+            self.num_bundle = core_cfg.num_bundles
             self.num_mcu = self.num_bundle * self.num_mcu_per_bundle
         else:
             self.num_mcu = int(self.tot_area // self.operating_area_per_mcu)
             self.num_bundle = int(self.num_mcu // self.num_mcu_per_bundle)
 
-        self.operating_flop_rate_per_mcu = self.nominal_flop_rate_per_mcu * self.area_scaling
+        self.matrix_operating_flop_rate_per_mcu = self.matrix_nominal_flop_rate_per_mcu * self.area_scaling
+        # Vector-unit throughput is defined per bundle (SM for GPU, TensorCore for TPU).
+        self.vector_nominal_flop_rate_per_bundle = self.vector_unit.nominal_flop_rate_per_bundle
+        self.vector_operating_flop_rate_per_bundle = (
+            self.vector_nominal_flop_rate_per_bundle * self.area_scaling
+        )
+        # Backward-compatible alias for any external users that still inspect
+        # per-MCU vector attributes directly.
+        self.vector_nominal_flop_rate_per_mcu = (
+            self.vector_nominal_flop_rate_per_bundle / self.num_mcu_per_bundle
+            if self.num_mcu_per_bundle > 0
+            else 0
+        )
+        self.vector_operating_flop_rate_per_mcu = (
+            self.vector_operating_flop_rate_per_bundle / self.num_mcu_per_bundle
+            if self.num_mcu_per_bundle > 0
+            else 0
+        )
+        # Backward-compatible alias used by older code paths.
+        self.operating_flop_rate_per_mcu = self.matrix_operating_flop_rate_per_mcu
         self.nominal_power = self.nominal_power_per_mcu * self.num_mcu * self.area_scaling
         
         if self.tot_power > 0 and self.nominal_power > 0:
             self.calc_operating_voltage()
-            if exp_config.tech_config.core.operating_frequency:
-                self.operating_freq = exp_config.tech_config.core.operating_frequency
+            if core_cfg.operating_frequency:
+                self.operating_freq = core_cfg.operating_frequency
                 self.operating_power_per_mcu = self.tot_power / self.num_mcu
-            elif exp_config.tech_config.core.nominal_frequency:
-                self.nominal_freq = exp_config.tech_config.core.nominal_frequency
+            elif core_cfg.nominal_frequency:
+                self.nominal_freq = core_cfg.nominal_frequency
                 self.calc_operating_frequency()
         else:
             self.operating_freq = 0
 
         self.calc_throughput()
+
+    def get_throughput(self, compute_unit="matrix"):
+        kind = str(compute_unit or "matrix").lower()
+        if kind in {"matrix", "matmul", "tensor", "mxu"}:
+            return self.matrix_throughput
+        if kind in {"vector", "vpu", "cuda_core", "cuda"}:
+            return self.vector_throughput
+        raise ValueError(f"Unsupported compute unit '{compute_unit}'")
 
     def calc_operating_voltage(self):
         # minimum voltage that meets power constraints
@@ -277,8 +346,18 @@ class Core(Base):
         )
 
     def calc_throughput(self):
-        self.operating_throughput = self.operating_flop_rate_per_mcu * self.operating_freq * self.num_mcu
-        self.throughput = self.operating_throughput * self.util
+        self.matrix_operating_throughput = (
+            self.matrix_operating_flop_rate_per_mcu * self.operating_freq * self.num_mcu
+        )
+        self.vector_operating_throughput = (
+            self.vector_operating_flop_rate_per_bundle * self.operating_freq * self.num_bundle
+        )
+        self.matrix_throughput = self.matrix_operating_throughput * self.matrix_util
+        self.vector_throughput = self.vector_operating_throughput * self.vector_util
+
+        # Backward-compatible aliases.
+        self.operating_throughput = self.matrix_operating_throughput
+        self.throughput = self.matrix_throughput
 
 
 class MemoryHierarchy(Base):

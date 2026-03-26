@@ -82,11 +82,11 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
     if hidden_dim is None:
         raise SystemExit("Unable to deduce hidden dimension from config.json (missing hidden_size / d_model / dim).")
 
-    num_layers = _first(cfg, "num_hidden_layers", "n_layer", "num_layers")
+    num_layers = _first(cfg, "num_hidden_layers", "n_layer", "num_layers", "n_layers")
     if num_layers is None:
         raise SystemExit("Unable to deduce number of layers from config.json.")
 
-    num_heads = _first(cfg, "num_attention_heads", "n_head", "num_heads")
+    num_heads = _first(cfg, "num_attention_heads", "n_head", "num_heads", "n_heads")
     if num_heads is None:
         raise SystemExit("Unable to deduce number of attention heads from config.json.")
 

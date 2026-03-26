@@ -45,7 +45,7 @@ tech_param:
     FMA_d1: 16                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 8
     dataflow: best
-    util: 1.0
+    util: 1
   DRAM:
     size: 80 GB     # [TePU]
     bandwidth: 3430 GB     # (/s) [TePU]
@@ -109,8 +109,8 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: Ring
-        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        type: FullyConnected
+        bandwidth: 450 GB # H100 SXM5 NVLink aggregate is ~900 GB/s bidirectional; model one-way effective bandwidth.
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
@@ -119,15 +119,18 @@ network:
       parallelisms: [tp, cp]
     - id: dim1
       label: inter_torus_infiniband
-      size: auto
       topology:
-        type: Ring 
-        bandwidth: 25 GB
+        type: FullyConnected
+        bandwidth: 50 GB   # per-GPU one-way if 400 Gb/s per GPU rail
         latency: 5e-6
-        energy_per_bit: 8e-12 # (J/bit)
-        util: 1.0
-      collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [pp,dp]
+        energy_per_bit: 8e-12
+        util: 0.4
+      collective_override: {}
+      # collective_override:
+      #   all_gather: ring
+      #   reduce_scatter: ring
+      #   all_reduce: ring
+      parallelisms: [dp, pp]
     - id: dim2
       label: inter_torus_infiniband_dp
       size: auto
@@ -148,10 +151,10 @@ network:
     # fraction of CP comm that can overlap CP compute
     cp_overlap: 0.0
 execution_backend:
-  model: analytical # analytical | astra
+  model: astra # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d

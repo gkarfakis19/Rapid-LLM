@@ -1,0 +1,25 @@
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: true
+  model_type: gpt
+  global_batch_size: 32
+  gradient_accumulation_steps: 2
+  seq_len: 65536
+  hidden_dim: 4096
+  attention:
+    attention_type: mha
+    num_heads: 32
+    kv_heads: null
+    use_flashattention: true
+    attention_tile_size: 128
+  intermediate_size: 16384
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 16384
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 32
+  vocab_size: 50432
+  num_layers: 32

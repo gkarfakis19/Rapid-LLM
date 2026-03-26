@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import sys
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -154,6 +156,15 @@ def _apply_compare_args(args: argparse.Namespace) -> None:
         COMPARE_LLMCOMPASS = bool(args.llmcompass)
         COMPARE_VIDUR = bool(args.vidur)
         COMPARE_GENZ = bool(args.genz)
+
+
+def _apply_device_compare_policy(device: str) -> None:
+    global COMPARE_LLMCOMPASS, COMPARE_VIDUR, COMPARE_GENZ, COMPARE_FLATTENED
+    if device == "H100":
+        COMPARE_LLMCOMPASS = False
+        COMPARE_VIDUR = False
+        COMPARE_GENZ = False
+        COMPARE_FLATTENED = False
 
 
 def _load_data(csv_path: Path) -> pd.DataFrame:
@@ -635,7 +646,7 @@ def _build_spec(device: str, model: str, tp: int, idx: int, network_ignored: boo
     hw_overrides: Dict[str, Dict[str, object]] = {
         "parallelism": {
             "tp": int(tp),
-            "tp_sp": True,
+            "tp_sp": False,
             "cp": 1,
             "pp": 1,
             "mb": 1,
@@ -696,7 +707,7 @@ def _build_nvidia_spec(
     hw_overrides: Dict[str, Dict[str, object]] = {
         "parallelism": {
             "tp": int(tp),
-            "tp_sp": True,
+            "tp_sp": False,
             "cp": 1,
             "pp": 1,
             "mb": 1,
@@ -974,6 +985,21 @@ def compute_nvidia_pct_errors(
             }
         )
     return rows
+
+
+def _valid_pct_errors(rows: Optional[Sequence[Dict[str, object]]]) -> List[float]:
+    if not rows:
+        return []
+    valid_errors: List[float] = []
+    for row in rows:
+        pct_error = row.get("pct_error", float("nan"))
+        try:
+            value = float(pct_error)
+        except (TypeError, ValueError):
+            continue
+        if not math.isnan(value):
+            valid_errors.append(value)
+    return valid_errors
 
 
 def _safe_ratio(pred: Optional[float], actual: Optional[float]) -> float:
@@ -1393,6 +1419,607 @@ def plot_nvidia_device(
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     fig.tight_layout()
     outpath = outdir / f"nvidia_inf_{device}.png"
+    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+def plot_validation_parity_combined(
+    imec_df: pd.DataFrame,
+    nvidia_df: pd.DataFrame,
+    device: str,
+    outdir: Path,
+    *,
+    nvidia_tp: int = 8,
+) -> Path | None:
+    def _clean_subset(df: pd.DataFrame) -> pd.DataFrame:
+        subset = df.copy()
+        for col in ("actual", "seconds"):
+            if col in subset.columns:
+                subset[col] = pd.to_numeric(subset[col], errors="coerce")
+        subset = subset[
+            subset["actual"].notna()
+            & subset["seconds"].notna()
+            & np.isfinite(subset["actual"])
+            & np.isfinite(subset["seconds"])
+            & (subset["actual"] > 0)
+            & (subset["seconds"] > 0)
+        ].copy()
+        return subset
+
+    def _model_size_label(model_name: object) -> str:
+        name = str(model_name).lower()
+        if "70b" in name:
+            return "70B"
+        if "13b" in name:
+            return "13B"
+        if "7b" in name:
+            return "7B"
+        return str(model_name)
+
+    def _set_parity_axes(ax, x_values: pd.Series, y_values: pd.Series) -> None:
+        values = pd.concat([x_values, y_values], ignore_index=True)
+        lo = float(values.min())
+        hi = float(values.max())
+        pad = 0.05 * max(hi - lo, 1e-9)
+        lo_lim = max(0.0, lo - pad)
+        hi_lim = hi + pad
+        ax.plot([lo_lim, hi_lim], [lo_lim, hi_lim], linestyle="--", color="#666666", linewidth=1.0)
+        ax.set_xlim(lo_lim, hi_lim)
+        ax.set_ylim(lo_lim, hi_lim)
+        ax.grid(True, linestyle="--", alpha=0.3)
+
+    if "device" in imec_df.columns:
+        imec_sub = imec_df[imec_df["device"].astype(str).str.upper() == str(device).upper()].copy()
+    else:
+        imec_sub = imec_df.copy()
+    if "device" in nvidia_df.columns:
+        nvidia_sub = nvidia_df[nvidia_df["device"].astype(str).str.upper() == str(device).upper()].copy()
+    else:
+        nvidia_sub = nvidia_df.copy()
+
+    if "TP" in nvidia_sub.columns:
+        nvidia_sub["TP"] = pd.to_numeric(nvidia_sub["TP"], errors="coerce")
+        nvidia_sub = nvidia_sub[nvidia_sub["TP"] == int(nvidia_tp)].copy()
+
+    imec_sub = _clean_subset(imec_sub)
+    nvidia_sub = _clean_subset(nvidia_sub)
+    if imec_sub.empty and nvidia_sub.empty:
+        return None
+
+    if not imec_sub.empty and "model" in imec_sub.columns:
+        imec_sub["model_size"] = imec_sub["model"].apply(_model_size_label)
+    else:
+        imec_sub["model_size"] = "unknown"
+    if not nvidia_sub.empty and "model" in nvidia_sub.columns:
+        nvidia_sub["model_size"] = nvidia_sub["model"].apply(_model_size_label)
+    else:
+        nvidia_sub["model_size"] = "unknown"
+
+    preferred_sizes = ["7B", "13B", "70B"]
+    present_sizes = sorted(
+        {
+            str(v)
+            for v in pd.concat(
+                [imec_sub["model_size"], nvidia_sub["model_size"]],
+                ignore_index=True,
+            ).dropna().tolist()
+        }
+    )
+    model_sizes = [s for s in preferred_sizes if s in present_sizes] + [s for s in present_sizes if s not in preferred_sizes]
+    if not model_sizes:
+        model_sizes = ["unknown"]
+    fallback_markers = ["s", "D", "v", "P", "X", "<", ">", "h", "*"]
+    fixed_markers = {"70B": "o", "7B": "^", "13B": "s"}
+    model_to_marker: Dict[str, str] = {}
+    fallback_idx = 0
+    for size in model_sizes:
+        if size in fixed_markers:
+            model_to_marker[size] = fixed_markers[size]
+        else:
+            model_to_marker[size] = fallback_markers[fallback_idx % len(fallback_markers)]
+            fallback_idx += 1
+
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.6))
+    ax_imec, ax_nvidia = axes
+
+    # Left: IMEC 200/200 rows (bs=1).
+    ax_imec.set_title("Input/Output = 200/200, Batch Size = 1")
+    if imec_sub.empty:
+        ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
+        ax_imec.axis("off")
+    else:
+        imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
+        imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
+        gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
+        gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
+        gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
+
+        for size in model_sizes:
+            rows_by_size = imec_sub[imec_sub["model_size"] == size]
+            if rows_by_size.empty:
+                continue
+            for gpu in gpu_levels:
+                group = rows_by_size[rows_by_size["TP"] == gpu]
+                if group.empty:
+                    continue
+                ax_imec.scatter(
+                    group["actual"],
+                    group["seconds"],
+                    marker=model_to_marker[size],
+                    color=gpu_to_color[gpu],
+                    s=64,
+                    edgecolors="black",
+                    linewidths=0.35,
+                    alpha=0.9,
+                )
+        _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
+        gpu_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor=gpu_to_color[gpu],
+                markeredgecolor="black",
+                markersize=7,
+                label=str(gpu),
+            )
+            for gpu in gpu_levels
+        ]
+        ax_imec.legend(
+            handles=gpu_handles,
+            loc="best",
+            fontsize=8,
+            framealpha=0.9,
+            title="# GPUs",
+            title_fontsize=9,
+        )
+
+    # Right: NVIDIA rows at selected TP.
+    ax_nvidia.set_title(f"{int(nvidia_tp)} GPUs")
+    if nvidia_sub.empty:
+        ax_nvidia.text(
+            0.5,
+            0.5,
+            f"No data for TP={int(nvidia_tp)}",
+            transform=ax_nvidia.transAxes,
+            ha="center",
+            va="center",
+        )
+        ax_nvidia.axis("off")
+    else:
+        for col in ("input_tokens", "output_tokens", "concurrency"):
+            nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
+        nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
+        nvidia_sub = nvidia_sub[
+            nvidia_sub["input_tokens"].notna()
+            & nvidia_sub["output_tokens"].notna()
+        ].copy()
+        token_pairs = sorted(
+            {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
+        )
+        pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
+        pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
+        batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
+        if len(batch_sizes) <= 1:
+            bs_to_scatter_size = {batch_sizes[0]: 90.0} if batch_sizes else {}
+        else:
+            min_size = 45.0
+            max_size = 210.0
+            bs_to_scatter_size = {
+                bs: min_size + (max_size - min_size) * idx / max(1, len(batch_sizes) - 1)
+                for idx, bs in enumerate(batch_sizes)
+            }
+
+        for size in model_sizes:
+            rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
+            if rows_by_size.empty:
+                continue
+            for pair in token_pairs:
+                pair_rows = rows_by_size[
+                    (rows_by_size["input_tokens"] == pair[0])
+                    & (rows_by_size["output_tokens"] == pair[1])
+                ]
+                if pair_rows.empty:
+                    continue
+                for bs in batch_sizes:
+                    group = pair_rows[pair_rows["concurrency"] == bs]
+                    if group.empty:
+                        continue
+                    ax_nvidia.scatter(
+                        group["actual"],
+                        group["seconds"],
+                        marker=model_to_marker[size],
+                        color=pair_to_color[pair],
+                        s=bs_to_scatter_size[bs],
+                        edgecolors="black",
+                        linewidths=0.35,
+                        alpha=0.85,
+                    )
+        _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
+        pair_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor=pair_to_color[pair],
+                markeredgecolor="black",
+                markersize=7,
+                label=f"{pair[0]}/{pair[1]}",
+            )
+            for pair in token_pairs
+        ]
+        bs_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor="#c8c8c8",
+                markeredgecolor="black",
+                markersize=max(4.5, math.sqrt(bs_to_scatter_size[bs])),
+                label=str(bs),
+            )
+            for bs in batch_sizes
+        ]
+        pair_legend = ax_nvidia.legend(
+            handles=pair_handles,
+            loc="upper left",
+            fontsize=8,
+            framealpha=0.9,
+            title="Input/Output",
+            title_fontsize=9,
+        )
+        ax_nvidia.add_artist(pair_legend)
+        ax_nvidia.legend(
+            handles=bs_handles,
+            loc="lower right",
+            fontsize=8,
+            framealpha=0.9,
+            title="Batch Size",
+            title_fontsize=9,
+        )
+
+    model_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=model_to_marker[size],
+            linestyle="None",
+            markerfacecolor="white",
+            markeredgecolor="black",
+            markersize=7,
+            label=str(size),
+        )
+        for size in model_sizes
+    ]
+    fig.legend(
+        handles=model_handles,
+        loc="upper center",
+        ncol=max(1, min(5, len(model_handles))),
+        bbox_to_anchor=(0.5, 0.93),
+        fontsize=8,
+        framealpha=0.9,
+        title="Model Size",
+        title_fontsize=9,
+    )
+
+    fig.suptitle(f"Llama2 Inference Latency ({str(device).upper()} 80GB BF16)", fontsize=13)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / f"inf_parity_combined_{str(device).lower()}.png"
+    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+def plot_validation_parity_combined_devices(
+    imec_by_device: Dict[str, pd.DataFrame],
+    nvidia_by_device: Dict[str, pd.DataFrame],
+    outdir: Path,
+    *,
+    device_order: Sequence[str] = ("A100", "H100"),
+) -> Path | None:
+    def _clean_subset(df: pd.DataFrame) -> pd.DataFrame:
+        subset = df.copy()
+        for col in ("actual", "seconds"):
+            if col in subset.columns:
+                subset[col] = pd.to_numeric(subset[col], errors="coerce")
+        subset = subset[
+            subset["actual"].notna()
+            & subset["seconds"].notna()
+            & np.isfinite(subset["actual"])
+            & np.isfinite(subset["seconds"])
+            & (subset["actual"] > 0)
+            & (subset["seconds"] > 0)
+        ].copy()
+        return subset
+
+    def _model_size_label(model_name: object) -> str:
+        name = str(model_name).lower()
+        if "70b" in name:
+            return "70B"
+        if "13b" in name:
+            return "13B"
+        if "7b" in name:
+            return "7B"
+        return str(model_name)
+
+    def _set_parity_axes(ax, x_values: pd.Series, y_values: pd.Series) -> None:
+        values = pd.concat([x_values, y_values], ignore_index=True)
+        lo = float(values.min())
+        hi = float(values.max())
+        pad = 0.05 * max(hi - lo, 1e-9)
+        lo_lim = max(0.0, lo - pad)
+        hi_lim = hi + pad
+        ax.plot([lo_lim, hi_lim], [lo_lim, hi_lim], linestyle="--", color="#666666", linewidth=1.0)
+        ax.set_xlim(lo_lim, hi_lim)
+        ax.set_ylim(lo_lim, hi_lim)
+        ax.grid(True, linestyle="--", alpha=0.3)
+
+    prepared: List[Tuple[str, int, pd.DataFrame, pd.DataFrame]] = []
+    for device in device_order:
+        imec_df = imec_by_device.get(str(device).upper())
+        nvidia_df = nvidia_by_device.get(str(device).upper())
+        if imec_df is None and nvidia_df is None:
+            continue
+        imec_sub = _clean_subset(imec_df if imec_df is not None else pd.DataFrame())
+        nvidia_sub = _clean_subset(nvidia_df if nvidia_df is not None else pd.DataFrame())
+        nvidia_tp = int(NVIDIA_DATASETS.get(str(device).upper(), {}).get("tp", 8))
+        if "TP" in nvidia_sub.columns:
+            nvidia_sub["TP"] = pd.to_numeric(nvidia_sub["TP"], errors="coerce")
+            nvidia_sub = nvidia_sub[nvidia_sub["TP"] == nvidia_tp].copy()
+        if not imec_sub.empty and "model" in imec_sub.columns:
+            imec_sub["model_size"] = imec_sub["model"].apply(_model_size_label)
+        else:
+            imec_sub["model_size"] = "unknown"
+        if not nvidia_sub.empty and "model" in nvidia_sub.columns:
+            nvidia_sub["model_size"] = nvidia_sub["model"].apply(_model_size_label)
+        else:
+            nvidia_sub["model_size"] = "unknown"
+        prepared.append((str(device).upper(), nvidia_tp, imec_sub, nvidia_sub))
+
+    if not prepared:
+        return None
+
+    preferred_sizes = ["7B", "13B", "70B"]
+    present_sizes = sorted(
+        {
+            str(v)
+            for _, _, imec_sub, nvidia_sub in prepared
+            for v in pd.concat(
+                [imec_sub.get("model_size", pd.Series(dtype=str)), nvidia_sub.get("model_size", pd.Series(dtype=str))],
+                ignore_index=True,
+            ).dropna().tolist()
+        }
+    )
+    model_sizes = [s for s in preferred_sizes if s in present_sizes] + [s for s in present_sizes if s not in preferred_sizes]
+    if not model_sizes:
+        model_sizes = ["unknown"]
+    fallback_markers = ["s", "D", "v", "P", "X", "<", ">", "h", "*"]
+    fixed_markers = {"70B": "o", "7B": "^", "13B": "s"}
+    model_to_marker: Dict[str, str] = {}
+    fallback_idx = 0
+    for size in model_sizes:
+        if size in fixed_markers:
+            model_to_marker[size] = fixed_markers[size]
+        else:
+            model_to_marker[size] = fallback_markers[fallback_idx % len(fallback_markers)]
+            fallback_idx += 1
+
+    global_batch_sizes = sorted(
+        {
+            int(v)
+            for _, _, _, nvidia_sub in prepared
+            for v in pd.to_numeric(
+                nvidia_sub.get("concurrency", pd.Series(dtype=float)),
+                errors="coerce",
+            ).dropna().tolist()
+        }
+    )
+    if len(global_batch_sizes) <= 1:
+        bs_to_scatter_size_global = {global_batch_sizes[0]: 90.0} if global_batch_sizes else {}
+    else:
+        min_size = 45.0
+        max_size = 210.0
+        bs_to_scatter_size_global = {
+            bs: min_size + (max_size - min_size) * idx / max(1, len(global_batch_sizes) - 1)
+            for idx, bs in enumerate(global_batch_sizes)
+        }
+
+    stacked_width = 10.0
+    stacked_height = stacked_width * ((4.9 * len(prepared)) / 12.8)
+    fig, axes = plt.subplots(len(prepared), 2, figsize=(stacked_width, stacked_height))
+    if len(prepared) == 1:
+        axes = np.array([axes])
+
+    for row_idx, (device, nvidia_tp, imec_sub, nvidia_sub) in enumerate(prepared):
+        ax_imec = axes[row_idx, 0]
+        ax_nvidia = axes[row_idx, 1]
+
+        ax_imec.set_title(f"{device}: Input/Output = 200/200, Batch Size = 1")
+        if imec_sub.empty:
+            ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
+            ax_imec.axis("off")
+        else:
+            imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
+            imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
+            gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
+            gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
+            gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
+
+            for size in model_sizes:
+                rows_by_size = imec_sub[imec_sub["model_size"] == size]
+                if rows_by_size.empty:
+                    continue
+                for gpu in gpu_levels:
+                    group = rows_by_size[rows_by_size["TP"] == gpu]
+                    if group.empty:
+                        continue
+                    ax_imec.scatter(
+                        group["actual"],
+                        group["seconds"],
+                        marker=model_to_marker[size],
+                        color=gpu_to_color[gpu],
+                        s=64,
+                        edgecolors="black",
+                        linewidths=0.35,
+                        alpha=0.9,
+                    )
+            _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
+            gpu_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor=gpu_to_color[gpu],
+                    markeredgecolor="black",
+                    markersize=7,
+                    label=str(gpu),
+                )
+                for gpu in gpu_levels
+            ]
+            ax_imec.legend(
+                handles=gpu_handles,
+                loc="best",
+                fontsize=8,
+                framealpha=0.9,
+                title="# GPUs",
+                title_fontsize=9,
+            )
+
+        ax_nvidia.set_title(f"{device}: {int(nvidia_tp)} GPUs")
+        if nvidia_sub.empty:
+            ax_nvidia.text(
+                0.5,
+                0.5,
+                f"No data for TP={int(nvidia_tp)}",
+                transform=ax_nvidia.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax_nvidia.axis("off")
+        else:
+            for col in ("input_tokens", "output_tokens", "concurrency"):
+                nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
+            nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
+            nvidia_sub = nvidia_sub[
+                nvidia_sub["input_tokens"].notna()
+                & nvidia_sub["output_tokens"].notna()
+            ].copy()
+            token_pairs = sorted(
+                {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
+            )
+            pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
+            pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
+            batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
+
+            for size in model_sizes:
+                rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
+                if rows_by_size.empty:
+                    continue
+                for pair in token_pairs:
+                    pair_rows = rows_by_size[
+                        (rows_by_size["input_tokens"] == pair[0])
+                        & (rows_by_size["output_tokens"] == pair[1])
+                    ]
+                    if pair_rows.empty:
+                        continue
+                    for bs in batch_sizes:
+                        group = pair_rows[pair_rows["concurrency"] == bs]
+                        if group.empty:
+                            continue
+                        ax_nvidia.scatter(
+                            group["actual"],
+                            group["seconds"],
+                            marker=model_to_marker[size],
+                            color=pair_to_color[pair],
+                            s=bs_to_scatter_size_global.get(bs, 90.0),
+                            edgecolors="black",
+                            linewidths=0.35,
+                            alpha=0.85,
+                        )
+            _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
+            pair_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor=pair_to_color[pair],
+                    markeredgecolor="black",
+                    markersize=7,
+                    label=f"{pair[0]}/{pair[1]}",
+                )
+                for pair in token_pairs
+            ]
+            pair_legend = ax_nvidia.legend(
+                handles=pair_handles,
+                loc="upper left",
+                fontsize=8,
+                framealpha=0.9,
+                title="Input/Output",
+                title_fontsize=9,
+            )
+            ax_nvidia.add_artist(pair_legend)
+
+    model_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=model_to_marker[size],
+            linestyle="None",
+            markerfacecolor="white",
+            markeredgecolor="black",
+            markersize=7,
+            label=str(size),
+        )
+        for size in model_sizes
+    ]
+    model_legend = fig.legend(
+        handles=model_handles,
+        loc="upper center",
+        ncol=max(1, min(4, len(model_handles))),
+        bbox_to_anchor=(0.32, 0.95),
+        fontsize=8,
+        framealpha=0.9,
+        title="Model Size",
+        title_fontsize=9,
+    )
+    fig.add_artist(model_legend)
+    if global_batch_sizes:
+        bs_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor="#c8c8c8",
+                markeredgecolor="black",
+                markersize=max(4.5, math.sqrt(bs_to_scatter_size_global[bs])),
+                label=str(bs),
+            )
+            for bs in global_batch_sizes
+        ]
+        fig.legend(
+            handles=bs_handles,
+            loc="upper center",
+            ncol=max(1, min(5, len(bs_handles))),
+            bbox_to_anchor=(0.76, 0.95),
+            fontsize=8,
+            framealpha=0.9,
+            title="Batch Size",
+            title_fontsize=9,
+        )
+    fig.suptitle("Llama2 Inference Latency", fontsize=14)
+    fig.supxlabel("Actual (s)")
+    fig.supylabel("Predicted (s)")
+    fig.tight_layout(rect=(0.03, 0.03, 1.0, 0.89))
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / "inf_parity_combined_a100_h100.png"
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return outpath
@@ -2199,7 +2826,7 @@ def run(
 
     rows = compute_pct_errors(validation_results, actual_lookup)
     flattened_rows = None
-    if COMPARE_FLATTENED:
+    if COMPARE_FLATTENED and device != "H100":
         flattened_specs = _build_flattened_specs(specs)
         flattened_results = run_validation_suite(
             flattened_specs,
@@ -2357,7 +2984,7 @@ def run_nvidia(
 
     rows = compute_nvidia_pct_errors(validation_results, actual_lookup)
     flattened_rows = None
-    if COMPARE_FLATTENED:
+    if COMPARE_FLATTENED and device != "H100":
         flattened_specs = _build_flattened_specs(specs)
         flattened_results = run_validation_suite(
             flattened_specs,
@@ -3015,6 +3642,7 @@ def _plot_combined_a100_error_bars(
     imec_rows: List[Dict[str, object]],
     nvidia_rows: List[Dict[str, object]],
     outdir: Path,
+    device: str = "A100",
     llmcompass_rows: Optional[List[Dict[str, object]]] = None,
     llmcompass_nvidia_rows: Optional[List[Dict[str, object]]] = None,
     vidur_rows: Optional[List[Dict[str, object]]] = None,
@@ -3024,20 +3652,20 @@ def _plot_combined_a100_error_bars(
     flattened_rows: Optional[List[Dict[str, object]]] = None,
     flattened_nvidia_rows: Optional[List[Dict[str, object]]] = None,
 ) -> Optional[Path]:
-    imec_rows = [row for row in imec_rows if row.get("device") == "A100"]
-    nvidia_rows = [row for row in nvidia_rows if row.get("device") == "A100"]
+    imec_rows = [row for row in imec_rows if row.get("device") == device]
+    nvidia_rows = [row for row in nvidia_rows if row.get("device") == device]
     if vidur_rows:
-        vidur_rows = [row for row in vidur_rows if row.get("device") == "A100"]
+        vidur_rows = [row for row in vidur_rows if row.get("device") == device]
     if vidur_nvidia_rows:
-        vidur_nvidia_rows = [row for row in vidur_nvidia_rows if row.get("device") == "A100"]
+        vidur_nvidia_rows = [row for row in vidur_nvidia_rows if row.get("device") == device]
     if genz_nvidia_rows:
-        genz_nvidia_rows = [row for row in genz_nvidia_rows if row.get("device") == "A100"]
+        genz_nvidia_rows = [row for row in genz_nvidia_rows if row.get("device") == device]
     if genz_rows:
-        genz_rows = [row for row in genz_rows if row.get("device") == "A100"]
+        genz_rows = [row for row in genz_rows if row.get("device") == device]
     if flattened_rows:
-        flattened_rows = [row for row in flattened_rows if row.get("device") == "A100"]
+        flattened_rows = [row for row in flattened_rows if row.get("device") == device]
     if flattened_nvidia_rows:
-        flattened_nvidia_rows = [row for row in flattened_nvidia_rows if row.get("device") == "A100"]
+        flattened_nvidia_rows = [row for row in flattened_nvidia_rows if row.get("device") == device]
     if not imec_rows or not nvidia_rows:
         return None
 
@@ -3389,13 +4017,13 @@ def _plot_combined_a100_error_bars(
             axes[1].set_xlim(min(bottom_x) - pad, max(bottom_x) + pad)
             axes[1].margins(x=0)
 
-        fig.suptitle("Inference Validation (A100 80 GB)", y=0.975)
+        fig.suptitle(f"Inference Validation ({device} 80 GB)", y=0.975)
         fig.supylabel("Total runtime estimation error (%)")
         fig.supxlabel("(Input tokens/Output tokens) and TP degree")
         fig.subplots_adjust(top=0.88, bottom=0.12, left=0.09, right=0.98)
 
     outdir.mkdir(parents=True, exist_ok=True)
-    outpath = outdir / "inf_errors_bar_combined_a100.png"
+    outpath = outdir / f"inf_errors_bar_combined_{device.lower()}.png"
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
     return outpath
@@ -3405,6 +4033,7 @@ def _plot_combined_ratio_grids(
     imec_rows: List[Dict[str, object]],
     nvidia_rows: List[Dict[str, object]],
     outdir: Path,
+    device: str = "A100",
     llmcompass_rows: Optional[List[Dict[str, object]]] = None,
     llmcompass_nvidia_rows: Optional[List[Dict[str, object]]] = None,
     vidur_rows: Optional[List[Dict[str, object]]] = None,
@@ -3414,21 +4043,21 @@ def _plot_combined_ratio_grids(
     flattened_rows: Optional[List[Dict[str, object]]] = None,
     flattened_nvidia_rows: Optional[List[Dict[str, object]]] = None,
 ) -> Optional[Path]:
-    imec_rows = [row for row in imec_rows if row.get("device") == "A100"]
-    nvidia_rows = [row for row in nvidia_rows if row.get("device") == "A100"]
+    imec_rows = [row for row in imec_rows if row.get("device") == device]
+    nvidia_rows = [row for row in nvidia_rows if row.get("device") == device]
     if vidur_rows:
-        vidur_rows = [row for row in vidur_rows if row.get("device") == "A100"]
+        vidur_rows = [row for row in vidur_rows if row.get("device") == device]
     if vidur_nvidia_rows:
-        vidur_nvidia_rows = [row for row in vidur_nvidia_rows if row.get("device") == "A100"]
+        vidur_nvidia_rows = [row for row in vidur_nvidia_rows if row.get("device") == device]
     if genz_nvidia_rows:
-        genz_nvidia_rows = [row for row in genz_nvidia_rows if row.get("device") == "A100"]
+        genz_nvidia_rows = [row for row in genz_nvidia_rows if row.get("device") == device]
     if genz_rows:
-        genz_rows = [row for row in genz_rows if row.get("device") == "A100"]
+        genz_rows = [row for row in genz_rows if row.get("device") == device]
     if flattened_rows:
-        flattened_rows = [row for row in flattened_rows if row.get("device") == "A100"]
+        flattened_rows = [row for row in flattened_rows if row.get("device") == device]
     if flattened_nvidia_rows:
         flattened_nvidia_rows = [
-            row for row in flattened_nvidia_rows if row.get("device") == "A100"
+            row for row in flattened_nvidia_rows if row.get("device") == device
         ]
     if not imec_rows or not nvidia_rows:
         return None
@@ -3708,7 +4337,7 @@ def _plot_combined_ratio_grids(
         col_idx = j % bottom_ncols
         fig.add_subplot(bottom_gs[row_idx, col_idx]).axis("off")
 
-    fig.suptitle("Normalized Inference Validation (A100 Systems)", y=0.995)
+    fig.suptitle(f"Normalized Inference Validation ({device} Systems)", y=0.995)
     handles = [plt.Rectangle((0, 0), 1, 1, color=tool_colors[name]) for name in tool_names]
     fig.legend(
         handles,
@@ -3721,7 +4350,7 @@ def _plot_combined_ratio_grids(
     fig.subplots_adjust(bottom=0.2, top=0.85)
 
     outdir.mkdir(parents=True, exist_ok=True)
-    outpath = outdir / "inf_ratio_grid_combined_a100.png"
+    outpath = outdir / f"inf_ratio_grid_combined_{device.lower()}.png"
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
     return outpath
@@ -3752,8 +4381,15 @@ if __name__ == "__main__":
         default="ratio",
         help="Choose which combined plot to generate (default: both).",
     )
+    parser.add_argument(
+        "--device",
+        choices=("A100", "H100"),
+        default="H100",
+        help="Device to validate (default: H100).",
+    )
     args = parser.parse_args()
     _apply_compare_args(args)
+    _apply_device_compare_policy(args.device)
 
     imec_rows = None
     imec_flattened_rows = None
@@ -3765,42 +4401,49 @@ if __name__ == "__main__":
     vidur_nvidia_rows = None
     genz_nvidia_rows = None
     genz_rows = None
-    # for device_name in ("A100", "H100"):
-    for device_name in ("A100",):
-        try:
-            # Only build combined plots below; skip per-device plots here.
-            result = run(network_ignored=False, device=device_name)
-            if device_name == "A100":
-                imec_rows = result.get("rows")
-                imec_flattened_rows = result.get("flattened_rows")
-        except FileNotFoundError:
-            pass
-    # for device_name in ("A100", "H100"):
-    for device_name in ("A100",):
-        try:
-            # Only build combined plots below; skip per-device plots here.
-            result = run_nvidia(network_ignored=False, device=device_name)
-            if device_name == "A100":
-                nvidia_rows = result.get("rows")
-                nvidia_flattened_rows = result.get("flattened_rows")
-        except FileNotFoundError:
-            pass
+    run_device = args.device
+    try:
+        # Only build combined plots below; skip per-device plots here.
+        result = run(network_ignored=False, device=run_device)
+        imec_rows = result.get("rows")
+        imec_flattened_rows = result.get("flattened_rows")
+    except FileNotFoundError:
+        pass
+    try:
+        # Only build combined plots below; skip per-device plots here.
+        result = run_nvidia(network_ignored=False, device=run_device)
+        nvidia_rows = result.get("rows")
+        nvidia_flattened_rows = result.get("flattened_rows")
+    except FileNotFoundError:
+        pass
+
+    imec_errors = _valid_pct_errors(imec_rows)
+    nvidia_errors = _valid_pct_errors(nvidia_rows)
+    if imec_errors and nvidia_errors:
+        combined_errors = imec_errors + nvidia_errors
+        combined_avg_abs_error = sum(combined_errors) / len(combined_errors)
+        print(
+            "Combined average absolute percent error across IMEC and NVIDIA tests: "
+            f"{combined_avg_abs_error:.2f}%"
+        )
+
     if imec_rows and nvidia_rows:
         out_dir = Path(PROJECT_ROOT) / "output" / "validation" / "inf"
         if COMPARE_LLMCOMPASS:
-            llmcompass_rows = _load_llmcompass_imec_errors(LLMCOMPASS_IMEC, device="A100")
-            llmcompass_nvidia_rows = _load_llmcompass_nvidia_errors(LLMCOMPASS_NVIDIA, device="A100")
+            llmcompass_rows = _load_llmcompass_imec_errors(LLMCOMPASS_IMEC, device=run_device)
+            llmcompass_nvidia_rows = _load_llmcompass_nvidia_errors(LLMCOMPASS_NVIDIA, device=run_device)
         if COMPARE_VIDUR:
             vidur_rows = _load_vidur_imec_errors(VIDUR_IMEC)
-            vidur_nvidia_rows = _load_vidur_nvidia_errors(VIDUR_NVIDIA, device="A100")
+            vidur_nvidia_rows = _load_vidur_nvidia_errors(VIDUR_NVIDIA, device=run_device)
         if COMPARE_GENZ:
-            genz_nvidia_rows = _load_genz_nvidia_errors(GENZ_NVIDIA, device="A100")
+            genz_nvidia_rows = _load_genz_nvidia_errors(GENZ_NVIDIA, device=run_device)
             genz_rows = _load_genz_imec_errors(GENZ_IMEC)
         if args.plot in ("errors", "both"):
             combined = _plot_combined_a100_error_bars(
                 imec_rows,
                 nvidia_rows,
                 out_dir,
+                device=run_device,
                 llmcompass_rows=llmcompass_rows,
                 llmcompass_nvidia_rows=llmcompass_nvidia_rows,
                 vidur_rows=vidur_rows,
@@ -3817,6 +4460,7 @@ if __name__ == "__main__":
                 imec_rows,
                 nvidia_rows,
                 out_dir,
+                device=run_device,
                 llmcompass_rows=llmcompass_rows,
                 llmcompass_nvidia_rows=llmcompass_nvidia_rows,
                 vidur_rows=vidur_rows,

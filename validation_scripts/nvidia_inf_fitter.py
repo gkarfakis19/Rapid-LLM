@@ -27,6 +27,7 @@ import os
 import random
 import sys
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -60,14 +61,18 @@ ADAM_EPS = 1e-8
 LOSS_FAIL_LAMBDA = 100.0
 LOSS_FAIL_VALUE = 1e6
 
-UTIL_MIN = 0.5
-UTIL_MAX = 1.0
-NET_UTIL_MIN = 0.5
-NET_UTIL_MAX = 1.2
+CORE_UTIL_MIN_DEFAULT = 0.5
+CORE_UTIL_MAX_DEFAULT = 1.0
+DRAM_UTIL_MIN_DEFAULT = 0.5
+DRAM_UTIL_MAX_DEFAULT = 1.0
+NET_UTIL_MIN_DEFAULT = 0.5
+NET_UTIL_MAX_DEFAULT = 1.2
 OVERLAP_MIN = 0.0
 OVERLAP_MAX = 1.0
-KERNEL_LAUNCH_MIN = 1e-6
-KERNEL_LAUNCH_MAX = 1e-3
+KERNEL_LAUNCH_MIN = 6.5e-6
+KERNEL_LAUNCH_MAX = 8.5e-6
+KERNEL_STAGE1_COARSE_POINTS = 5
+KERNEL_STAGE1_FINE_POINTS = 5
 
 
 INIT_DEFAULTS = {
@@ -75,7 +80,7 @@ INIT_DEFAULTS = {
     "u_mem": 0.92,
     "u_net_tp": 0.77,
     "tp_sp_overlap": 0.13,
-    "kernel_launch_overhead": 5.43e-6,
+    "kernel_launch_overhead": 7e-6,
 }
 
 
@@ -178,13 +183,26 @@ def _merge_overrides(
     return _deep_update(merged, extra)
 
 
-def _params_to_overrides(params: Dict[str, float]) -> Dict[str, Any]:
+def _params_to_overrides(
+    params: Dict[str, float],
+    *,
+    fixed_kernel_launch_overhead: Optional[float] = None,
+    core_clock_hz: Optional[float] = None,
+) -> Dict[str, Any]:
+    kernel_launch = (
+        float(fixed_kernel_launch_overhead)
+        if fixed_kernel_launch_overhead is not None
+        else float(params.get("kernel_launch_overhead", INIT_DEFAULTS["kernel_launch_overhead"]))
+    )
+    core_overrides: Dict[str, float] = {"util": float(params["u_flops"])}
+    if core_clock_hz is not None:
+        core_overrides["operating_frequency"] = float(core_clock_hz)
     return {
         "tech_param": {
-            "core": {"util": float(params["u_flops"])},
+            "core": core_overrides,
             "DRAM": {"util": float(params["u_mem"])},
         },
-        "sw_param": {"kernel_launch_overhead": float(INIT_DEFAULTS["kernel_launch_overhead"])},
+        "sw_param": {"kernel_launch_overhead": kernel_launch},
         "network": {
             "overlap": {"tp_sp_overlap": float(params["tp_sp_overlap"])},
             "dimensions": [
@@ -194,14 +212,27 @@ def _params_to_overrides(params: Dict[str, float]) -> Dict[str, Any]:
     }
 
 
-def _apply_params_to_hw_config(base_hw: Dict[str, Any], params: Dict[str, float]) -> Dict[str, Any]:
+def _apply_params_to_hw_config(
+    base_hw: Dict[str, Any],
+    params: Dict[str, float],
+    *,
+    fixed_kernel_launch_overhead: Optional[float] = None,
+    core_clock_hz: Optional[float] = None,
+) -> Dict[str, Any]:
     cfg = copy.deepcopy(base_hw)
+    kernel_launch = (
+        float(fixed_kernel_launch_overhead)
+        if fixed_kernel_launch_overhead is not None
+        else float(params.get("kernel_launch_overhead", INIT_DEFAULTS["kernel_launch_overhead"]))
+    )
 
     tech = cfg.get("tech_param")
     if tech is None:
         tech = cfg.setdefault("tech_config", {})
     core = tech.setdefault("core", {})
     core["util"] = float(params["u_flops"])
+    if core_clock_hz is not None:
+        core["operating_frequency"] = float(core_clock_hz)
 
     dram = tech.get("DRAM")
     if dram is None:
@@ -209,7 +240,7 @@ def _apply_params_to_hw_config(base_hw: Dict[str, Any], params: Dict[str, float]
     dram["util"] = float(params["u_mem"])
 
     sw = cfg.setdefault("sw_param", {})
-    sw["kernel_launch_overhead"] = float(INIT_DEFAULTS["kernel_launch_overhead"])
+    sw["kernel_launch_overhead"] = kernel_launch
 
     net = cfg.setdefault("network", {})
     overlap = net.setdefault("overlap", {})
@@ -239,29 +270,38 @@ def _extract_initial_params(base_hw: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def _build_param_specs(init: Dict[str, float]) -> Sequence[ParamSpec]:
+def _build_param_specs(
+    init: Dict[str, float],
+    *,
+    core_util_min: float,
+    core_util_max: float,
+    dram_util_min: float,
+    dram_util_max: float,
+    net_util_min: float,
+    net_util_max: float,
+) -> Sequence[ParamSpec]:
     return (
         ParamSpec(
             "u_flops",
-            UTIL_MIN,
-            UTIL_MAX,
-            _s0_from_val(init["u_flops"], UTIL_MIN, UTIL_MAX, cushion_frac=0.02),
+            core_util_min,
+            core_util_max,
+            _s0_from_val(init["u_flops"], core_util_min, core_util_max, cushion_frac=0.02),
             ADAM_ALPHA,
             0.05,
         ),
         ParamSpec(
             "u_mem",
-            UTIL_MIN,
-            UTIL_MAX,
-            _s0_from_val(init["u_mem"], UTIL_MIN, UTIL_MAX, cushion_frac=0.02),
+            dram_util_min,
+            dram_util_max,
+            _s0_from_val(init["u_mem"], dram_util_min, dram_util_max, cushion_frac=0.02),
             ADAM_ALPHA,
             0.05,
         ),
         ParamSpec(
             "u_net_tp",
-            NET_UTIL_MIN,
-            NET_UTIL_MAX,
-            _s0_from_val(init["u_net_tp"], NET_UTIL_MIN, NET_UTIL_MAX, cushion_frac=0.02),
+            net_util_min,
+            net_util_max,
+            _s0_from_val(init["u_net_tp"], net_util_min, net_util_max, cushion_frac=0.02),
             ADAM_ALPHA,
             0.05,
         ),
@@ -304,22 +344,84 @@ def _apply_overrides_to_specs(
     return updated
 
 
-def _compute_loss(rows: Sequence[Dict[str, object]]) -> Tuple[float, Dict[str, float]]:
+def _compute_suite_stats(rows: Sequence[Dict[str, object]]) -> Dict[str, float]:
     errors: List[float] = []
     failures = 0
     for row in rows:
         err = row.get("pct_error")
-        if row.get("success") is False or err is None or math.isnan(float(err)):
+        if row.get("success") is False or err is None:
             failures += 1
             continue
-        errors.append(float(err))
+        try:
+            err_val = float(err)
+        except (TypeError, ValueError):
+            failures += 1
+            continue
+        if math.isnan(err_val):
+            failures += 1
+            continue
+        errors.append(abs(err_val))
     total = len(errors) + failures
-    if not errors:
-        return LOSS_FAIL_VALUE, {"mean_abs": float("nan"), "fail_rate": 1.0, "count": 0, "fail": failures}
-    mean_abs = sum(errors) / len(errors)
-    fail_rate = float(failures) / float(total) if total > 0 else 0.0
-    loss = mean_abs + LOSS_FAIL_LAMBDA * fail_rate
-    return float(loss), {"mean_abs": mean_abs, "fail_rate": fail_rate, "count": len(errors), "fail": failures}
+    mean_abs = (sum(errors) / len(errors)) if errors else float("nan")
+    fail_rate = float(failures) / float(total) if total > 0 else 1.0
+    return {
+        "mean_abs": float(mean_abs),
+        "fail_rate": float(fail_rate),
+        "count": float(len(errors)),
+        "fail": float(failures),
+    }
+
+
+def _safe_mean_abs(value: float) -> float:
+    return float(value) if math.isfinite(float(value)) else float(LOSS_FAIL_VALUE)
+
+
+def _compute_eval_metrics(
+    imec_rows: Sequence[Dict[str, object]],
+    nvidia_rows: Sequence[Dict[str, object]],
+) -> Dict[str, float]:
+    imec_stats = _compute_suite_stats(imec_rows)
+    nvidia_stats = _compute_suite_stats(nvidia_rows)
+    imec_mean = _safe_mean_abs(float(imec_stats["mean_abs"]))
+    nvidia_mean = _safe_mean_abs(float(nvidia_stats["mean_abs"]))
+    imec_fail_rate = float(imec_stats["fail_rate"])
+    nvidia_fail_rate = float(nvidia_stats["fail_rate"])
+    gap_abs = abs(imec_mean - nvidia_mean)
+    balanced_mean_abs = 0.5 * (imec_mean + nvidia_mean)
+    balanced_fail_rate = 0.5 * (imec_fail_rate + nvidia_fail_rate)
+    stage2_loss = balanced_mean_abs + LOSS_FAIL_LAMBDA * balanced_fail_rate
+    return {
+        "imec_mean_abs": imec_mean,
+        "nvidia_mean_abs": nvidia_mean,
+        "imec_fail_rate": imec_fail_rate,
+        "nvidia_fail_rate": nvidia_fail_rate,
+        "imec_count": float(imec_stats["count"]),
+        "nvidia_count": float(nvidia_stats["count"]),
+        "imec_fail": float(imec_stats["fail"]),
+        "nvidia_fail": float(nvidia_stats["fail"]),
+        "gap_abs": float(gap_abs),
+        "balanced_mean_abs": float(balanced_mean_abs),
+        "balanced_fail_rate": float(balanced_fail_rate),
+        "stage2_loss": float(stage2_loss),
+        # Keep aliases for existing logs/callers.
+        "mean_abs": float(balanced_mean_abs),
+        "fail_rate": float(balanced_fail_rate),
+    }
+
+
+def _stage1_rank_key(metrics: Dict[str, float], kernel_launch_overhead: float) -> Tuple[float, float, float, float]:
+    return (
+        float(metrics["gap_abs"]),
+        float(metrics["balanced_mean_abs"]),
+        float(metrics["imec_fail_rate"] + metrics["nvidia_fail_rate"]),
+        float(kernel_launch_overhead),
+    )
+
+
+def _kernel_candidates(low: float, high: float, points: int) -> List[float]:
+    if points <= 1 or low >= high:
+        return [float(low)]
+    return [float(x) for x in np.linspace(float(low), float(high), int(points))]
 
 
 def _evaluate_params(
@@ -381,14 +483,104 @@ def _evaluate_param_sets(
         subset = results[offset:offset + spec_count]
         imec_results = subset[:imec_count]
         nvidia_results = subset[imec_count:]
-        rows: List[Dict[str, object]] = []
+        imec_rows: List[Dict[str, object]] = []
+        nvidia_rows: List[Dict[str, object]] = []
         if imec_results:
-            rows.extend(nvidia_inf.compute_pct_errors(imec_results, imec_lookup))
+            imec_rows = nvidia_inf.compute_pct_errors(imec_results, imec_lookup)
         if nvidia_results:
-            rows.extend(nvidia_inf.compute_nvidia_pct_errors(nvidia_results, nvidia_lookup))
-        outputs.append(_compute_loss(rows))
+            nvidia_rows = nvidia_inf.compute_nvidia_pct_errors(nvidia_results, nvidia_lookup)
+        metrics = _compute_eval_metrics(imec_rows, nvidia_rows)
+        outputs.append((float(metrics["stage2_loss"]), metrics))
         offset += spec_count
     return outputs
+
+
+def _search_kernel_launch_overhead(
+    specs: Sequence[ValidationSpec],
+    imec_count: int,
+    imec_lookup: Dict[Tuple[str, int], float],
+    nvidia_lookup: Dict[Tuple[str, int, int, int, int], float],
+    base_model_path: str,
+    base_hw_path: str,
+    base_params: Dict[str, float],
+    *,
+    max_workers: Optional[int],
+    cache_mode: str,
+    fixed_kernel_launch_overhead: Optional[float] = None,
+    core_clock_hz: Optional[float] = None,
+) -> Tuple[float, Dict[str, float]]:
+    if fixed_kernel_launch_overhead is not None:
+        fixed = float(fixed_kernel_launch_overhead)
+        params = dict(base_params)
+        params["kernel_launch_overhead"] = fixed
+        loss, metrics = _evaluate_params(
+            specs,
+            imec_count,
+            imec_lookup,
+            nvidia_lookup,
+            base_model_path,
+            base_hw_path,
+            _params_to_overrides(
+                params,
+                fixed_kernel_launch_overhead=fixed,
+                core_clock_hz=core_clock_hz,
+            ),
+            max_workers=max_workers,
+            cache_mode=cache_mode,
+        )
+        _ = loss
+        return fixed, metrics
+
+    def _eval_kernel_grid(candidates: Sequence[float]) -> Tuple[float, Dict[str, float]]:
+        overrides_list: List[Dict[str, Any]] = []
+        kernels: List[float] = []
+        for kernel in candidates:
+            params = dict(base_params)
+            params["kernel_launch_overhead"] = float(kernel)
+            overrides_list.append(
+                _params_to_overrides(
+                    params,
+                    fixed_kernel_launch_overhead=None,
+                    core_clock_hz=core_clock_hz,
+                )
+            )
+            kernels.append(float(kernel))
+
+        losses_stats = _evaluate_param_sets(
+            specs,
+            imec_count,
+            imec_lookup,
+            nvidia_lookup,
+            base_model_path,
+            base_hw_path,
+            overrides_list,
+            max_workers=max_workers,
+            cache_mode=cache_mode,
+        )
+        if not losses_stats:
+            raise RuntimeError("Kernel stage-1 search did not produce any evaluations.")
+
+        best_idx = min(
+            range(len(losses_stats)),
+            key=lambda idx: _stage1_rank_key(losses_stats[idx][1], kernels[idx]),
+        )
+        return kernels[best_idx], losses_stats[best_idx][1]
+
+    coarse = _kernel_candidates(KERNEL_LAUNCH_MIN, KERNEL_LAUNCH_MAX, KERNEL_STAGE1_COARSE_POINTS)
+    coarse_best_kernel, coarse_best_metrics = _eval_kernel_grid(coarse)
+
+    if len(coarse) >= 2:
+        coarse_step = abs(float(coarse[1]) - float(coarse[0]))
+    else:
+        coarse_step = float(KERNEL_LAUNCH_MAX - KERNEL_LAUNCH_MIN) / 2.0
+    fine_low = max(float(KERNEL_LAUNCH_MIN), float(coarse_best_kernel) - coarse_step)
+    fine_high = min(float(KERNEL_LAUNCH_MAX), float(coarse_best_kernel) + coarse_step)
+    if fine_low >= fine_high:
+        return float(coarse_best_kernel), coarse_best_metrics
+
+    fine = _kernel_candidates(fine_low, fine_high, KERNEL_STAGE1_FINE_POINTS)
+    fine_best_kernel, fine_best_metrics = _eval_kernel_grid(fine)
+    return float(fine_best_kernel), fine_best_metrics
 
 
 def _run_spsa(
@@ -404,19 +596,73 @@ def _run_spsa(
     seed: int,
     max_workers: Optional[int],
     cache_mode: str,
+    core_util_min: float,
+    core_util_max: float,
+    dram_util_min: float,
+    dram_util_max: float,
+    net_util_min: float,
+    net_util_max: float,
+    fixed_kernel_launch_overhead: Optional[float],
+    core_clock_hz: Optional[float],
 ) -> Dict[str, float]:
     init = _extract_initial_params(base_hw)
-    param_specs = _build_param_specs(init)
+    param_specs = _build_param_specs(
+        init,
+        core_util_min=core_util_min,
+        core_util_max=core_util_max,
+        dram_util_min=dram_util_min,
+        dram_util_max=dram_util_max,
+        net_util_min=net_util_min,
+        net_util_max=net_util_max,
+    )
     s = np.array([spec.s0 for spec in param_specs], dtype=float)
     m = np.zeros_like(s)
     v = np.zeros_like(s)
     rng = random.Random(seed)
 
+    stage1_base_params = _params_from_s(s, param_specs)
+    stage1_base_params["kernel_launch_overhead"] = float(init["kernel_launch_overhead"])
+    if fixed_kernel_launch_overhead is None:
+        print(
+            "stage1 kernel search: range=[{:.2e}, {:.2e}] coarse_points={} fine_points={}".format(
+                float(KERNEL_LAUNCH_MIN),
+                float(KERNEL_LAUNCH_MAX),
+                int(KERNEL_STAGE1_COARSE_POINTS),
+                int(KERNEL_STAGE1_FINE_POINTS),
+            )
+        )
+    else:
+        print(f"stage1 kernel fixed: kernel_launch_overhead={float(fixed_kernel_launch_overhead):.2e}")
+    best_kernel_launch_overhead, stage1_metrics = _search_kernel_launch_overhead(
+        specs,
+        imec_count,
+        imec_lookup,
+        nvidia_lookup,
+        base_model_path,
+        base_hw_path,
+        stage1_base_params,
+        max_workers=max_workers,
+        cache_mode=cache_mode,
+        fixed_kernel_launch_overhead=fixed_kernel_launch_overhead,
+        core_clock_hz=core_clock_hz,
+    )
+    print(
+        "stage1 winner: kernel_launch_overhead={:.2e} | gap={:.2f}% | imec_mae={:.2f}% | "
+        "nvidia_mae={:.2f}% | fail_sum={:.2f}".format(
+            float(best_kernel_launch_overhead),
+            float(stage1_metrics.get("gap_abs", float("nan"))),
+            float(stage1_metrics.get("imec_mean_abs", float("nan"))),
+            float(stage1_metrics.get("nvidia_mean_abs", float("nan"))),
+            float(stage1_metrics.get("imec_fail_rate", float("nan")))
+            + float(stage1_metrics.get("nvidia_fail_rate", float("nan"))),
+        )
+    )
+
     best_loss = float("inf")
     best_s = s.copy()
 
     init_params = _params_from_s(s, param_specs)
-    init_params["kernel_launch_overhead"] = INIT_DEFAULTS["kernel_launch_overhead"]
+    init_params["kernel_launch_overhead"] = float(best_kernel_launch_overhead)
     print(
         "init params: u_flops={:.3f}, u_mem={:.3f}, u_net_tp={:.3f}, tp_sp_overlap={:.3f}, "
         "kernel_launch_overhead={:.2e}".format(
@@ -445,7 +691,14 @@ def _run_spsa(
             s_variants.append(s - c_vec * delta)
 
         overrides_list = [
-            _params_to_overrides(_params_from_s(variant, param_specs))
+            _params_to_overrides(
+                {
+                    **_params_from_s(variant, param_specs),
+                    "kernel_launch_overhead": float(best_kernel_launch_overhead),
+                },
+                fixed_kernel_launch_overhead=fixed_kernel_launch_overhead,
+                core_clock_hz=core_clock_hz,
+            )
             for variant in s_variants
         ]
         losses_stats = _evaluate_param_sets(
@@ -486,19 +739,26 @@ def _run_spsa(
         s = s - alpha_vec * m_hat / (np.sqrt(v_hat) + ADAM_EPS)
 
         stats_ref = iter_best_stats or {}
-        mean_abs = stats_ref.get("mean_abs", float("nan"))
-        fail_rate = stats_ref.get("fail_rate", float("nan"))
+        balanced_mean_abs = stats_ref.get("balanced_mean_abs", float("nan"))
+        imec_mae = stats_ref.get("imec_mean_abs", float("nan"))
+        nvidia_mae = stats_ref.get("nvidia_mean_abs", float("nan"))
+        gap_abs = stats_ref.get("gap_abs", float("nan"))
+        fail_rate = stats_ref.get("balanced_fail_rate", float("nan"))
         print(
-            "iter {:02d} | loss={:.3f} | best={:.3f} | mean_abs={:.2f}% | fail_rate={:.2f}".format(
+            "iter {:02d} | loss={:.3f} | best={:.3f} | balanced_mae={:.2f}% | imec_mae={:.2f}% | "
+            "nvidia_mae={:.2f}% | gap={:.2f}% | fail_rate={:.2f}".format(
                 k + 1,
                 float(iter_best_loss) if iter_best_loss is not None else float("nan"),
                 float(best_loss),
-                float(mean_abs) if math.isfinite(float(mean_abs)) else float("nan"),
+                float(balanced_mean_abs) if math.isfinite(float(balanced_mean_abs)) else float("nan"),
+                float(imec_mae) if math.isfinite(float(imec_mae)) else float("nan"),
+                float(nvidia_mae) if math.isfinite(float(nvidia_mae)) else float("nan"),
+                float(gap_abs) if math.isfinite(float(gap_abs)) else float("nan"),
                 float(fail_rate) if math.isfinite(float(fail_rate)) else float("nan"),
             )
         )
         current_params = _params_from_s(s, param_specs)
-        current_params["kernel_launch_overhead"] = INIT_DEFAULTS["kernel_launch_overhead"]
+        current_params["kernel_launch_overhead"] = float(best_kernel_launch_overhead)
         print(
             "  params: u_flops={:.3f}, u_mem={:.3f}, u_net_tp={:.3f}, tp_sp_overlap={:.3f}, "
             "kernel_launch_overhead={:.2e}".format(
@@ -510,7 +770,9 @@ def _run_spsa(
             )
         )
 
-    return _params_from_s(best_s, param_specs)
+    final_params = _params_from_s(best_s, param_specs)
+    final_params["kernel_launch_overhead"] = float(best_kernel_launch_overhead)
+    return final_params
 
 
 def _load_base_hw(path: str) -> Dict[str, Any]:
@@ -580,6 +842,15 @@ def fit_device(
     seed: int,
     max_workers: Optional[int],
     cache_mode: str,
+    output_dir: Optional[str],
+    core_util_min: float,
+    core_util_max: float,
+    dram_util_min: float,
+    dram_util_max: float,
+    net_util_min: float,
+    net_util_max: float,
+    fixed_kernel_launch_overhead: Optional[float],
+    core_clock_hz: Optional[float],
 ) -> Optional[Path]:
     specs, imec_count, imec_lookup, nvidia_lookup, base_model_path, base_hw_path = _build_specs(
         device, network_ignored=False
@@ -597,10 +868,28 @@ def fit_device(
         seed=seed,
         max_workers=max_workers,
         cache_mode=cache_mode,
+        core_util_min=core_util_min,
+        core_util_max=core_util_max,
+        dram_util_min=dram_util_min,
+        dram_util_max=dram_util_max,
+        net_util_min=net_util_min,
+        net_util_max=net_util_max,
+        fixed_kernel_launch_overhead=fixed_kernel_launch_overhead,
+        core_clock_hz=core_clock_hz,
     )
-    fitted = _apply_params_to_hw_config(base_hw, params)
+    fitted = _apply_params_to_hw_config(
+        base_hw,
+        params,
+        fixed_kernel_launch_overhead=fixed_kernel_launch_overhead,
+        core_clock_hz=core_clock_hz,
+    )
     fitted_name = os.path.basename(nvidia_inf.HW_CONFIGS[device]).replace(".yaml", nvidia_inf.FITTED_HW_SUFFIX)
-    out_path = Path(nvidia_inf.HARDWARE_CONFIG_PATH) / fitted_name
+    if output_dir:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fitted_name = fitted_name.replace(".yaml", f".{timestamp}.yaml")
+        out_path = Path(output_dir) / fitted_name
+    else:
+        out_path = Path(nvidia_inf.HARDWARE_CONFIG_PATH) / fitted_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as handle:
         yaml.safe_dump(fitted, handle, sort_keys=False)
@@ -620,8 +909,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--seed", type=int, default=1234, help="Random seed.")
     parser.add_argument("--max-workers", type=int, default=105, help="Max validation workers.")
     parser.add_argument("--cache-mode", type=str, default="NO_CACHE", help="Astra cache mode.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to write fitted config(s). Defaults to hardware-config path when unset.",
+    )
+    parser.add_argument(
+        "--fixed-kernel-launch-overhead",
+        type=float,
+        default=None,
+        help="Fix kernel_launch_overhead (seconds) instead of searching over a range.",
+    )
+    parser.add_argument(
+        "--core-clock-hz",
+        type=float,
+        default=None,
+        help="If set, override tech_param.core.operating_frequency (Hz) during fitting and in output config.",
+    )
+    parser.add_argument("--core-util-min", type=float, default=CORE_UTIL_MIN_DEFAULT)
+    parser.add_argument("--core-util-max", type=float, default=CORE_UTIL_MAX_DEFAULT)
+    parser.add_argument("--dram-util-min", type=float, default=DRAM_UTIL_MIN_DEFAULT)
+    parser.add_argument("--dram-util-max", type=float, default=DRAM_UTIL_MAX_DEFAULT)
+    parser.add_argument("--net-util-min", type=float, default=NET_UTIL_MIN_DEFAULT)
+    parser.add_argument("--net-util-max", type=float, default=NET_UTIL_MAX_DEFAULT)
     args = parser.parse_args(argv)
     os.environ.setdefault("RAPID_VALIDATION_QUIET", "1")
+
+    bounds = [
+        ("core util", float(args.core_util_min), float(args.core_util_max)),
+        ("dram util", float(args.dram_util_min), float(args.dram_util_max)),
+        ("network dim0 util", float(args.net_util_min), float(args.net_util_max)),
+    ]
+    for label, low, high in bounds:
+        if high < low:
+            parser.error(f"Invalid {label} bounds: min={low} must be <= max={high}")
 
     devices = ["A100", "H100"] if args.device == "all" else [args.device]
     for device in devices:
@@ -632,6 +954,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 seed=int(args.seed),
                 max_workers=args.max_workers,
                 cache_mode=str(args.cache_mode),
+                output_dir=args.output_dir,
+                core_util_min=float(args.core_util_min),
+                core_util_max=float(args.core_util_max),
+                dram_util_min=float(args.dram_util_min),
+                dram_util_max=float(args.dram_util_max),
+                net_util_min=float(args.net_util_min),
+                net_util_max=float(args.net_util_max),
+                fixed_kernel_launch_overhead=(
+                    float(args.fixed_kernel_launch_overhead)
+                    if args.fixed_kernel_launch_overhead is not None
+                    else None
+                ),
+                core_clock_hz=float(args.core_clock_hz) if args.core_clock_hz is not None else None,
             )
         except FileNotFoundError as exc:
             print(f"[warn] Missing data for {device}: {exc}")

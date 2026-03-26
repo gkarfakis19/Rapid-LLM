@@ -370,7 +370,10 @@ class TimeCalculation:
         # Hardware Parameters
         self.hw_config = hw_config
         self.core = Core(hw_config)
-        self.th = self.core.get_throughput()
+        self.th_matrix = self.core.get_throughput("matrix")
+        self.th_vector = self.core.get_throughput("vector")
+        # Backward compatibility with old code paths that expect self.th.
+        self.th = self.th_matrix
         self.FMA_dims = self.core.FMA_dims  # (FMA_x, FMA_y)
         self.dataflow = self.core.dataflow
 
@@ -427,7 +430,7 @@ class TimeCalculation:
             hw_config,
             self.precision_bytes,
             self.O,
-            self.roofline,
+            self.vector_roofline,
             astra_policy=self._astra_policy,
         )
 
@@ -527,7 +530,7 @@ class TimeCalculation:
             raise ValueError(f"Unsupported model type: {model_type}")
         return model_classes[model_type]
 
-    def roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
+    def roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False, compute_unit="matrix"):
         # print("Roofline: entered {}".format(name))
 
         # Parse mem_access_ into consistent format
@@ -542,7 +545,7 @@ class TimeCalculation:
             print("mem_access_ should be integer or list, wrong input", flush=True)
             sys.exit(0)
 
-        throughput = self.th * util
+        throughput = self.core.get_throughput(compute_unit) * util
 
         # Determine which levels to compute
         if mem_level is not None:
@@ -583,9 +586,75 @@ class TimeCalculation:
 
         # print("Roofline: exited {}".format(name))
         return max_time
+
+    def vector_roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
+        """Roofline latency model for vectorized/pointwise compute."""
+        return self.roofline(
+            flop,
+            mem_access_,
+            name=name,
+            util=util,
+            info=info,
+            mem_level=mem_level,
+            flashattn_enable=flashattn_enable,
+            compute_unit="vector",
+        )
+
+    def matrix_roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
+        """Roofline latency model for matrix-math compute."""
+        return self.roofline(
+            flop,
+            mem_access_,
+            name=name,
+            util=util,
+            info=info,
+            mem_level=mem_level,
+            flashattn_enable=flashattn_enable,
+            compute_unit="matrix",
+        )
+
+    def _resolve_reuse_activation(self, reuse_activation: Optional[bool]) -> bool:
+        if reuse_activation is None:
+            return self.num_workers != 1
+        return bool(reuse_activation)
+
+    def _apply_gemm_last_level_write_penalty(
+        self,
+        rw_accesses: AccessBytes,
+        dim1: int,
+        dim2: int,
+        dim3: int,
+        *,
+        reuse_activation: Optional[bool],
+        reuse_weight: bool,
+        flashattn_enable: bool,
+    ) -> AccessBytes:
+        """Apply optional matrix load penalties to last-level write traffic."""
+        if flashattn_enable:
+            return rw_accesses
+
+        add_activation = self._resolve_reuse_activation(reuse_activation)
+        add_weight = bool(reuse_weight)
+        if not add_activation and not add_weight:
+            return rw_accesses
+
+        bytes_to_add = 0
+        if add_activation:
+            bytes_to_add += int(math.ceil(dim1 * dim2 * self.precision_bytes))
+        if add_weight:
+            bytes_to_add += int(math.ceil(dim2 * dim3 * self.precision_bytes))
+        if bytes_to_add <= 0:
+            return rw_accesses
+
+        writes = list(rw_accesses.writes)
+        if not writes:
+            return rw_accesses
+        writes[-1] = int(writes[-1]) + bytes_to_add
+        return AccessBytes(reads=rw_accesses.reads, writes=tuple(writes))
     
     def get_gemm_time(self, dim1, dim2, dim3, name="", 
-                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
+                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False,
+                    reuse_activation: Optional[bool] = None, reuse_weight: bool = False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
@@ -602,7 +671,15 @@ class TimeCalculation:
                 print("===============================================================")
 
             GEMM_flop = gemm.GEMM_flop
-            rw_accesses = gemm.mem_accesses
+            rw_accesses = self._apply_gemm_last_level_write_penalty(
+                gemm.mem_accesses,
+                dim1,
+                dim2,
+                dim3,
+                reuse_activation=reuse_activation,
+                reuse_weight=reuse_weight,
+                flashattn_enable=flashattn_enable,
+            )
 
             mem_access = rw_accesses.totals() # (L0, L1, L2, DRAM)
             if flashattn_enable:
@@ -631,7 +708,13 @@ class TimeCalculation:
                     partial_wave = gemm_waves - full_waves
                     sm_util = (full_waves + partial_wave * partial_wave) / gemm_waves
 
-            GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, util=sm_util, flashattn_enable=flashattn_enable) 
+            GEMM_time = self.matrix_roofline(
+                GEMM_flop,
+                mem_access_per_sm,
+                name,
+                util=sm_util,
+                flashattn_enable=flashattn_enable,
+            )
             if flashattn_enable or disable_overhead:
                 pass
             else:
@@ -920,9 +1003,7 @@ class TimeCalculation:
         # 2: 2 memory accesses for operands with one input and one output
         # 1: 5/4 non-linearities per gate
 
-        point_time = (
-            self.roofline(point_flop, point_mem, name=f"pointwise_{name}") + 5 * self.O
-        )
+        point_time = self.vector_roofline(point_flop, point_mem, name=f"pointwise_{name}") + 5 * self.O
 
         if self.debug:
             gigaByte = 1024 * 1024 * 1024
@@ -946,7 +1027,7 @@ class TimeCalculation:
         gradclip_mem = clip_mem
         gradclip_comp = norm_comp + clip_comp
 
-        return self.roofline(gradclip_comp, gradclip_mem, name="pointwise-grad-clipping")
+        return self.vector_roofline(gradclip_comp, gradclip_mem, name="pointwise-grad-clipping")
 
     def apply_grad(self, num_params: int) -> float:
         """Approximate optimizer update cost (Adam/AdamW-style) per parameter tensor."""
@@ -966,7 +1047,7 @@ class TimeCalculation:
         apply_grad_comp = num_params * OPT_FLOPS_PER_PARAM
         apply_grad_mem = num_params * (bytes_per_param_read + bytes_per_param_write)
 
-        apply_grad_time = self.roofline(apply_grad_comp, apply_grad_mem, name="apply_grad", mem_level=self.num_levels-1)
+        apply_grad_time = self.vector_roofline(apply_grad_comp, apply_grad_mem, name="apply_grad", mem_level=self.num_levels-1)
         clip_time = self.grad_clipping(num_params)
         return apply_grad_time + clip_time
 

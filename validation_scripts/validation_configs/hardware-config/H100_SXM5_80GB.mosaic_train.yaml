@@ -1,40 +1,33 @@
 sw_param:
   full_recomputation: false
-  kernel_launch_overhead: 1.3e-4
+  kernel_launch_overhead: 6e-6 # 6.176681837694969e-06
   dp_zero_stage: 1
   precision:
     tensor_format: bf16
     kv_cache: as_tensor_format
     parameters: as_tensor_format
     gradients: fp32
+    grad_microbatch: as_tensor_format
     grad_communication: as_tensor_format
     optimizer_states: fp32
     stats: fp32
-    master_parameters: 0
+    master_parameters: 0.0
   h2d_bandwidth: -1
-  const_mem_offset: 0 GB
   dp_microbatch: last_mb
 tech_param:
   core:
-    operating_frequency: 1.83e9
+    operating_frequency: 1.095e9 # 1.98e9 
     num_bundles: 132
+    nominal_flop_rate_per_mcu: 1024
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 4
-    matrix_unit:
-      nominal_flop_rate_per_mcu: 1024
-      util: 1
-      FMA_d1: 16
-      FMA_d2: 8
-      dataflow: best
-    vector_unit:
-      nominal_flop_rate_per_bundle: 128
-      util: 1
-      lanes: 128
-      simd_width: 1
-      vector_width_bits: 32
+    FMA_d1: 16
+    FMA_d2: 8
+    dataflow: best
+    util: 1
   DRAM:
     size: 80 GB
-    bandwidth: 3350 GB
+    bandwidth: 3430 GB
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
     util: 1
@@ -71,62 +64,58 @@ memory_hierarchy:
     scope: global
 parallelism:
   auto: false
-  tp: 2
-  tp_sp: true
+  tp: 8
+  tp_sp: false
   cp: 1
-  pp: 2
-  mb: 4
+  pp: 1
+  mb: 1
   train:
-    dp: 2 # data parallelism
-    ep: 1 # expert parallelism
-    # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
+    dp: 1
+    ep: 1
     tp_ep: true
   inference:
-    replica_count: 2 # inference throughput scaling only
-    moe_dp: 1 # inference expert pool expansion (EP_eff = tp * moe_dp)
+    replica_count: 1
+    moe_dp: 1
 network:
   dimensions:
   - id: dim0
     label: torus2d_tp
     size: auto
     topology:
-      type: Ring
-      bandwidth: 100 GB
-      latency: 3.3e-07
+      type: FullyConnected
+      bandwidth: 50 GB
+      latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.94
+      util: 1
       optimize_2dmap: false
     collective_override: {}
     parallelisms:
-    - tp
-    - cp
+    - dp
   - id: dim1
     label: inter_torus_infiniband
     size: auto
     topology:
-      type: Ring
-      bandwidth: 25 GB
-      latency: 3.3e-07
+      type: FullyConnected
+      bandwidth: 50 GB
+      latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.93
+      util: 1
     collective_override: {}
-    parallelisms:
-    - pp
-    - dp
+    parallelisms: []
   - id: dim2
     label: inter_torus_infiniband_dp
     size: auto
     topology:
       type: Ring
       bandwidth: 25 GB
-      latency: 3.3e-07
+      latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.97
+      util: 1.0
     parallelisms: []
     collective_override: {}
   overlap:
-    tp_sp_overlap: 0.0
-    tp_overlap: 0.0
+    tp_sp_overlap: 0
+    tp_overlap: 1
     cp_overlap: 0.0
 execution_backend:
   model: astra
