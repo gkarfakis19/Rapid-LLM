@@ -1,6 +1,6 @@
 sw_param:
   full_recomputation: false
-  kernel_launch_overhead: 6e-06
+  kernel_launch_overhead: 6e-6 # 6.176681837694969e-06
   dp_zero_stage: 1
   precision:
     tensor_format: bf16
@@ -16,7 +16,7 @@ sw_param:
   dp_microbatch: last_mb
 tech_param:
   core:
-    operating_frequency: 1.09e9
+    operating_frequency: 1.095e9 # 1.98e9 
     num_bundles: 132
     nominal_flop_rate_per_mcu: 1024
     nominal_energy_per_flop: 1.8e-13
@@ -24,13 +24,13 @@ tech_param:
     FMA_d1: 16
     FMA_d2: 8
     dataflow: best
-    util: 1 # 0.5506343696901347
+    util: 1
   DRAM:
     size: 80 GB
     bandwidth: 3430 GB
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
-    util: 1 # 0.9696685792255203
+    util: 1
   SRAM-L2:
     size: 50 MB
     bandwidth: 8138 GB
@@ -86,25 +86,22 @@ network:
       bandwidth: 50 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 1 # 0.893049330964143
+      util: 1
       optimize_2dmap: false
     collective_override: {}
     parallelisms:
-    - tp
-    - cp
+    - dp
   - id: dim1
     label: inter_torus_infiniband
     size: auto
     topology:
-      type: Ring
-      bandwidth: 25 GB
+      type: FullyConnected
+      bandwidth: 50 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 1.0
+      util: 1
     collective_override: {}
-    parallelisms:
-    - pp
-    - dp
+    parallelisms: []
   - id: dim2
     label: inter_torus_infiniband_dp
     size: auto
@@ -117,8 +114,8 @@ network:
     parallelisms: []
     collective_override: {}
   overlap:
-    tp_sp_overlap: 0 # 0.1593630149173312
-    tp_overlap: 0.6
+    tp_sp_overlap: 0
+    tp_overlap: 1
     cp_overlap: 0.0
 execution_backend:
   model: astra
