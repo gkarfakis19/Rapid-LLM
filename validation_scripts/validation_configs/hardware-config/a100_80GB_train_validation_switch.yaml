@@ -31,7 +31,7 @@ sw_param:
   dp_microbatch: last_mb
 tech_param:
   core:
-    operating_frequency: 1.41e9     # (Hz)
+    operating_frequency: 1.065e9 # 1.41e9     # (Hz)
     num_bundles: 108
     nominal_flop_rate_per_mcu: 512
     nominal_energy_per_flop: 1.8e-13 # (J)
@@ -111,7 +111,6 @@ network:
         optimize_2dmap: false
       collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep]
-
     - id: dim1
       label: inter_torus_infiniband
       size: auto
