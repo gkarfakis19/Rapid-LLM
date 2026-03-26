@@ -612,9 +612,49 @@ class TimeCalculation:
             flashattn_enable=flashattn_enable,
             compute_unit="matrix",
         )
+
+    def _resolve_reuse_activation(self, reuse_activation: Optional[bool]) -> bool:
+        if reuse_activation is None:
+            return self.num_workers != 1
+        return bool(reuse_activation)
+
+    def _apply_gemm_last_level_write_penalty(
+        self,
+        rw_accesses: AccessBytes,
+        dim1: int,
+        dim2: int,
+        dim3: int,
+        *,
+        reuse_activation: Optional[bool],
+        reuse_weight: bool,
+        flashattn_enable: bool,
+    ) -> AccessBytes:
+        """Apply optional matrix load penalties to last-level write traffic."""
+        if flashattn_enable:
+            return rw_accesses
+
+        add_activation = self._resolve_reuse_activation(reuse_activation)
+        add_weight = bool(reuse_weight)
+        if not add_activation and not add_weight:
+            return rw_accesses
+
+        bytes_to_add = 0
+        if add_activation:
+            bytes_to_add += int(math.ceil(dim1 * dim2 * self.precision_bytes))
+        if add_weight:
+            bytes_to_add += int(math.ceil(dim2 * dim3 * self.precision_bytes))
+        if bytes_to_add <= 0:
+            return rw_accesses
+
+        writes = list(rw_accesses.writes)
+        if not writes:
+            return rw_accesses
+        writes[-1] = int(writes[-1]) + bytes_to_add
+        return AccessBytes(reads=rw_accesses.reads, writes=tuple(writes))
     
     def get_gemm_time(self, dim1, dim2, dim3, name="", 
-                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
+                    flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False,
+                    reuse_activation: Optional[bool] = None, reuse_weight: bool = False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
@@ -631,7 +671,15 @@ class TimeCalculation:
                 print("===============================================================")
 
             GEMM_flop = gemm.GEMM_flop
-            rw_accesses = gemm.mem_accesses
+            rw_accesses = self._apply_gemm_last_level_write_penalty(
+                gemm.mem_accesses,
+                dim1,
+                dim2,
+                dim3,
+                reuse_activation=reuse_activation,
+                reuse_weight=reuse_weight,
+                flashattn_enable=flashattn_enable,
+            )
 
             mem_access = rw_accesses.totals() # (L0, L1, L2, DRAM)
             if flashattn_enable:
