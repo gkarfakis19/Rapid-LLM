@@ -500,6 +500,13 @@ class MemoryEstimator:
                         )
                         if experts_per_rank > 0 and (tokens_local % experts_per_rank) != 0:
                             tokens_local = math.ceil(tokens_local / float(experts_per_rank)) * experts_per_rank
+                    else:
+                        experts_per_rank = int(
+                            max(1, float(getattr(tc, "moe_num_experts", 1)) / float(max(1, moe_group)))
+                        )
+                    apply_imbalance = getattr(tc, "_moe_apply_expert_imbalance", None)
+                    if callable(apply_imbalance):
+                        tokens_local = float(apply_imbalance(int(tokens_local), experts_per_rank))
                     moe_scale = (float(tokens_local) / float(tokens_owner)) + float(
                         getattr(tc, "n_shared_experts", 0)
                     )

@@ -233,6 +233,49 @@ class GemmShardSpec:
         return int(self.shard_batch * self.shard_m * self.shard_n)
 
 
+@dataclass(frozen=True)
+class MoEImbalanceProfile:
+    """Effective MoE load factors under the one-hot-expert approximation.
+
+    Assumptions:
+    - exactly one routed expert is hotter than the balanced average
+    - the remaining routed experts share the leftover tokens uniformly
+    - the first rank in the routing group owns the hot expert, so its total
+      local routed load is the worst-case rank load that sets MoE latency
+    """
+
+    hot_expert_factor: float
+    cold_expert_factor: float
+    hot_rank_factor: float
+    total_experts: int
+    experts_per_rank: int
+
+
+@dataclass(frozen=True)
+class MoECommDecomposition:
+    """First-order MoE communication decomposition under one-hot-expert skew.
+
+    `total_bytes` is the physically conserved routed activation volume for the
+    MoE dispatch/combine step. We approximate skew by splitting that volume into:
+
+    - a reduced symmetric all-to-all sized by the cold-rank factor
+    - a residual hot-path p2p transfer, evenly partitioned across remote senders
+
+    This is still not congestion aware, but it preserves total byte volume while
+    separating the balanced exchange from the hot-rank completion penalty.
+    """
+
+    total_bytes: int
+    base_all_to_all_bytes: int
+    residual_total_bytes: int
+    residual_per_sender_bytes: int
+    residual_sender_count: int
+    routing_group: int
+    routing_mode: str
+    hot_rank_factor: float
+    cold_rank_factor: float
+
+
 class TimeCalculationLLM(TimeCalculation):
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
 # Mode parameter
@@ -392,11 +435,222 @@ class TimeCalculationLLM(TimeCalculation):
         run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
         return run_type == "inference"
 
+    def _moe_expert_imbalance_factor(self) -> float:
+        factor = float(getattr(self, "expert_imbalance_factor", 1.0) or 1.0)
+        if factor < 1.0:
+            raise ValueError(
+                "MoE expert_imbalance_factor must be >= 1.0. "
+                "Use 1.0 to preserve the current perfectly balanced MoE behavior; "
+                "values > 1.0 model one routed expert as hotter than the balanced average expert load."
+            )
+        return factor
+
+    def _moe_imbalance_profile(self, experts_per_rank: int) -> MoEImbalanceProfile:
+        """Return hot/cold expert factors and the implied hot-rank load factor.
+
+        This keeps a single global assumption for all MoE layers:
+        one routed expert is hot, the remaining routed experts are uniformly
+        colder, and the first routing rank owns that hot expert.
+        """
+
+        experts_per_rank = max(1, int(experts_per_rank))
+        total_experts = max(1, int(self.moe_num_experts))
+        hot_expert_factor = self._moe_expert_imbalance_factor()
+        if hot_expert_factor <= 1.0 or total_experts <= 1:
+            return MoEImbalanceProfile(
+                hot_expert_factor=1.0,
+                cold_expert_factor=1.0,
+                hot_rank_factor=1.0,
+                total_experts=total_experts,
+                experts_per_rank=experts_per_rank,
+            )
+        if hot_expert_factor > float(total_experts):
+            raise ValueError(
+                "MoE expert_imbalance_factor cannot exceed moe_num_experts under the "
+                "one-hot-expert assumption. The simulator models one routed expert as hot "
+                "and the remaining routed experts as uniformly colder. "
+                f"expert_imbalance_factor={hot_expert_factor}, moe_num_experts={total_experts}."
+            )
+        cold_expert_factor = (float(total_experts) - hot_expert_factor) / float(total_experts - 1)
+        hot_rank_factor = (
+            hot_expert_factor + float(max(0, experts_per_rank - 1)) * cold_expert_factor
+        ) / float(experts_per_rank)
+        return MoEImbalanceProfile(
+            hot_expert_factor=hot_expert_factor,
+            cold_expert_factor=cold_expert_factor,
+            hot_rank_factor=hot_rank_factor,
+            total_experts=total_experts,
+            experts_per_rank=experts_per_rank,
+        )
+
+    def _moe_comm_routing_mode(self) -> str:
+        run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
+        if run_type == "inference":
+            return "tp_ep"
+        return "ep"
+
+    def _moe_comm_decomposition(self, total_bytes: int, experts_per_rank: int) -> MoECommDecomposition:
+        total_bytes = int(math.ceil(float(total_bytes or 0.0)))
+        routing_group = max(1, int(self._moe_routing_group()))
+        routing_mode = self._moe_comm_routing_mode()
+        profile = self._moe_imbalance_profile(experts_per_rank)
+        cold_rank_factor = float(profile.cold_expert_factor)
+        hot_rank_factor = float(profile.hot_rank_factor)
+        if total_bytes <= 0:
+            return MoECommDecomposition(
+                total_bytes=0,
+                base_all_to_all_bytes=0,
+                residual_total_bytes=0,
+                residual_per_sender_bytes=0,
+                residual_sender_count=max(0, routing_group - 1),
+                routing_group=routing_group,
+                routing_mode=routing_mode,
+                hot_rank_factor=hot_rank_factor,
+                cold_rank_factor=cold_rank_factor,
+            )
+        if routing_group <= 1 or profile.hot_expert_factor <= 1.0:
+            return MoECommDecomposition(
+                total_bytes=total_bytes,
+                base_all_to_all_bytes=total_bytes,
+                residual_total_bytes=0,
+                residual_per_sender_bytes=0,
+                residual_sender_count=max(0, routing_group - 1),
+                routing_group=routing_group,
+                routing_mode=routing_mode,
+                hot_rank_factor=1.0,
+                cold_rank_factor=1.0,
+            )
+
+        base_all_to_all_bytes = int(math.floor(float(total_bytes) * max(0.0, min(1.0, cold_rank_factor))))
+        base_all_to_all_bytes = max(0, min(total_bytes, base_all_to_all_bytes))
+        residual_total_bytes = max(0, total_bytes - base_all_to_all_bytes)
+        residual_sender_count = max(1, routing_group - 1) if residual_total_bytes > 0 else max(0, routing_group - 1)
+        residual_per_sender_bytes = (
+            int(math.ceil(float(residual_total_bytes) / float(residual_sender_count)))
+            if residual_total_bytes > 0 and residual_sender_count > 0
+            else 0
+        )
+        return MoECommDecomposition(
+            total_bytes=total_bytes,
+            base_all_to_all_bytes=base_all_to_all_bytes,
+            residual_total_bytes=residual_total_bytes,
+            residual_per_sender_bytes=residual_per_sender_bytes,
+            residual_sender_count=residual_sender_count,
+            routing_group=routing_group,
+            routing_mode=routing_mode,
+            hot_rank_factor=hot_rank_factor,
+            cold_rank_factor=cold_rank_factor,
+        )
+
+    def _moe_comm_time(
+        self,
+        decomposition: MoECommDecomposition,
+        *,
+        debug_label: str,
+        axis: Optional[str],
+    ) -> float:
+        base_time = 0.0
+        if decomposition.base_all_to_all_bytes > 0 and decomposition.routing_group > 1:
+            base_time = self.network_model.collective(
+                kind=ALL_TO_ALL,
+                size_bytes=decomposition.base_all_to_all_bytes,
+                participants=decomposition.routing_group,
+                ib=self.links["ep"].bandwidth,
+                ll=self.links["ep"].latency,
+                local_bytes=0,
+                debug_label=f"{debug_label}_base_all_to_all",
+                axis=axis,
+            )
+        residual_time = 0.0
+        if decomposition.residual_per_sender_bytes > 0:
+            residual_time = self.network_model.collective(
+                kind=PIPELINE,
+                size_bytes=decomposition.residual_per_sender_bytes,
+                participants=2,
+                ib=self.links["ep"].bandwidth,
+                ll=self.links["ep"].latency,
+                local_bytes=0,
+                debug_label=f"{debug_label}_residual_p2p",
+                axis=None,
+            )
+        return max(base_time, residual_time)
+
+    def _make_moe_comm_specs(
+        self,
+        op_name: str,
+        direction: str,
+        total_bytes: float,
+    ) -> Tuple[CommSpec, ...]:
+        decomposition = self._moe_comm_decomposition(total_bytes, self.experts_per_gpu)
+        if decomposition.total_bytes <= 0:
+            return ()
+        parallel_group = f"{op_name}_{direction}_moe_parallel_group"
+        specs: List[CommSpec] = []
+        if decomposition.base_all_to_all_bytes > 0 and decomposition.routing_group > 1:
+            specs.append(
+                CommSpec(
+                    name=f"{op_name}_{direction}_base_all_to_all",
+                    kind=ALL_TO_ALL,
+                    size_bytes=decomposition.base_all_to_all_bytes,
+                    participants=decomposition.routing_group,
+                    interconnect="ep",
+                    extra={
+                        "placement": "post",
+                        "parallel_group": parallel_group,
+                        "moe_component": "base_all_to_all",
+                        "moe_routing_mode": decomposition.routing_mode,
+                    },
+                )
+            )
+        if decomposition.residual_per_sender_bytes > 0:
+            specs.append(
+                CommSpec(
+                    name=f"{op_name}_{direction}_residual_p2p",
+                    kind=PIPELINE,
+                    size_bytes=decomposition.residual_per_sender_bytes,
+                    participants=2,
+                    interconnect="ep",
+                    extra={
+                        "placement": "post",
+                        "parallel_group": parallel_group,
+                        "moe_component": "residual_p2p",
+                        "moe_routing_mode": decomposition.routing_mode,
+                    },
+                )
+            )
+        return tuple(specs)
+
+    def _moe_apply_expert_imbalance(self, tokens_local: int, experts_per_rank: int) -> int:
+        """Inflate balanced local routed tokens into the hot-rank effective load.
+
+        The returned value is still a scalar local-token count because the
+        communication and activation-memory models do not carry a per-expert
+        traffic matrix. The value is therefore the effective worst-case rank
+        load implied by the one-hot-expert approximation.
+        """
+
+        tokens_local = int(tokens_local)
+        experts_per_rank = max(1, int(experts_per_rank))
+        profile = self._moe_imbalance_profile(experts_per_rank)
+        if profile.hot_expert_factor <= 1.0 or tokens_local <= 0:
+            return tokens_local
+        tokens_per_expert = int(tokens_local // experts_per_rank)
+        if tokens_per_expert <= 0:
+            return tokens_local
+        hot_tokens = max(tokens_per_expert, int(math.ceil(float(tokens_per_expert) * profile.hot_expert_factor)))
+        cold_tokens = max(0, int(math.floor(float(tokens_per_expert) * profile.cold_expert_factor)))
+        inflated_tokens = hot_tokens + cold_tokens * max(0, experts_per_rank - 1)
+        return max(tokens_local, inflated_tokens)
+
     def _moe_tokens_local(self, tokens_dispatched: int) -> int:
         moe_group = self._moe_routing_group()
-        return int(math.ceil(float(tokens_dispatched) / float(max(1, moe_group))))
+        tokens_local = int(math.ceil(float(tokens_dispatched) / float(max(1, moe_group))))
+        experts_per_rank = self.experts_per_gpu
+        if experts_per_rank > 0:
+            return self._moe_apply_expert_imbalance(tokens_local, experts_per_rank)
+        return tokens_local
 
-    def _moe_routed_tokens_per_expert(
+    def _moe_balanced_routed_tokens_per_expert(
         self,
         batch_size: int,
         seq_len: int,
@@ -443,6 +697,76 @@ class TimeCalculationLLM(TimeCalculation):
                 )
         tokens_per_expert = tokens_local // experts_per_rank
         return tokens_owner, tokens_dispatched, tokens_local, experts_per_rank, tokens_per_expert
+
+    def _moe_routed_tokens_per_expert(
+        self,
+        batch_size: int,
+        seq_len: int,
+        *,
+        allow_padding: bool = False,
+    ) -> Tuple[int, int, int, int, int]:
+        (
+            tokens_owner,
+            _tokens_dispatched_balanced,
+            tokens_local_balanced,
+            experts_per_rank,
+            _tokens_per_expert_balanced,
+        ) = self._moe_balanced_routed_tokens_per_expert(
+            batch_size,
+            seq_len,
+            allow_padding=allow_padding,
+        )
+        moe_group = max(1, self._moe_routing_group())
+        tokens_local = self._moe_apply_expert_imbalance(tokens_local_balanced, experts_per_rank)
+        tokens_dispatched = tokens_local * moe_group
+        # For experts_per_rank > 1 this is just an effective average used by
+        # legacy reporting paths; routed expert compute uses a separate
+        # hot/cold bucket split in get_moe_ffn_f/get_moe_ffn_b.
+        tokens_per_expert = int(math.ceil(float(tokens_local) / float(experts_per_rank)))
+        return tokens_owner, tokens_dispatched, tokens_local, experts_per_rank, tokens_per_expert
+
+    def _moe_routed_compute_buckets(
+        self,
+        tokens_per_expert_balanced: int,
+        experts_per_rank: int,
+    ) -> List[Tuple[int, int, str]]:
+        """Build routed expert compute buckets for the worst-case MoE rank.
+
+        The balanced path uses one repeated batched GEMM for all local experts.
+        Under expert imbalance with multiple experts per rank, we approximate the
+        hottest rank as one hot expert plus a uniform cold bucket for the
+        remaining local experts. That preserves the original worst-rank latency
+        abstraction without needing per-expert graphs.
+        """
+
+        tokens_per_expert_balanced = int(tokens_per_expert_balanced)
+        experts_per_rank = max(1, int(experts_per_rank))
+        if tokens_per_expert_balanced <= 0:
+            return []
+        profile = self._moe_imbalance_profile(experts_per_rank)
+        if profile.hot_expert_factor <= 1.0 or experts_per_rank <= 1:
+            return [(experts_per_rank, tokens_per_expert_balanced, "uniform")]
+
+        tokens_local_balanced = tokens_per_expert_balanced * experts_per_rank
+        target_local_tokens = self._moe_apply_expert_imbalance(tokens_local_balanced, experts_per_rank)
+        hot_tokens = max(
+            tokens_per_expert_balanced,
+            int(math.ceil(float(tokens_per_expert_balanced) * profile.hot_expert_factor)),
+        )
+        cold_tokens = max(
+            0,
+            int(math.floor(float(tokens_per_expert_balanced) * profile.cold_expert_factor)),
+        )
+        remaining_experts = max(0, experts_per_rank - 1)
+        if remaining_experts > 0 and (hot_tokens + cold_tokens * remaining_experts) < target_local_tokens:
+            cold_tokens = int(
+                math.ceil(float(max(0, target_local_tokens - hot_tokens)) / float(remaining_experts))
+            )
+
+        buckets: List[Tuple[int, int, str]] = [(1, hot_tokens, "hot")]
+        if remaining_experts > 0 and cold_tokens > 0:
+            buckets.append((remaining_experts, cold_tokens, "cold"))
+        return buckets
 
     def _param_stats_per_rank(
         self,
@@ -1748,22 +2072,43 @@ class TimeCalculationLLM(TimeCalculation):
             allow_padding = self._moe_allow_padding()
         (
             tokens_owner,
-            tokens_dispatched,
-            tokens_local,
+            _tokens_dispatched,
+            _tokens_local,
             experts_per_rank,
-            tokens_per_expert,
-        ) = self._moe_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
+            tokens_per_expert_balanced,
+        ) = self._moe_balanced_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
         tokens_shared = self._moe_tokens_shared(tokens_owner)
 
-        m_per_expert = tokens_per_expert * max(1, int(self.cp))
-        gemm_override = (experts_per_rank, m_per_expert, k, n)
         use_tp_sharded = bool(getattr(self, "tp_ep", True))
-        gemm_time, tp_comm_time, tp_comm_bytes, total_flops, mem_accesses_total = self._batched_gemm_forward_compute(
-            gemm_override,
-            name,
-            gemm_type=gemm_type,
-            use_tp=use_tp_sharded,
-        )
+        gemm_time = 0.0
+        tp_comm_time = 0.0
+        tp_comm_bytes = 0
+        total_flops = 0.0
+        mem_accesses_total: Dict[str, float] = {}
+        for bucket_batch, bucket_tokens_per_expert, bucket_label in self._moe_routed_compute_buckets(
+            tokens_per_expert_balanced,
+            experts_per_rank,
+        ):
+            m_per_expert = bucket_tokens_per_expert * max(1, int(self.cp))
+            gemm_override = (bucket_batch, m_per_expert, k, n)
+            bucket_name = name if bucket_label == "uniform" else f"{name}_{bucket_label}"
+            (
+                bucket_gemm_time,
+                bucket_tp_comm_time,
+                bucket_tp_comm_bytes,
+                bucket_total_flops,
+                bucket_mem_accesses,
+            ) = self._batched_gemm_forward_compute(
+                gemm_override,
+                bucket_name,
+                gemm_type=gemm_type,
+                use_tp=use_tp_sharded,
+            )
+            gemm_time += bucket_gemm_time
+            tp_comm_time += bucket_tp_comm_time
+            tp_comm_bytes += bucket_tp_comm_bytes
+            total_flops += bucket_total_flops
+            mem_accesses_total = self._combine_mem(mem_accesses_total, bucket_mem_accesses)
 
         if tokens_shared > 0:
             shared_m = tokens_owner * max(1, int(self.cp))
@@ -1804,22 +2149,33 @@ class TimeCalculationLLM(TimeCalculation):
             allow_padding = self._moe_allow_padding()
         (
             tokens_owner,
-            tokens_dispatched,
-            tokens_local,
+            _tokens_dispatched,
+            _tokens_local,
             experts_per_rank,
-            tokens_per_expert,
-        ) = self._moe_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
+            tokens_per_expert_balanced,
+        ) = self._moe_balanced_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
         tokens_shared = self._moe_tokens_shared(tokens_owner)
 
-        m_per_expert = tokens_per_expert * max(1, int(self.cp))
-        gemm_override = (experts_per_rank, m_per_expert, k, n)
         use_tp_sharded = bool(getattr(self, "tp_ep", True))
-        gemm_time, tp_comm_time, tp_comm_bytes = self._batched_gemm_backward_compute(
-            gemm_override,
-            name,
-            gemm_type=gemm_type,
-            use_tp=use_tp_sharded,
-        )
+        gemm_time = 0.0
+        tp_comm_time = 0.0
+        tp_comm_bytes = 0
+        for bucket_batch, bucket_tokens_per_expert, bucket_label in self._moe_routed_compute_buckets(
+            tokens_per_expert_balanced,
+            experts_per_rank,
+        ):
+            m_per_expert = bucket_tokens_per_expert * max(1, int(self.cp))
+            gemm_override = (bucket_batch, m_per_expert, k, n)
+            bucket_name = name if bucket_label == "uniform" else f"{name}_{bucket_label}"
+            bucket_gemm_time, bucket_tp_comm_time, bucket_tp_comm_bytes = self._batched_gemm_backward_compute(
+                gemm_override,
+                bucket_name,
+                gemm_type=gemm_type,
+                use_tp=use_tp_sharded,
+            )
+            gemm_time += bucket_gemm_time
+            tp_comm_time += bucket_tp_comm_time
+            tp_comm_bytes += bucket_tp_comm_bytes
         if tokens_shared > 0:
             shared_m = tokens_owner * max(1, int(self.cp))
             shared_name = f"{name}_shared" if name else "moe_ffn_shared"
@@ -2611,11 +2967,15 @@ class TimeCalculationLLM(TimeCalculation):
             allow_padding = self._moe_allow_padding()
             (
                 moe_tokens_owner,
-                moe_tokens_dispatched,
-                moe_tokens_local,
-                _experts_per_rank,
-                _tokens_per_expert,
-            ) = self._moe_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
+                moe_tokens_dispatched_balanced,
+                moe_tokens_local_balanced,
+                experts_per_rank,
+                _tokens_per_expert_balanced,
+            ) = self._moe_balanced_routed_tokens_per_expert(batch_size, seq_len, allow_padding=allow_padding)
+            moe_tokens_local = self._moe_apply_expert_imbalance(
+                moe_tokens_local_balanced,
+                experts_per_rank,
+            )
             moe_tokens_shared = self._moe_tokens_shared(moe_tokens_owner)
             router_gemm_time_f , router_reduction_f, router_size_f, _, _ = _extract_forward(
                 self.get_router_f(gemm_router, gemm_ffn1, batch_size=batch_size, seq_len=seq_len)
@@ -2626,29 +2986,19 @@ class TimeCalculationLLM(TimeCalculation):
             moe_group = self._moe_routing_group()
             axis = "ep" if moe_group == self.ep else None
             dispatch_fwd_bytes = int(
-                math.ceil(self.precision.activations * moe_tokens_dispatched * hidden_dim)
+                math.ceil(self.precision.activations * moe_tokens_dispatched_balanced * hidden_dim)
             )
             dispatch_bwd_bytes = int(
-                math.ceil(self.precision.grad_communication * moe_tokens_dispatched * hidden_dim)
+                math.ceil(self.precision.grad_communication * moe_tokens_dispatched_balanced * hidden_dim)
             )
-            dispatch_fwd_time = self.network_model.collective(
-                kind=ALL_TO_ALL,
-                size_bytes=dispatch_fwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0,
-                debug_label="moe_dispatch_f_all_to_all",
+            dispatch_fwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_fwd_bytes, experts_per_rank),
+                debug_label="moe_dispatch_f",
                 axis=axis,
             )
-            dispatch_bwd_time = self.network_model.collective(
-                kind=ALL_TO_ALL,
-                size_bytes=dispatch_bwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0,
-                debug_label="moe_dispatch_b_all_to_all",
+            dispatch_bwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_bwd_bytes, experts_per_rank),
+                debug_label="moe_dispatch_b",
                 axis=axis,
             )
             ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
@@ -2669,24 +3019,14 @@ class TimeCalculationLLM(TimeCalculation):
                 seq_len=seq_len,
                 allow_padding=allow_padding,
             )
-            combine_fwd_time = self.network_model.collective(
-                kind=ALL_TO_ALL,
-                size_bytes=dispatch_fwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0,
-                debug_label="moe_combine_f_all_to_all",
+            combine_fwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_fwd_bytes, experts_per_rank),
+                debug_label="moe_combine_f",
                 axis=axis,
             )
-            combine_bwd_time = self.network_model.collective(
-                kind=ALL_TO_ALL,
-                size_bytes=dispatch_bwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0,
-                debug_label="moe_combine_b_all_to_all",
+            combine_bwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_bwd_bytes, experts_per_rank),
+                debug_label="moe_combine_b",
                 axis=axis,
             )
             ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
@@ -3296,9 +3636,7 @@ class TimeCalculationLLM(TimeCalculation):
                 names: List[str] = []
                 for spec in specs:
                     existing = transformer_comm_metadata.get(spec.name)
-                    placement = None
-                    if spec.extra:
-                        placement = spec.extra.get("placement")
+                    extra = dict(spec.extra or {})
                     if existing:
                         if (
                             existing["size"] != spec.size_bytes
@@ -3310,6 +3648,13 @@ class TimeCalculationLLM(TimeCalculation):
                                 f"Conflicting CommSpec registration for '{spec.name}' "
                                 f"(existing={existing}, new={spec})"
                             )
+                        for key, value in extra.items():
+                            if key in existing and existing[key] != value:
+                                raise ValueError(
+                                    f"Conflicting CommSpec metadata for '{spec.name}' on key '{key}' "
+                                    f"(existing={existing[key]!r}, new={value!r})"
+                                )
+                            existing.setdefault(key, value)
                     else:
                         transformer_comm_metadata[spec.name] = {
                             "size": spec.size_bytes,
@@ -3317,8 +3662,7 @@ class TimeCalculationLLM(TimeCalculation):
                             "participants": spec.participants,
                             "interconnect_type": spec.interconnect,
                         }
-                        if placement:
-                            transformer_comm_metadata[spec.name]["placement"] = placement
+                        transformer_comm_metadata[spec.name].update(extra)
                     names.append(spec.name)
                 return names
 
@@ -3355,7 +3699,10 @@ class TimeCalculationLLM(TimeCalculation):
             ) -> Dict[str, Any]:
                 if timing is None:
                     return {"duration": 0.0, "reduction": 0.0, "comm_keys": []}
-                specs = list(_make_comm_specs(op_name, direction, timing.comm_bytes, rules_by_mode))
+                if op_name in {"moe_dispatch", "moe_combine"}:
+                    specs = list(self._make_moe_comm_specs(op_name, direction, timing.comm_bytes))
+                else:
+                    specs = list(_make_comm_specs(op_name, direction, timing.comm_bytes, rules_by_mode))
                 if (
                     include_transformer_backward
                     and direction == "backward"

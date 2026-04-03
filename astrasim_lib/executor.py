@@ -868,6 +868,27 @@ def convert_rapid_llm_graph_to_chakra_et(
 
     pipeline_edge_map: Dict[Tuple[Any, Any], Any] = {}
 
+    def _resolve_stage(obj: Any) -> Optional[int]:
+        hw = getattr(obj, "hw_id", None)
+        if hw is None:
+            hw = getattr(obj, "local_hw_id", None)
+        if hw is None:
+            return None
+        return int(hw)
+
+    def _pipeline_edge_remote_child_stages(edge_obj: Any, *, local_stage: int) -> List[int]:
+        stages: List[int] = []
+        for child in getattr(edge_obj, "children", []):
+            child_stage = _resolve_stage(child)
+            if child_stage is None or child_stage == local_stage:
+                continue
+            if child_stage not in stages:
+                stages.append(child_stage)
+        return stages
+
+    def _pipeline_edge_has_remote_child(edge_obj: Any, *, local_stage: int) -> bool:
+        return bool(_pipeline_edge_remote_child_stages(edge_obj, local_stage=local_stage))
+
     def _record_pipeline_edges_for_first_dim(collector_obj: gmap.GMapCollector) -> None:
         if not collector_obj.include_pipeline:
             return
@@ -899,11 +920,12 @@ def convert_rapid_llm_graph_to_chakra_et(
 
     # Step 5a: Walk backwards from a compute node to classify dependencies into
     # stage-local, cross-stage (pipeline), or collective inputs.
-    def analyze_for_compute(node: Any) -> Tuple[Set[Any], Set[Any], Set[Any]]:
+    def analyze_for_compute(node: Any) -> Tuple[Set[Any], Set[Any], Set[Any], Set[Any]]:
         stage = node.hw_id
         stage_deps: Set[Any] = set()
         pipeline_deps: Set[Any] = set()
         collective_deps: Set[Any] = set()
+        local_pipeline_deps: Set[Any] = set()
         visited: Set[Tuple[int, bool]] = set()
         stack: List[Tuple[Any, bool]] = [(parent, False) for parent in getattr(node, "parents", [])]
         debug_en = False
@@ -987,6 +1009,8 @@ def convert_rapid_llm_graph_to_chakra_et(
                             
                             if src.hw_id == stage:
                                 if not via_collective:
+                                    if _pipeline_edge_has_remote_child(cur, local_stage=stage):
+                                        local_pipeline_deps.add(cur)
                                     if debug_en:
                                         print(f"    Adding pipeline src to stage_deps: {getattr(src, 'name', str(id(src)))}")
                                     stage_deps.add(src)
@@ -1005,6 +1029,8 @@ def convert_rapid_llm_graph_to_chakra_et(
                                 print(f"  Processing coll_src: {getattr(src, 'name', str(id(src)))} (local_hw_id: {src.local_hw_id})")
                             if src.local_hw_id == stage:
                                 if not via_collective:
+                                    if _pipeline_edge_has_remote_child(cur, local_stage=stage):
+                                        local_pipeline_deps.add(cur)
                                     if debug_en:
                                         print(f"    Adding dp-collective src to stage_deps: {getattr(src, 'name', str(id(src)))}")
                                     collective_deps.add(src)
@@ -1053,21 +1079,23 @@ def convert_rapid_llm_graph_to_chakra_et(
             print(f"stage_deps after discard: {[getattr(d, 'name', str(id(d))) for d in stage_deps]}")
             print(f"pipeline_deps: {[getattr(d, 'name', str(id(d))) for d in pipeline_deps]}")
             print(f"collective_deps: {[getattr(d, 'name', str(id(d))) for d in collective_deps]}")
+            print(f"local_pipeline_deps: {[getattr(d, 'name', str(id(d))) for d in local_pipeline_deps]}")
             print(f"pipeline_edge_map entries added: {len(pipeline_edge_map)}")
             for (src, dst), edge in pipeline_edge_map.items():
                 if dst == node:
                     print(f"  {getattr(src, 'name', str(id(src)))} -> {getattr(dst, 'name', str(id(dst)))} via {getattr(edge, 'name', str(id(edge))) if edge else 'None'}")
             print(f"=== END DEBUG ===")
         
-        return stage_deps, pipeline_deps, collective_deps
+        return stage_deps, pipeline_deps, collective_deps, local_pipeline_deps
 
     # Step 5b: Same classification for collective edges (they often use local_hw_id
     # instead of hw_id, so we check both).
-    def analyze_for_collective(edge: Any) -> Tuple[Set[Any], Set[Any], Set[Any]]:
+    def analyze_for_collective(edge: Any) -> Tuple[Set[Any], Set[Any], Set[Any], Set[Any]]:
         stage = edge_stage[edge]
         stage_deps: Set[Any] = set()
         pipeline_deps: Set[Any] = set()
         collective_deps: Set[Any] = set()
+        local_pipeline_deps: Set[Any] = set()
         visited: Set[Tuple[int, bool]] = set()
         stack: List[Tuple[Any, bool]] = [(parent, False) for parent in getattr(edge, "parents", [])]
 
@@ -1098,6 +1126,8 @@ def convert_rapid_llm_graph_to_chakra_et(
                     for src in srcs:
                         if src.hw_id == stage:
                             if not via_collective:
+                                if _pipeline_edge_has_remote_child(cur, local_stage=stage):
+                                    local_pipeline_deps.add(cur)
                                 stage_deps.add(src)
                         else:
                             pipeline_deps.add(src)
@@ -1106,6 +1136,8 @@ def convert_rapid_llm_graph_to_chakra_et(
                     for src in coll_srcs:
                         if src.local_hw_id == stage:
                             if not via_collective:
+                                if _pipeline_edge_has_remote_child(cur, local_stage=stage):
+                                    local_pipeline_deps.add(cur)
                                 collective_deps.add(src)
                         # else:
                         #     pipeline_deps.add(src)
@@ -1120,28 +1152,30 @@ def convert_rapid_llm_graph_to_chakra_et(
             for parent in getattr(cur, "parents", []):
                 stack.append((parent, via_collective))
 
-        return stage_deps, pipeline_deps, collective_deps
+        return stage_deps, pipeline_deps, collective_deps, local_pipeline_deps
 
     # Aggregate the analysis results so later stages can fetch dependencies by node.
     compute_info: Dict[Any, Dict[str, Any]] = {}
     for node in compute_nodes:
-        stage_deps, pipeline_deps, collective_deps = analyze_for_compute(node)
+        stage_deps, pipeline_deps, collective_deps, local_pipeline_deps = analyze_for_compute(node)
         compute_info[node] = {
             "stage": node.hw_id,
             "stage_deps": stage_deps,
             "pipeline_deps": pipeline_deps,
             "collective_deps": collective_deps,
+            "local_pipeline_deps": local_pipeline_deps,
             "name": node.name,
         }
 
     collective_info: Dict[Any, Dict[str, Any]] = {}
     for edge, stage in edge_stage.items():
-        stage_deps, pipeline_deps, collective_deps = analyze_for_collective(edge)
+        stage_deps, pipeline_deps, collective_deps, local_pipeline_deps = analyze_for_collective(edge)
         entry = {
             "stage": stage,
             "stage_deps": stage_deps,
             "pipeline_deps": pipeline_deps,
             "collective_deps": collective_deps,
+            "local_pipeline_deps": local_pipeline_deps,
             "size": int(getattr(edge, "comm_size_bytes", 0)),
             "comm_type": get_collective_type(edge.comm_type),
             "name": edge.name,
@@ -1302,6 +1336,7 @@ def convert_rapid_llm_graph_to_chakra_et(
                     "stage_deps": [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]],
                     "pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]],
                     "collective_deps": [getattr(dep, "name", str(id(dep))) for dep in info["collective_deps"]],
+                    "local_pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["local_pipeline_deps"]],
                 }
             )
 
@@ -1314,6 +1349,7 @@ def convert_rapid_llm_graph_to_chakra_et(
                     "type": edge.__class__.__name__,
                     "stage_deps": [getattr(dep, "name", str(id(dep))) for dep in info["stage_deps"]],
                     "pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["pipeline_deps"]],
+                    "local_pipeline_deps": [getattr(dep, "name", str(id(dep))) for dep in info["local_pipeline_deps"]],
                 }
             )
 
@@ -1347,46 +1383,30 @@ def convert_rapid_llm_graph_to_chakra_et(
     compute_et_ids: Dict[Tuple[Any, int], int] = {}
     collective_et_ids: Dict[Tuple[Any, int], int] = {}
     pipeline_recv_cache: Dict[Tuple[Any, Any, int], int] = {}
+    pipeline_send_cache: Dict[Tuple[Any, int, int, Any], int] = {}
     tag_counter = itertools.count(start=1)
 
     # Step 8 helper: materialise SEND/RECV control edges across stages whenever a
     # pipeline dependency exists between ``parent`` and ``target``.
-    def ensure_pipeline(parent: Any, target: Any, dp_idx: int) -> int:
+    def _append_pipeline_send(parent: Any, edge_obj: Any, *, dst_stage: int, dp_idx: int) -> int:
         parent_stage = getattr(parent, "hw_id", None)
-        if parent_stage == None:
+        if parent_stage is None:
             parent_stage = getattr(parent, "local_hw_id", None)
-        if parent_stage == None:
+        if parent_stage is None:
             raise ValueError(f"Stage not found for parent {parent}")
-        target_stage = collective_info[target]["stage"] if target in collective_info else compute_info[target]["stage"]
-        if parent_stage == target_stage:
-            if parent in collective_info:
-                return collective_et_ids[(parent, rank_for(parent_stage, dp_idx))]
-            return compute_et_ids[(parent, rank_for(parent_stage, dp_idx))]
+        key = (parent, int(dst_stage), int(dp_idx), edge_obj)
+        cached_send = pipeline_send_cache.get(key)
+        if cached_send is not None:
+            return cached_send
 
-        edge_obj = pipeline_edge_map.get((parent, target))
-
-        key = (parent, target_stage, dp_idx, edge_obj)
-        # if the key has been seen before, then this is a duplicate pipeline dependency
-        # just return old recv_id
-        cached = pipeline_recv_cache.get(key)
-        if cached is not None:
-            return cached
-
-        # if not edge_obj:
-        #     print("Pipeline edge map:")
-        #     import pprint
-        #     pprint.pprint(pipeline_edge_map)
-        #     raise ValueError(f"No edge object found for parent {parent} and target {target}")
-        # If there is no edge, assume it is a control dependency (size set to 0 automatically)
         size = int(getattr(edge_obj, "comm_size_bytes", 0))
         tag = getattr(edge_obj, "op_id", next(tag_counter))
 
         src_rank = rank_for(parent_stage, dp_idx)
-        dst_rank = rank_for(target_stage, dp_idx)
+        dst_rank = rank_for(dst_stage, dp_idx)
         send_trace = rank_traces[src_rank]
-        recv_trace = rank_traces[dst_rank]
         is_control = False
-        if size == 0 or edge_obj.comm_type != CollectiveType.PIPELINE:
+        if size == 0 or getattr(edge_obj, "comm_type", None) != CollectiveType.PIPELINE:
             # control dependancy
             size = 1 # has to be at least 1 byte for astrasim.
             is_control = True
@@ -1419,6 +1439,59 @@ def convert_rapid_llm_graph_to_chakra_et(
             raise ValueError(f"Parent {parent} not found in collective_info or compute_info")
 
         send_trace.append_node(send_node)
+        pipeline_send_cache[key] = send_id
+        return send_id
+
+    def _pipeline_parent_for_same_stage_edge(edge_obj: Any, *, local_stage: int) -> Any:
+        for parent in getattr(edge_obj, "parents", []):
+            parent_stage = _resolve_stage(parent)
+            if parent_stage == local_stage:
+                return parent
+        raise ValueError(
+            f"Unable to resolve same-stage pipeline source for edge '{getattr(edge_obj, 'name', edge_obj)}' "
+            f"and stage {local_stage}."
+        )
+
+    def ensure_local_pipeline_sends(edge_obj: Any, target: Any, dp_idx: int) -> List[int]:
+        target_stage = collective_info[target]["stage"] if target in collective_info else compute_info[target]["stage"]
+        remote_stages = _pipeline_edge_remote_child_stages(edge_obj, local_stage=target_stage)
+        if not remote_stages:
+            return []
+        parent = _pipeline_parent_for_same_stage_edge(edge_obj, local_stage=target_stage)
+        send_ids: List[int] = []
+        for remote_stage in remote_stages:
+            send_ids.append(_append_pipeline_send(parent, edge_obj, dst_stage=remote_stage, dp_idx=dp_idx))
+        return send_ids
+
+    def ensure_pipeline(parent: Any, target: Any, dp_idx: int) -> int:
+        parent_stage = getattr(parent, "hw_id", None)
+        if parent_stage is None:
+            parent_stage = getattr(parent, "local_hw_id", None)
+        if parent_stage is None:
+            raise ValueError(f"Stage not found for parent {parent}")
+        target_stage = collective_info[target]["stage"] if target in collective_info else compute_info[target]["stage"]
+        if parent_stage == target_stage:
+            if parent in collective_info:
+                return collective_et_ids[(parent, rank_for(parent_stage, dp_idx))]
+            return compute_et_ids[(parent, rank_for(parent_stage, dp_idx))]
+
+        edge_obj = pipeline_edge_map.get((parent, target))
+        key = (parent, target_stage, dp_idx, edge_obj)
+        cached = pipeline_recv_cache.get(key)
+        if cached is not None:
+            return cached
+
+        send_id = _append_pipeline_send(parent, edge_obj, dst_stage=target_stage, dp_idx=dp_idx)
+
+        src_rank = rank_for(parent_stage, dp_idx)
+        dst_rank = rank_for(target_stage, dp_idx)
+        recv_trace = rank_traces[dst_rank]
+        size = int(getattr(edge_obj, "comm_size_bytes", 0))
+        tag = getattr(edge_obj, "op_id", next(tag_counter))
+        is_control = False
+        if size == 0 or getattr(edge_obj, "comm_type", None) != CollectiveType.PIPELINE:
+            size = 1
+            is_control = True
 
         recv_id = recv_trace.next_id
         if is_control:
@@ -1426,7 +1499,6 @@ def convert_rapid_llm_graph_to_chakra_et(
         else:
             recv_name = f"{getattr(edge_obj, 'name', 'pipeline')}_recv_dp{dp_idx}"
         recv_node = new_recv_node(recv_id, recv_name, size, src_rank, tag)
-        # recv_node.ctrl_deps.append(send_id)
         recv_trace.append_node(recv_node)
 
         pipeline_recv_cache[key] = recv_id
@@ -1604,7 +1676,7 @@ def convert_rapid_llm_graph_to_chakra_et(
             else:
                 info = compute_info[task]
 
-            if not info["pipeline_deps"]:
+            if not info["pipeline_deps"] and not info.get("local_pipeline_deps"):
                 continue
 
             for dp_idx, rank in enumerate(stage_to_ranks[stage]):
@@ -1637,6 +1709,19 @@ def convert_rapid_llm_graph_to_chakra_et(
                 for rid in unique_recv_ids:
                     if rid not in node.ctrl_deps:
                         node.ctrl_deps.append(rid)
+
+                local_send_ids: List[int] = []
+                for edge_obj in info.get("local_pipeline_deps", set()):
+                    local_send_ids.extend(ensure_local_pipeline_sends(edge_obj, task, dp_idx))
+
+                unique_local_send_ids: List[int] = []
+                for send_id in local_send_ids:
+                    if send_id not in unique_local_send_ids:
+                        unique_local_send_ids.append(send_id)
+
+                for send_id in unique_local_send_ids:
+                    if send_id not in node.ctrl_deps:
+                        node.ctrl_deps.append(send_id)
 
 
     # Step 12: Build manifest ops directly from the in-memory traces. This lets the
