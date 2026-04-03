@@ -20,6 +20,7 @@ model_param:
     top_k: 6
     moe_intermediate_size: 1408
     n_shared_experts: 2
+    expert_imbalance_factor: 1.0 # Default preserves perfectly balanced MoE routing; values >1.0 model one routed expert as hotter than the balanced average expert load.
     moe_layer_freq: 1
     first_k_dense_replace: 1
   vocab_size: 102400

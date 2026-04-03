@@ -244,16 +244,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             allow_padding = self._moe_allow_padding()
             (
                 tokens_owner,
-                tokens_dispatched,
-                tokens_local,
-                _experts_per_rank,
-                _tokens_per_expert,
-            ) = self._moe_routed_tokens_per_expert(
+                tokens_dispatched_balanced,
+                _tokens_local_balanced,
+                experts_per_rank,
+                _tokens_per_expert_balanced,
+            ) = self._moe_balanced_routed_tokens_per_expert(
                 batch_size,
                 output_seq_len,
                 allow_padding=allow_padding,
             )
-            moe_tokens_local = tokens_local
             moe_tokens_shared = self._moe_tokens_shared(tokens_owner)
             router_time_f, router_comm_f, router_bytes_f = self.get_router_f(
                 gemm_router,
@@ -264,16 +263,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             moe_group = self._moe_routing_group()
             axis = None
             dispatch_fwd_bytes = int(
-                math.ceil(self.precision.activations * tokens_dispatched * self.hidden_dim)
+                math.ceil(self.precision.activations * tokens_dispatched_balanced * self.hidden_dim)
             )
-            dispatch_fwd_time = self.network_model.collective(
-                kind=CollectiveType.ALL_TO_ALL,
-                size_bytes=dispatch_fwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0.0,
-                debug_label="decode_moe_dispatch_f_all_to_all",
+            dispatch_fwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_fwd_bytes, experts_per_rank),
+                debug_label="decode_moe_dispatch_f",
                 axis=axis,
             )
             ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem = self.get_moe_ffn_f(
@@ -292,14 +286,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 seq_len=output_seq_len,
                 allow_padding=allow_padding,
             )
-            combine_fwd_time = self.network_model.collective(
-                kind=CollectiveType.ALL_TO_ALL,
-                size_bytes=dispatch_fwd_bytes,
-                participants=moe_group,
-                ib=self.links["ep"].bandwidth,
-                ll=self.links["ep"].latency,
-                local_bytes=0.0,
-                debug_label="decode_moe_combine_f_all_to_all",
+            combine_fwd_time = self._moe_comm_time(
+                self._moe_comm_decomposition(dispatch_fwd_bytes, experts_per_rank),
+                debug_label="decode_moe_combine_f",
                 axis=axis,
             )
             transformer_timings["router"] = OperationTiming(

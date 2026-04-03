@@ -1381,6 +1381,7 @@ class MoEConfig:
     top_k: int
     moe_intermediate_size: int
     n_shared_experts: int
+    expert_imbalance_factor: float
     moe_layer_freq: int
     first_k_dense_replace: int
 
@@ -1393,6 +1394,27 @@ class MoEConfig:
         fallback_intermediate_size: Optional[int] = None,
     ) -> "MoEConfig":
         moe_dict = _require_mapping("model_param.moe", moe_dict)
+        imbalance_help = (
+            "model_param.moe.expert_imbalance_factor must be a finite float >= 1.0. "
+            "Use 1.0 to preserve the current perfectly balanced MoE behavior; "
+            "values > 1.0 model one routed expert as hotter than the balanced average expert load."
+        )
+
+        def _parse_expert_imbalance_factor(value: object) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(imbalance_help) from exc
+            if not math.isfinite(parsed):
+                raise ValueError(imbalance_help)
+            if parsed < 1.0:
+                raise ValueError(
+                    "model_param.moe.expert_imbalance_factor must be >= 1.0. "
+                    "Use 1.0 to preserve the current perfectly balanced MoE behavior; "
+                    "values > 1.0 model one routed expert as hotter than the balanced average expert load."
+                )
+            return parsed
+
         if not validate:
             def _lenient_int(value: object, default: int) -> int:
                 try:
@@ -1411,6 +1433,9 @@ class MoEConfig:
                 fallback_intermediate_size,
             )
             n_shared_experts = _lenient_int(moe_dict.get("n_shared_experts", 0), 0)
+            expert_imbalance_factor = _parse_expert_imbalance_factor(
+                moe_dict.get("expert_imbalance_factor", 1.0)
+            )
             moe_layer_freq = _lenient_int(moe_dict.get("moe_layer_freq", 1), 1)
             first_k_dense_replace = _lenient_int(moe_dict.get("first_k_dense_replace", 0), 0)
         else:
@@ -1421,6 +1446,9 @@ class MoEConfig:
                 moe_dict.get("n_shared_experts", 0),
                 "model_param.moe.n_shared_experts",
                 min_value=0,
+            )
+            expert_imbalance_factor = _parse_expert_imbalance_factor(
+                moe_dict.get("expert_imbalance_factor", 1.0)
             )
             moe_layer_freq = _coerce_int(
                 moe_dict.get("moe_layer_freq", 1),
@@ -1436,12 +1464,20 @@ class MoEConfig:
             if top_k > num_experts:
                 raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")
 
+        if expert_imbalance_factor > float(num_experts):
+            raise ValueError(
+                "model_param.moe.expert_imbalance_factor cannot exceed model_param.moe.num_experts. "
+                "RAPID models imbalance as one hot routed expert and the remaining routed experts "
+                "sharing the leftover tokens uniformly."
+            )
+
         # TODO: Shared experts are modeled as replicated across EP for now.
         return cls(
             num_experts=num_experts,
             top_k=top_k,
             moe_intermediate_size=moe_intermediate_size,
             n_shared_experts=n_shared_experts,
+            expert_imbalance_factor=expert_imbalance_factor,
             moe_layer_freq=moe_layer_freq,
             first_k_dense_replace=first_k_dense_replace,
         )
@@ -1499,6 +1535,10 @@ class LLMConfig:
     @property
     def n_shared_experts(self) -> int:
         return self.moe.n_shared_experts
+
+    @property
+    def expert_imbalance_factor(self) -> float:
+        return self.moe.expert_imbalance_factor
 
     @property
     def moe_intermediate_size(self) -> int:

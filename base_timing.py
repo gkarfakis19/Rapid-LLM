@@ -145,6 +145,9 @@ class model_LLM:
             getattr(exp_config.model_config, "moe_intermediate_size", self.intermediate_size)
         )
         self.n_shared_experts = int(getattr(exp_config.model_config, "n_shared_experts", 0))
+        self.expert_imbalance_factor = float(
+            getattr(exp_config.model_config, "expert_imbalance_factor", 1.0)
+        )
         self.moe_layer_freq = int(getattr(exp_config.model_config, "moe_layer_freq", 1))
         self.first_k_dense_replace = int(getattr(exp_config.model_config, "first_k_dense_replace", 0))
         self.moe_layer_mask = list(getattr(exp_config.model_config, "moe_layer_mask", []))
@@ -223,7 +226,14 @@ class NetworkModel:
         network_bytes = float(math.ceil(size_bytes))
         local_bytes_int = int(math.ceil(local_bytes)) if local_bytes else 0
 
-        if self._astra_policy in {"hybrid", "full"}:
+        # PIPELINE is our point-to-point primitive. Even in Astra-backed modes we
+        # time the direct helper analytically here, because the fast Astra
+        # collective shortcut is designed for collectives and can fail on tiny
+        # 2-rank p2p cases. Full hierarchical execution still models these
+        # transfers through explicit SEND/RECV nodes in the generated ET.
+        if kind == CollectiveType.PIPELINE:
+            network_time = self._analytical_point_to_point(network_bytes, ib, ll)
+        elif self._astra_policy in {"hybrid", "full"}:
             if kind in collective_ops or kind == CollectiveType.PIPELINE:
                 # Pipeline uses 2 NPUs for point-to-point, others use part
                 npus = 2 if kind == CollectiveType.PIPELINE else part
@@ -477,6 +487,9 @@ class TimeCalculation:
                 getattr(self.model, "moe_intermediate_size", self.intermediate_size)
             )
             self.n_shared_experts = int(getattr(self.model, "n_shared_experts", 0))
+            self.expert_imbalance_factor = float(
+                getattr(self.model, "expert_imbalance_factor", 1.0)
+            )
             self.moe_layer_freq = int(getattr(self.model, "moe_layer_freq", 1))
             self.first_k_dense_replace = int(getattr(self.model, "first_k_dense_replace", 0))
             self.moe_layer_mask = list(getattr(self.model, "moe_layer_mask", []))

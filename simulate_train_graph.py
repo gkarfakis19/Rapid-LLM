@@ -1343,10 +1343,213 @@ class Graph:
                     )
             return pre_keys, post_keys
 
+        def _comm_metadata(comm_key: str) -> Dict[str, Any]:
+            metadata = self.comm_metadata.get(comm_key)
+            if metadata is None:
+                raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
+            return metadata
+
+        def _comm_parallel_groups(comm_keys: List[str]) -> List[List[str]]:
+            grouped: List[List[str]] = []
+            parallel_index: Dict[str, int] = {}
+            for comm_key in comm_keys:
+                metadata = _comm_metadata(comm_key)
+                parallel_group = metadata.get("parallel_group")
+                if not parallel_group:
+                    grouped.append([comm_key])
+                    continue
+                existing_idx = parallel_index.get(parallel_group)
+                if existing_idx is None:
+                    parallel_index[parallel_group] = len(grouped)
+                    grouped.append([comm_key])
+                else:
+                    grouped[existing_idx].append(comm_key)
+            return grouped
+
+        def _rank_id(tp_idx: int, cp_idx: int, ep_idx: int) -> int:
+            return tp_idx + cp_idx * tp_degree + ep_idx * tp_degree * cp_degree
+
+        def _create_rank_comm_edge(
+            *,
+            comm_key: str,
+            rank: int,
+            tp_idx: int,
+            cp_idx: int,
+            ep_idx: int,
+            name: Optional[str] = None,
+            local_hw_id: Optional[int] = None,
+        ) -> Edge:
+            nonlocal op_id
+            comm_edge = self.create_comm_edge(
+                name=name or comm_key,
+                op_id=op_id,
+                comm_key=comm_key,
+                is_dp=False,
+                local_hw_id=local_hw_id if local_hw_id is not None else rank,
+            )
+            comm_edge.tp_rank = tp_idx
+            comm_edge.cp_rank = cp_idx
+            comm_edge.ep_rank = ep_idx
+            op_id += 1
+            return comm_edge
+
+        def _moe_hot_rank(tp_idx: int, cp_idx: int, routing_mode: str) -> int:
+            if routing_mode == "ep":
+                return _rank_id(tp_idx, cp_idx, 0)
+            if routing_mode == "tp_ep":
+                return _rank_id(0, cp_idx, 0)
+            raise ValueError(f"Unsupported MoE routing mode '{routing_mode}'")
+
+        def _moe_parallel_token(tp_idx: int, cp_idx: int, routing_mode: str) -> Tuple[Any, ...]:
+            if routing_mode == "ep":
+                return (routing_mode, cp_idx, tp_idx)
+            if routing_mode == "tp_ep":
+                return (routing_mode, cp_idx)
+            raise ValueError(f"Unsupported MoE routing mode '{routing_mode}'")
+
+        moe_parallel_joins: Dict[Tuple[str, Tuple[Any, ...]], Node] = {}
+
+        def _make_local_join_node(
+            *,
+            name: str,
+            rank: int,
+            tp_idx: int,
+            cp_idx: int,
+            ep_idx: int,
+            direction_name: str,
+        ) -> Node:
+            nonlocal op_id
+            join = Node(
+                name=name,
+                op_id=op_id,
+                hw_id=rank,
+                duration=0.0,
+                fwd=(direction_name == "forward"),
+                mem_kind=None,
+            )
+            join.tp_rank = tp_idx
+            join.cp_rank = cp_idx
+            join.ep_rank = ep_idx
+            op_id += 1
+            return join
+
+        def _attach_serial_comm_chain(
+            previous_obj: Any,
+            comm_keys: List[str],
+            *,
+            rank: int,
+            tp_idx: int,
+            cp_idx: int,
+            ep_idx: int,
+        ) -> Any:
+            current = previous_obj
+            for comm_key in comm_keys:
+                comm_edge = _create_rank_comm_edge(
+                    comm_key=comm_key,
+                    rank=rank,
+                    tp_idx=tp_idx,
+                    cp_idx=cp_idx,
+                    ep_idx=ep_idx,
+                )
+                current.add_child(comm_edge)
+                current = comm_edge
+            return current
+
+        def _attach_moe_parallel_post_group(
+            previous_obj: Any,
+            comm_keys: List[str],
+            *,
+            rank: int,
+            tp_idx: int,
+            cp_idx: int,
+            ep_idx: int,
+            direction_name: str,
+        ) -> Any:
+            base_key: Optional[str] = None
+            residual_key: Optional[str] = None
+            parallel_group: Optional[str] = None
+            routing_mode: Optional[str] = None
+
+            for comm_key in comm_keys:
+                metadata = _comm_metadata(comm_key)
+                component = metadata.get("moe_component")
+                parallel_group = parallel_group or metadata.get("parallel_group")
+                routing_mode = routing_mode or metadata.get("moe_routing_mode")
+                if component == "base_all_to_all":
+                    base_key = comm_key
+                elif component == "residual_p2p":
+                    residual_key = comm_key
+                else:
+                    raise ValueError(
+                        f"MoE parallel comm group contains unsupported component '{component}' "
+                        f"for key '{comm_key}'"
+                    )
+
+            if not parallel_group or not routing_mode:
+                raise ValueError(
+                    f"MoE parallel comm group {comm_keys} is missing required metadata "
+                    "(parallel_group / moe_routing_mode)."
+                )
+
+            base_edge: Optional[Edge] = None
+            if base_key is not None:
+                base_edge = _create_rank_comm_edge(
+                    comm_key=base_key,
+                    rank=rank,
+                    tp_idx=tp_idx,
+                    cp_idx=cp_idx,
+                    ep_idx=ep_idx,
+                )
+                previous_obj.add_child(base_edge)
+
+            hot_rank = _moe_hot_rank(tp_idx, cp_idx, routing_mode)
+            group_token = (parallel_group, _moe_parallel_token(tp_idx, cp_idx, routing_mode))
+
+            join = _make_local_join_node(
+                name=f"{parallel_group}_join_rank{rank}",
+                rank=rank,
+                tp_idx=tp_idx,
+                cp_idx=cp_idx,
+                ep_idx=ep_idx,
+                direction_name=direction_name,
+            )
+            if base_edge is not None:
+                base_edge.add_child(join)
+            else:
+                previous_obj.add_child(join)
+
+            if rank == hot_rank:
+                moe_parallel_joins[group_token] = join
+                return join
+
+            if residual_key is None:
+                return join
+
+            hot_join = moe_parallel_joins.get(group_token)
+            if hot_join is None:
+                raise ValueError(
+                    f"Missing hot-rank MoE join node for parallel group '{parallel_group}'. "
+                    "The simulator assumes the first rank in the routing group is hot "
+                    "and must be constructed before colder ranks."
+                )
+
+            residual_edge = _create_rank_comm_edge(
+                comm_key=residual_key,
+                rank=rank,
+                tp_idx=tp_idx,
+                cp_idx=cp_idx,
+                ep_idx=ep_idx,
+                name=f"{residual_key}_rank{rank}_to_hot{hot_rank}",
+            )
+            previous_obj.add_child(residual_edge)
+            residual_edge.add_child(join)
+            residual_edge.add_child(hot_join)
+            return join
+
         for ep_idx in range(ep_degree):
             for cp_idx in range(cp_degree):
                 for tp_idx in range(tp_degree):
-                    rank = tp_idx + cp_idx * tp_degree + ep_idx * tp_degree * cp_degree
+                    rank = _rank_id(tp_idx, cp_idx, ep_idx)
                     previous = root
 
                     if direction in {"forward", "both"}:
@@ -1360,22 +1563,14 @@ class Graph:
                             comm_keys = list(forward_cfg.get("comm_keys", []) or [])
                             pre_keys, post_keys = _split_comm_keys(comm_keys)
 
-                            for comm_key in pre_keys:
-                                if comm_key not in self.comm_metadata:
-                                    raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                                comm_edge = self.create_comm_edge(
-                                    name=comm_key,
-                                    op_id=op_id,
-                                    comm_key=comm_key,
-                                    is_dp=False,
-                                    local_hw_id=rank,
-                                )
-                                comm_edge.tp_rank = tp_idx
-                                comm_edge.cp_rank = cp_idx
-                                comm_edge.ep_rank = ep_idx
-                                op_id += 1
-                                previous.add_child(comm_edge)
-                                previous = comm_edge
+                            previous = _attach_serial_comm_chain(
+                                previous,
+                                pre_keys,
+                                rank=rank,
+                                tp_idx=tp_idx,
+                                cp_idx=cp_idx,
+                                ep_idx=ep_idx,
+                            )
 
                             node = Node(
                                 name=f"{entry_name}_fwd_rank{rank}",
@@ -1392,22 +1587,27 @@ class Graph:
                             op_id += 1
                             previous.add_child(node)
                             previous = node
-                            for comm_key in post_keys:
-                                if comm_key not in self.comm_metadata:
-                                    raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                                comm_edge = self.create_comm_edge(
-                                    name=comm_key,
-                                    op_id=op_id,
-                                    comm_key=comm_key,
-                                    is_dp=False,
-                                    local_hw_id=rank,
-                                )
-                                comm_edge.tp_rank = tp_idx
-                                comm_edge.cp_rank = cp_idx
-                                comm_edge.ep_rank = ep_idx
-                                op_id += 1
-                                previous.add_child(comm_edge)
-                                previous = comm_edge
+                            for key_group in _comm_parallel_groups(post_keys):
+                                metadata = _comm_metadata(key_group[0])
+                                if metadata.get("parallel_group") and metadata.get("moe_component"):
+                                    previous = _attach_moe_parallel_post_group(
+                                        previous,
+                                        key_group,
+                                        rank=rank,
+                                        tp_idx=tp_idx,
+                                        cp_idx=cp_idx,
+                                        ep_idx=ep_idx,
+                                        direction_name="forward",
+                                    )
+                                else:
+                                    previous = _attach_serial_comm_chain(
+                                        previous,
+                                        key_group,
+                                        rank=rank,
+                                        tp_idx=tp_idx,
+                                        cp_idx=cp_idx,
+                                        ep_idx=ep_idx,
+                                    )
 
                     if direction in {"backward", "both"}:
                         for idx, entry in enumerate(reversed(gemm_entries)):
@@ -1420,22 +1620,14 @@ class Graph:
                             comm_keys = list(backward_cfg.get("comm_keys", []) or [])
                             pre_keys, post_keys = _split_comm_keys(comm_keys)
 
-                            for comm_key in pre_keys:
-                                if comm_key not in self.comm_metadata:
-                                    raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                                comm_edge = self.create_comm_edge(
-                                    name=comm_key,
-                                    op_id=op_id,
-                                    comm_key=comm_key,
-                                    is_dp=False,
-                                    local_hw_id=rank,
-                                )
-                                comm_edge.tp_rank = tp_idx
-                                comm_edge.cp_rank = cp_idx
-                                comm_edge.ep_rank = ep_idx
-                                op_id += 1
-                                previous.add_child(comm_edge)
-                                previous = comm_edge
+                            previous = _attach_serial_comm_chain(
+                                previous,
+                                pre_keys,
+                                rank=rank,
+                                tp_idx=tp_idx,
+                                cp_idx=cp_idx,
+                                ep_idx=ep_idx,
+                            )
 
                             node = Node(
                                 name=f"{entry_name}_bwd_rank{rank}",
@@ -1453,22 +1645,27 @@ class Graph:
                             previous.add_child(node)
                             previous = node
 
-                            for comm_idx, comm_key in enumerate(post_keys):
-                                if comm_key not in self.comm_metadata:
-                                    raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                                comm_edge = self.create_comm_edge(
-                                    name=comm_key,
-                                    op_id=op_id,
-                                    comm_key=comm_key,
-                                    is_dp=False,
-                                    local_hw_id=rank,
-                                )
-                                comm_edge.tp_rank = tp_idx
-                                comm_edge.cp_rank = cp_idx
-                                comm_edge.ep_rank = ep_idx
-                                op_id += 1
-                                previous.add_child(comm_edge)
-                                previous = comm_edge
+                            for key_group in _comm_parallel_groups(post_keys):
+                                metadata = _comm_metadata(key_group[0])
+                                if metadata.get("parallel_group") and metadata.get("moe_component"):
+                                    previous = _attach_moe_parallel_post_group(
+                                        previous,
+                                        key_group,
+                                        rank=rank,
+                                        tp_idx=tp_idx,
+                                        cp_idx=cp_idx,
+                                        ep_idx=ep_idx,
+                                        direction_name="backward",
+                                    )
+                                else:
+                                    previous = _attach_serial_comm_chain(
+                                        previous,
+                                        key_group,
+                                        rank=rank,
+                                        tp_idx=tp_idx,
+                                        cp_idx=cp_idx,
+                                        ep_idx=ep_idx,
+                                    )
 
         return root
         

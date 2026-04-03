@@ -15,6 +15,7 @@ tools/*.tsv
 tools/*.json
 tools/gmap_artifacts/
 *.md
+!MOE_ONE_HOT_EXPERT_MODEL.md
 *.et
 tools/comp/wrapper_outputs/*
 memory-summary/
