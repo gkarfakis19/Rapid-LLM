@@ -81,7 +81,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
             qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
             v_head_dim=getattr(self, "v_head_dim", None),
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         intermediate_size = self.moe_intermediate_size if use_moe_layer else self.intermediate_size
         gemm_ctx = self
@@ -99,7 +98,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
                 v_head_dim=getattr(self, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
                 run_type=str(
                     getattr(
                         self,
@@ -595,7 +593,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
                 v_head_dim=getattr(self, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
                 run_type=str(
                     getattr(
                         self,
@@ -794,7 +791,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
                 v_head_dim=getattr(self, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
             )
             if getattr(self, "disable_kv_cache", False):
                 token_bytes = 0.0
@@ -1065,7 +1061,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
             qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
             v_head_dim=getattr(self, "v_head_dim", None),
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         if getattr(self, "disable_kv_cache", False):
             token_bytes = 0.0
