@@ -2335,11 +2335,6 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     if not isinstance(model, LLMConfig):
         raise ValueError("Unsupported model config type for validation")
 
-    if model.attention.attention_type == "mla" and (tp > 1 or cp > 1):
-        raise ValueError(
-            "attention_type='mla' currently requires parallelism.tp=1 and parallelism.cp=1."
-        )
-
     if model.use_moe and model.top_k > model.num_experts:
         raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")
 
