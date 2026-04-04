@@ -104,6 +104,14 @@ class DecodeGraph(Graph):
         )
         self.n_shared_experts = int(getattr(model_cfg, "n_shared_experts", 0) or 0)
         self.head_dim = getattr(model_cfg, "head_dim", None)
+        attention_cfg = getattr(model_cfg, "attention", None)
+        self.attention_type = getattr(attention_cfg, "attention_type", "mha")
+        self.kv_lora_rank = getattr(attention_cfg, "kv_lora_rank", None)
+        self.q_lora_rank = getattr(attention_cfg, "q_lora_rank", None)
+        self.qk_nope_head_dim = getattr(attention_cfg, "qk_nope_head_dim", None)
+        self.qk_rope_head_dim = getattr(attention_cfg, "qk_rope_head_dim", None)
+        self.v_head_dim = getattr(attention_cfg, "v_head_dim", None)
+        self.run_type = str(getattr(model_cfg, "run_type", "inference")).lower()
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
