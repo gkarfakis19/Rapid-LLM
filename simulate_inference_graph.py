@@ -111,6 +111,7 @@ class DecodeGraph(Graph):
         self.qk_nope_head_dim = getattr(attention_cfg, "qk_nope_head_dim", None)
         self.qk_rope_head_dim = getattr(attention_cfg, "qk_rope_head_dim", None)
         self.v_head_dim = getattr(attention_cfg, "v_head_dim", None)
+        self.cache_mla_latents = bool(getattr(attention_cfg, "cache_mla_latents", False))
         self.run_type = str(getattr(model_cfg, "run_type", "inference")).lower()
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:

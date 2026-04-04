@@ -1182,6 +1182,7 @@ class LLMAttentionConfig:
     qk_nope_head_dim: Optional[int] = None
     qk_rope_head_dim: Optional[int] = None
     v_head_dim: Optional[int] = None
+    cache_mla_latents: bool = False
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
 
@@ -1288,6 +1289,15 @@ class LLMAttentionConfig:
                 raise ValueError(
                     "model_param.attention.v_head_dim must be specified when attention_type='mla'"
                 )
+        raw_cache_mla_latents = attention_dict.get("cache_mla_latents", False)
+        cache_mla_latents = _coerce_bool(
+            raw_cache_mla_latents,
+            "model_param.attention.cache_mla_latents",
+        )
+        if attn_type != "mla" and cache_mla_latents:
+            raise ValueError(
+                "model_param.attention.cache_mla_latents is only valid when attention_type='mla'"
+            )
 
         raw_flash = attention_dict.get(
             "use_flashattention",
@@ -1328,6 +1338,7 @@ class LLMAttentionConfig:
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
+            cache_mla_latents=cache_mla_latents,
             use_flashattention=use_flashattention,
             attention_tile_size=attention_tile_size,
         )
@@ -1493,6 +1504,10 @@ class LLMConfig:
     @property
     def v_head_dim(self) -> Optional[int]:
         return getattr(self.attention, "v_head_dim", None)
+
+    @property
+    def cache_mla_latents(self) -> bool:
+        return bool(getattr(self.attention, "cache_mla_latents", False))
 
     @property
     def use_moe(self) -> bool:
@@ -2230,6 +2245,18 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
         raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")
 
     run_type = str(getattr(model, "run_type", "training")).lower()
+    attention_type = str(getattr(getattr(model, "attention", None), "attention_type", "mha")).lower()
+    cache_mla_latents = bool(getattr(model, "cache_mla_latents", False))
+    if cache_mla_latents:
+        if attention_type != "mla":
+            raise ValueError(
+                "model_param.attention.cache_mla_latents requires attention_type='mla'."
+            )
+        if run_type != "inference":
+            raise ValueError(
+                "model_param.attention.cache_mla_latents is only supported for inference runs. "
+                "Megatron's MLA latent-cache absorption is decode-only and conflicts with training."
+            )
     if run_type == "inference":
         replica_count = sch.inference.replica_count
         moe_dp = sch.inference.moe_dp
