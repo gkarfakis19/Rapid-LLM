@@ -44,18 +44,11 @@ def reshape_gemm_to_3d(arg):
 
 
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
-MLA_LATENT_ATTENTION_GEMM_KEYS = {
-    "attention_score_1",
-    "attention_score_2",
-    "attention_score_rope",
-    "attention_ctx_latent",
-}
 MLA_PROJECTION_COMPONENT_KEYS = {
     "D_proj_q",
     "D_proj_kv",
     "U_proj_q",
     "U_proj_kv",
-    "U_proj_q_rope",
 }
 
 _LLAMA_STYLE_MODEL_TYPES = {"llama", "glm4_moe", "glm4", "glm"}
@@ -96,10 +89,6 @@ def mla_dim_sizes(num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim):
     v_size = int(num_heads) * int(v_head_dim)
     kv_up_size = int(num_heads) * (int(qk_nope_head_dim) + int(v_head_dim))
     return qk_head_dim, q_size, v_size, kv_up_size
-
-
-def mla_uses_absorbed_decode(*, run_type: str, decode: bool, cache_mla_latents: bool) -> bool:
-    return bool(cache_mla_latents) and bool(decode) and str(run_type or "").lower() == "inference"
 
 
 def mla_attention_param_sizes(
@@ -243,22 +232,19 @@ def mla_kv_cache_token_bytes(
     qk_rope_head_dim,
     precision_bytes,
     *,
-    num_heads=None,
-    qk_nope_head_dim=None,
-    v_head_dim=None,
-    cache_mla_latents=False,
+    num_heads,
+    qk_nope_head_dim,
+    v_head_dim,
 ):
-    """Return per-token MLA KV-cache bytes for the selected Megatron-style cache mode."""
-    if not cache_mla_latents and None not in (num_heads, qk_nope_head_dim, v_head_dim):
-        return mla_full_kv_cache_token_bytes(
-            batch_size=batch_size,
-            num_heads=num_heads,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            precision_bytes=precision_bytes,
-        )
-    return batch_size * (kv_lora_rank + qk_rope_head_dim) * precision_bytes
+    """Return per-token MLA KV-cache bytes for the default full-cache decode contract."""
+    return mla_full_kv_cache_token_bytes(
+        batch_size=batch_size,
+        num_heads=num_heads,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        precision_bytes=precision_bytes,
+    )
 
 
 def mla_runtime_proxy_sizes(
@@ -268,35 +254,17 @@ def mla_runtime_proxy_sizes(
     qk_nope_head_dim,
     qk_rope_head_dim,
     v_head_dim,
-    *,
-    run_type="training",
-    decode=False,
-    cache_mla_latents=False,
 ):
     """Return proxy stage-output widths for the selected MLA runtime contract."""
-    if mla_uses_absorbed_decode(
-        run_type=run_type,
-        decode=decode,
-        cache_mla_latents=cache_mla_latents,
-    ):
-        qkv_output_size = (
-            int(q_lora_rank)
-            + int(kv_lora_rank)
-            + int(num_heads) * int(qk_rope_head_dim)
-            + int(qk_rope_head_dim)
-        )
-        attention_output_size = int(kv_lora_rank)
-        output_proj_input_size = int(num_heads) * int(kv_lora_rank)
-    else:
-        qk_head_dim, q_size, _v_size, kv_up_size = mla_dim_sizes(
-            num_heads,
-            qk_nope_head_dim,
-            qk_rope_head_dim,
-            v_head_dim,
-        )
-        qkv_output_size = int(q_lora_rank) + int(kv_lora_rank) + int(qk_rope_head_dim) + int(q_size) + int(kv_up_size)
-        attention_output_size = int(v_head_dim)
-        output_proj_input_size = int(num_heads) * int(v_head_dim)
+    qk_head_dim, q_size, _v_size, kv_up_size = mla_dim_sizes(
+        num_heads,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+    )
+    qkv_output_size = int(q_lora_rank) + int(kv_lora_rank) + int(qk_rope_head_dim) + int(q_size) + int(kv_up_size)
+    attention_output_size = int(v_head_dim)
+    output_proj_input_size = int(num_heads) * int(v_head_dim)
     return {
         "qkv_output_size": qkv_output_size,
         "attention_output_size": attention_output_size,
@@ -316,64 +284,8 @@ def mla_runtime_op_shapes(
     qk_nope_head_dim,
     qk_rope_head_dim,
     v_head_dim,
-    run_type="training",
-    decode=False,
-    cache_mla_latents=False,
 ):
-    """Return MLA component GEMM shapes for the selected Megatron-style runtime path."""
-    if mla_uses_absorbed_decode(
-        run_type=run_type,
-        decode=decode,
-        cache_mla_latents=cache_mla_latents,
-    ):
-        return OrderedDict(
-            {
-                "D_proj_q": (batch_size, query_seq_len, hidden_dim, q_lora_rank),
-                "D_proj_kv": (
-                    batch_size,
-                    query_seq_len,
-                    hidden_dim,
-                    int(kv_lora_rank) + int(qk_rope_head_dim),
-                ),
-                "U_proj_q_rope": (
-                    batch_size,
-                    query_seq_len,
-                    q_lora_rank,
-                    int(qk_rope_head_dim) * int(num_heads),
-                ),
-                "attention_score_1": (
-                    int(batch_size) * int(num_heads),
-                    query_seq_len,
-                    q_lora_rank,
-                    kv_lora_rank,
-                ),
-                "attention_score_2": (
-                    int(batch_size) * int(num_heads),
-                    query_seq_len,
-                    kv_lora_rank,
-                    key_seq_len,
-                ),
-                "attention_score_rope": (
-                    int(batch_size) * int(num_heads),
-                    query_seq_len,
-                    qk_rope_head_dim,
-                    key_seq_len,
-                ),
-                "attention_ctx_latent": (
-                    int(batch_size) * int(num_heads),
-                    query_seq_len,
-                    key_seq_len,
-                    kv_lora_rank,
-                ),
-                "O_proj_absorbed": (
-                    int(batch_size) * int(num_heads),
-                    query_seq_len,
-                    kv_lora_rank,
-                    hidden_dim,
-                ),
-            }
-        )
-
+    """Return MLA component GEMM shapes for the default full-cache runtime path."""
     qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
     return OrderedDict(
         {
@@ -419,11 +331,8 @@ def mla_activation_tensor_bytes(
     full_recomputation=False,
     tp=1,
     cp=1,
-    cache_mla_latents=False,
-    run_type="training",
-    decode=False,
 ):
-    """Approximate MLA activation sizing using the selected Megatron-style runtime tensors.
+    """Approximate MLA activation sizing using the selected RAPID MLA runtime tensors.
 
     The helper intentionally models the *local* per-rank activation footprint:
 
@@ -455,32 +364,12 @@ def mla_activation_tensor_bytes(
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     hidden_bytes = batch_size * seq_len * hidden_dim * precision_bytes
-    if mla_uses_absorbed_decode(
-        run_type=run_type,
-        decode=decode,
-        cache_mla_latents=cache_mla_latents,
-    ):
-        local_q_rank = q_lora_rank
-        local_kv_rank = kv_lora_rank
-        local_q_rope = int(math.ceil(float(num_heads * qk_rope_head_dim) / float(tp)))
-        local_k_rope = qk_rope_head_dim
-        qkv_bytes = batch_size * seq_len * (
-            local_q_rank + local_kv_rank + local_q_rope + local_k_rope
-        ) * precision_bytes
-        attn_ctx_bytes = (
-            batch_size
-            * local_heads
-            * seq_len
-            * kv_lora_rank
-            * precision_bytes
-        )
-    else:
-        q_down_bytes = batch_size * seq_len * q_lora_rank * precision_bytes
-        kv_down_bytes = batch_size * seq_len * (kv_lora_rank + qk_rope_head_dim) * precision_bytes
-        q_up_bytes = batch_size * seq_len * local_heads * qk_head_dim * precision_bytes
-        kv_up_bytes = batch_size * seq_len * local_heads * (qk_nope_head_dim + v_head_dim) * precision_bytes
-        qkv_bytes = q_down_bytes + kv_down_bytes + q_up_bytes + kv_up_bytes
-        attn_ctx_bytes = batch_size * local_heads * seq_len * v_head_dim * precision_bytes
+    q_down_bytes = batch_size * seq_len * q_lora_rank * precision_bytes
+    kv_down_bytes = batch_size * seq_len * (kv_lora_rank + qk_rope_head_dim) * precision_bytes
+    q_up_bytes = batch_size * seq_len * local_heads * qk_head_dim * precision_bytes
+    kv_up_bytes = batch_size * seq_len * local_heads * (qk_nope_head_dim + v_head_dim) * precision_bytes
+    qkv_bytes = q_down_bytes + kv_down_bytes + q_up_bytes + kv_up_bytes
+    attn_ctx_bytes = batch_size * local_heads * seq_len * v_head_dim * precision_bytes
     attn_score_bytes = 0.0
     if not flash_attention:
         attn_score_bytes = batch_size * local_heads * seq_len * key_seq_len * precision_bytes
@@ -516,7 +405,6 @@ def attention_kv_cache_token_bytes(
     qk_nope_head_dim=None,
     qk_rope_head_dim=None,
     v_head_dim=None,
-    cache_mla_latents=False,
 ):
     if str(attention_type or "").lower() == "mla":
         return mla_kv_cache_token_bytes(
@@ -527,7 +415,6 @@ def attention_kv_cache_token_bytes(
             num_heads=num_heads,
             qk_nope_head_dim=qk_nope_head_dim,
             v_head_dim=v_head_dim,
-            cache_mla_latents=cache_mla_latents,
         )
     return kv_cache_token_bytes(
         batch_size=batch_size,
@@ -586,9 +473,6 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
             qk_nope_head_dim=self.qk_nope_head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
-            run_type=run_type,
-            decode=False,
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms.update(runtime_ops)
         proxy_sizes = mla_runtime_proxy_sizes(
@@ -598,9 +482,6 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
             self.qk_nope_head_dim,
             self.qk_rope_head_dim,
             self.v_head_dim,
-            run_type=run_type,
-            decode=False,
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
 
         gemms["qkv_proj"] = (batch_size, seq_len, d_model, proxy_sizes["qkv_output_size"])
@@ -689,7 +570,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
     )
 
     processed = OrderedDict()
-    attention_keys = ATTENTION_GEMM_KEYS.union(MLA_LATENT_ATTENTION_GEMM_KEYS)
+    attention_keys = ATTENTION_GEMM_KEYS
     for key, shape in gemm_shapes_4d.items():
         if key in attention_keys:
             processed[key] = tuple(shape)
@@ -722,7 +603,6 @@ def get_transformer_mem_layer(
     qk_nope_head_dim=None,
     qk_rope_head_dim=None,
     v_head_dim=None,
-    cache_mla_latents=False,
     run_type="training",
     key_seq_len=None,
 ):  #  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
@@ -748,9 +628,6 @@ def get_transformer_mem_layer(
             full_recomputation=full_recomputation,
             tp=tp,
             cp=cp,
-            cache_mla_latents=cache_mla_latents,
-            run_type=run_type,
-            decode=False,
         )
         act_memory_layer = mla_activation["training_bytes"]
         act_memory_layer_inf = mla_activation["inference_peak_bytes"]
@@ -1141,9 +1018,6 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             qk_nope_head_dim=self.qk_nope_head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
-            run_type=run_type,
-            decode=True,
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms.update(runtime_ops)
         proxy_sizes = mla_runtime_proxy_sizes(
@@ -1153,9 +1027,6 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             self.qk_nope_head_dim,
             self.qk_rope_head_dim,
             self.v_head_dim,
-            run_type=run_type,
-            decode=True,
-            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms["qkv_proj"] = (batch_size, 1, d_model, proxy_sizes["qkv_output_size"])
         gemms["attention_score"] = (
@@ -1250,7 +1121,7 @@ def process_decode_gemm_shapes(
     )
 
     processed = OrderedDict()
-    decode_attention_keys = ATTENTION_GEMM_KEYS.union(MLA_LATENT_ATTENTION_GEMM_KEYS)
+    decode_attention_keys = ATTENTION_GEMM_KEYS
     for key, shape in gemm_shapes_4d.items():
         if key in decode_attention_keys:
             # Keep attention GEMMs in 4D for proper computation

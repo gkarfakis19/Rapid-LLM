@@ -37,7 +37,6 @@ def _build_mla_model(
     use_flashattention: bool = False,
     use_moe: bool = False,
     full_recomputation: bool = False,
-    cache_mla_latents: bool = False,
 ) -> config.ModelConfig:
     model_param = {
         "mode": "LLM",
@@ -61,7 +60,6 @@ def _build_mla_model(
             "qk_nope_head_dim": 12,
             "qk_rope_head_dim": 4,
             "v_head_dim": 8,
-            "cache_mla_latents": cache_mla_latents,
         },
         "intermediate_size": 128,
         "vocab_size": 512,
@@ -267,34 +265,6 @@ def test_mla_inference_decode_defaults_to_full_cache_path():
     assert "O_proj_absorbed" not in gemm_shapes
 
 
-def test_mla_inference_decode_latent_cache_uses_absorbed_path():
-    hw_config = _build_hw_config(tp=2)
-    hw_config.inference_config = hw_config.sch_config.inference
-    model = _build_mla_model(run_type="inference", cache_mla_latents=True)
-    config.validate_configs(hw_config, model)
-    tc = TimeCalculationLLMInference(hw_config, model, "LLM")
-
-    gemm_shapes = llm_util.process_decode_gemm_shapes(
-        tc,
-        batch_size=4,
-        current_seq_len=8,
-        d_model=64,
-        num_heads=4,
-        kv_heads=4,
-        intermediate_size=128,
-        vocab_size=512,
-        model_type=tc.model_type,
-    )
-
-    assert gemm_shapes["D_proj_q"] == (4, 64, 8)
-    assert gemm_shapes["D_proj_kv"] == (4, 64, 8)
-    assert gemm_shapes["U_proj_q_rope"] == (4, 8, 16)
-    assert gemm_shapes["attention_score_1"] == (16, 1, 8, 4)
-    assert gemm_shapes["attention_ctx_latent"] == (16, 1, 8, 4)
-    assert gemm_shapes["output_proj"] == (4, 16, 64)
-    assert "K_rope_proj" not in gemm_shapes
-
-
 def test_mla_local_projection_shapes_match_megatron_tp_and_cp_rules():
     hw_config = _build_hw_config(tp=2, cp=2)
     model = _build_mla_model()
@@ -319,7 +289,7 @@ def test_mla_local_projection_shapes_match_megatron_tp_and_cp_rules():
     assert _local_output_elements(tc, gemm_shapes["attention_output"], GemmType.ATTENTION_OUTPUT) == 256
 
 
-def test_mla_decode_cp_and_latent_shapes_match_megatron_local_rules():
+def test_mla_decode_cp_shapes_match_megatron_local_rules():
     hw_config = _build_hw_config(tp=2, cp=2)
     hw_config.inference_config = hw_config.sch_config.inference
     full_model = _build_mla_model(run_type="inference")
@@ -343,27 +313,6 @@ def test_mla_decode_cp_and_latent_shapes_match_megatron_local_rules():
     assert _local_output_elements(full_tc, full_shapes["U_proj_q"], GemmType.QKV) == 64
     assert _local_output_elements(full_tc, full_shapes["U_proj_kv"], GemmType.QKV) == 80
     assert _local_output_elements(full_tc, full_shapes["attention_output"], GemmType.ATTENTION_OUTPUT) == 64
-
-    latent_hw_config = _build_hw_config(tp=2)
-    latent_hw_config.inference_config = latent_hw_config.sch_config.inference
-    latent_model = _build_mla_model(run_type="inference", cache_mla_latents=True)
-    config.validate_configs(latent_hw_config, latent_model)
-    latent_tc = TimeCalculationLLMInference(latent_hw_config, latent_model, "LLM")
-
-    latent_shapes = llm_util.process_decode_gemm_shapes(
-        latent_tc,
-        batch_size=4,
-        current_seq_len=8,
-        d_model=64,
-        num_heads=4,
-        kv_heads=4,
-        intermediate_size=128,
-        vocab_size=512,
-        model_type=latent_tc.model_type,
-    )
-
-    assert _local_output_elements(latent_tc, latent_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ) == 32
-
 
 def test_mla_activation_tensor_bytes_match_full_runtime_formula():
     activation = llm_util.mla_activation_tensor_bytes(
@@ -395,7 +344,7 @@ def test_mla_activation_tensor_bytes_match_full_runtime_formula():
     assert activation["inference_peak_bytes"] == 16384.0
 
 
-def test_mla_activation_tensor_bytes_track_tp_cp_flash_and_latent_modes():
+def test_mla_activation_tensor_bytes_track_tp_cp_and_flash_modes():
     full_flash = llm_util.mla_activation_tensor_bytes(
         batch_size=4,
         seq_len=4,
@@ -415,37 +364,12 @@ def test_mla_activation_tensor_bytes_track_tp_cp_flash_and_latent_modes():
         tp=2,
         cp=2,
     )
-    latent_decode = llm_util.mla_activation_tensor_bytes(
-        batch_size=4,
-        seq_len=1,
-        key_seq_len=8,
-        hidden_dim=64,
-        intermediate_size=128,
-        num_heads=4,
-        q_lora_rank=8,
-        kv_lora_rank=4,
-        qk_nope_head_dim=12,
-        qk_rope_head_dim=4,
-        v_head_dim=8,
-        precision_bytes=2,
-        model_type="llama",
-        flash_attention=False,
-        full_recomputation=False,
-        tp=2,
-        cp=2,
-        cache_mla_latents=True,
-        run_type="inference",
-        decode=True,
-    )
 
     assert full_flash["qkv_bytes"] == 2816.0
     assert full_flash["attention_ctx_bytes"] == 512.0
     assert full_flash["attention_score_bytes"] == 0.0
     assert full_flash["training_bytes"] == 15616.0
     assert full_flash["inference_peak_bytes"] == 4096.0
-    assert latent_decode["qkv_bytes"] == 192.0
-    assert latent_decode["attention_ctx_bytes"] == 64.0
-    assert latent_decode["attention_score_bytes"] == 128.0
 
 
 def test_mla_training_composite_flops_match_full_runtime_components():
@@ -550,7 +474,7 @@ def test_mla_training_tp_and_cp_comm_bytes_follow_megatron_contract():
         tc_tp.intermediate_size,
         tc_tp.hw_config.tech_config.core.num_bundles,
     )
-    assert timings_tp["qkv_proj"].backward.comm_bytes == 768
+    assert timings_tp["qkv_proj"].backward.comm_bytes == 1024
     assert timings_tp["attention"].backward.comm_bytes == 0
     assert timings_tp["output_proj"].forward.comm_bytes == 4096
 
@@ -585,13 +509,13 @@ def test_mla_training_tp_and_cp_comm_bytes_follow_megatron_contract():
         tc_hybrid.hw_config.tech_config.core.num_bundles,
     )
     assert timings_hybrid["qkv_proj"].forward.comm_bytes == 3072
-    assert timings_hybrid["qkv_proj"].backward.comm_bytes == 384
+    assert timings_hybrid["qkv_proj"].backward.comm_bytes == 512
     assert timings_hybrid["attention"].backward.comm_bytes == 3072
     assert timings_hybrid["output_proj"].forward.comm_bytes == 2048
     assert timings_hybrid["output_proj"].backward.comm_bytes == 3072
 
 
-def test_mla_inference_prefill_and_decode_comm_bytes_follow_full_vs_latent_modes():
+def test_mla_inference_prefill_and_decode_comm_bytes_follow_full_cache_mode():
     hw_config = _build_hw_config(tp=2, cp=2)
     hw_config.inference_config = hw_config.sch_config.inference
     model = _build_mla_model(run_type="inference")
@@ -631,29 +555,47 @@ def test_mla_inference_prefill_and_decode_comm_bytes_follow_full_vs_latent_modes
     assert decode_timings["qkv_proj"].forward.comm_bytes == 128
     assert decode_timings["output_proj"].forward.comm_bytes == 256
 
-    latent_model = _build_mla_model(run_type="inference", cache_mla_latents=True)
-    config.validate_configs(hw_config, latent_model)
-    latent_tc = TimeCalculationLLMInference(hw_config, latent_model, "LLM")
-    latent_decode_shapes = llm_util.process_decode_gemm_shapes(
-        latent_tc,
-        batch_size=latent_tc._effective_transformer_batch(),
-        current_seq_len=8,
-        d_model=latent_tc.hidden_dim,
-        num_heads=latent_tc.num_heads,
-        kv_heads=latent_tc.kv_heads,
-        intermediate_size=latent_tc.intermediate_size,
-        vocab_size=latent_tc.vocab_size,
-        model_type=latent_tc.model_type,
-    )
-    latent_decode_timings, _ = latent_tc._build_decode_transformer_results(
-        batch_size=latent_tc._effective_transformer_batch(),
-        total_seq_len=8,
-        use_moe_layer=False,
-        gemm_shapes=latent_decode_shapes,
-    )
-    assert latent_decode_timings["qkv_proj"].forward.comm_bytes == 256
-    assert latent_decode_timings["output_proj"].forward.comm_bytes == 256
+def test_mla_inference_decode_flash_flag_is_ignored_without_flashmla_support():
+    hw_config = _build_hw_config(tp=2)
+    hw_config.inference_config = hw_config.sch_config.inference
 
+    def _decode_timings(*, use_flashattention: bool):
+        model = _build_mla_model(
+            run_type="inference",
+            use_flashattention=use_flashattention,
+        )
+        config.validate_configs(hw_config, model)
+        tc = TimeCalculationLLMInference(hw_config, model, "LLM")
+        decode_shapes = llm_util.process_decode_gemm_shapes(
+            tc,
+            batch_size=tc._effective_transformer_batch(),
+            current_seq_len=8,
+            d_model=tc.hidden_dim,
+            num_heads=tc.num_heads,
+            kv_heads=tc.kv_heads,
+            intermediate_size=tc.intermediate_size,
+            vocab_size=tc.vocab_size,
+            model_type=tc.model_type,
+        )
+        timings, _ = tc._build_decode_transformer_results(
+            batch_size=tc._effective_transformer_batch(),
+            total_seq_len=8,
+            use_moe_layer=False,
+            gemm_shapes=decode_shapes,
+        )
+        return timings
+
+    no_flash = _decode_timings(use_flashattention=False)
+    with_flash = _decode_timings(use_flashattention=True)
+    assert no_flash["attention"].forward.compute_time == pytest.approx(
+        with_flash["attention"].forward.compute_time
+    )
+    assert no_flash["attention"].forward.flops == pytest.approx(
+        with_flash["attention"].forward.flops
+    )
+    assert no_flash["attention"].forward.comm_bytes == with_flash["attention"].forward.comm_bytes
+    assert no_flash["qkv_proj"].forward.comm_bytes == with_flash["qkv_proj"].forward.comm_bytes
+    assert no_flash["output_proj"].forward.comm_bytes == with_flash["output_proj"].forward.comm_bytes
 
 def test_mla_training_flashattention_uses_full_attention_contract():
     hw_config = _build_hw_config()
@@ -775,7 +717,7 @@ def test_mla_moe_training_only_changes_attention_side():
     assert "moe_combine" in moe_timings
 
 
-def test_mla_kv_cache_bytes_and_memory_follow_full_and_latent_modes():
+def test_mla_kv_cache_bytes_and_memory_follow_full_cache_mode():
     full_bytes = llm_util.attention_kv_cache_token_bytes(
         "mla",
         batch_size=4,
@@ -787,24 +729,9 @@ def test_mla_kv_cache_bytes_and_memory_follow_full_and_latent_modes():
         qk_nope_head_dim=12,
         qk_rope_head_dim=4,
         v_head_dim=8,
-        cache_mla_latents=False,
-    )
-    latent_bytes = llm_util.attention_kv_cache_token_bytes(
-        "mla",
-        batch_size=4,
-        kv_heads=4,
-        head_dim=16,
-        precision_bytes=2,
-        kv_lora_rank=4,
-        num_heads=4,
-        qk_nope_head_dim=12,
-        qk_rope_head_dim=4,
-        v_head_dim=8,
-        cache_mla_latents=True,
     )
 
     assert full_bytes == 768
-    assert latent_bytes == 64
 
     hw_config = _build_hw_config(tp=2, cp=2)
     hw_config.inference_config = hw_config.sch_config.inference
@@ -820,30 +747,18 @@ def test_mla_kv_cache_bytes_and_memory_follow_full_and_latent_modes():
     )
     assert full_memory["kv_cache_bytes_per_layer"] == pytest.approx(1536.0)
 
-    latent_model = _build_mla_model(run_type="inference", cache_mla_latents=True)
-    config.validate_configs(hw_config, latent_model)
-    latent_tc = TimeCalculationLLMInference(hw_config, latent_model, "LLM")
-    latent_memory = MemoryEstimator(latent_tc).build_memory_data(
-        mode="inference",
-        batch_size=latent_tc._effective_transformer_batch(),
-        seq_len=1,
-        kv_cache_tokens=8,
-    )
-    assert latent_memory["kv_cache_bytes_per_layer"] == pytest.approx(256.0)
 
-
-def test_mla_inference_decode_sampling_runs_for_full_and_latent_modes():
+def test_mla_inference_decode_sampling_runs_for_full_mode():
     hw_config = _build_hw_config()
     hw_config.inference_config = hw_config.sch_config.inference
-    for cache_mla_latents in (False, True):
-        model = _build_mla_model(run_type="inference", cache_mla_latents=cache_mla_latents)
-        config.validate_configs(hw_config, model)
-        tc = TimeCalculationLLMInference(hw_config, model, "LLM")
-        decode_time, decode_energy, samples = tc.calc_decode_time()
+    model = _build_mla_model(run_type="inference")
+    config.validate_configs(hw_config, model)
+    tc = TimeCalculationLLMInference(hw_config, model, "LLM")
+    decode_time, decode_energy, samples = tc.calc_decode_time()
 
-        assert decode_time > 0.0
-        assert decode_energy > 0.0
-        assert len(samples) > 0
+    assert decode_time > 0.0
+    assert decode_energy > 0.0
+    assert len(samples) > 0
 
 
 def test_mla_dense_vs_gqa_toy_training_and_inference_are_not_pathologically_reversed():

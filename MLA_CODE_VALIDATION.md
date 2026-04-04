@@ -3,7 +3,7 @@
 ## Scope
 
 This is the lightweight external validation pass for RAPID-LLM's MLA implementation after the
-Megatron-equality PT#1 changes.
+PT#1 Megatron-alignment work.
 
 The goal is deliberately narrow:
 
@@ -14,7 +14,8 @@ The goal is deliberately narrow:
   paths execute cleanly
 
 This validation does **not** add tracing hooks to RAPID-LLM and it does **not** claim cycle-level
-parity with Megatron kernels. It is a code-contract and toy-runtime validation.
+parity with Megatron kernels. It is a code-contract and toy-runtime validation for the supported
+subset: training, prefill, and default full-cache decode.
 
 ## Pinned references
 
@@ -36,12 +37,11 @@ The validator intentionally avoids heavy instrumentation.
    - training: `tp=1`, `tp=2`, `cp=2`, `tp=2 cp=2`
    - inference prefill: `tp=1`, `tp=2`, `cp=2`, `tp=2 cp=2`
    - inference decode: `tp=1`, `tp=2`, `cp=2`, `tp=2 cp=2`
-   - inference decode with `cache_mla_latents=true`: `tp=2`
 4. Run a small practical smoke matrix through RAPID-LLM itself in:
    - analytical mode
    - full AstraSim hierarchical mode
    - dense and one MoE sanity case
-   - default full-cache decode and latent-cache decode
+   - default full-cache decode
 
 Primary artifacts:
 
@@ -51,8 +51,8 @@ Primary artifacts:
 
 Latest validator summary:
 
-- `93` checks passed
-- `0` checks mismatched
+- validator counts come from the canonical machine-readable output in
+  [tmp/mla_code_validation/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_code_validation/results.json)
 
 ## Reference code facts used
 
@@ -61,11 +61,8 @@ Latest validator summary:
 The validator asserts these pinned Megatron facts:
 
 1. Default MLA GPT layer spec uses local `linear()` down projections for `q_down` and `kv_down`.
-2. `cache_mla_latents` defaults to `False`.
-3. Latent cache stores `kv_lora_rank + qk_pos_emb_head_dim`.
-4. Default training and prefill use the unabsorbed MLA path:
+2. Default training and prefill use the unabsorbed MLA path:
    `q_down/kv_down -> q_up/kv_up -> full per-head attention -> row-parallel output`.
-5. Absorption is decode-only and only active when `cache_mla_latents=true`.
 
 ### DeepSpeed
 
@@ -102,23 +99,19 @@ The old absorbed-latent training/prefill path is no longer the default model.
 
 ### 3. Inference decode mode split
 
-RAPID-LLM now follows the Megatron mode split:
+RAPID-LLM follows Megatron's supported default decode contract:
 
 - default decode uses full per-head KV cache
-- `cache_mla_latents=true` switches to absorbed latent-cache decode
 
-This is validated by checking the emitted runtime components:
+The default decode path is validated by checking the emitted runtime components:
 
 - default decode exposes `U_proj_q` and `U_proj_kv`
-- latent decode exposes absorbed-score/output components and does **not** emit the old standalone
-  `K_rope_proj`
 
 ### 4. KV-cache bytes
 
-RAPID-LLM now matches the two Megatron cache modes:
+RAPID-LLM matches the Megatron default full-cache mode exactly:
 
 - full-cache mode: per-head `K/V`, TP-sharded over heads
-- latent-cache mode: `kv_lora_rank + qk_rope_head_dim`, not additionally TP-divided
 
 The toy validator checks per-rank cache bytes directly.
 
@@ -143,15 +136,12 @@ Covered toy cases:
 - training hierarchical dense: `tp=2 cp=2 flash=true`
 - training hierarchical MoE: `tp=1 cp=1`
 - inference analytical full-cache: `tp=2 cp=2`
-- inference analytical latent-cache decode: `tp=2`
 - inference hierarchical full-cache: `tp=2 cp=2`
-- inference hierarchical latent-cache + MoE: `tp=2`
 
 Key sanity outcomes from [tmp/mla_pt1_smoke/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_pt1_smoke/results.json):
 
 - all cases executed without MLA-specific runtime failures
-- full-cache inference reports larger KV-cache bytes than latent-cache inference
-- latent-cache decode is faster than the matched full-cache analytical toy case
+- full-cache inference KV-cache sizing matches the expected Megatron-style per-head storage contract
 - hierarchical runs complete for both dense and MoE sanity cases
 
 The MoE practical cases still print the repo's existing MoE energy warning. That is unrelated to the
@@ -159,15 +149,16 @@ MLA contract work and remains a known simulator limitation.
 
 ## Bottom line
 
-Within the intended scope of this lightweight validation, RAPID-LLM's current MLA model is now
-Megatron-equal.
+Within the intended scope of this lightweight validation, RAPID-LLM's current MLA model is aligned
+with the pinned Megatron/DeepSpeed code contract for training, prefill, and default full-cache
+decode.
 
 More precisely, it is aligned with the pinned Megatron/DeepSpeed **code contract** for:
 
 - parameter grouping
 - TP partitioning
 - training/prefill full-MLA execution
-- decode mode split
+- default decode mode split
 - KV-cache sizing
 - CP-aware local shape behavior
 
@@ -177,5 +168,4 @@ What this validation still does **not** prove:
 - exact peak activation-memory parity with a live Megatron run
 - exact end-to-end latency parity with Megatron on real hardware
 
-Those would require a heavier trace- or measurement-based validation pass. For the current PT#1
-goal, the code-level parity target is satisfied.
+Those would require a heavier trace- or measurement-based validation pass.

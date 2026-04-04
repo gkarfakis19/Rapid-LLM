@@ -147,7 +147,6 @@ class MemoryEstimator:
             qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
             qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
             v_head_dim=getattr(tc, "v_head_dim", None),
-            cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
             run_type=getattr(tc, "run_type", "training"),
             key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
         )
@@ -228,7 +227,6 @@ class MemoryEstimator:
                 qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
                 v_head_dim=getattr(tc, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
                 run_type=getattr(tc, "run_type", "training"),
                 key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
             )
@@ -422,7 +420,6 @@ class MemoryEstimator:
                 qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
                 v_head_dim=getattr(tc, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
             )
             gemm_shapes_dense = llm_util.process_gemm_shapes(
                 dense_ctx,
@@ -614,12 +611,11 @@ class MemoryEstimator:
                     num_heads=getattr(tc, "num_heads", None),
                     qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
                     v_head_dim=getattr(tc, "v_head_dim", None),
-                    cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
                 )
                 kv_tokens_local = math.ceil(float(kv_tokens) / float(max(1, cp)))
-                kv_cache_bytes_per_layer = float(per_token_bytes) * float(kv_tokens_local)
-                if not bool(getattr(tc, "cache_mla_latents", False)):
-                    kv_cache_bytes_per_layer /= float(max(1, tp))
+                kv_cache_bytes_per_layer = (
+                    float(per_token_bytes) * float(kv_tokens_local) / float(max(1, tp))
+                )
             else:
                 kv_heads = int(getattr(tc, "kv_heads", tc.num_heads))
                 head_dim = getattr(tc, "head_dim", None)

@@ -833,7 +833,6 @@ class TimeCalculationLLM(TimeCalculation):
                 qk_nope_head_dim=self.qk_nope_head_dim,
                 qk_rope_head_dim=self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
-                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
             )
             return int(math.ceil(float(self.seq_len) * float(per_token_bytes)))
         head_dim = getattr(self, "head_dim", None)
@@ -2885,9 +2884,8 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_shapes: Dict[str, Tuple[int, ...]],
         precision_bytes: int,
     ) -> int:
-        attn_output_key = "attention_ctx_latent" if "attention_ctx_latent" in gemm_shapes else "attention_output"
         elements = self._mla_component_output_elements(
-            gemm_shapes[attn_output_key],
+            gemm_shapes["attention_output"],
             GemmType.ATTENTION_OUTPUT,
         )
         return int(math.ceil(float(elements) * float(precision_bytes)))
@@ -3022,12 +3020,19 @@ class TimeCalculationLLM(TimeCalculation):
         if kind is None:
             return 0, 0.0
         d_proj_q_spec = self._shard_gemm_descriptor(gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ)
+        # Megatron's kv_down projection emits both the latent KV slice and the
+        # RoPE-bearing slice, so the TP reduction on the replicated down-proj
+        # branch must include gradients for q_lora_rank + kv_lora_rank + rope.
         size_bytes = int(
             math.ceil(
                 float(self.precision.grad_communication)
                 * float(d_proj_q_spec.shard_m)
                 * float(d_proj_q_spec.shard_batch)
-                * float(int(self.q_lora_rank) + int(self.kv_lora_rank))
+                * float(
+                    int(self.q_lora_rank)
+                    + int(self.kv_lora_rank)
+                    + int(self.qk_rope_head_dim)
+                )
             )
         )
         comm_time = self._mla_collective_time(
@@ -3204,19 +3209,12 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim: int,
         decode: bool = False,
     ) -> OperationTiming:
-        if "U_proj_q" in gemm_shapes:
-            components = (
-                ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
-                ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
-                ("mla_u_proj_q", gemm_shapes["U_proj_q"], GemmType.QKV),
-                ("mla_u_proj_kv", gemm_shapes["U_proj_kv"], GemmType.QKV),
-            )
-        else:
-            components = (
-                ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
-                ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
-                ("mla_u_proj_q_rope", gemm_shapes["U_proj_q_rope"], GemmType.QKV),
-            )
+        components = (
+            ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
+            ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
+            ("mla_u_proj_q", gemm_shapes["U_proj_q"], GemmType.QKV),
+            ("mla_u_proj_kv", gemm_shapes["U_proj_kv"], GemmType.QKV),
+        )
         forward_comm_bytes, forward_comm_time = self._mla_projection_forward_comm(
             gemm_shapes,
             decode=decode,
@@ -3249,25 +3247,17 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim: int,
         decode: bool = False,
     ) -> Dict[str, OperationTiming]:
-        absorbed_mode = "attention_score_1" in gemm_shapes
-        if absorbed_mode:
-            score_components = (
-                ("mla_attention_score_1", gemm_shapes["attention_score_1"], GemmType.ATTENTION_SCORE),
-                ("mla_attention_score_2", gemm_shapes["attention_score_2"], GemmType.ATTENTION_SCORE),
-                ("mla_attention_score_rope", gemm_shapes["attention_score_rope"], GemmType.ATTENTION_SCORE),
-            )
-            output_components = (
-                ("mla_attention_ctx_latent", gemm_shapes["attention_ctx_latent"], GemmType.ATTENTION_OUTPUT),
-            )
-        else:
-            score_components = (
-                ("mla_attention_score", gemm_shapes["attention_score"], GemmType.ATTENTION_SCORE),
-            )
-            output_components = (
-                ("mla_attention_output", gemm_shapes["attention_output"], GemmType.ATTENTION_OUTPUT),
-            )
+        score_components = (
+            ("mla_attention_score", gemm_shapes["attention_score"], GemmType.ATTENTION_SCORE),
+        )
+        output_components = (
+            ("mla_attention_output", gemm_shapes["attention_output"], GemmType.ATTENTION_OUTPUT),
+        )
 
-        flash_enabled = bool(self.flash_attention) and not decode and not absorbed_mode
+        # RAPID follows the repo-wide inference rule that flash attention is a
+        # prefill/training optimization only. MLA decode does not model
+        # FlashMLA; decode always stays on the non-flash attention path.
+        flash_enabled = bool(self.flash_attention) and not decode
 
         score_forward_mem = None
         score_backward_mem = None
@@ -3469,14 +3459,9 @@ class TimeCalculationLLM(TimeCalculation):
         include_backward: bool,
         hidden_dim: int,
     ) -> OperationTiming:
-        if "O_proj_absorbed" in gemm_shapes:
-            components = (
-                ("mla_output_proj_absorbed", gemm_shapes["O_proj_absorbed"], GemmType.ATTENTION_OUTPUT),
-            )
-        else:
-            components = (
-                ("mla_output_proj", gemm_shapes["output_proj"], GemmType.OUT_PROJ),
-            )
+        components = (
+            ("mla_output_proj", gemm_shapes["output_proj"], GemmType.OUT_PROJ),
+        )
         forward_comm_bytes, forward_comm_time = self._mla_output_forward_comm(gemm_shapes)
         forward = self._mla_composite_direction(
             stage_name="mla_output_proj_f",
@@ -3533,7 +3518,6 @@ class TimeCalculationLLM(TimeCalculation):
                 qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
                 v_head_dim=getattr(self, "v_head_dim", None),
-                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
                 run_type=str(
                     getattr(
                         self,

@@ -41,6 +41,7 @@ def _env_flag(name: str) -> bool:
 
 
 _MOE_PADDING_WARNED = False
+_MLA_DECODE_FLASH_WARNED = False
 
 
 @dataclass(frozen=True)
@@ -1291,7 +1292,6 @@ class LLMAttentionConfig:
     qk_nope_head_dim: Optional[int] = None
     qk_rope_head_dim: Optional[int] = None
     v_head_dim: Optional[int] = None
-    cache_mla_latents: bool = False
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
 
@@ -1398,20 +1398,7 @@ class LLMAttentionConfig:
                 raise ValueError(
                     "model_param.attention.v_head_dim must be specified when attention_type='mla'"
                 )
-        raw_cache_mla_latents = attention_dict.get("cache_mla_latents", False)
-        cache_mla_latents = _coerce_bool(
-            raw_cache_mla_latents,
-            "model_param.attention.cache_mla_latents",
-        )
-        if attn_type != "mla" and cache_mla_latents:
-            raise ValueError(
-                "model_param.attention.cache_mla_latents is only valid when attention_type='mla'"
-            )
-
-        raw_flash = attention_dict.get(
-            "use_flashattention",
-            attention_dict.get("used_flash_attention", False),
-        )
+        raw_flash = attention_dict.get("use_flashattention", False)
         use_flashattention = _coerce_bool(
             raw_flash,
             "model_param.attention.use_flashattention",
@@ -1447,7 +1434,6 @@ class LLMAttentionConfig:
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
-            cache_mla_latents=cache_mla_latents,
             use_flashattention=use_flashattention,
             attention_tile_size=attention_tile_size,
         )
@@ -1613,10 +1599,6 @@ class LLMConfig:
     @property
     def v_head_dim(self) -> Optional[int]:
         return getattr(self.attention, "v_head_dim", None)
-
-    @property
-    def cache_mla_latents(self) -> bool:
-        return bool(getattr(self.attention, "cache_mla_latents", False))
 
     @property
     def use_moe(self) -> bool:
@@ -2355,17 +2337,18 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     run_type = str(getattr(model, "run_type", "training")).lower()
     attention_type = str(getattr(getattr(model, "attention", None), "attention_type", "mha")).lower()
-    cache_mla_latents = bool(getattr(model, "cache_mla_latents", False))
-    if cache_mla_latents:
-        if attention_type != "mla":
-            raise ValueError(
-                "model_param.attention.cache_mla_latents requires attention_type='mla'."
-            )
-        if run_type != "inference":
-            raise ValueError(
-                "model_param.attention.cache_mla_latents is only supported for inference runs. "
-                "Megatron's MLA latent-cache absorption is decode-only and conflicts with training."
-            )
+    use_flashattention = bool(getattr(model, "use_flashattention", False))
+    if run_type == "inference" and attention_type == "mla":
+        decode_len = int(getattr(model, "decode_len", 0) or 0)
+        if use_flashattention and decode_len > 0:
+            global _MLA_DECODE_FLASH_WARNED
+            if not _MLA_DECODE_FLASH_WARNED:
+                print(
+                    "[WARNING]: MLA inference does not model FlashMLA decode. "
+                    "model_param.attention.use_flashattention only affects MLA prefill; "
+                    "decode continues to use the non-flash path."
+                )
+                _MLA_DECODE_FLASH_WARNED = True
     if run_type == "inference":
         replica_count = sch.inference.replica_count
         moe_dp = sch.inference.moe_dp

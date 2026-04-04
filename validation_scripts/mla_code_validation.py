@@ -56,7 +56,6 @@ class ToyCase:
     cp: int
     phase: str = "default"
     tp_sp: bool = False
-    cache_mla_latents: bool = False
 
 
 @dataclass
@@ -105,7 +104,7 @@ def _build_hw_config(*, tp: int = 1, cp: int = 1, tp_sp: bool = False) -> config
     return hw_config
 
 
-def _build_mla_model(*, run_type: str = "training", cache_mla_latents: bool = False) -> config.ModelConfig:
+def _build_mla_model(*, run_type: str = "training") -> config.ModelConfig:
     model_param = {
         "mode": "LLM",
         "run_type": run_type,
@@ -128,7 +127,6 @@ def _build_mla_model(*, run_type: str = "training", cache_mla_latents: bool = Fa
             "qk_nope_head_dim": 12,
             "qk_rope_head_dim": 4,
             "v_head_dim": 8,
-            "cache_mla_latents": cache_mla_latents,
         },
         "intermediate_size": 128,
         "vocab_size": 512,
@@ -153,7 +151,6 @@ def _rapid_tc(case: ToyCase):
         hw_config.inference_config = hw_config.sch_config.inference
     model = _build_mla_model(
         run_type=case.run_type,
-        cache_mla_latents=case.cache_mla_latents,
     )
     config.validate_configs(hw_config, model)
     if case.run_type == "inference":
@@ -205,10 +202,7 @@ def _rapid_mla_cache_token_bytes_per_rank(case: ToyCase) -> float:
         qk_nope_head_dim=12,
         qk_rope_head_dim=4,
         v_head_dim=8,
-        cache_mla_latents=case.cache_mla_latents,
     )
-    if case.cache_mla_latents:
-        return float(total)
     return float(total) / float(case.tp)
 
 
@@ -236,12 +230,10 @@ def _megatron_reference_shapes(case: ToyCase) -> Dict[str, int]:
     }
 
 
-def _megatron_cache_bytes_per_rank(*, tp: int, latent_cache: bool) -> float:
+def _megatron_cache_bytes_per_rank(*, tp: int) -> float:
     precision = 2
     batch_size = 4
     heads_local = 4 // tp
-    if latent_cache:
-        return float(batch_size * (4 + 4) * precision)
     return float(batch_size * heads_local * (12 + 4 + 8) * precision)
 
 
@@ -253,12 +245,6 @@ def _check_reference_code_facts() -> List[CheckResult]:
     )
     megatron_mla = _read_text(
         MEGATRON_ROOT / "megatron/core/transformer/multi_latent_attention.py"
-    )
-    megatron_cfg = _read_text(
-        MEGATRON_ROOT / "megatron/core/transformer/transformer_config.py"
-    )
-    megatron_ctx = _read_text(
-        MEGATRON_ROOT / "megatron/core/inference/contexts/dynamic_context.py"
     )
     deepspeed_autotp = _read_text(DEEPSPEED_ROOT / "deepspeed/module_inject/autotp_config.py")
 
@@ -275,45 +261,12 @@ def _check_reference_code_facts() -> List[CheckResult]:
     )
     checks.append(
         CheckResult(
-            name="Megatron default cache_mla_latents default",
-            status="PASS",
-            details=_find_required(
-                megatron_cfg,
-                r"cache_mla_latents:\s*bool\s*=\s*False",
-                "Megatron MLA cache_mla_latents defaults to False",
-            ),
-        )
-    )
-    checks.append(
-        CheckResult(
-            name="Megatron latent cache shape",
-            status="PASS",
-            details=_find_required(
-                megatron_ctx,
-                r"self\.kv_reduced_dim\s*=\s*model_config\.kv_lora_rank\s*\+\s*model_config\.qk_pos_emb_head_dim",
-                "Megatron latent cache stores kv_lora_rank + qk_pos_emb_head_dim",
-            ),
-        )
-    )
-    checks.append(
-        CheckResult(
             name="Megatron default prefill/training path is unabsorbed",
             status="PASS",
             details=_find_required(
                 megatron_mla,
                 r"kv,\s*_ = self\.linear_kv_up_proj\(kv_compressed\)",
                 "Megatron expands kv_compressed back to full per-head K/V before attention",
-            ),
-        )
-    )
-    checks.append(
-        CheckResult(
-            name="Megatron decode latent-cache path uses absorbed decode helper",
-            status="PASS",
-            details=_find_required(
-                megatron_mla,
-                r"use_absorption\s*=\s*\(\s*self\.config\.cache_mla_latents[\s\S]*?inference_context\.is_decode_only\(\)\s*\)",
-                "Megatron absorption is gated by cache_mla_latents and decode-only inference",
             ),
         )
     )
@@ -412,44 +365,6 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
         )
     )
 
-    if case.cache_mla_latents and case.phase == "decode":
-        rapid_q_up = _rapid_local_output_elements(case, "U_proj_q_rope", GemmType.QKV)
-        results.append(
-            CheckResult(
-                name="Latent-cache decode switches to absorbed component path",
-                status=(
-                    "PASS"
-                    if (
-                        "attention_score_1" in shapes
-                        and "O_proj_absorbed" in shapes
-                        and "K_rope_proj" not in shapes
-                    )
-                    else "MISMATCH"
-                ),
-                details="Megatron only uses absorbed MLA decode when cache_mla_latents=true.",
-                rapid_value=str(
-                    {
-                        "attention_score_1": shapes.get("attention_score_1"),
-                        "O_proj_absorbed": shapes.get("O_proj_absorbed"),
-                        "K_rope_proj": shapes.get("K_rope_proj"),
-                    }
-                ),
-                reference_value="absorbed decode components present only in latent-cache mode, with kv_down_proj carrying both latent and rope terms",
-                case=case.name,
-            )
-        )
-        results.append(
-            CheckResult(
-                name="Latent-cache decode keeps q rope up-projection TP-sharded",
-                status="PASS" if rapid_q_up == (4 * 1 * (4 // case.tp) * 4) else "MISMATCH",
-                details="The absorbed decode helper should still shard per-head q_rope output across TP.",
-                rapid_value=rapid_q_up,
-                reference_value=(4 * 1 * (4 // case.tp) * 4),
-                case=case.name,
-            )
-        )
-        return results
-
     rapid_q_up = _rapid_local_output_elements(case, "U_proj_q", GemmType.QKV)
     rapid_kv_up = _rapid_local_output_elements(case, "U_proj_kv", GemmType.QKV)
     rapid_output_input = _rapid_local_output_elements(case, "attention_output", GemmType.ATTENTION_OUTPUT)
@@ -486,20 +401,15 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
 
     if case.run_type == "inference":
         rapid_cache = _rapid_mla_cache_token_bytes_per_rank(case)
-        megatron_full = _megatron_cache_bytes_per_rank(tp=case.tp, latent_cache=False)
-        megatron_latent = _megatron_cache_bytes_per_rank(tp=case.tp, latent_cache=True)
-        cache_status = (
-            "PASS"
-            if math.isclose(rapid_cache, megatron_latent if case.cache_mla_latents else megatron_full)
-            else "MISMATCH"
-        )
+        megatron_full = _megatron_cache_bytes_per_rank(tp=case.tp)
+        cache_status = "PASS" if math.isclose(rapid_cache, megatron_full) else "MISMATCH"
         results.append(
             CheckResult(
                 name="Per-rank inference KV-cache bytes per token",
                 status=cache_status,
-                details="RAPID MLA cache bytes compared against the selected Megatron cache mode.",
+                details="RAPID MLA cache bytes compared against Megatron's default full-cache mode.",
                 rapid_value=rapid_cache,
-                reference_value=(megatron_latent if case.cache_mla_latents else megatron_full),
+                reference_value=megatron_full,
                 case=case.name,
             )
         )
@@ -547,10 +457,10 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
     else:
         results.append(
             CheckResult(
-                name="Inference decode Flash/absorption contract",
+                name="Inference decode default full-cache contract",
                 status="PASS" if "U_proj_q" in shapes and "U_proj_kv" in shapes and "attention_score_1" not in shapes else "MISMATCH",
                 details=(
-                    "Megatron default decode uses the full-cache MLA path. Absorption should only appear when cache_mla_latents=true."
+                    "Megatron default decode uses the full-cache MLA path with explicit q/kv up-projections."
                 ),
                 rapid_value=str(
                     {
@@ -560,7 +470,7 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
                         "output_proj": shapes["output_proj"],
                     }
                 ),
-                reference_value="Megatron default decode uses full KV unless cache_mla_latents=true; FlashMLA only on decode latent-cache path",
+                reference_value="Megatron default decode uses the full-cache MLA path",
                 case=case.name,
             )
         )
@@ -596,14 +506,6 @@ def run_validation() -> Dict[str, object]:
         ToyCase(name="infer_decode_tp2", run_type="inference", tp=2, cp=1, phase="decode"),
         ToyCase(name="infer_decode_cp2", run_type="inference", tp=1, cp=2, phase="decode"),
         ToyCase(name="infer_decode_tp2_cp2", run_type="inference", tp=2, cp=2, phase="decode"),
-        ToyCase(
-            name="infer_decode_tp2_latent",
-            run_type="inference",
-            tp=2,
-            cp=1,
-            phase="decode",
-            cache_mla_latents=True,
-        ),
     ]
     for case in toy_cases:
         checks.extend(_compare_case(case))
