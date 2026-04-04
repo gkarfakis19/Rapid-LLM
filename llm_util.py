@@ -50,6 +50,13 @@ MLA_LATENT_ATTENTION_GEMM_KEYS = {
     "attention_score_rope",
     "attention_ctx_latent",
 }
+MLA_PROJECTION_COMPONENT_KEYS = {
+    "D_proj_q",
+    "D_proj_kv",
+    "U_proj_q",
+    "U_proj_kv",
+    "U_proj_q_rope",
+}
 
 _LLAMA_STYLE_MODEL_TYPES = {"llama", "glm4_moe", "glm4", "glm"}
 _GLM_MODEL_TYPES = {"glm4_moe", "glm4", "glm"}
@@ -91,6 +98,10 @@ def mla_dim_sizes(num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim):
     return qk_head_dim, q_size, v_size, kv_up_size
 
 
+def mla_uses_absorbed_decode(*, run_type: str, decode: bool, cache_mla_latents: bool) -> bool:
+    return bool(cache_mla_latents) and bool(decode) and str(run_type or "").lower() == "inference"
+
+
 def mla_attention_param_sizes(
     hidden_dim,
     num_heads,
@@ -115,7 +126,7 @@ def mla_attention_param_sizes(
         qk_rope_head_dim,
         v_head_dim,
     )
-    d_proj = groups["d_proj_q"] + groups["d_proj_kv"] + groups["k_rope_proj"]
+    d_proj = groups["d_proj_q"] + groups["d_proj_kv"]
     u_proj_q = groups["u_proj_q_nope"] + groups["u_proj_q_rope"]
     u_proj_kv = groups["u_proj_k_nope"] + groups["u_proj_v"]
     out_proj = groups["out_proj"]
@@ -132,6 +143,42 @@ def mla_attention_param_sizes(
         "attention_stage": groups["attention_stage"],
         "output_stage": groups["output_stage"],
         "total": d_proj + u_proj_q + u_proj_kv + out_proj,
+    }
+
+
+def mla_attention_params_per_rank(
+    hidden_dim,
+    num_heads,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
+    *,
+    tp=1,
+):
+    groups = mla_attention_param_groups(
+        hidden_dim,
+        num_heads,
+        q_lora_rank,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+    )
+    tp = max(1, int(tp))
+    sharded = (
+        groups["u_proj_q_nope"]
+        + groups["u_proj_q_rope"]
+        + groups["u_proj_k_nope"]
+        + groups["u_proj_v"]
+        + groups["out_proj"]
+    ) / float(tp)
+    replicated = groups["d_proj_q"] + groups["d_proj_kv"]
+    return {
+        "replicated": replicated,
+        "sharded": sharded,
+        "total": replicated + sharded,
     }
 
 
@@ -155,8 +202,7 @@ def mla_attention_param_groups(
 
     groups = {
         "d_proj_q": hidden_dim * q_lora_rank,
-        "d_proj_kv": hidden_dim * kv_lora_rank,
-        "k_rope_proj": hidden_dim * qk_rope_head_dim,
+        "d_proj_kv": hidden_dim * (kv_lora_rank + qk_rope_head_dim),
         "u_proj_q_nope": q_lora_rank * num_heads * qk_nope_head_dim,
         "u_proj_q_rope": q_lora_rank * num_heads * qk_rope_head_dim,
         "u_proj_k_nope": kv_lora_rank * num_heads * qk_nope_head_dim,
@@ -166,32 +212,91 @@ def mla_attention_param_groups(
     groups["projection_stage"] = (
         groups["d_proj_q"]
         + groups["d_proj_kv"]
-        + groups["k_rope_proj"]
+        + groups["u_proj_q_nope"]
         + groups["u_proj_q_rope"]
+        + groups["u_proj_k_nope"]
+        + groups["u_proj_v"]
     )
-    groups["attention_stage"] = groups["u_proj_q_nope"] + groups["u_proj_k_nope"]
-    groups["output_stage"] = groups["u_proj_v"] + groups["out_proj"]
+    groups["attention_stage"] = 0
+    groups["output_stage"] = groups["out_proj"]
     groups["total"] = (
         groups["projection_stage"] + groups["attention_stage"] + groups["output_stage"]
     )
     return groups
 
 
-def mla_kv_cache_token_bytes(batch_size, kv_lora_rank, qk_rope_head_dim, precision_bytes):
-    """Return per-token MLA cache bytes for the modeled latent KV + shared rope key."""
+def mla_full_kv_cache_token_bytes(
+    batch_size,
+    num_heads,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
+    precision_bytes,
+):
+    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
+    return batch_size * int(num_heads) * (qk_head_dim + int(v_head_dim)) * precision_bytes
+
+
+def mla_kv_cache_token_bytes(
+    batch_size,
+    kv_lora_rank,
+    qk_rope_head_dim,
+    precision_bytes,
+    *,
+    num_heads=None,
+    qk_nope_head_dim=None,
+    v_head_dim=None,
+    cache_mla_latents=False,
+):
+    """Return per-token MLA KV-cache bytes for the selected Megatron-style cache mode."""
+    if not cache_mla_latents and None not in (num_heads, qk_nope_head_dim, v_head_dim):
+        return mla_full_kv_cache_token_bytes(
+            batch_size=batch_size,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            precision_bytes=precision_bytes,
+        )
     return batch_size * (kv_lora_rank + qk_rope_head_dim) * precision_bytes
 
 
-def mla_runtime_proxy_sizes(num_heads, q_lora_rank, kv_lora_rank, qk_rope_head_dim):
-    """Return proxy tensor sizes for the modeled latent MLA runtime path."""
-    qkv_output_size = (
-        int(q_lora_rank)
-        + int(kv_lora_rank)
-        + int(num_heads) * int(qk_rope_head_dim)
-        + int(qk_rope_head_dim)
-    )
-    attention_output_size = int(kv_lora_rank)
-    output_proj_input_size = int(num_heads) * int(kv_lora_rank)
+def mla_runtime_proxy_sizes(
+    num_heads,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
+    *,
+    run_type="training",
+    decode=False,
+    cache_mla_latents=False,
+):
+    """Return proxy stage-output widths for the selected MLA runtime contract."""
+    if mla_uses_absorbed_decode(
+        run_type=run_type,
+        decode=decode,
+        cache_mla_latents=cache_mla_latents,
+    ):
+        qkv_output_size = (
+            int(q_lora_rank)
+            + int(kv_lora_rank)
+            + int(num_heads) * int(qk_rope_head_dim)
+            + int(qk_rope_head_dim)
+        )
+        attention_output_size = int(kv_lora_rank)
+        output_proj_input_size = int(num_heads) * int(kv_lora_rank)
+    else:
+        qk_head_dim, q_size, _v_size, kv_up_size = mla_dim_sizes(
+            num_heads,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+        )
+        qkv_output_size = int(q_lora_rank) + int(kv_lora_rank) + int(qk_rope_head_dim) + int(q_size) + int(kv_up_size)
+        attention_output_size = int(v_head_dim)
+        output_proj_input_size = int(num_heads) * int(v_head_dim)
     return {
         "qkv_output_size": qkv_output_size,
         "attention_output_size": attention_output_size,
@@ -208,49 +313,88 @@ def mla_runtime_op_shapes(
     num_heads,
     q_lora_rank,
     kv_lora_rank,
+    qk_nope_head_dim,
     qk_rope_head_dim,
+    v_head_dim,
+    run_type="training",
+    decode=False,
+    cache_mla_latents=False,
 ):
-    """Return the latent MLA runtime matmul shapes used by the composite kernels."""
+    """Return MLA component GEMM shapes for the selected Megatron-style runtime path."""
+    if mla_uses_absorbed_decode(
+        run_type=run_type,
+        decode=decode,
+        cache_mla_latents=cache_mla_latents,
+    ):
+        return OrderedDict(
+            {
+                "D_proj_q": (batch_size, query_seq_len, hidden_dim, q_lora_rank),
+                "D_proj_kv": (
+                    batch_size,
+                    query_seq_len,
+                    hidden_dim,
+                    int(kv_lora_rank) + int(qk_rope_head_dim),
+                ),
+                "U_proj_q_rope": (
+                    batch_size,
+                    query_seq_len,
+                    q_lora_rank,
+                    int(qk_rope_head_dim) * int(num_heads),
+                ),
+                "attention_score_1": (
+                    int(batch_size) * int(num_heads),
+                    query_seq_len,
+                    q_lora_rank,
+                    kv_lora_rank,
+                ),
+                "attention_score_2": (
+                    int(batch_size) * int(num_heads),
+                    query_seq_len,
+                    kv_lora_rank,
+                    key_seq_len,
+                ),
+                "attention_score_rope": (
+                    int(batch_size) * int(num_heads),
+                    query_seq_len,
+                    qk_rope_head_dim,
+                    key_seq_len,
+                ),
+                "attention_ctx_latent": (
+                    int(batch_size) * int(num_heads),
+                    query_seq_len,
+                    key_seq_len,
+                    kv_lora_rank,
+                ),
+                "O_proj_absorbed": (
+                    int(batch_size) * int(num_heads),
+                    query_seq_len,
+                    kv_lora_rank,
+                    hidden_dim,
+                ),
+            }
+        )
+
+    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
     return OrderedDict(
         {
             "D_proj_q": (batch_size, query_seq_len, hidden_dim, q_lora_rank),
-            "D_proj_kv": (batch_size, query_seq_len, hidden_dim, kv_lora_rank),
-            "U_proj_q_rope": (
+            "D_proj_kv": (
+                batch_size,
+                query_seq_len,
+                hidden_dim,
+                int(kv_lora_rank) + int(qk_rope_head_dim),
+            ),
+            "U_proj_q": (
                 batch_size,
                 query_seq_len,
                 q_lora_rank,
-                int(qk_rope_head_dim) * int(num_heads),
+                int(num_heads) * qk_head_dim,
             ),
-            "K_rope_proj": (batch_size, query_seq_len, hidden_dim, qk_rope_head_dim),
-            "attention_score_1": (
-                int(batch_size) * int(num_heads),
-                query_seq_len,
-                q_lora_rank,
-                kv_lora_rank,
-            ),
-            "attention_score_2": (
-                int(batch_size) * int(num_heads),
+            "U_proj_kv": (
+                batch_size,
                 query_seq_len,
                 kv_lora_rank,
-                key_seq_len,
-            ),
-            "attention_score_rope": (
-                int(batch_size) * int(num_heads),
-                query_seq_len,
-                qk_rope_head_dim,
-                key_seq_len,
-            ),
-            "attention_ctx_latent": (
-                int(batch_size) * int(num_heads),
-                query_seq_len,
-                key_seq_len,
-                kv_lora_rank,
-            ),
-            "O_proj_absorbed": (
-                int(batch_size) * int(num_heads),
-                query_seq_len,
-                kv_lora_rank,
-                hidden_dim,
+                int(num_heads) * (int(qk_nope_head_dim) + int(v_head_dim)),
             ),
         }
     )
@@ -266,15 +410,20 @@ def mla_activation_tensor_bytes(
     num_heads,
     q_lora_rank,
     kv_lora_rank,
+    qk_nope_head_dim,
     qk_rope_head_dim,
+    v_head_dim,
     precision_bytes,
     model_type="gpt",
     flash_attention=False,
     full_recomputation=False,
     tp=1,
     cp=1,
+    cache_mla_latents=False,
+    run_type="training",
+    decode=False,
 ):
-    """Approximate MLA activation sizing using the modeled latent runtime tensors.
+    """Approximate MLA activation sizing using the selected Megatron-style runtime tensors.
 
     The helper intentionally models the *local* per-rank activation footprint:
 
@@ -294,33 +443,48 @@ def mla_activation_tensor_bytes(
     num_heads = int(num_heads)
     q_lora_rank = int(q_lora_rank)
     kv_lora_rank = int(kv_lora_rank)
+    qk_nope_head_dim = int(qk_nope_head_dim)
     qk_rope_head_dim = int(qk_rope_head_dim)
+    v_head_dim = int(v_head_dim)
     if key_seq_len is None:
         key_seq_len = seq_len * cp
     key_seq_len = int(key_seq_len)
     projected_dim = 2 * int(intermediate_size) if is_llama_style(model_type) else int(intermediate_size)
 
     local_heads = int(math.ceil(float(num_heads) / float(tp)))
-    local_q_rank = int(math.ceil(float(q_lora_rank) / float(tp)))
-    local_kv_rank = int(math.ceil(float(kv_lora_rank) / float(tp)))
-    local_q_rope = int(math.ceil(float(num_heads * qk_rope_head_dim) / float(tp)))
-    local_k_rope = int(math.ceil(float(qk_rope_head_dim) / float(tp)))
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
-    hidden_bytes = (batch_size * seq_len * hidden_dim * precision_bytes) / float(tp)
-    qkv_bytes = batch_size * seq_len * (
-        local_q_rank + local_kv_rank + local_q_rope + local_k_rope
-    ) * precision_bytes
-    attn_ctx_bytes = (
-        batch_size
-        * local_heads
-        * seq_len
-        * kv_lora_rank
-        * precision_bytes
-    )
+    hidden_bytes = batch_size * seq_len * hidden_dim * precision_bytes
+    if mla_uses_absorbed_decode(
+        run_type=run_type,
+        decode=decode,
+        cache_mla_latents=cache_mla_latents,
+    ):
+        local_q_rank = q_lora_rank
+        local_kv_rank = kv_lora_rank
+        local_q_rope = int(math.ceil(float(num_heads * qk_rope_head_dim) / float(tp)))
+        local_k_rope = qk_rope_head_dim
+        qkv_bytes = batch_size * seq_len * (
+            local_q_rank + local_kv_rank + local_q_rope + local_k_rope
+        ) * precision_bytes
+        attn_ctx_bytes = (
+            batch_size
+            * local_heads
+            * seq_len
+            * kv_lora_rank
+            * precision_bytes
+        )
+    else:
+        q_down_bytes = batch_size * seq_len * q_lora_rank * precision_bytes
+        kv_down_bytes = batch_size * seq_len * (kv_lora_rank + qk_rope_head_dim) * precision_bytes
+        q_up_bytes = batch_size * seq_len * local_heads * qk_head_dim * precision_bytes
+        kv_up_bytes = batch_size * seq_len * local_heads * (qk_nope_head_dim + v_head_dim) * precision_bytes
+        qkv_bytes = q_down_bytes + kv_down_bytes + q_up_bytes + kv_up_bytes
+        attn_ctx_bytes = batch_size * local_heads * seq_len * v_head_dim * precision_bytes
     attn_score_bytes = 0.0
     if not flash_attention:
         attn_score_bytes = batch_size * local_heads * seq_len * key_seq_len * precision_bytes
-    ffn_bytes = (batch_size * seq_len * projected_dim * precision_bytes) / float(tp)
+    ffn_bytes = (batch_size * seq_len * projected_dim * precision_bytes) / float(max(1, tp))
 
     # Training stores the hidden-state boundaries plus MLA latent intermediates.
     if full_recomputation:
@@ -348,7 +512,11 @@ def attention_kv_cache_token_bytes(
     head_dim,
     precision_bytes,
     kv_lora_rank=None,
+    num_heads=None,
+    qk_nope_head_dim=None,
     qk_rope_head_dim=None,
+    v_head_dim=None,
+    cache_mla_latents=False,
 ):
     if str(attention_type or "").lower() == "mla":
         return mla_kv_cache_token_bytes(
@@ -356,6 +524,10 @@ def attention_kv_cache_token_bytes(
             kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
             precision_bytes=precision_bytes,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            v_head_dim=v_head_dim,
+            cache_mla_latents=cache_mla_latents,
         )
     return kv_cache_token_bytes(
         batch_size=batch_size,
@@ -411,14 +583,24 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
             num_heads=num_heads,
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            run_type=run_type,
+            decode=False,
+            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms.update(runtime_ops)
         proxy_sizes = mla_runtime_proxy_sizes(
             num_heads,
             self.q_lora_rank,
             self.kv_lora_rank,
+            self.qk_nope_head_dim,
             self.qk_rope_head_dim,
+            self.v_head_dim,
+            run_type=run_type,
+            decode=False,
+            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
 
         gemms["qkv_proj"] = (batch_size, seq_len, d_model, proxy_sizes["qkv_output_size"])
@@ -540,6 +722,8 @@ def get_transformer_mem_layer(
     qk_nope_head_dim=None,
     qk_rope_head_dim=None,
     v_head_dim=None,
+    cache_mla_latents=False,
+    run_type="training",
     key_seq_len=None,
 ):  #  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     """Approximate transformer-layer memory sizing for training/inference."""
@@ -555,13 +739,18 @@ def get_transformer_mem_layer(
             num_heads=n_heads,
             q_lora_rank=q_lora_rank,
             kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
             precision_bytes=precision.activations,
             model_type=model_type,
             flash_attention=flash_attention,
             full_recomputation=full_recomputation,
             tp=tp,
             cp=cp,
+            cache_mla_latents=cache_mla_latents,
+            run_type=run_type,
+            decode=False,
         )
         act_memory_layer = mla_activation["training_bytes"]
         act_memory_layer_inf = mla_activation["inference_peak_bytes"]
@@ -579,7 +768,7 @@ def get_transformer_mem_layer(
     if kv_heads is None:
         kv_heads = n_heads
     if str(attention_type or "").lower() == "mla":
-        attention_params = mla_attention_param_sizes(
+        attention_params_per_rank = mla_attention_params_per_rank(
             hidden_dim,
             n_heads,
             q_lora_rank,
@@ -587,22 +776,25 @@ def get_transformer_mem_layer(
             qk_nope_head_dim,
             qk_rope_head_dim,
             v_head_dim,
+            tp=tp,
         )["total"]
     else:
         head_dim = resolve_head_dim(hidden_dim, n_heads, head_dim=head_dim)
         q_size = n_heads * head_dim
         kv_size = kv_heads * head_dim
-        attention_params = (hidden_dim * (q_size + 2 * kv_size)) + (q_size * hidden_dim)
+        attention_params_per_rank = ((hidden_dim * (q_size + 2 * kv_size)) + (q_size * hidden_dim)) / tp
 
-    transformer_param_layer = attention_params + intermediate_size * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
+    transformer_param_layer = attention_params_per_rank + (
+        intermediate_size * ffn_proj_factor * hidden_dim / tp
+    )  # weights Wq,Wk,Wv,Wo,ffn per rank
 
-    optimizer_mem = (precision.optimizer_states * 2 + precision.activations) * transformer_param_layer / tp # don't divide by dp for DDP, NeMo ZeRO-1 optimizer style
-    tensor_weight_memory_layer = transformer_param_layer * precision.parameters / tp #weight memory
+    optimizer_mem = (precision.optimizer_states * 2 + precision.activations) * transformer_param_layer # don't divide by dp for DDP, NeMo ZeRO-1 optimizer style
+    tensor_weight_memory_layer = transformer_param_layer * precision.parameters #weight memory
     # master_parameters is set to 0 by default, so this works.
-    master_weight_memory_layer = transformer_param_layer * precision.master_parameters / tp
+    master_weight_memory_layer = transformer_param_layer * precision.master_parameters
     weight_memory_layer = tensor_weight_memory_layer + master_weight_memory_layer
     
-    gradient_mem = transformer_param_layer * precision.gradients / tp  # gradient buffers scaled by precision
+    gradient_mem = transformer_param_layer * precision.gradients  # gradient buffers scaled by precision
     # precision has been replaced with a class that has many different precision types.
     # furthemore, we have added this "master weight" copy for weights that are stored in FP32 optionally.
     # for weight_memory_layer it makes sense to just add them together. But I can see it's only really used in infernece?
@@ -946,14 +1138,24 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             num_heads=num_heads,
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            run_type=run_type,
+            decode=True,
+            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms.update(runtime_ops)
         proxy_sizes = mla_runtime_proxy_sizes(
             num_heads,
             self.q_lora_rank,
             self.kv_lora_rank,
+            self.qk_nope_head_dim,
             self.qk_rope_head_dim,
+            self.v_head_dim,
+            run_type=run_type,
+            decode=True,
+            cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
         )
         gemms["qkv_proj"] = (batch_size, 1, d_model, proxy_sizes["qkv_output_size"])
         gemms["attention_score"] = (

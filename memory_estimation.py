@@ -147,6 +147,8 @@ class MemoryEstimator:
             qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
             qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
             v_head_dim=getattr(tc, "v_head_dim", None),
+            cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
+            run_type=getattr(tc, "run_type", "training"),
             key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
         )
         transformer_mem_layer_moe = transformer_mem_layer_dense
@@ -226,11 +228,13 @@ class MemoryEstimator:
                 qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
                 v_head_dim=getattr(tc, "v_head_dim", None),
+                cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
+                run_type=getattr(tc, "run_type", "training"),
                 key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
             )
             ffn_proj_factor = 3 if llm_util.is_llama_style(tc.model_type) else 2
             if getattr(tc, "attention_type", "mha") == "mla":
-                attention_params = llm_util.mla_attention_param_sizes(
+                attention_params = llm_util.mla_attention_params_per_rank(
                     tc.hidden_dim,
                     tc.num_heads,
                     tc.q_lora_rank,
@@ -238,6 +242,7 @@ class MemoryEstimator:
                     tc.qk_nope_head_dim,
                     tc.qk_rope_head_dim,
                     tc.v_head_dim,
+                    tp=tp,
                 )["total"]
             else:
                 _head_dim, q_size, kv_size = llm_util.attention_dim_sizes(
@@ -246,7 +251,9 @@ class MemoryEstimator:
                     tc.kv_heads,
                     head_dim=getattr(tc, "head_dim", None),
                 )
-                attention_params = (tc.hidden_dim * (q_size + 2 * kv_size)) + (q_size * tc.hidden_dim)
+                attention_params = (
+                    (tc.hidden_dim * (q_size + 2 * kv_size)) + (q_size * tc.hidden_dim)
+                ) / float(max(1, tp))
             expert_param = ffn_proj_factor * moe_intermediate * tc.hidden_dim
             routed_experts = int(getattr(tc, "moe_num_experts", 1))
             shared_experts = int(getattr(tc, "n_shared_experts", 0))
@@ -262,9 +269,8 @@ class MemoryEstimator:
                 shared_params_per_rank = expert_param * shared_experts
             expert_params_per_rank = routed_params_per_rank + shared_params_per_rank
             router_params_per_rank = tc.hidden_dim * routed_experts
-            attention_params_per_rank = attention_params / float(max(1, tp))
             params_per_layer_moe = (
-                attention_params_per_rank + expert_params_per_rank + router_params_per_rank
+                attention_params + expert_params_per_rank + router_params_per_rank
             )
             weight_memory_layer_moe = params_per_layer_moe * bytes_per_param_weight
             if mode == "training":
@@ -416,6 +422,7 @@ class MemoryEstimator:
                 qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", None),
                 v_head_dim=getattr(tc, "v_head_dim", None),
+                cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
             )
             gemm_shapes_dense = llm_util.process_gemm_shapes(
                 dense_ctx,
@@ -604,13 +611,15 @@ class MemoryEstimator:
                     kv_lora_rank=getattr(tc, "kv_lora_rank", 0),
                     qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", 0),
                     precision_bytes=precision.kv_cache,
+                    num_heads=getattr(tc, "num_heads", None),
+                    qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
+                    v_head_dim=getattr(tc, "v_head_dim", None),
+                    cache_mla_latents=bool(getattr(tc, "cache_mla_latents", False)),
                 )
                 kv_tokens_local = math.ceil(float(kv_tokens) / float(max(1, cp)))
-                kv_cache_bytes_per_layer = (
-                    float(per_token_bytes)
-                    * float(kv_tokens_local)
-                    / float(max(1, tp))
-                )
+                kv_cache_bytes_per_layer = float(per_token_bytes) * float(kv_tokens_local)
+                if not bool(getattr(tc, "cache_mla_latents", False)):
+                    kv_cache_bytes_per_layer /= float(max(1, tp))
             else:
                 kv_heads = int(getattr(tc, "kv_heads", tc.num_heads))
                 head_dim = getattr(tc, "head_dim", None)

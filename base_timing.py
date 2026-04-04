@@ -143,6 +143,9 @@ class model_LLM:
         self.qk_nope_head_dim = getattr(exp_config.model_config.attention, "qk_nope_head_dim", None)
         self.qk_rope_head_dim = getattr(exp_config.model_config.attention, "qk_rope_head_dim", None)
         self.v_head_dim = getattr(exp_config.model_config.attention, "v_head_dim", None)
+        self.cache_mla_latents = bool(
+            getattr(exp_config.model_config.attention, "cache_mla_latents", False)
+        )
 
         self.moe_num_experts = int(getattr(exp_config.model_config, "num_experts", 1))
         self.moe_top_k = int(getattr(exp_config.model_config, "top_k", 1))
@@ -489,6 +492,7 @@ class TimeCalculation:
             self.qk_nope_head_dim = getattr(self.model, "qk_nope_head_dim", None)
             self.qk_rope_head_dim = getattr(self.model, "qk_rope_head_dim", None)
             self.v_head_dim = getattr(self.model, "v_head_dim", None)
+            self.cache_mla_latents = bool(getattr(self.model, "cache_mla_latents", False))
             raw_num_experts = getattr(self.model, "moe_num_experts", 1)
             raw_top_k = getattr(self.model, "moe_top_k", 1)
             self.moe_num_experts = max(1, int(raw_num_experts))

@@ -209,6 +209,7 @@ MOE_COMMUNICATION_RULES: Dict[
 class GemmType(Enum):
     ATTENTION_SCORE = "attention_score"
     ATTENTION_OUTPUT = "attention_output"
+    MLA_DOWN_PROJ = "mla_down_proj"
     QKV = "qkv"
     OUT_PROJ = "out_proj"
     FFN1 = "ffn1"
@@ -780,9 +781,11 @@ class TimeCalculationLLM(TimeCalculation):
         pp = max(1, self.pp)
 
         ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
-        attention_params = self._attention_param_total(hidden_dim)
-        transformer_param_layer = attention_params + intermediate_size * ffn_proj_factor * hidden_dim
-        params_per_layer_per_rank = transformer_param_layer / tp
+        attention_params = self._attention_param_total_per_rank(hidden_dim)
+        transformer_param_layer = attention_params + (
+            intermediate_size * ffn_proj_factor * hidden_dim / tp
+        )
+        params_per_layer_per_rank = transformer_param_layer
 
         total_transformer_params = params_per_layer_per_rank * self.num_layers
         if pp == 1:
@@ -818,6 +821,21 @@ class TimeCalculationLLM(TimeCalculation):
         """Return the total size in bytes of the KV cache."""
         if getattr(self, "disable_kv_cache", False):
             return 0
+        if self.attention_type == "mla":
+            per_token_bytes = llm_util.attention_kv_cache_token_bytes(
+                "mla",
+                batch_size=self.micro_batch,
+                kv_heads=self.kv_heads,
+                head_dim=self.head_dim,
+                precision_bytes=self.precision.kv_cache,
+                kv_lora_rank=self.kv_lora_rank,
+                num_heads=self.num_heads,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
+            )
+            return int(math.ceil(float(self.seq_len) * float(per_token_bytes)))
         head_dim = getattr(self, "head_dim", None)
         if head_dim is None:
             head_dim = self.hidden_dim // self.num_heads
@@ -845,6 +863,40 @@ class TimeCalculationLLM(TimeCalculation):
             head_dim=getattr(self, "head_dim", None),
         )
         return int(hidden_dim * (q_size + 2 * kv_size)), int(q_size * hidden_dim)
+
+    def _attention_param_components_per_rank(self, hidden_dim: int) -> Tuple[float, float]:
+        if self.attention_type == "mla":
+            groups = llm_util.mla_attention_param_groups(
+                hidden_dim,
+                self.num_heads,
+                self.q_lora_rank,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            )
+            qkv_params = (
+                groups["d_proj_q"]
+                + groups["d_proj_kv"]
+                + (
+                    groups["u_proj_q_nope"]
+                    + groups["u_proj_q_rope"]
+                    + groups["u_proj_k_nope"]
+                    + groups["u_proj_v"]
+                )
+                / float(max(1, self.tp))
+            )
+            output_params = groups["out_proj"] / float(max(1, self.tp))
+            return float(qkv_params), float(output_params)
+        qkv_params, output_params = self._attention_param_components(hidden_dim)
+        return (
+            float(qkv_params) / float(max(1, self.tp)),
+            float(output_params) / float(max(1, self.tp)),
+        )
+
+    def _attention_param_total_per_rank(self, hidden_dim: int) -> float:
+        qkv_params, output_params = self._attention_param_components_per_rank(hidden_dim)
+        return float(qkv_params + output_params)
 
     def _attention_param_total(self, hidden_dim: int) -> int:
         qkv_params, output_params = self._attention_param_components(hidden_dim)
@@ -907,6 +959,8 @@ class TimeCalculationLLM(TimeCalculation):
             if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
                 shard_batch = math.ceil(batch / tp)
                 batch_scale = 1.0 / tp
+            elif gemm_type == GemmType.MLA_DOWN_PROJ:
+                pass
             elif gemm_type in (GemmType.QKV, GemmType.FFN1):
                 shard_n = math.ceil(n / tp)
             elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):
@@ -917,10 +971,12 @@ class TimeCalculationLLM(TimeCalculation):
                 raise ValueError(f"Unsupported GEMM type for tensor parallelism: {gemm_type}")
         elif mode == ParallelismMode.CONTEXT:
             shard_m = math.ceil(m / cp)
-            shard_n = math.ceil(n / cp)
-            if gemm_type not in (
-                GemmType.ATTENTION_SCORE,
-                GemmType.ATTENTION_OUTPUT,
+            if gemm_type == GemmType.ATTENTION_SCORE:
+                shard_n = math.ceil(n / cp)
+            elif gemm_type == GemmType.ATTENTION_OUTPUT:
+                shard_k = math.ceil(k / cp)
+            elif gemm_type not in (
+                GemmType.MLA_DOWN_PROJ,
                 GemmType.QKV,
                 GemmType.OUT_PROJ,
                 GemmType.FFN1,
@@ -930,11 +986,16 @@ class TimeCalculationLLM(TimeCalculation):
                 raise ValueError(f"Unsupported GEMM type for context parallelism: {gemm_type}")
         elif mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             shard_m = math.ceil(m / cp)
-            if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
+            if gemm_type == GemmType.ATTENTION_SCORE:
                 shard_batch = math.ceil(batch / tp)
                 batch_scale = 1.0 / tp
                 shard_n = math.ceil(n / cp)
+            elif gemm_type == GemmType.ATTENTION_OUTPUT:
+                shard_batch = math.ceil(batch / tp)
+                batch_scale = 1.0 / tp
                 shard_k = math.ceil(k / cp)
+            elif gemm_type == GemmType.MLA_DOWN_PROJ:
+                pass
             elif gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.LINEAR_SOFTMAX):
                 shard_n = math.ceil(n / tp)
             elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):
@@ -1209,6 +1270,8 @@ class TimeCalculationLLM(TimeCalculation):
             return 0
         if gemm_type is None:
             return int(k * n)
+        if gemm_type == GemmType.MLA_DOWN_PROJ:
+            return int(k * n)
         if gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.LINEAR_SOFTMAX):
             return int(k * shard_n)
         if gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):
@@ -1345,6 +1408,13 @@ class TimeCalculationLLM(TimeCalculation):
                 disable_overhead=True,
             )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
+        elif gemm_type == GemmType.MLA_DOWN_PROJ:
+            gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                shard_spec.shard_m,
+                shard_spec.k,
+                shard_spec.n,
+                name,
+            )
         elif gemm_type == GemmType.QKV:  # column wise
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1472,6 +1542,19 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0] * batch * shard_spec.batch_scale
+        elif gemm_type == GemmType.MLA_DOWN_PROJ:
+            grad_time_act = self.get_gemm_time(
+                shard_spec.shard_m,
+                shard_spec.n,
+                shard_spec.k,
+                name,
+            )[0]
+            grad_time_wt = self.get_gemm_time(
+                shard_spec.k,
+                shard_spec.shard_m,
+                shard_spec.n,
+                name,
+            )[0]
         elif gemm_type == GemmType.QKV:  # column wise
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1625,6 +1708,13 @@ class TimeCalculationLLM(TimeCalculation):
                 disable_overhead=True,
             )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
+        elif gemm_type == GemmType.MLA_DOWN_PROJ:
+            gemm_time,_,_, mem_accesses = self.get_gemm_time(
+                shard_spec.shard_m,
+                shard_spec.k,
+                shard_spec.n,
+                name,
+            )
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             gemm_time,_,_, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1715,6 +1805,19 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch * shard_spec.batch_scale + self.O
+        elif gemm_type == GemmType.MLA_DOWN_PROJ:
+            grad_time_act = self.get_gemm_time(
+                shard_spec.shard_m,
+                shard_spec.n,
+                shard_spec.k,
+                name,
+            )[0]
+            grad_time_wt = self.get_gemm_time(
+                shard_spec.k,
+                shard_spec.shard_m,
+                shard_spec.n,
+                name,
+            )[0]
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1814,6 +1917,13 @@ class TimeCalculationLLM(TimeCalculation):
                 disable_overhead=True,
             ) 
             gemm_time = gemm_time * batch + self.O
+        elif gemm_type == GemmType.MLA_DOWN_PROJ:
+            gemm_time, _, _, mem_accesses = self.get_gemm_time(
+                shard_spec.shard_m,
+                shard_spec.k,
+                shard_spec.n,
+                name,
+            )
         elif gemm_type == GemmType.QKV:  # qkv gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1898,7 +2008,7 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch + self.O
-        elif gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.FFN2):
+        elif gemm_type in (GemmType.MLA_DOWN_PROJ, GemmType.QKV, GemmType.FFN1, GemmType.FFN2):
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
                 shard_spec.n,
@@ -2617,7 +2727,7 @@ class TimeCalculationLLM(TimeCalculation):
             return 0
 
         # Calculate sizes only
-        qkv_params, output_params = self._attention_param_components(d)
+        qkv_params, output_params = self._attention_param_components_per_rank(d)
         qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
         output_size = math.ceil(self.precision.grad_communication * output_params)
         if not moe:
@@ -2652,7 +2762,7 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_data_parallel_reduction_llm(self, d, intermediate_size, *, moe: bool = False):
         """Return apply_grad compute time per rank (no communication), honoring ZeRO sharding."""
-        qkv_params, output_params = self._attention_param_components(d)
+        qkv_params, output_params = self._attention_param_components_per_rank(d)
         apply_grad_time = self.apply_grad(int(qkv_params)) # QKV
         apply_grad_time += self.apply_grad(int(output_params)) # Output
         if not moe:
@@ -2727,10 +2837,17 @@ class TimeCalculationLLM(TimeCalculation):
         return int(elements)
 
     def _mla_query_state_bytes(self, gemm_shapes: Dict[str, Tuple[int, ...]], precision_bytes: int) -> int:
-        elements = self._mla_component_output_elements(gemm_shapes["D_proj_q"], GemmType.QKV) + self._mla_component_output_elements(
-            gemm_shapes["U_proj_q_rope"],
-            GemmType.QKV,
-        )
+        if "U_proj_q" in gemm_shapes:
+            elements = self._mla_component_output_elements(
+                gemm_shapes["U_proj_q"],
+                GemmType.QKV,
+            )
+        else:
+            score_spec = self._shard_gemm_descriptor(
+                gemm_shapes["attention_score"],
+                GemmType.ATTENTION_SCORE,
+            )
+            elements = int(score_spec.shard_batch * score_spec.shard_m * score_spec.k)
         return int(math.ceil(float(elements) * float(precision_bytes)))
 
     def _mla_cache_state_bytes(
@@ -2740,15 +2857,27 @@ class TimeCalculationLLM(TimeCalculation):
         *,
         visible_cp: bool,
     ) -> int:
-        elements = self._mla_component_output_elements(
-            gemm_shapes["D_proj_kv"],
-            GemmType.QKV,
-            visible_cp=visible_cp,
-        ) + self._mla_component_output_elements(
-            gemm_shapes["K_rope_proj"],
-            GemmType.QKV,
-            visible_cp=visible_cp,
-        )
+        if "U_proj_kv" in gemm_shapes:
+            score_spec = self._shard_gemm_descriptor(
+                gemm_shapes["attention_score"],
+                GemmType.ATTENTION_SCORE,
+            )
+            output_spec = self._shard_gemm_descriptor(
+                gemm_shapes["attention_output"],
+                GemmType.ATTENTION_OUTPUT,
+            )
+            key_tokens = score_spec.n if visible_cp else score_spec.shard_n
+            value_tokens = output_spec.k if visible_cp else output_spec.shard_k
+            elements = int(
+                (score_spec.shard_batch * key_tokens * score_spec.k)
+                + (output_spec.shard_batch * value_tokens * output_spec.n)
+            )
+        else:
+            elements = self._mla_component_output_elements(
+                gemm_shapes["D_proj_kv"],
+                GemmType.MLA_DOWN_PROJ,
+                visible_cp=visible_cp,
+            )
         return int(math.ceil(float(elements) * float(precision_bytes)))
 
     def _mla_attention_ctx_bytes(
@@ -2756,8 +2885,9 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_shapes: Dict[str, Tuple[int, ...]],
         precision_bytes: int,
     ) -> int:
+        attn_output_key = "attention_ctx_latent" if "attention_ctx_latent" in gemm_shapes else "attention_output"
         elements = self._mla_component_output_elements(
-            gemm_shapes["attention_ctx_latent"],
+            gemm_shapes[attn_output_key],
             GemmType.ATTENTION_OUTPUT,
         )
         return int(math.ceil(float(elements) * float(precision_bytes)))
@@ -2891,13 +3021,13 @@ class TimeCalculationLLM(TimeCalculation):
         kind = self._mla_reduce_kind_for_tp()
         if kind is None:
             return 0, 0.0
-        spec = self._shard_gemm_descriptor(gemm_shapes["qkv_proj"], GemmType.QKV)
+        d_proj_q_spec = self._shard_gemm_descriptor(gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ)
         size_bytes = int(
             math.ceil(
                 float(self.precision.grad_communication)
-                * float(spec.batch)
-                * float(spec.shard_m)
-                * float(spec.k)
+                * float(d_proj_q_spec.shard_m)
+                * float(d_proj_q_spec.shard_batch)
+                * float(int(self.q_lora_rank) + int(self.kv_lora_rank))
             )
         )
         comm_time = self._mla_collective_time(
@@ -3074,12 +3204,19 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim: int,
         decode: bool = False,
     ) -> OperationTiming:
-        components = (
-            ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.QKV),
-            ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.QKV),
-            ("mla_u_proj_q_rope", gemm_shapes["U_proj_q_rope"], GemmType.QKV),
-            ("mla_k_rope_proj", gemm_shapes["K_rope_proj"], GemmType.QKV),
-        )
+        if "U_proj_q" in gemm_shapes:
+            components = (
+                ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
+                ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
+                ("mla_u_proj_q", gemm_shapes["U_proj_q"], GemmType.QKV),
+                ("mla_u_proj_kv", gemm_shapes["U_proj_kv"], GemmType.QKV),
+            )
+        else:
+            components = (
+                ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
+                ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
+                ("mla_u_proj_q_rope", gemm_shapes["U_proj_q_rope"], GemmType.QKV),
+            )
         forward_comm_bytes, forward_comm_time = self._mla_projection_forward_comm(
             gemm_shapes,
             decode=decode,
@@ -3112,39 +3249,55 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim: int,
         decode: bool = False,
     ) -> Dict[str, OperationTiming]:
-        score_components = (
-            ("mla_attention_score_1", gemm_shapes["attention_score_1"], GemmType.ATTENTION_SCORE),
-            ("mla_attention_score_2", gemm_shapes["attention_score_2"], GemmType.ATTENTION_SCORE),
-            ("mla_attention_score_rope", gemm_shapes["attention_score_rope"], GemmType.ATTENTION_SCORE),
-        )
-        all_components = score_components + (
-            ("mla_attention_ctx_latent", gemm_shapes["attention_ctx_latent"], GemmType.ATTENTION_OUTPUT),
-        )
-        flash_enabled = bool(self.flash_attention) and not decode
+        absorbed_mode = "attention_score_1" in gemm_shapes
+        if absorbed_mode:
+            score_components = (
+                ("mla_attention_score_1", gemm_shapes["attention_score_1"], GemmType.ATTENTION_SCORE),
+                ("mla_attention_score_2", gemm_shapes["attention_score_2"], GemmType.ATTENTION_SCORE),
+                ("mla_attention_score_rope", gemm_shapes["attention_score_rope"], GemmType.ATTENTION_SCORE),
+            )
+            output_components = (
+                ("mla_attention_ctx_latent", gemm_shapes["attention_ctx_latent"], GemmType.ATTENTION_OUTPUT),
+            )
+        else:
+            score_components = (
+                ("mla_attention_score", gemm_shapes["attention_score"], GemmType.ATTENTION_SCORE),
+            )
+            output_components = (
+                ("mla_attention_output", gemm_shapes["attention_output"], GemmType.ATTENTION_OUTPUT),
+            )
 
-        flash_forward_mem = None
-        flash_backward_mem = None
+        flash_enabled = bool(self.flash_attention) and not decode and not absorbed_mode
+
+        score_forward_mem = None
+        score_backward_mem = None
+        output_forward_mem = None
+        output_backward_mem = None
         flash_recompute_local_flops = 0.0
         flash_recompute_global_flops = 0.0
         flash_softmax_recompute = 0.0
         if flash_enabled:
-            flash_forward_mem = self._mem_levels(
+            score_forward_mem = self._mem_levels(
                 self._mla_query_state_bytes(gemm_shapes, self.precision.activations)
                 + self._mla_cache_state_bytes(
                     gemm_shapes,
                     self.precision.activations,
                     visible_cp=True,
                 )
-                + self._mla_attention_ctx_bytes(gemm_shapes, self.precision.activations)
             )
-            flash_backward_mem = self._mem_levels(
+            score_backward_mem = self._mem_levels(
                 self._mla_query_state_bytes(gemm_shapes, self.precision.activations)
                 + (2 * self._mla_cache_state_bytes(
                     gemm_shapes,
                     self.precision.activations,
                     visible_cp=True,
                 ))
-                + (2 * self._mla_attention_ctx_bytes(gemm_shapes, self.precision.activations))
+            )
+            output_forward_mem = self._mem_levels(
+                self._mla_attention_ctx_bytes(gemm_shapes, self.precision.activations)
+            )
+            output_backward_mem = self._mem_levels(
+                2 * self._mla_attention_ctx_bytes(gemm_shapes, self.precision.activations)
             )
             if include_backward and not self.full_recomputation:
                 for component_name, gemm, gemm_type in score_components:
@@ -3160,25 +3313,29 @@ class TimeCalculationLLM(TimeCalculation):
                     math.ceil(float(batch) * float(m) * float(n) / float(max(1, self.tp * self.cp)))
                 ) * float(SOFTMAX_FORWARD_FLOPS_PER_ELEMENT + 1)
 
+        backward_comm_bytes = 0
+        backward_comm_time = 0.0
+        if include_backward:
+            backward_comm_bytes, backward_comm_time = self._mla_attention_backward_comm(gemm_shapes)
+
         attention_score_forward = self._mla_composite_direction(
-            stage_name="mla_attention_f",
-            components=all_components,
+            stage_name="mla_attention_score_f",
+            components=score_components,
             backward=False,
-            memory_override=flash_forward_mem,
+            memory_override=score_forward_mem,
         )
         attention_score_backward = DirectionTiming(compute_time=0.0, comm_time=0.0, comm_bytes=0)
         if include_backward:
-            backward_comm_bytes, backward_comm_time = self._mla_attention_backward_comm(gemm_shapes)
             attention_score_backward = self._mla_composite_direction(
-                stage_name="mla_attention_b",
-                components=all_components,
+                stage_name="mla_attention_score_b",
+                components=score_components,
                 backward=True,
-                grad_accum_elems=self._mla_param_stage_sizes(hidden_dim)["attention_stage"],
+                grad_accum_elems=0,
                 comm_bytes=backward_comm_bytes,
                 comm_time=backward_comm_time,
                 extra_local_flops=flash_recompute_local_flops,
                 extra_global_flops=flash_recompute_global_flops,
-                memory_override=flash_backward_mem,
+                memory_override=score_backward_mem,
             )
 
         softmax_forward = self._mla_softmax_direction(
@@ -3223,24 +3380,40 @@ class TimeCalculationLLM(TimeCalculation):
                     ),
                 )
 
-        attention_output_forward = DirectionTiming(
-            compute_time=0.0,
-            comm_time=0.0,
-            comm_bytes=0,
-            flops=0.0,
-            memory_accesses={},
+        attention_output_forward = self._mla_composite_direction(
+            stage_name="mla_attention_output_f",
+            components=output_components,
+            backward=False,
+            memory_override=output_forward_mem,
         )
         attention_output_backward = DirectionTiming(compute_time=0.0, comm_time=0.0, comm_bytes=0)
+        if include_backward:
+            attention_output_backward = self._mla_composite_direction(
+                stage_name="mla_attention_output_b",
+                components=output_components,
+                backward=True,
+                grad_accum_elems=self._mla_param_stage_sizes(hidden_dim)["attention_stage"],
+                memory_override=output_backward_mem,
+            )
 
         attention_forward_mem = self._combine_mem(
             attention_score_forward.memory_accesses,
             softmax_forward.memory_accesses,
+            attention_output_forward.memory_accesses,
         )
         attention_forward = DirectionTiming(
-            compute_time=attention_score_forward.compute_time + softmax_forward.compute_time,
+            compute_time=(
+                attention_score_forward.compute_time
+                + softmax_forward.compute_time
+                + attention_output_forward.compute_time
+            ),
             comm_time=attention_score_forward.comm_time,
             comm_bytes=attention_score_forward.comm_bytes,
-            flops=attention_score_forward.flops + softmax_forward.flops,
+            flops=(
+                attention_score_forward.flops
+                + softmax_forward.flops
+                + attention_output_forward.flops
+            ),
             memory_accesses=dict(self._mem_levels(attention_forward_mem)),
         )
         attention_backward = DirectionTiming(compute_time=0.0, comm_time=0.0, comm_bytes=0)
@@ -3248,12 +3421,21 @@ class TimeCalculationLLM(TimeCalculation):
             attention_backward_mem = self._combine_mem(
                 attention_score_backward.memory_accesses,
                 softmax_backward.memory_accesses,
+                attention_output_backward.memory_accesses,
             )
             attention_backward = DirectionTiming(
-                compute_time=attention_score_backward.compute_time + softmax_backward.compute_time,
+                compute_time=(
+                    attention_score_backward.compute_time
+                    + softmax_backward.compute_time
+                    + attention_output_backward.compute_time
+                ),
                 comm_time=attention_score_backward.comm_time,
                 comm_bytes=attention_score_backward.comm_bytes,
-                flops=attention_score_backward.flops + softmax_backward.flops,
+                flops=(
+                    attention_score_backward.flops
+                    + softmax_backward.flops
+                    + attention_output_backward.flops
+                ),
                 memory_accesses=dict(self._mem_levels(attention_backward_mem)),
             )
 
@@ -3287,9 +3469,14 @@ class TimeCalculationLLM(TimeCalculation):
         include_backward: bool,
         hidden_dim: int,
     ) -> OperationTiming:
-        components = (
-            ("mla_output_proj_absorbed", gemm_shapes["O_proj_absorbed"], GemmType.ATTENTION_OUTPUT),
-        )
+        if "O_proj_absorbed" in gemm_shapes:
+            components = (
+                ("mla_output_proj_absorbed", gemm_shapes["O_proj_absorbed"], GemmType.ATTENTION_OUTPUT),
+            )
+        else:
+            components = (
+                ("mla_output_proj", gemm_shapes["output_proj"], GemmType.OUT_PROJ),
+            )
         forward_comm_bytes, forward_comm_time = self._mla_output_forward_comm(gemm_shapes)
         forward = self._mla_composite_direction(
             stage_name="mla_output_proj_f",
@@ -3346,6 +3533,7 @@ class TimeCalculationLLM(TimeCalculation):
                 qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
                 qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
                 v_head_dim=getattr(self, "v_head_dim", None),
+                cache_mla_latents=bool(getattr(self, "cache_mla_latents", False)),
                 run_type=str(
                     getattr(
                         self,
@@ -4198,7 +4386,7 @@ class TimeCalculationLLM(TimeCalculation):
         ep_dense_sync_bytes_dense = 0
         ep_dense_sync_bytes_moe = 0
         if include_transformer_backward and self.use_moe and self.ep > 1:
-            qkv_params, output_params = self._attention_param_components(hidden_dim)
+            qkv_params, output_params = self._attention_param_components_per_rank(hidden_dim)
             qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
             output_size = math.ceil(self.precision.grad_communication * output_params)
             ffn1_dim = self._ffn1_output_dim(intermediate_size)
