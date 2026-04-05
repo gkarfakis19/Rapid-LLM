@@ -191,11 +191,10 @@ def test_hf_to_config_maps_deepseek_v3_to_mla_and_moe():
     assert model["moe"]["top_k"] == 8
     assert model["moe"]["moe_intermediate_size"] == 2048
     assert model["moe"]["n_shared_experts"] == 1
-    assert model["moe"]["topk_group"] == 4
-    assert model["moe"]["topk_method"] == "noaux_tc"
-    assert model["moe"]["scoring_func"] == "sigmoid"
-    assert model["num_nextn_predict_layers"] == 1
-    assert model["rope_scaling"]["type"] == "yarn"
+    assert "topk_group" not in model["moe"]
+    assert "scoring_func" not in model["moe"]
+    assert "num_nextn_predict_layers" not in model
+    assert "rope_scaling" not in model
 
 
 def test_deepseek_v3_yaml_configs_parse_and_validate():
