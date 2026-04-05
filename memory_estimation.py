@@ -149,6 +149,7 @@ class MemoryEstimator:
             v_head_dim=getattr(tc, "v_head_dim", None),
             run_type=getattr(tc, "run_type", "training"),
             key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
+            swiglu_mlp=getattr(tc, "swiglu_mlp", False),
         )
         transformer_mem_layer_moe = transformer_mem_layer_dense
         transformer_act_layer_moe = transformer_act_layer_dense
@@ -229,8 +230,9 @@ class MemoryEstimator:
                 v_head_dim=getattr(tc, "v_head_dim", None),
                 run_type=getattr(tc, "run_type", "training"),
                 key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
+                swiglu_mlp=getattr(tc, "swiglu_mlp", False),
             )
-            ffn_proj_factor = 3 if llm_util.is_llama_style(tc.model_type) else 2
+            ffn_proj_factor = 3 if llm_util.uses_gated_mlp(tc.model_type, swiglu_mlp=getattr(tc, "swiglu_mlp", False)) else 2
             if getattr(tc, "attention_type", "mha") == "mla":
                 attention_params = llm_util.mla_attention_params_per_rank(
                     tc.hidden_dim,
@@ -472,6 +474,25 @@ class MemoryEstimator:
                 vocab_shard = math.ceil(float(tc.vocab_size) / float(max(1, tp * cp)))
                 softmax_out_bytes = tokens * float(vocab_shard) * float(precision.activations)
 
+            if llm_util.is_vit_style(getattr(tc, "model_type", "")):
+                embedding_out_bytes = (
+                    float(batch_size)
+                    * float(seq_len_eff)
+                    * float(tc.hidden_dim)
+                    * float(precision.activations)
+                )
+                vit_output_dim = llm_util.vit_output_dim(
+                    hidden_dim=tc.hidden_dim,
+                    num_classes=getattr(tc, "num_classes", 0),
+                )
+                softmax_out_bytes = (
+                    float(batch_size)
+                    * float(vit_output_dim)
+                    * float(precision.activations)
+                )
+            else:
+                embedding_out_bytes = out_proj_bytes
+
             # TODO: figure out router memory estimation (minor, interacts with sp/cp in non intuitive ways)
         
             # Activation output sizes by operation.
@@ -485,7 +506,7 @@ class MemoryEstimator:
                 MemKind.OUTPUT_PROJ: out_proj_bytes,  # (batch, seq, hidden_dim)
                 MemKind.LAYERNORM2: out_proj_bytes,  # (batch, seq, hidden_dim)
                 MemKind.MLP: ffn2_bytes,
-                MemKind.EMBEDDING: 0.0 if disable_embedding_unembedding else out_proj_bytes,
+                MemKind.EMBEDDING: 0.0 if disable_embedding_unembedding else embedding_out_bytes,
                 MemKind.SOFTMAX: 0.0 if disable_embedding_unembedding else softmax_out_bytes,
                 MemKind.OPTIMIZER: 0.0,
                 MemKind.MOE_DISPATCH: 0.0,
@@ -605,7 +626,6 @@ class MemoryEstimator:
             if getattr(tc, "attention_type", "mha") == "mla":
                 per_token_bytes = llm_util.mla_kv_cache_token_bytes(
                     batch_size=batch_size,
-                    kv_lora_rank=getattr(tc, "kv_lora_rank", 0),
                     qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", 0),
                     precision_bytes=precision.kv_cache,
                     num_heads=getattr(tc, "num_heads", None),

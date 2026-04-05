@@ -42,6 +42,15 @@ def _env_flag(name: str) -> bool:
 
 _MOE_PADDING_WARNED = False
 _MLA_DECODE_FLASH_WARNED = False
+_VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
+
+
+def _is_vit_model_type(model_type: str) -> bool:
+    return str(model_type or "").strip().lower() in _VIT_MODEL_TYPES
+
+
+def _vit_default_num_prefix_tokens(model_type: str) -> int:
+    return 5 if str(model_type or "").strip().lower() == "vit_dinov3" else 1
 
 
 @dataclass(frozen=True)
@@ -1246,6 +1255,24 @@ def _parse_bool_field(context: str, data: Dict[str, object], field: str) -> bool
     return _coerce_bool(value, f"{context}.{field}")
 
 
+def _parse_positive_pair(value: object, context: str) -> Tuple[int, int]:
+    if isinstance(value, int):
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError(f"{context} must be > 0")
+        return (parsed, parsed)
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            first = int(value[0])
+            second = int(value[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context} must be an int or a two-entry list/tuple of ints") from exc
+        if first <= 0 or second <= 0:
+            raise ValueError(f"{context} entries must be > 0")
+        return (first, second)
+    raise ValueError(f"{context} must be an int or a two-entry list/tuple of ints")
+
+
 @dataclass
 class GEMMConfig:
     mode: str
@@ -1548,6 +1575,39 @@ class MoEConfig:
 
 
 @dataclass
+class ViTConfig:
+    image_size: Tuple[int, int]
+    patch_size: Tuple[int, int]
+
+    @property
+    def patch_dim(self) -> int:
+        return int(self.patch_size[0]) * int(self.patch_size[1]) * 3
+
+    @property
+    def num_patches(self) -> int:
+        return int(self.image_size[0] // self.patch_size[0]) * int(self.image_size[1] // self.patch_size[1])
+
+    @classmethod
+    def from_dict(cls, vision_dict: Dict[str, object]) -> "ViTConfig":
+        vision_dict = _require_mapping("model_param.vision", vision_dict)
+        image_size = _parse_positive_pair(_require_field("model_param.vision", vision_dict, "image_size"), "model_param.vision.image_size")
+        patch_size = _parse_positive_pair(_require_field("model_param.vision", vision_dict, "patch_size"), "model_param.vision.patch_size")
+        if image_size[0] % patch_size[0] != 0 or image_size[1] % patch_size[1] != 0:
+            raise ValueError(
+                "model_param.vision.image_size must be divisible by model_param.vision.patch_size"
+            )
+        allowed_keys = {"image_size", "patch_size"}
+        extra_keys = sorted(set(vision_dict.keys()) - allowed_keys)
+        if extra_keys:
+            raise ValueError(
+                "model_param.vision only supports image_size and patch_size for ViT configs. "
+                f"Unsupported keys: {', '.join(extra_keys)}"
+            )
+
+        return cls(image_size=image_size, patch_size=patch_size)
+
+
+@dataclass
 class LLMConfig:
     mode: str
     run_type: str
@@ -1565,6 +1625,7 @@ class LLMConfig:
     n_tokens: int
     attention: LLMAttentionConfig
     moe: MoEConfig
+    vision: Optional[ViTConfig] = None
 
     @property
     def num_heads(self) -> int:
@@ -1661,6 +1722,42 @@ class LLMConfig:
         """Backward-compatible alias for gradient accumulation steps."""
         return self.gradient_accumulation_steps
 
+    @property
+    def is_vit(self) -> bool:
+        return _is_vit_model_type(self.model_type)
+
+    @property
+    def num_classes(self) -> int:
+        return 0 if not self.is_vit else int(max(0, self.vocab_size))
+
+    @property
+    def image_size(self) -> Optional[Tuple[int, int]]:
+        return None if self.vision is None else tuple(self.vision.image_size)
+
+    @property
+    def patch_size(self) -> Optional[Tuple[int, int]]:
+        return None if self.vision is None else tuple(self.vision.patch_size)
+
+    @property
+    def in_chans(self) -> int:
+        return 3
+
+    @property
+    def num_prefix_tokens(self) -> int:
+        return 0 if self.vision is None else int(_vit_default_num_prefix_tokens(self.model_type))
+
+    @property
+    def num_patches(self) -> int:
+        return 0 if self.vision is None else int(self.vision.num_patches)
+
+    @property
+    def patch_dim(self) -> int:
+        return 0 if self.vision is None else int(self.vision.patch_dim)
+
+    @property
+    def swiglu_mlp(self) -> bool:
+        return self.model_type == "vit_dinov3"
+
     @classmethod
     def from_dict(cls, model_dict: Dict[str, object]) -> "LLMConfig":
         model_dict = _require_mapping("model_param", model_dict)
@@ -1688,9 +1785,9 @@ class LLMConfig:
         model_type = model_type_raw.strip().lower()
         if model_type in {"glm4", "glm"}:
             model_type = "glm4_moe"
-        if model_type not in {"gpt", "llama", "glm4_moe", "vit"}:
+        if model_type not in {"gpt", "llama", "glm4_moe", "vit", "vit_dinov3"}:
             raise ValueError(
-                "model_param.model_type must be either 'gpt', 'llama', 'vit', or 'glm4_moe' "
+                "model_param.model_type must be one of 'gpt', 'llama', 'vit', 'vit_dinov3', or 'glm4_moe' "
                 f"(got {model_type_raw!r})"
             )
 
@@ -1713,9 +1810,57 @@ class LLMConfig:
                 ) from exc
             if gradient_accumulation_steps <= 0:
                 raise ValueError("model_param.gradient_accumulation_steps must be a positive integer")
-        seq_len = _parse_int_field("model_param", model_dict, "seq_len")
-        vocab_size = _parse_int_field("model_param", model_dict, "vocab_size")
-        intermediate_size = _parse_int_field("model_param", model_dict, "intermediate_size")
+        vision = None
+        if _is_vit_model_type(model_type):
+            vision = ViTConfig.from_dict(_require_field("model_param", model_dict, "vision"))
+        elif "vision" in model_dict:
+            raise ValueError(
+                "model_param.vision is only supported when model_param.model_type is a ViT family model"
+            )
+
+        seq_len_raw = model_dict.get("seq_len", None)
+        if seq_len_raw is None:
+            if vision is None:
+                raise ValueError("model_param.seq_len must be specified")
+            seq_len = int(vision.num_patches) + int(_vit_default_num_prefix_tokens(model_type))
+        else:
+            try:
+                seq_len = int(seq_len_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.seq_len must be an integer (got {seq_len_raw!r})") from exc
+            if seq_len <= 0:
+                raise ValueError("model_param.seq_len must be >= 1")
+            if vision is not None:
+                min_vit_seq_len = int(vision.num_patches) + int(_vit_default_num_prefix_tokens(model_type))
+                if seq_len < min_vit_seq_len:
+                    raise ValueError(
+                        "model_param.seq_len must be >= the ViT-derived token count "
+                        f"({min_vit_seq_len} from image_size/patch_size/default prefix tokens, got {seq_len})"
+                    )
+
+        vocab_size_raw = model_dict.get("vocab_size", None)
+        if _is_vit_model_type(model_type):
+            if vocab_size_raw is None:
+                raise ValueError(
+                    "model_param.vocab_size must be specified for ViT configs and represents the classifier head size "
+                    "(use 0 for a headless feature encoder)."
+                )
+            vocab_size = _coerce_int(vocab_size_raw, "model_param.vocab_size", min_value=0)
+        else:
+            vocab_size = _parse_int_field("model_param", model_dict, "vocab_size")
+
+        intermediate_raw = model_dict.get("intermediate_size", None)
+        if intermediate_raw is None:
+            raise ValueError("model_param.intermediate_size must be specified")
+        else:
+            try:
+                intermediate_size = int(intermediate_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.intermediate_size must be an integer (got {intermediate_raw!r})"
+                ) from exc
+            if intermediate_size <= 0:
+                raise ValueError("model_param.intermediate_size must be >= 1")
 
         if model_type == "glm4_moe":
             if attention.head_dim is None:
@@ -1751,7 +1896,7 @@ class LLMConfig:
                 ) from exc
 
         if run_type == "inference" and decode_len is None:
-            if model_type == "vit":
+            if _is_vit_model_type(model_type):
                 decode_len = 0
             else:
                 raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
@@ -1760,12 +1905,14 @@ class LLMConfig:
             model_dict.get("disable_embedding_unembedding", model_dict.get("disable_embedding_unembedding_ops", False)),
             "model_param.disable_embedding_unembedding",
         )
-        if model_type == "vit":
-            if run_type != "inference":
-                raise ValueError("model_param.model_type='vit' is supported for inference only.")
+        if _is_vit_model_type(model_type):
             if decode_len not in (0, None):
-                raise ValueError("model_param.decode_len must be 0 for ViT inference runs.")
-            disable_embedding_unembedding = True
+                raise ValueError("model_param.decode_len must be 0 for ViT runs.")
+            if disable_embedding_unembedding:
+                raise ValueError(
+                    "ViT does not support model_param.disable_embedding_unembedding=true. "
+                    "Patch embedding and final ViT head/pooling are first-class modeled ops."
+                )
 
         moe_block = model_dict.get("moe", {})
         if moe_block is None:
@@ -1822,6 +1969,7 @@ class LLMConfig:
             n_tokens=0,
             attention=attention,
             moe=moe,
+            vision=vision,
         )
 
 
@@ -2369,11 +2517,18 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             )
         if model.decode_len is not None and model.decode_len > model.seq_len:
             raise ValueError("model_param.decode_len must be <= seq_len for inference")
-        if model.model_type == "vit":
+        if model.is_vit:
             if model.decode_len not in (0, None):
                 raise ValueError("model_param.decode_len must be 0 for ViT inference")
             if model.use_moe:
                 raise ValueError("ViT inference does not support MoE/EP. Set model_param.moe.num_experts=1.")
+    elif model.is_vit:
+        if model.decode_len not in (0, None):
+            raise ValueError("model_param.decode_len must be 0 for ViT training")
+        if model.use_moe:
+            raise ValueError("ViT training does not support MoE/EP. Set model_param.moe.num_experts=1.")
+        if train_ep > 1:
+            raise ValueError("ViT training does not support EP. Set parallelism.train.ep=1.")
     else:
         if cp > 1 and train_ep > 1:
             raise ValueError(

@@ -699,7 +699,7 @@ class Graph:
         recompute_enabled = include_backward and self.full_recomputation and (
             self.flattened_mode or self.pipeline_style_recompute
         )
-        block_prefix = "vit_block" if self.model_type == "vit" else "transformer_layer"
+        block_prefix = "vit_block" if str(self.model_type).lower().startswith("vit") else "transformer_layer"
 
 
         def attach_parallel_edge(target, gather_edge, skip_non_comm_children=None, skip_comm_children=None):
