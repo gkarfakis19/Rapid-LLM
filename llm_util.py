@@ -16,7 +16,7 @@
 import math
 import os
 from collections import OrderedDict
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 import config
 
@@ -44,15 +44,10 @@ def reshape_gemm_to_3d(arg):
 
 
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
-MLA_PROJECTION_COMPONENT_KEYS = {
-    "D_proj_q",
-    "D_proj_kv",
-    "U_proj_q",
-    "U_proj_kv",
-}
 
 _LLAMA_STYLE_MODEL_TYPES = {"llama", "glm4_moe", "glm4", "glm"}
 _GLM_MODEL_TYPES = {"glm4_moe", "glm4", "glm"}
+_VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
 
 
 def is_llama_style(model_type) -> bool:
@@ -61,6 +56,49 @@ def is_llama_style(model_type) -> bool:
 
 def is_glm_style(model_type) -> bool:
     return str(model_type or "").strip().lower() in _GLM_MODEL_TYPES
+
+
+def is_vit_style(model_type) -> bool:
+    return str(model_type or "").strip().lower() in _VIT_MODEL_TYPES
+
+
+def uses_gated_mlp(model_type, swiglu_mlp: bool = False) -> bool:
+    return (
+        is_llama_style(model_type)
+        or str(model_type or "").strip().lower() == "vit_dinov3"
+        or bool(swiglu_mlp)
+    )
+
+
+def vit_patch_dim(patch_size: Tuple[int, int], in_chans: int) -> int:
+    return int(patch_size[0]) * int(patch_size[1]) * int(in_chans)
+
+
+def vit_output_dim(*, hidden_dim: int, num_classes: int) -> int:
+    return int(num_classes) if int(num_classes) > 0 else int(hidden_dim)
+
+
+def vit_patch_embed_param_count(
+    *,
+    hidden_dim: int,
+    patch_size: Tuple[int, int],
+    in_chans: int = 3,
+) -> int:
+    patch_dim = vit_patch_dim(patch_size, in_chans)
+    params = int(patch_dim) * int(hidden_dim)
+    params += int(hidden_dim)
+    return int(params)
+
+
+def vit_head_param_count(
+    *,
+    hidden_dim: int,
+    num_classes: int,
+) -> int:
+    params = 2 * int(hidden_dim)
+    if int(num_classes) > 0:
+        params += int(hidden_dim) * int(num_classes) + int(num_classes)
+    return int(params)
 
 
 def resolve_head_dim(hidden_dim, num_heads, head_dim=None) -> int:
@@ -214,21 +252,8 @@ def mla_attention_param_groups(
     return groups
 
 
-def mla_full_kv_cache_token_bytes(
-    batch_size,
-    num_heads,
-    qk_nope_head_dim,
-    qk_rope_head_dim,
-    v_head_dim,
-    precision_bytes,
-):
-    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
-    return batch_size * int(num_heads) * (qk_head_dim + int(v_head_dim)) * precision_bytes
-
-
 def mla_kv_cache_token_bytes(
     batch_size,
-    kv_lora_rank,
     qk_rope_head_dim,
     precision_bytes,
     *,
@@ -237,13 +262,12 @@ def mla_kv_cache_token_bytes(
     v_head_dim,
 ):
     """Return per-token MLA KV-cache bytes for the default full-cache decode contract."""
-    return mla_full_kv_cache_token_bytes(
-        batch_size=batch_size,
-        num_heads=num_heads,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        precision_bytes=precision_bytes,
+    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
+    return (
+        int(batch_size)
+        * int(num_heads)
+        * (qk_head_dim + int(v_head_dim))
+        * float(precision_bytes)
     )
 
 
@@ -276,7 +300,6 @@ def mla_runtime_op_shapes(
     *,
     batch_size,
     query_seq_len,
-    key_seq_len,
     hidden_dim,
     num_heads,
     q_lora_rank,
@@ -327,6 +350,7 @@ def mla_activation_tensor_bytes(
     v_head_dim,
     precision_bytes,
     model_type="gpt",
+    swiglu_mlp=False,
     flash_attention=False,
     full_recomputation=False,
     tp=1,
@@ -358,7 +382,11 @@ def mla_activation_tensor_bytes(
     if key_seq_len is None:
         key_seq_len = seq_len * cp
     key_seq_len = int(key_seq_len)
-    projected_dim = 2 * int(intermediate_size) if is_llama_style(model_type) else int(intermediate_size)
+    projected_dim = (
+        2 * int(intermediate_size)
+        if uses_gated_mlp(model_type, swiglu_mlp=swiglu_mlp)
+        else int(intermediate_size)
+    )
 
     local_heads = int(math.ceil(float(num_heads) / float(tp)))
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -409,7 +437,6 @@ def attention_kv_cache_token_bytes(
     if str(attention_type or "").lower() == "mla":
         return mla_kv_cache_token_bytes(
             batch_size=batch_size,
-            kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
             precision_bytes=precision_bytes,
             num_heads=num_heads,
@@ -451,12 +478,9 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
     gemms = OrderedDict()
 
     attention_type = str(getattr(self, "attention_type", "mha")).lower()
-    run_type = str(
-        getattr(self, "run_type", getattr(getattr(self, "model", None), "run_type", "training"))
-    ).lower()
 
     if attention_type == "mla":
-        qk_head_dim, q_size_mla, v_size_mla, kv_up_size = mla_dim_sizes(
+        qk_head_dim, _q_size_mla, _v_size_mla, _kv_up_size = mla_dim_sizes(
             num_heads,
             self.qk_nope_head_dim,
             self.qk_rope_head_dim,
@@ -465,7 +489,6 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
         runtime_ops = mla_runtime_op_shapes(
             batch_size=batch_size,
             query_seq_len=seq_len,
-            key_seq_len=seq_len,
             hidden_dim=d_model,
             num_heads=num_heads,
             q_lora_rank=self.q_lora_rank,
@@ -520,13 +543,17 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
             head_dim,
         )
         gemms["output_proj"] = (batch_size, seq_len, q_size, d_model)
-    if is_llama_style(model_type):
+    if uses_gated_mlp(model_type, swiglu_mlp=getattr(self, "swiglu_mlp", False)):
         projected_dim = 2 * intermediate_size
     else:
         projected_dim = intermediate_size
     if self.use_moe:
         moe_intermediate = int(getattr(self, "moe_intermediate_size", intermediate_size))
-        projected_dim = 2 * moe_intermediate if is_llama_style(model_type) else moe_intermediate
+        projected_dim = (
+            2 * moe_intermediate
+            if uses_gated_mlp(model_type, swiglu_mlp=getattr(self, "swiglu_mlp", False))
+            else moe_intermediate
+        )
         # MoE GEMM shapes use token-owner dimensions; token dispatch is modeled in timing logic.
         gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
         gemms["ffn2"] = (batch_size, seq_len, moe_intermediate, d_model)
@@ -605,6 +632,7 @@ def get_transformer_mem_layer(
     v_head_dim=None,
     run_type="training",
     key_seq_len=None,
+    swiglu_mlp=False,
 ):  #  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     """Approximate transformer-layer memory sizing for training/inference."""
     #Activations refer to output activations that need to be stored
@@ -640,7 +668,7 @@ def get_transformer_mem_layer(
             act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2)
 
         act_memory_layer_inf = seq_len * batch_size * intermediate_size / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
-    ffn_proj_factor = 3 if is_llama_style(model_type) else 2
+    ffn_proj_factor = 3 if uses_gated_mlp(model_type, swiglu_mlp=swiglu_mlp) else 2
 
     if kv_heads is None:
         kv_heads = n_heads
@@ -1010,7 +1038,6 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         runtime_ops = mla_runtime_op_shapes(
             batch_size=batch_size,
             query_seq_len=1,
-            key_seq_len=current_seq_len,
             hidden_dim=d_model,
             num_heads=num_heads,
             q_lora_rank=self.q_lora_rank,
@@ -1072,10 +1099,18 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     # Output projection & FFNs only process the new token
     if not (attention_type == "mla" and run_type == "inference"):
         gemms["output_proj"] = (batch_size, 1, q_size, d_model)
-    projected_dim = 2 * intermediate_size if is_llama_style(model_type) else intermediate_size
+    projected_dim = (
+        2 * intermediate_size
+        if uses_gated_mlp(model_type, swiglu_mlp=getattr(self, "swiglu_mlp", False))
+        else intermediate_size
+    )
     if self.use_moe:
         moe_intermediate = int(getattr(self, "moe_intermediate_size", intermediate_size))
-        projected_dim = 2 * moe_intermediate if is_llama_style(model_type) else moe_intermediate
+        projected_dim = (
+            2 * moe_intermediate
+            if uses_gated_mlp(model_type, swiglu_mlp=getattr(self, "swiglu_mlp", False))
+            else moe_intermediate
+        )
         # MoE GEMM shapes use token-owner dimensions; dispatch/combine modeled separately.
         gemms["ffn1"] = (batch_size, 1, d_model, projected_dim)
         gemms["ffn2"] = (batch_size, 1, moe_intermediate, d_model)

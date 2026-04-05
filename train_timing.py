@@ -780,7 +780,7 @@ class TimeCalculationLLM(TimeCalculation):
         tp = max(1, self.tp)
         pp = max(1, self.pp)
 
-        ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
+        ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
         attention_params = self._attention_param_total_per_rank(hidden_dim)
         transformer_param_layer = attention_params + (
             intermediate_size * ffn_proj_factor * hidden_dim / tp
@@ -798,6 +798,20 @@ class TimeCalculationLLM(TimeCalculation):
         if self.disable_embedding_unembedding:
             embedding_params = 0.0
             output_params = 0.0
+        elif self._is_vit_model():
+            embedding_params = float(
+                llm_util.vit_patch_embed_param_count(
+                    hidden_dim=hidden_dim,
+                    patch_size=self.patch_size,
+                    in_chans=self.in_chans,
+                )
+            )
+            output_params = float(
+                llm_util.vit_head_param_count(
+                    hidden_dim=hidden_dim,
+                    num_classes=getattr(self, "num_classes", 0),
+                )
+            )
         else:
             embedding_params = vocab_size * hidden_dim / tp
             output_params = 0.0 if self.tied_embeddings else embedding_params
@@ -861,7 +875,9 @@ class TimeCalculationLLM(TimeCalculation):
             self.kv_heads,
             head_dim=getattr(self, "head_dim", None),
         )
-        return int(hidden_dim * (q_size + 2 * kv_size)), int(q_size * hidden_dim)
+        qkv_params = int(hidden_dim * (q_size + 2 * kv_size))
+        output_params = int(q_size * hidden_dim)
+        return qkv_params, output_params
 
     def _attention_param_components_per_rank(self, hidden_dim: int) -> Tuple[float, float]:
         if self.attention_type == "mla":
@@ -1026,8 +1042,77 @@ class TimeCalculationLLM(TimeCalculation):
     def _effective_dims(cls, gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         batch, m, k, n = cls._expand_gemm_descriptor(gemm) 
         return batch, batch * m, k, n
+
+    def _is_vit_model(self) -> bool:
+        return llm_util.is_vit_style(getattr(self, "model_type", ""))
+
+    def _uses_gated_mlp(self) -> bool:
+        return llm_util.uses_gated_mlp(
+            self.model_type,
+            swiglu_mlp=getattr(self, "swiglu_mlp", False),
+        )
+
     def _ffn1_output_dim(self, intermediate_size: int) -> int:
-        return 2 * intermediate_size if llm_util.is_llama_style(self.model_type) else intermediate_size
+        return 2 * intermediate_size if self._uses_gated_mlp() else intermediate_size
+
+    def _vit_sequence_shard_degree(self) -> int:
+        if not self._is_vit_model():
+            return 1
+        mode = self.get_parallelism_mode()
+        if mode in (
+            ParallelismMode.TENSOR_SEQUENCE,
+            ParallelismMode.CONTEXT,
+            ParallelismMode.TENSOR_CONTEXT_HYBRID,
+        ):
+            return max(1, int(self._sequence_parallel_degree()))
+        return 1
+
+    def _vit_pool_token_count(self) -> int:
+        if not self._is_vit_model():
+            return 0
+        seq_degree = self._vit_sequence_shard_degree()
+        pooled_tokens = max(1, int(self.seq_len) - int(getattr(self, "num_prefix_tokens", 0)))
+        return max(1, int(math.ceil(float(pooled_tokens) / float(seq_degree))))
+
+    def _vit_patch_embed_gemm(self, batch: int, hidden_dim: int) -> Tuple[int, int, int, int]:
+        return (
+            int(batch),
+            int(getattr(self, "num_patches", 0)),
+            int(getattr(self, "patch_dim", 0)),
+            int(hidden_dim),
+        )
+
+    def _vit_pool_time(self, *, batch: int, hidden_dim: int, backward: bool) -> Tuple[float, float]:
+        if not self._is_vit_model():
+            return 0.0, 0.0
+        output_elements = float(batch) * float(hidden_dim)
+        reduce_tokens = float(self._vit_pool_token_count())
+        flops = output_elements * reduce_tokens
+        mem = self.precision.activations * (output_elements * (reduce_tokens + 1.0))
+        time = self.roofline(
+            flops,
+            mem,
+            name="vit_pool_b" if backward else "vit_pool_f",
+            mem_level=self.num_levels - 1,
+        ) + self.O
+        seq_degree = self._vit_sequence_shard_degree()
+        if seq_degree > 1:
+            pooled_bytes = math.ceil(
+                float(batch) * float(hidden_dim) * float(self.precision.activations)
+            )
+            if pooled_bytes > 0:
+                axis_hint = "cp" if self.cp > 1 else "tp"
+                time += self.network_model.collective(
+                    kind=ALL_REDUCE,
+                    size_bytes=pooled_bytes,
+                    participants=seq_degree,
+                    ib=self.links[axis_hint].bandwidth,
+                    ll=self.links[axis_hint].latency,
+                    local_bytes=0,
+                    debug_label="vit_pool_b" if backward else "vit_pool_f",
+                    axis=axis_hint,
+                )
+        return time, mem
     # def sequence
     def get_tensor_reduction_time(
         self,
@@ -2324,6 +2409,33 @@ class TimeCalculationLLM(TimeCalculation):
         """
         Calculates the total time required for embedding operations, including computation and data transfer.
         """
+        if self._is_vit_model():
+            batch = self._effective_transformer_batch()
+            patch_gemm = self._vit_patch_embed_gemm(batch, hidden_dim)
+            gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(
+                patch_gemm,
+                "vit_patch_embed_f",
+            )
+            input_image_bytes = (
+                float(batch)
+                * float(getattr(self, "image_size", (1, 1))[0])
+                * float(getattr(self, "image_size", (1, 1))[1])
+                * float(getattr(self, "in_chans", 3))
+                * float(self.precision.activations)
+            )
+            token_bytes = float(batch) * float(seq_len) * float(hidden_dim) * float(self.precision.activations)
+            prep_time = self.roofline(
+                0.0,
+                token_bytes,
+                name="vit_embedding_f",
+                mem_level=self.num_levels - 1,
+            ) + self.O
+            embedding_mem = input_image_bytes + token_bytes
+            embedding_time = gemm_time + prep_time
+            if self.h2d_bandwidth and self.h2d_bandwidth > 0:
+                embedding_time += input_image_bytes / self.h2d_bandwidth
+            return embedding_time, embedding_mem
+
         batch = self._effective_transformer_batch()
         embedding_mem = vocab_size * hidden_dim * self.precision.activations + seq_len * batch * hidden_dim * self.precision.activations
         embedding_time = self.roofline(
@@ -2348,6 +2460,44 @@ class TimeCalculationLLM(TimeCalculation):
         """Estimate time for final projection + softmax forward.
             assuming linear softmax gemm always use tensor parallelism sharded by vocab dimension
         """
+        if self._is_vit_model():
+            batch = self._effective_transformer_batch()
+            total_time = 0.0
+            total_mem = 0.0
+            ln_f, ln_comm, _ = self.get_layernorm_f(
+                batch=batch,
+                seq_len=self.seq_len,
+                d_model=self.hidden_dim,
+            )
+            total_time += ln_f + ln_comm
+            total_mem += float(batch) * float(self.seq_len) * float(self.hidden_dim) * float(self.precision.stats)
+
+            pool_time, pool_mem = self._vit_pool_time(batch=batch, hidden_dim=self.hidden_dim, backward=False)
+            total_time += pool_time
+            total_mem += pool_mem
+
+            if getattr(self, "num_classes", 0) > 0:
+                head_gemm = (batch, 1, self.hidden_dim, int(self.num_classes))
+                gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(
+                    head_gemm,
+                    "vit_head_f",
+                    gemm_type=GemmType.LINEAR_SOFTMAX,
+                )
+                total_time += gemm_time
+                total_mem += (
+                    float(batch)
+                    * float(self.num_classes)
+                    * float(self.precision.activations)
+                )
+            else:
+                total_mem += (
+                    float(batch)
+                    * float(self.hidden_dim)
+                    * float(self.precision.activations)
+                )
+
+            return total_time, total_mem
+
         _, effective_m, k, n = self._effective_dims(gemm)
 
         # Previous TP-aware path kept comm time here:
@@ -2379,6 +2529,28 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time + point_time, point_mem
     
     def get_linear_softmax_b(self, gemm):
+        if self._is_vit_model():
+            batch = self._effective_transformer_batch()
+            total_time = 0.0
+            if getattr(self, "num_classes", 0) > 0:
+                head_gemm = (batch, 1, self.hidden_dim, int(self.num_classes))
+                gemm_time, _, _ = self.single_gpu_gemm_backward(
+                    head_gemm,
+                    "vit_head_b",
+                    gemm_type=GemmType.LINEAR_SOFTMAX,
+                )
+                total_time += gemm_time
+
+            pool_time, _ = self._vit_pool_time(batch=batch, hidden_dim=self.hidden_dim, backward=True)
+            total_time += pool_time
+
+            ln_b, ln_comm, _ = self.get_layernorm_b(
+                batch=batch,
+                seq_len=self.seq_len,
+                d_model=self.hidden_dim,
+            )
+            total_time += ln_b + ln_comm
+            return total_time
 
 
         _, effective_m, k, n = self._effective_dims(gemm)
@@ -2692,6 +2864,22 @@ class TimeCalculationLLM(TimeCalculation):
         return compute_time, 0.0, 0
     
     def get_embedding_b(self, vocab_size, seq_len, hidden_dim):
+        if self._is_vit_model():
+            batch = self._effective_transformer_batch()
+            patch_gemm = self._vit_patch_embed_gemm(batch, hidden_dim)
+            gemm_time, _, _ = self.single_gpu_gemm_backward(
+                patch_gemm,
+                "vit_patch_embed_b",
+            )
+            token_bytes = float(batch) * float(seq_len) * float(hidden_dim) * float(self.precision.gradients)
+            prep_time = self.roofline(
+                0.0,
+                token_bytes,
+                name="vit_embedding_b",
+                mem_level=self.num_levels - 1,
+            ) + self.O
+            return gemm_time + prep_time
+
         batch = self._effective_transformer_batch()
         embedding_mem = vocab_size * hidden_dim * self.precision.gradients + seq_len * batch * hidden_dim * self.precision.gradients
         embedding_mem_time = self.roofline(
@@ -2736,7 +2924,7 @@ class TimeCalculationLLM(TimeCalculation):
             total_size = qkv_size + output_size + ffn1_size + ffn2_size
             return total_size
 
-        ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
+        ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
         expert_param_size = ffn_proj_factor * intermediate_size * d
         tp = max(1, int(self.tp))
         moe_group = max(1, int(self._moe_routing_group()))
@@ -2769,7 +2957,7 @@ class TimeCalculationLLM(TimeCalculation):
             apply_grad_time += self.apply_grad(int(ffn1_dim * d)) # FFN1
             apply_grad_time += self.apply_grad(int(intermediate_size * d)) # FFN2
         else:
-            ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
+            ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
             expert_param_size = ffn_proj_factor * intermediate_size * d
             tp = max(1, int(self.tp))
             moe_group = max(1, int(self._moe_routing_group()))
@@ -3483,9 +3671,6 @@ class TimeCalculationLLM(TimeCalculation):
             )
         return OperationTiming("output_proj", forward=forward, backward=backward_dir)
 
-    # TODO TODO:
-    # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
-    # FIX at some point!
     def compute_all_gemm_and_node_times(
         self,
         batch_size,
@@ -4043,7 +4228,7 @@ class TimeCalculationLLM(TimeCalculation):
             if tokens_shared > 0:
                 ffn1_activation_shape_shared = (tokens_shared, ffn1_spec.k, ffn1_n)
 
-        if llm_util.is_llama_style(self.model_type):
+        if self._uses_gated_mlp():
             act_f = self.get_swiglu_f(tensor_shape=ffn1_activation_shape)
             act_b = self.get_swiglu_b(tensor_shape=ffn1_activation_shape)
             if ffn1_activation_shape_shared is not None:
@@ -4350,8 +4535,21 @@ class TimeCalculationLLM(TimeCalculation):
                 )
 
         # these are used for dp all-reduce/reduce-scatter.
-        embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
-        softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
+        if self._is_vit_model():
+            embedding_params = llm_util.vit_patch_embed_param_count(
+                hidden_dim=hidden_dim,
+                patch_size=self.patch_size,
+                in_chans=self.in_chans,
+            )
+            output_params = llm_util.vit_head_param_count(
+                hidden_dim=hidden_dim,
+                num_classes=getattr(self, "num_classes", 0),
+            )
+            embedding_size = math.ceil(self.precision.grad_communication * embedding_params)
+            softmax_size = math.ceil(self.precision.grad_communication * output_params)
+        else:
+            embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
+            softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
 
         ep_dense_sync_bytes_dense = 0
@@ -4367,7 +4565,7 @@ class TimeCalculationLLM(TimeCalculation):
             router_size = math.ceil(self.precision.grad_communication * hidden_dim * self.moe_num_experts)
             shared_size = 0
             if self.n_shared_experts > 0:
-                ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
+                ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
                 expert_param_size = ffn_proj_factor * self.moe_intermediate_size * hidden_dim
                 use_tp_sharded = bool(getattr(self, "tp_ep", True))
                 if use_tp_sharded:
