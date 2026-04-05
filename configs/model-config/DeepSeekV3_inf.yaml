@@ -8,55 +8,14 @@ model_param:
   seq_len: 163840
   decode_len: 1024
   hidden_dim: 7168
-  attention_bias: false
-  attention_dropout: 0.0
-  architectures: ["DeepseekV3ForCausalLM"]
-  auto_map:
-    AutoConfig: "configuration_deepseek.DeepseekV3Config"
-    AutoModel: "modeling_deepseek.DeepseekV3Model"
-    AutoModelForCausalLM: "modeling_deepseek.DeepseekV3ForCausalLM"
-  bos_token_id: 0
-  eos_token_id: 1
-  ep_size: 1
-  hidden_act: "silu"
-  initializer_range: 0.02
-  max_position_embeddings: 163840
-  n_group: 8
-  norm_topk_prob: true
-  num_nextn_predict_layers: 1
-  quantization_config:
-    activation_scheme: "dynamic"
-    fmt: "e4m3"
-    quant_method: "fp8"
-    weight_block_size: [128, 128]
-  rope_scaling:
-    beta_fast: 32
-    beta_slow: 1
-    factor: 40
-    mscale: 1.0
-    mscale_all_dim: 1.0
-    original_max_position_embeddings: 4096
-    type: "yarn"
-  rope_theta: 10000
-  routed_scaling_factor: 2.5
-  scoring_func: "sigmoid"
-  tie_word_embeddings: false
-  topk_group: 4
-  topk_method: "noaux_tc"
-  torch_dtype: "bfloat16"
-  transformers_version: "4.33.1"
-  use_cache: true
   attention:
     attention_type: "mla"
     num_heads: 128
-    kv_heads: 128
     kv_lora_rank: 512
     q_lora_rank: 1536
     qk_nope_head_dim: 128
     qk_rope_head_dim: 64
     v_head_dim: 128
-    attention_bias: false
-    attention_dropout: 0.0
     use_flashattention: true  # Simulator knob; only affects MLA prefill, not decode.
     attention_tile_size: 128
   moe:
@@ -67,12 +26,6 @@ model_param:
     expert_imbalance_factor: 1.0
     moe_layer_freq: 1
     first_k_dense_replace: 3
-    n_group: 8
-    topk_group: 4
-    topk_method: "noaux_tc"
-    routed_scaling_factor: 2.5
-    scoring_func: "sigmoid"
-    norm_topk_prob: true
   intermediate_size: 18432
   vocab_size: 129280
   num_layers: 61

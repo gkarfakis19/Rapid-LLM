@@ -129,7 +129,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
     }
     if model_type == "deepseek_v3":
         attention_block["attention_type"] = "mla"
-        attention_block["kv_heads"] = int(kv_heads) if kv_heads is not None else int(num_heads)
         mla_field_names = (
             "kv_lora_rank",
             "q_lora_rank",
@@ -149,10 +148,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
                 raise SystemExit(
                     f"Invalid {field_name} value for DeepSeek-V3 MLA attention: {raw_value!r}."
                 ) from exc
-        for optional_field in ("attention_bias", "attention_dropout"):
-            raw_value = _first(cfg, optional_field, default=_first(lang_cfg, optional_field, default=None))
-            if raw_value is not None:
-                attention_block[optional_field] = raw_value
     elif kv_heads is not None and int(kv_heads) > 0 and int(kv_heads) != int(num_heads):
         attention_block["attention_type"] = "gqa"
         attention_block["kv_heads"] = int(kv_heads)
@@ -343,53 +338,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
             "num_layers": int(num_layers),
         },
     }
-
-    if model_type == "deepseek_v3":
-        model_block = yaml_dict["model_param"]
-        passthrough_model_fields = (
-            "architectures",
-            "attention_bias",
-            "attention_dropout",
-            "auto_map",
-            "bos_token_id",
-            "eos_token_id",
-            "ep_size",
-            "hidden_act",
-            "initializer_range",
-            "max_position_embeddings",
-            "n_group",
-            "norm_topk_prob",
-            "num_nextn_predict_layers",
-            "quantization_config",
-            "rope_scaling",
-            "rope_theta",
-            "routed_scaling_factor",
-            "scoring_func",
-            "tie_word_embeddings",
-            "topk_group",
-            "topk_method",
-            "torch_dtype",
-            "transformers_version",
-            "use_cache",
-        )
-        for field_name in passthrough_model_fields:
-            raw_value = _first(cfg, field_name, default=_first(lang_cfg, field_name, default=None))
-            if raw_value is not None:
-                model_block[field_name] = raw_value
-
-        moe_block = model_block["moe"]
-        passthrough_moe_fields = (
-            "n_group",
-            "norm_topk_prob",
-            "routed_scaling_factor",
-            "scoring_func",
-            "topk_group",
-            "topk_method",
-        )
-        for field_name in passthrough_moe_fields:
-            raw_value = _first(cfg, field_name, default=_first(lang_cfg, field_name, default=None))
-            if raw_value is not None:
-                moe_block[field_name] = raw_value
 
     return yaml_dict
 
