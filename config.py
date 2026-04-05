@@ -1676,9 +1676,9 @@ class LLMConfig:
         model_type = model_type_raw.strip().lower()
         if model_type in {"glm4", "glm"}:
             model_type = "glm4_moe"
-        if model_type not in {"gpt", "llama", "glm4_moe", "vit", "vit_dinov3"}:
+        if model_type not in {"gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"}:
             raise ValueError(
-                "model_param.model_type must be one of 'gpt', 'llama', 'vit', 'vit_dinov3', or 'glm4_moe' "
+                "model_param.model_type must be one of 'gpt', 'llama', 'deepseek_v3', 'vit', 'vit_dinov3', or 'glm4_moe' "
                 f"(got {model_type_raw!r})"
             )
 

@@ -45,7 +45,7 @@ def reshape_gemm_to_3d(arg):
 
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
-_LLAMA_STYLE_MODEL_TYPES = {"llama", "glm4_moe", "glm4", "glm"}
+_LLAMA_STYLE_MODEL_TYPES = {"llama", "deepseek_v3", "glm4_moe", "glm4", "glm"}
 _GLM_MODEL_TYPES = {"glm4_moe", "glm4", "glm"}
 _VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
 
