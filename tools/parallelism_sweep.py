@@ -69,11 +69,17 @@ plt.rcParams.update({"font.size": 13})
 # -----------------------------------------------------------------------------
 
 # Paths to the baseline configuration files
-HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/a100_80GB_para_sweep.yaml"
+HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/A100_SXM4_80GB_case-A.yaml"
 HARDWARE_CONFIG_DIR = "validation_scripts/validation_configs/hardware-config"
-HW_CONFIGS = []  # Optional: list of hardware configs to sweep; if empty, uses HARDWARE_CONFIG_PATH.
-HW_LABELS = []   # Optional: labels aligned with HW_CONFIGS.
-MODEL_CONFIG_PATH = "validation_scripts/validation_configs/model-config/Llama3.1-405B.yaml"
+HW_CONFIGS = [  # Optional: list of hardware configs to sweep; if empty, uses HARDWARE_CONFIG_PATH.
+    "A100_SXM4_80GB_case-A.yaml",
+    "A100_SXM4_80GB_case-B.yaml",
+]
+HW_LABELS = [  # Optional: labels aligned with HW_CONFIGS.
+    "Case A",
+    "Case B",
+]
+MODEL_CONFIG_PATH = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml"
 
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Values map to the training parallelism block (parallelism.train.dp, etc.).
@@ -93,7 +99,7 @@ OTHER_PARALLELISM_OPTIONS = {
 # GPU count filter: only evaluate combinations whose TP*CP*DP*PP fall inside
 # this inclusive range.
 GPU_COUNT_MIN = 128
-GPU_COUNT_MAX = 4096
+GPU_COUNT_MAX = 2048
 TP_CP_PRODUCT_MIN = 1  # Optional: set to int to filter tp*cp below this threshold.
 TP_CP_PRODUCT_MAX = 512  # Optional: set to int to filter tp*cp above this threshold.
 
@@ -134,7 +140,7 @@ MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in p
 EVALUATE_MEMORY_EXCEEDED = True  # When True, still compute runtime even if memory limits are exceeded (may crash).
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 60
+MAX_WORKERS = 127
 # When True, use a thread pool instead of a process pool (more stable, avoids worker crashes at the cost of GIL contention).
 USE_THREADPOOL = False
 
@@ -210,7 +216,7 @@ def read_yaml(path):
         return yaml.safe_load(handle)
 
 
-def _parse_hardware_list(arg: str) -> List[str]:
+def _parse_csv_list(arg: str) -> List[str]:
     if not arg:
         return []
     paths = []
@@ -221,12 +227,137 @@ def _parse_hardware_list(arg: str) -> List[str]:
     return paths
 
 
+def _resolve_repo_relative_path(path_like: str) -> Path:
+    p = Path(path_like)
+    if p.is_absolute():
+        return p
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_candidate = repo_root / p
+    if repo_candidate.exists():
+        return repo_candidate
+    return p.resolve()
+
+
+def _normalize_device_type_key(value: str) -> str:
+    text = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text
+
+
+def _to_positive_float(value: object, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Expected numeric value for '{field_name}', got {value!r}.")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"Expected '{field_name}' > 0, got {value!r}.")
+    return parsed
+
+
+def _load_device_derates(path_like: str, device_type: str) -> Dict[str, float]:
+    config_path = _resolve_repo_relative_path(path_like)
+    raw = read_yaml(str(config_path))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Derate config must be a YAML mapping at root: {config_path}")
+
+    shared_raw = raw.get("shared")
+    if not isinstance(shared_raw, dict):
+        raise ValueError(f"Derate config missing 'shared' mapping: {config_path}")
+    kernel_launch_overhead_s = _to_positive_float(
+        shared_raw.get("kernel_launch_overhead_s"),
+        "shared.kernel_launch_overhead_s",
+    )
+
+    device_types_raw = raw.get("device_types")
+    if not isinstance(device_types_raw, dict):
+        raise ValueError(f"Derate config missing 'device_types' mapping: {config_path}")
+
+    target_key = _normalize_device_type_key(device_type)
+    selected = None
+    for raw_key, entry in device_types_raw.items():
+        if _normalize_device_type_key(str(raw_key)) == target_key:
+            selected = entry
+            break
+    if not isinstance(selected, dict):
+        raise ValueError(
+            f"Derate config has no device_types entry for '{device_type}' in {config_path}"
+        )
+
+    return {
+        "kernel_launch_overhead_s": kernel_launch_overhead_s,
+        "dram_util": _to_positive_float(selected.get("dram_util"), f"device_types.{device_type}.dram_util"),
+        "network_util": _to_positive_float(
+            selected.get("network_util"), f"device_types.{device_type}.network_util"
+        ),
+        "compute_util": _to_positive_float(
+            selected.get("compute_util"), f"device_types.{device_type}.compute_util"
+        ),
+    }
+
+
+def _apply_device_derates(hw_dict: Dict[str, object], derates: Dict[str, float]) -> None:
+    sw_param = hw_dict.setdefault("sw_param", {})
+    if not isinstance(sw_param, dict):
+        raise ValueError("Expected sw_param to be a mapping in hardware config.")
+    sw_param["kernel_launch_overhead"] = float(derates["kernel_launch_overhead_s"])
+
+    tech_param = hw_dict.setdefault("tech_param", {})
+    if not isinstance(tech_param, dict):
+        raise ValueError("Expected tech_param to be a mapping in hardware config.")
+    dram_cfg = tech_param.setdefault("DRAM", {})
+    if not isinstance(dram_cfg, dict):
+        raise ValueError("Expected tech_param.DRAM to be a mapping in hardware config.")
+    core_cfg = tech_param.setdefault("core", {})
+    if not isinstance(core_cfg, dict):
+        raise ValueError("Expected tech_param.core to be a mapping in hardware config.")
+    dram_cfg["util"] = float(derates["dram_util"])
+    core_cfg["util"] = float(derates["compute_util"])
+
+    network = hw_dict.get("network")
+    if not isinstance(network, dict):
+        raise ValueError("Expected network to be a mapping in hardware config.")
+    dimensions = network.get("dimensions")
+    if not isinstance(dimensions, list):
+        raise ValueError("Expected network.dimensions to be a list in hardware config.")
+
+    dim0_found = False
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        if str(dim.get("id", "")).strip() != "dim0":
+            continue
+        topology = dim.setdefault("topology", {})
+        if not isinstance(topology, dict):
+            raise ValueError("Expected network.dimensions[id=dim0].topology to be a mapping.")
+        topology["util"] = float(derates["network_util"])
+        dim0_found = True
+        break
+    if not dim0_found:
+        raise ValueError("Expected a network dimension with id='dim0' in hardware config.")
+
+
 def _tagged_output_path(base_path: str, tag: str) -> str:
     """Insert a tag before the file extension in base_path."""
     p = Path(base_path)
     tag = tag.replace(os.sep, "_")
     new_name = f"{p.stem}_{tag}{p.suffix}"
     return str(p.with_name(new_name))
+
+
+def _root_output_path(base_path: str, output_root: str) -> str:
+    if not output_root:
+        return base_path
+    return str(Path(output_root) / Path(base_path).name)
+
+
+def _combine_tags(*parts: str) -> str:
+    cleaned = []
+    for part in parts:
+        text = str(part or "").strip()
+        if text:
+            cleaned.append(text.replace(os.sep, "_"))
+    return "_".join(cleaned)
 
 
 def _resolve_hw_paths(config_list: List[str]) -> List[str]:
@@ -251,24 +382,53 @@ def _hardware_label(index: int, hw_path: str) -> str:
 def _model_config_with_overrides(base_model_path: str, hw_config_path: str) -> Tuple[str, str]:
     """
     Return a path to a model config that includes hardware-specific overrides.
-    For a100_80GB_L2.yaml, tweak attention tiling and enable flash attention.
+    Case A scales attention tile size with the larger effective L2 only when
+    FlashAttention is enabled in the base model config.
     """
     hw_name = Path(hw_config_path).name
     cache_id = str(Path(base_model_path).resolve())
-    if hw_name != "a100_80GB_L2.yaml":
+    if hw_name != "A100_SXM4_80GB_case-A.yaml":
         return base_model_path, cache_id
+
+    def _parse_size_to_bytes(value) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        number, unit = text.split(None, 1)
+        scale = {
+            "B": 1,
+            "KB": 1024,
+            "MB": 1024 ** 2,
+            "GB": 1024 ** 3,
+            "TB": 1024 ** 4,
+        }
+        return int(float(number) * scale[unit.upper()])
 
     model_dict = read_yaml(base_model_path)
     model_param = model_dict.setdefault("model_param", {})
     attention = model_param.setdefault("attention", {})
-    attention["attention_tile_size"] = 409
-    attention["use_flashattention"] = True
+    if not bool(attention.get("use_flashattention", False)):
+        return base_model_path, cache_id
+    base_hw_path = (
+        Path(__file__).resolve().parents[1]
+        / "validation_scripts"
+        / "validation_configs"
+        / "hardware-config"
+        / "A100_SXM4_80GB_base.yaml"
+    )
+    base_hw = read_yaml(str(base_hw_path))
+    case_hw = read_yaml(hw_config_path)
+    base_l2 = _parse_size_to_bytes(base_hw["tech_param"]["SRAM-L2"]["size"])
+    case_l2 = _parse_size_to_bytes(case_hw["tech_param"]["SRAM-L2"]["size"])
+    base_tile = int(attention.get("attention_tile_size", 128) or 128)
+    scaled_tile = max(1, int(base_tile * (float(case_l2) / float(base_l2))))
+    attention["attention_tile_size"] = scaled_tile
 
     tmp_handle = tempfile.NamedTemporaryFile("w", suffix="_model_override.yaml", delete=False)
     try:
         yaml.safe_dump(model_dict, tmp_handle, default_flow_style=False, sort_keys=False)
         tmp_handle.flush()
-        cache_id = f"{cache_id}|l2_flashattention"
+        cache_id = f"{cache_id}|caseA_flashattention_tile={scaled_tile}"
         return tmp_handle.name, cache_id
     finally:
         try:
@@ -316,6 +476,8 @@ def _load_runtime_cache(path: str) -> Dict[Tuple[str, str, str], Dict[str, objec
                     "parallelism": settings,
                     "num_gpus": int(row.get("num_gpus", 0)),
                     "runtime": float(row.get("runtime", "nan")),
+                    "prefill_time": float(row.get("prefill_time", "nan")),
+                    "decode_time": float(row.get("decode_time", "nan")),
                     "performance": float(row.get("performance", "nan")),
                     "total_flops": float(row.get("total_flops", "nan")),
                     "achieved_flops": float(row.get("achieved_flops", "nan")),
@@ -339,6 +501,8 @@ def _save_runtime_cache(cache: Dict[Tuple[str, str, str], Dict[str, object]], pa
         "parallelism",
         "num_gpus",
         "runtime",
+        "prefill_time",
+        "decode_time",
         "performance",
         "total_flops",
         "achieved_flops",
@@ -359,6 +523,18 @@ def _save_runtime_cache(cache: Dict[Tuple[str, str, str], Dict[str, object]], pa
                 writer.writerow(row)
     except Exception as exc:
         print(f"Warning: failed to save runtime cache to {path}: {exc}", file=sys.stderr)
+
+
+def _cache_entry_has_inference_breakdown(entry: Dict[str, object]) -> bool:
+    for key in ("prefill_time", "decode_time"):
+        value = entry.get(key)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return False
+        if math.isnan(parsed):
+            return False
+    return True
 
 
 def cartesian_product(option_map):
@@ -606,11 +782,15 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
             with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
                 inference_timing = calculator.calc_total_inference_time()
                 runtime = float(inference_timing["total_inference_time"])
+                prefill_time = float(inference_timing.get("prefill_time", float("nan")))
+                decode_time = float(inference_timing.get("decode_time", float("nan")))
             mem_exceeded = bool(getattr(calculator, "memory_capacity_exceeded", False))
             mem_violation = float(getattr(calculator, "memory_capacity_violation_gb", 0.0) or 0.0)
             if mem_exceeded and not EVALUATE_MEMORY_EXCEEDED:
                 return {
                     "runtime": float("nan"),
+                    "prefill_time": prefill_time,
+                    "decode_time": decode_time,
                     "performance": float("nan"),
                     "total_flops": float("nan"),
                     "peak_flops": gpu_peak_flops(hw_config),
@@ -623,6 +803,8 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
             performance = (1.0 / runtime) if runtime > 0.0 else float("nan")
             return {
                 "runtime": runtime,
+                "prefill_time": prefill_time,
+                "decode_time": decode_time,
                 "performance": performance,
                 "total_flops": float("nan"),
                 "peak_flops": gpu_peak_flops(hw_config),
@@ -642,6 +824,8 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
             num_gpus = total_gpu_count(parallel_settings)
             return {
                 "runtime": float("nan"),
+                "prefill_time": float("nan"),
+                "decode_time": float("nan"),
                 "performance": float("nan"),
                 "total_flops": total_flops,
                 "peak_flops": peak_flops,
@@ -662,6 +846,8 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
         mfu = (achieved_flops / denom) if denom and denom > 0 else float("nan")
         return {
             "runtime": runtime,
+            "prefill_time": float("nan"),
+            "decode_time": float("nan"),
             "performance": performance,
             "total_flops": total_flops,
             "peak_flops": peak_flops,
@@ -686,9 +872,12 @@ def set_astrasim_cache_mode(mode_str):
 
 
 def write_report(results, path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     header = [
         "num_gpus",
         "runtime_s",
+        "prefill_time_s",
+        "decode_time_s",
         "performance_1_over_s",
         "total_flops",
         "achieved_flops_per_s",
@@ -704,6 +893,8 @@ def write_report(results, path):
             row = [
                 str(entry["num_gpus"]),
                 "{:.6f}".format(entry["runtime"]),
+                "{:.6f}".format(entry.get("prefill_time", float("nan"))),
+                "{:.6f}".format(entry.get("decode_time", float("nan"))),
                 (
                     "{:.6f}".format(entry["performance"])
                     if entry["performance"] == entry["performance"]
@@ -733,32 +924,30 @@ def load_results_from_report(path: str) -> List[Dict[str, object]]:
 
     results: List[Dict[str, object]] = []
     with open(path, "r") as handle:
-        header = handle.readline()
-        if not header:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
             return results
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) < 10:
-                print(f"Warning: skipping malformed row in report: {line}", file=sys.stderr)
-                continue
+        for row in reader:
             try:
-                parallelism = ast.literal_eval(parts[9])
+                parallelism = ast.literal_eval(row["parallelism"])
             except (SyntaxError, ValueError) as exc:
-                print(f"Warning: failed to parse parallelism '{parts[9]}': {exc}", file=sys.stderr)
+                print(
+                    f"Warning: failed to parse parallelism '{row.get('parallelism', '')}': {exc}",
+                    file=sys.stderr,
+                )
                 continue
             entry = {
-                "num_gpus": int(parts[0]),
-                "runtime": _parse_float(parts[1]),
-                "performance": _parse_float(parts[2]),
-                "total_flops": _parse_float(parts[3]),
-                "achieved_flops": _parse_float(parts[4]),
-                "peak_flops": _parse_float(parts[5]),
-                "mfu": _parse_float(parts[6]),
-                "memory_exceeded": str(parts[7]).strip().lower() == "true",
-                "memory_violation_gb": _parse_float(parts[8]),
+                "num_gpus": int(row["num_gpus"]),
+                "runtime": _parse_float(row.get("runtime_s")),
+                "prefill_time": _parse_float(row.get("prefill_time_s")),
+                "decode_time": _parse_float(row.get("decode_time_s")),
+                "performance": _parse_float(row.get("performance_1_over_s")),
+                "total_flops": _parse_float(row.get("total_flops")),
+                "achieved_flops": _parse_float(row.get("achieved_flops_per_s")),
+                "peak_flops": _parse_float(row.get("peak_flops_per_gpu")),
+                "mfu": _parse_float(row.get("mfu")),
+                "memory_exceeded": str(row.get("memory_exceeded", "")).strip().lower() == "true",
+                "memory_violation_gb": _parse_float(row.get("memory_violation_gb")),
                 "parallelism": parallelism,
             }
             results.append(entry)
@@ -769,6 +958,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="RAPID-LLM parallelism sweep utility.")
     parser.add_argument(
         "--plot_only",
+        "--plot-only",
+        dest="plot_only",
         action="store_true",
         help="Skip evaluation and only regenerate plots from the existing TSV report.",
     )
@@ -776,6 +967,60 @@ def parse_args():
         "--enforce-square-tp-cp",
         action="store_true",
         help="Require tp*cp to be a square power of two when enumerating configurations.",
+    )
+    parser.add_argument(
+        "--hardware-configs",
+        type=str,
+        default="",
+        help="Comma-separated hardware config paths to evaluate (overrides HARDWARE_CONFIG_PATH/HW_CONFIGS).",
+    )
+    parser.add_argument(
+        "--hardware-labels",
+        type=str,
+        default="",
+        help="Comma-separated labels aligned with --hardware-configs (for combined plots).",
+    )
+    parser.add_argument(
+        "--model-config",
+        type=str,
+        default="",
+        help="Path to model config YAML (overrides MODEL_CONFIG_PATH).",
+    )
+    parser.add_argument(
+        "--output-tag",
+        type=str,
+        default="",
+        help="Suffix added to generated report/plot filenames to keep runs separate.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=str,
+        default="",
+        help="Optional directory to place generated TSV/PNG/cache artifacts for this run.",
+    )
+    parser.add_argument(
+        "--gpu-count-min",
+        type=int,
+        default=None,
+        help="Minimum total GPU count to evaluate (overrides GPU_COUNT_MIN).",
+    )
+    parser.add_argument(
+        "--gpu-count-max",
+        type=int,
+        default=None,
+        help="Maximum total GPU count to evaluate (overrides GPU_COUNT_MAX).",
+    )
+    parser.add_argument(
+        "--derate-config",
+        type=str,
+        default="",
+        help="Path to derate YAML (same schema as validation_scripts/validation_configs/harness_derates.yaml).",
+    )
+    parser.add_argument(
+        "--derate-device-type",
+        type=str,
+        default="",
+        help="Device type entry to load from --derate-config (e.g., A100_SXM4).",
     )
     return parser.parse_args()
 
@@ -1112,6 +1357,7 @@ def plot_best_runtimes_per_gpu(best_by_gpu: Dict[int, List[Dict[str, object]]], 
             plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{value:.3f}", ha="center", va="bottom", fontsize=8)
 
         path = os.path.join(output_dir, f"best_runtime_{gpu_count}gpus.png")
+        os.makedirs(output_dir, exist_ok=True)
         plt.savefig(path, dpi=200)
         plt.close()
         print(f"Saved per-GPU best-runtime bar chart to {path}")
@@ -1423,19 +1669,115 @@ def main():
     args = parse_args()
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
 
-    hw_config_paths = _resolve_hw_paths(HW_CONFIGS or [HARDWARE_CONFIG_PATH])
+    hw_config_cli = _parse_csv_list(args.hardware_configs)
+    hw_config_paths = _resolve_hw_paths(hw_config_cli or HW_CONFIGS or [HARDWARE_CONFIG_PATH])
+    label_override = _parse_csv_list(args.hardware_labels)
+    if label_override and len(label_override) != len(hw_config_paths):
+        raise ValueError(
+            f"--hardware-labels count ({len(label_override)}) must match hardware configs count "
+            f"({len(hw_config_paths)})."
+        )
+
+    derate_config_path = str(args.derate_config or "").strip()
+    derate_device_type = str(args.derate_device_type or "").strip()
+    if bool(derate_config_path) != bool(derate_device_type):
+        raise ValueError("Both --derate-config and --derate-device-type must be provided together.")
+    active_derates: Dict[str, float] = {}
+    derate_cache_tag = ""
+    if derate_config_path and derate_device_type:
+        active_derates = _load_device_derates(derate_config_path, derate_device_type)
+        resolved_derate_path = _resolve_repo_relative_path(derate_config_path)
+        device_type_key = _normalize_device_type_key(derate_device_type)
+        derate_cache_tag = (
+            f"|derate:{resolved_derate_path.resolve()}:{device_type_key}"
+            f":klo={active_derates['kernel_launch_overhead_s']:.12g}"
+            f":dram={active_derates['dram_util']:.12g}"
+            f":net={active_derates['network_util']:.12g}"
+            f":core={active_derates['compute_util']:.12g}"
+        )
+        print(
+            "Applying derates from {} for {}: kernel_launch_overhead={}, dram.util={}, "
+            "network.dim0.util={}, core.util={}".format(
+                resolved_derate_path,
+                device_type_key,
+                active_derates["kernel_launch_overhead_s"],
+                active_derates["dram_util"],
+                active_derates["network_util"],
+                active_derates["compute_util"],
+            )
+        )
+
     enforce_square = ENFORCE_SQUARE_TP_CP or args.enforce_square_tp_cp
-    mode = determine_model_mode(MODEL_CONFIG_PATH)
-    runtime_cache = _load_runtime_cache(RUNTIME_CACHE_PATH)
+    active_model_config_path = str(args.model_config or "").strip() or MODEL_CONFIG_PATH
+    active_gpu_count_min = GPU_COUNT_MIN if args.gpu_count_min is None else int(args.gpu_count_min)
+    active_gpu_count_max = GPU_COUNT_MAX if args.gpu_count_max is None else int(args.gpu_count_max)
+    if active_gpu_count_min > active_gpu_count_max:
+        raise ValueError(
+            f"--gpu-count-min ({active_gpu_count_min}) must be <= --gpu-count-max ({active_gpu_count_max})."
+        )
+    output_tag = str(args.output_tag or "").strip()
+    output_root = str(args.output_root or "").strip()
+    rooted_plot_output_path = _root_output_path(PLOT_OUTPUT_PATH, output_root)
+    rooted_report_output_path = _root_output_path(REPORT_OUTPUT_PATH, output_root)
+    rooted_best_runtime_plot_path = _root_output_path(BEST_RUNTIME_PLOT_PATH, output_root)
+    rooted_best_runtime_per_gpu_dir = _root_output_path(BEST_RUNTIME_PER_GPU_DIR, output_root)
+    rooted_best_runtime_per_gpu_combined_path = _root_output_path(
+        BEST_RUNTIME_PER_GPU_COMBINED_PATH,
+        output_root,
+    )
+    rooted_best_speedup_per_gpu_combined_path = _root_output_path(
+        BEST_SPEEDUP_PER_GPU_COMBINED_PATH,
+        output_root,
+    )
+    rooted_runtime_cache_path = _root_output_path(RUNTIME_CACHE_PATH, output_root)
+    if output_root:
+        Path(output_root).mkdir(parents=True, exist_ok=True)
+    active_plot_output_path = (
+        _tagged_output_path(rooted_plot_output_path, output_tag)
+        if output_tag
+        else rooted_plot_output_path
+    )
+    active_report_output_path = (
+        _tagged_output_path(rooted_report_output_path, output_tag)
+        if output_tag
+        else rooted_report_output_path
+    )
+    active_best_runtime_plot_path = (
+        _tagged_output_path(rooted_best_runtime_plot_path, output_tag)
+        if output_tag
+        else rooted_best_runtime_plot_path
+    )
+    active_best_runtime_per_gpu_dir = (
+        _tagged_output_path(rooted_best_runtime_per_gpu_dir, output_tag)
+        if output_tag
+        else rooted_best_runtime_per_gpu_dir
+    )
+    active_best_runtime_per_gpu_combined_path = (
+        _tagged_output_path(rooted_best_runtime_per_gpu_combined_path, output_tag)
+        if output_tag
+        else rooted_best_runtime_per_gpu_combined_path
+    )
+    active_best_speedup_per_gpu_combined_path = (
+        _tagged_output_path(rooted_best_speedup_per_gpu_combined_path, output_tag)
+        if output_tag
+        else rooted_best_speedup_per_gpu_combined_path
+    )
+    mode = determine_model_mode(active_model_config_path)
+    runtime_cache = _load_runtime_cache(rooted_runtime_cache_path)
     cache_dirty = False
 
     results: List[Dict[str, object]] = []
-    label_order = [_hardware_label(i, path) for i, path in enumerate(hw_config_paths)]
+    label_order = label_override or [_hardware_label(i, path) for i, path in enumerate(hw_config_paths)]
 
     if args.plot_only:
         for hw_path in hw_config_paths:
             tag = Path(hw_path).stem if len(hw_config_paths) > 1 else None
-            report_path = _tagged_output_path(REPORT_OUTPUT_PATH, tag) if tag else REPORT_OUTPUT_PATH
+            report_tag = _combine_tags(output_tag, tag)
+            report_path = (
+                _tagged_output_path(rooted_report_output_path, report_tag)
+                if report_tag
+                else rooted_report_output_path
+            )
             try:
                 results = load_results_from_report(report_path)
             except FileNotFoundError as exc:
@@ -1457,7 +1799,8 @@ def main():
             print("  MFU: {:.3f}".format(best["mfu"]))
             if best["memory_exceeded"]:
                 print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
-            plot_path = _tagged_output_path(PLOT_OUTPUT_PATH, tag) if tag else PLOT_OUTPUT_PATH
+            plot_tag = _combine_tags(output_tag, tag)
+            plot_path = _tagged_output_path(PLOT_OUTPUT_PATH, plot_tag) if plot_tag else PLOT_OUTPUT_PATH
             plot_results(results, plot_path)
         return
 
@@ -1485,7 +1828,7 @@ def main():
             if TP_CP_PRODUCT_MAX is not None and tp_cp_prod > TP_CP_PRODUCT_MAX:
                 skipped_out_of_range += 1
                 continue
-        if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
+        if active_gpu_count_min <= num_gpus <= active_gpu_count_max:
             filtered_tasks.append(items)
         else:
             skipped_out_of_range += 1
@@ -1509,8 +1852,10 @@ def main():
 
     for hw_index, hw_path in enumerate(hw_config_paths):
         tag = Path(hw_path).stem if len(hw_config_paths) > 1 else None
-        report_path = _tagged_output_path(REPORT_OUTPUT_PATH, tag) if tag else REPORT_OUTPUT_PATH
-        plot_path = _tagged_output_path(PLOT_OUTPUT_PATH, tag) if tag else PLOT_OUTPUT_PATH
+        report_tag = _combine_tags(output_tag, tag)
+        plot_tag = _combine_tags(output_tag, tag)
+        report_path = _tagged_output_path(active_report_output_path, tag) if tag else active_report_output_path
+        plot_path = _tagged_output_path(active_plot_output_path, tag) if tag else active_plot_output_path
         hw_label = label_order[hw_index] if hw_index < len(label_order) else Path(hw_path).stem
         print(f"\n=== Evaluating hardware config: {hw_path} ===")
 
@@ -1520,6 +1865,7 @@ def main():
         memory_violations = 0
         error_messages: List[str] = []
         evaluated = 0
+        model_config_id = ""
 
         def _consume_worker_result(result: Dict[str, object]) -> None:
             nonlocal skipped_errors, memory_violations, evaluated, cache_dirty
@@ -1539,6 +1885,8 @@ def main():
                 "parallelism": settings,
                 "num_gpus": num_gpus,
                 "runtime": metrics["runtime"],
+                "prefill_time": metrics.get("prefill_time", float("nan")),
+                "decode_time": metrics.get("decode_time", float("nan")),
                 "performance": metrics["performance"],
                 "total_flops": metrics["total_flops"],
                 "achieved_flops": metrics["achieved_flops"],
@@ -1547,13 +1895,15 @@ def main():
                 "memory_exceeded": metrics["memory_exceeded"],
                 "memory_violation_gb": metrics["memory_violation_gb"],
             }
-            key = _cache_key(hw_path, model_cache_id, settings)
+            key = _cache_key(hw_path, model_config_id, settings)
             runtime_cache[key] = {
                 "hardware_config": str(Path(hw_path).resolve()),
-                "model_config": model_cache_id,
+                "model_config": model_config_id,
                 "parallelism": dict(settings),
                 "num_gpus": num_gpus,
                 "runtime": entry["runtime"],
+                "prefill_time": entry["prefill_time"],
+                "decode_time": entry["decode_time"],
                 "performance": entry["performance"],
                 "total_flops": entry["total_flops"],
                 "achieved_flops": entry["achieved_flops"],
@@ -1583,22 +1933,34 @@ def main():
 
         if not results_from_report:
             base_hw_dict = read_yaml(hw_path)
-            model_config_path, model_cache_id = _model_config_with_overrides(MODEL_CONFIG_PATH, hw_path)
+            model_config_path, model_config_id = _model_config_with_overrides(active_model_config_path, hw_path)
+            if active_derates:
+                _apply_device_derates(base_hw_dict, active_derates)
+                model_config_id = f"{model_config_id}{derate_cache_tag}"
+            model_config_obj = config.parse_config(model_config_path, config_type=mode)
+            active_run_type = str(
+                getattr(getattr(model_config_obj, "model_config", None), "run_type", "training")
+            ).lower()
 
             try:
                 tasks_to_eval: List[Tuple[Tuple[str, object], ...]] = []
                 for items in filtered_tasks:
                     settings = build_parallelism_settings(dict(items))
                     num_gpus = total_gpu_count(settings)
-                    key = _cache_key(hw_path, model_cache_id, settings)
+                    key = _cache_key(hw_path, model_config_id, settings)
                     cached_entry = runtime_cache.get(key)
-                    if cached_entry is None:
+                    if cached_entry is None or (
+                        active_run_type == "inference"
+                        and not _cache_entry_has_inference_breakdown(cached_entry)
+                    ):
                         tasks_to_eval.append(items)
                         continue
                     entry = {
                         "parallelism": settings,
                         "num_gpus": num_gpus,
                         "runtime": float(cached_entry.get("runtime", float("nan"))),
+                        "prefill_time": float(cached_entry.get("prefill_time", float("nan"))),
+                        "decode_time": float(cached_entry.get("decode_time", float("nan"))),
                         "performance": float(cached_entry.get("performance", float("nan"))),
                         "total_flops": float(cached_entry.get("total_flops", float("nan"))),
                         "achieved_flops": float(cached_entry.get("achieved_flops", float("nan"))),
@@ -1712,7 +2074,6 @@ def main():
                                     continue
                                 _consume_worker_result(result)
                 elif tasks_to_eval:
-                    model_config_obj = config.parse_config(model_config_path, config_type=mode)
                     with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
                         for items in tasks_to_eval:
                             settings = build_parallelism_settings(dict(items))
@@ -1729,6 +2090,8 @@ def main():
                                 "parallelism": settings,
                                 "num_gpus": num_gpus,
                                 "runtime": metrics["runtime"],
+                                "prefill_time": metrics.get("prefill_time", float("nan")),
+                                "decode_time": metrics.get("decode_time", float("nan")),
                                 "performance": metrics["performance"],
                                 "total_flops": metrics["total_flops"],
                                 "achieved_flops": metrics["achieved_flops"],
@@ -1737,13 +2100,15 @@ def main():
                                 "memory_exceeded": metrics["memory_exceeded"],
                                 "memory_violation_gb": metrics["memory_violation_gb"],
                             }
-                            key = _cache_key(hw_path, model_cache_id, settings)
+                            key = _cache_key(hw_path, model_config_id, settings)
                             runtime_cache[key] = {
                                 "hardware_config": str(Path(hw_path).resolve()),
-                                "model_config": model_cache_id,
+                                "model_config": model_config_id,
                                 "parallelism": dict(settings),
                                 "num_gpus": num_gpus,
                                 "runtime": metrics["runtime"],
+                                "prefill_time": metrics.get("prefill_time", float("nan")),
+                                "decode_time": metrics.get("decode_time", float("nan")),
                                 "performance": metrics["performance"],
                                 "total_flops": metrics["total_flops"],
                                 "achieved_flops": metrics["achieved_flops"],
@@ -1765,7 +2130,7 @@ def main():
                             evaluated += 1
                             results.append(entry)
             finally:
-                if model_config_path != MODEL_CONFIG_PATH and os.path.exists(model_config_path):
+                if model_config_path != active_model_config_path and os.path.exists(model_config_path):
                     try:
                         os.unlink(model_config_path)
                     except Exception:
@@ -1848,19 +2213,23 @@ def main():
     # plot_mfu(results, PLOT_MFU_OUTPUT_PATH)
 
     if best_runtime_entries:
-        plot_best_runtimes(best_runtime_entries, BEST_RUNTIME_PLOT_PATH, label_order)
+        plot_best_runtimes(best_runtime_entries, active_best_runtime_plot_path, label_order)
     if best_runtime_by_gpu_count:
-        plot_best_runtimes_per_gpu(best_runtime_by_gpu_count, BEST_RUNTIME_PER_GPU_DIR, label_order)
-        plot_best_runtimes_per_gpu_combined(best_runtime_by_gpu_count, BEST_RUNTIME_PER_GPU_COMBINED_PATH, label_order)
+        plot_best_runtimes_per_gpu(
+            best_runtime_by_gpu_count, active_best_runtime_per_gpu_dir, label_order
+        )
+        plot_best_runtimes_per_gpu_combined(
+            best_runtime_by_gpu_count, active_best_runtime_per_gpu_combined_path, label_order
+        )
         plot_speedup_per_gpu_combined(
             best_runtime_by_gpu_count,
-            BEST_SPEEDUP_PER_GPU_COMBINED_PATH,
+            active_best_speedup_per_gpu_combined_path,
             label_order,
-            base_label=HW_LABELS[0] if HW_LABELS else "Base",
+            base_label=label_order[0] if label_order else "Base",
             omit_gpu_counts=[64],
         )
     if cache_dirty:
-        _save_runtime_cache(runtime_cache, RUNTIME_CACHE_PATH)
+        _save_runtime_cache(runtime_cache, rooted_runtime_cache_path)
 
 if __name__ == "__main__":
     main()

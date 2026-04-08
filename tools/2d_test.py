@@ -24,6 +24,7 @@ prints tabular results, and emits bar plots.
 import copy
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import shutil
@@ -60,13 +61,17 @@ if H100_GPU:
 else:
     TRAIN_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_train.yaml"
     INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_inf.yaml"
+DERATE_CONFIG = "validation_scripts/validation_configs/harness_derates.yaml"
+DERATE_DEVICE_TYPE = "H100_SXM5" if H100_GPU else "A100_SXM4"
 
 TRAIN_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml"
 # TRAIN_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_train.yaml"
 TRAIN_GLM45_106B_MODEL_CONFIG = "configs/model-config/GLM_4.5_AIR_106B.yaml"
+TRAIN_VIT7B_MODEL_CONFIG = "configs/model-config/vit_7b_patch16_dinov3_lvd1689m_train.yaml"
 INF_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_inf.yaml"
 # INF_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml"
 INF_GLM45_106B_MODEL_CONFIG = "configs/model-config/GLM_4.5_AIR_106B_inf.yaml"
+INF_VIT7B_MODEL_CONFIG = "configs/model-config/vit_7b_patch16_dinov3_lvd1689m_inf.yaml"
 
 OUTPUT_ROOT = Path("output") / "2d_test"
 PLOT_DIR = OUTPUT_ROOT
@@ -122,7 +127,7 @@ COMP_TOPO_SPECS = {
 }
 # TOPOLOGIES = ("Mesh2D", "Torus2D")
 
-BW_SWEEP_GBPS = (50,200,325,750,1500)
+BW_SWEEP_GBPS = (750,)
 BW_SWEEP_LABELS = {
     10: "10 GB/s",
     25: "25 GB/s",
@@ -178,6 +183,11 @@ TRAIN_MODELS = (
         ),
         "axes": ("tp", "ep", "pp"),
     },
+    {
+        "label": "ViT7B",
+        "config": TRAIN_VIT7B_MODEL_CONFIG,
+        "axes": ("tp", "pp"),
+    },
     # {
     #     "label": "GPT175B",
     #     "config": TRAIN_GPT175B_MODEL_CONFIG,
@@ -194,12 +204,14 @@ INF_SHAPES = ((4, 5), (4, 6), (4, 8), (6, 6))
 INF_MODELS = (
     {"label": "70B", "config": INF_70B_MODEL_CONFIG},
     {"label": "GLM4.5_106B", "config": INF_GLM45_106B_MODEL_CONFIG},
+    {"label": "ViT7B", "config": INF_VIT7B_MODEL_CONFIG},
     # {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
 )
 
 MODEL_DISPLAY_NAMES = {
     "70B": "Llama 3 70B",
     "GLM4.5_106B": "GLM 4.5 106B",
+    "ViT7B": "ViT 7B",
     # "GPT175B": "GPT 175B",
 }
 
@@ -220,6 +232,109 @@ def read_yaml(path: str) -> Dict[str, Any]:
 def _file_signature(path: str) -> str:
     payload = Path(path).read_bytes()
     return hashlib.sha1(payload).hexdigest()
+
+
+def _normalize_device_type_key(value: str) -> str:
+    text = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text
+
+
+def _to_positive_float(value: object, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Expected numeric value for '{field_name}', got {value!r}.")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"Expected '{field_name}' > 0, got {value!r}.")
+    return parsed
+
+
+def _load_device_derates(path_like: str, device_type: str) -> Dict[str, float]:
+    raw = read_yaml(path_like)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Derate config must be a YAML mapping at root: {path_like}")
+
+    shared_raw = raw.get("shared")
+    if not isinstance(shared_raw, dict):
+        raise ValueError(f"Derate config missing 'shared' mapping: {path_like}")
+    kernel_launch_overhead_s = _to_positive_float(
+        shared_raw.get("kernel_launch_overhead_s"),
+        "shared.kernel_launch_overhead_s",
+    )
+
+    device_types_raw = raw.get("device_types")
+    if not isinstance(device_types_raw, dict):
+        raise ValueError(f"Derate config missing 'device_types' mapping: {path_like}")
+
+    target_key = _normalize_device_type_key(device_type)
+    selected = None
+    for raw_key, entry in device_types_raw.items():
+        if _normalize_device_type_key(str(raw_key)) == target_key:
+            selected = entry
+            break
+    if not isinstance(selected, dict):
+        raise ValueError(
+            f"Derate config has no device_types entry for '{device_type}' in {path_like}"
+        )
+
+    return {
+        "kernel_launch_overhead_s": kernel_launch_overhead_s,
+        "dram_util": _to_positive_float(
+            selected.get("dram_util"),
+            f"device_types.{device_type}.dram_util",
+        ),
+        "network_util": _to_positive_float(
+            selected.get("network_util"),
+            f"device_types.{device_type}.network_util",
+        ),
+        "compute_util": _to_positive_float(
+            selected.get("compute_util"),
+            f"device_types.{device_type}.compute_util",
+        ),
+    }
+
+
+def _apply_device_derates(hw_dict: Dict[str, Any], derates: Dict[str, float]) -> None:
+    sw_param = hw_dict.setdefault("sw_param", {})
+    if not isinstance(sw_param, dict):
+        raise ValueError("Expected sw_param to be a mapping in hardware config.")
+    sw_param["kernel_launch_overhead"] = float(derates["kernel_launch_overhead_s"])
+
+    tech_param = hw_dict.setdefault("tech_param", {})
+    if not isinstance(tech_param, dict):
+        raise ValueError("Expected tech_param to be a mapping in hardware config.")
+    dram_cfg = tech_param.setdefault("DRAM", {})
+    if not isinstance(dram_cfg, dict):
+        raise ValueError("Expected tech_param.DRAM to be a mapping in hardware config.")
+    core_cfg = tech_param.setdefault("core", {})
+    if not isinstance(core_cfg, dict):
+        raise ValueError("Expected tech_param.core to be a mapping in hardware config.")
+    dram_cfg["util"] = float(derates["dram_util"])
+    core_cfg["util"] = float(derates["compute_util"])
+
+    network = hw_dict.get("network")
+    if not isinstance(network, dict):
+        raise ValueError("Expected network to be a mapping in hardware config.")
+    dimensions = network.get("dimensions")
+    if not isinstance(dimensions, list):
+        raise ValueError("Expected network.dimensions to be a list in hardware config.")
+
+    dim0_found = False
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        if str(dim.get("id", "")).strip() != "dim0":
+            continue
+        topology = dim.setdefault("topology", {})
+        if not isinstance(topology, dict):
+            raise ValueError("Expected network.dimensions[id=dim0].topology to be a mapping.")
+        topology["util"] = float(derates["network_util"])
+        dim0_found = True
+        break
+    if not dim0_found:
+        raise ValueError("Expected a network dimension with id='dim0' in hardware config.")
 
 
 def determine_model_mode(model_path: str) -> str:
@@ -910,6 +1025,17 @@ def _default_mode_colors() -> Tuple[str, str]:
     return inf_color, train_color
 
 
+def _default_model_color(model_label: str) -> str:
+    palette = plt.rcParams.get("axes.prop_cycle", None)
+    colors = palette.by_key().get("color", []) if palette else []
+    explicit = {
+        "70B": colors[0] if len(colors) > 0 else "#1f77b4",
+        "GLM4.5_106B": colors[1] if len(colors) > 1 else "#ff7f0e",
+        "ViT7B": colors[2] if len(colors) > 2 else "#54a24b",
+    }
+    return explicit.get(model_label, colors[0] if len(colors) > 0 else "#1f77b4")
+
+
 def _compute_speedup_ratio(
     rows: Sequence[Dict[str, Any]],
     *,
@@ -1004,11 +1130,15 @@ def _plot_speedup_by_model(
         if idx == 0:
             ax.set_ylabel("2D Torus over Mesh speedup")
 
-    legend_axis = axes[1] if len(axes) > 1 else axes[0]
-    legend_axis.legend(loc="center right")
-    fig.suptitle("2D Torus vs Mesh inference/training runtime comparison", y=0.96)
+    fig.suptitle("2D Torus vs Mesh inference/training runtime comparison", y=0.98)
+    fig.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=2,
+        frameon=False,
+    )
     fig.supxlabel("2D topology shape")
-    fig.subplots_adjust(top=0.86, bottom=0.11, left=0.09, right=0.98, wspace=0.08)
+    fig.subplots_adjust(top=0.80, bottom=0.11, left=0.09, right=0.98, wspace=0.08)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -1027,13 +1157,7 @@ def _plot_super_merged_speedup(
     if not model_order or not shapes:
         return
     fig, ax = plt.subplots(figsize=(max(10, len(shapes) * 0.9), 6))
-    inf_color, train_color = _default_mode_colors()
-    model_colors = {}
-    for model_label in model_order:
-        if model_label == "GLM4.5_106B":
-            model_colors[model_label] = train_color
-        else:
-            model_colors[model_label] = inf_color
+    model_colors = {model_label: _default_model_color(model_label) for model_label in model_order}
     mode_order = ["inference", "train"]
     mode_hatches = {"inference": "", "train": "//"}
     combos = [(model_label, mode) for model_label in model_order for mode in mode_order]
@@ -1088,11 +1212,22 @@ def _plot_super_merged_speedup(
         ax.set_ylim(0.95, 1.4)
     ax.set_ylabel(ylabel)
     ax.set_xlabel("2D topology and GPU count")
-    ax.set_title(title)
     ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.6, alpha=0.85, zorder=3)
 
-    ax.legend(handles=combined_handles, loc="upper left")
-    fig.subplots_adjust(top=0.88, bottom=0.11, left=0.1, right=0.98)
+    legend_cols = min(len(combined_handles), max(1, len(model_order)))
+    legend_rows = max(1, math.ceil(len(combined_handles) / legend_cols))
+    fig.suptitle(title, y=0.98)
+    fig.legend(
+        handles=combined_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.94),
+        ncol=legend_cols,
+        frameon=False,
+        columnspacing=1.2,
+        handletextpad=0.6,
+    )
+    top_margin = 0.78 if legend_rows > 1 else 0.82
+    fig.subplots_adjust(top=top_margin, bottom=0.11, left=0.1, right=0.98)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -1368,213 +1503,9 @@ def _run_for_bandwidth(
 
     _save_cache(cache)
 
-    train_titles: Dict[str, str] = {}
-    for model in TRAIN_MODELS:
-        params = read_yaml(model["config"]).get("model_param") or {}
-        seq_len = int(params.get("seq_len", 0) or 0)
-        display_name = MODEL_DISPLAY_NAMES.get(model["label"], model["label"])
-        train_titles[model["label"]] = f"{display_name}\n[Seq={_format_tokens(seq_len)} tok]"
-
-    inf_titles: Dict[str, str] = {}
-    for model in INF_MODELS:
-        params = read_yaml(model["config"]).get("model_param") or {}
-        seq_len = int(params.get("seq_len", 0) or 0)
-        decode_len = int(params.get("decode_len", 0) or 0)
-        prefill_len = max(seq_len - decode_len, 0)
-        display_name = MODEL_DISPLAY_NAMES.get(model["label"], model["label"])
-        inf_titles[model["label"]] = (
-            f"{display_name}\n"
-            f"[Prefill={_format_tokens(prefill_len)} tok, "
-            f"Decode={_format_tokens(decode_len)} tok]"
-        )
-
     train_ok = [row for row in train_rows if row.get("runtime_s") != "error"]
 
-    topo_groups: Dict[str, Dict[Tuple[str, int, int], Dict[str, float]]] = {}
-    for row in train_ok:
-        model = str(row.get("model", ""))
-        combo = (
-            str(row.get("shape", "")),
-            int(row.get("tp", 0) or 0),
-            int(row.get("pp", 0) or 0),
-        )
-        topo_groups.setdefault(model, {}).setdefault(combo, {})[row["topology"]] = float(
-            row["runtime_s"]
-        )
-
-    train_experiments: Dict[str, List[Dict[str, Any]]] = {}
-    for model_label, combo_map in topo_groups.items():
-        experiments = []
-        for combo, topo_map in combo_map.items():
-            if "Mesh2D" not in topo_map or "Torus2D" not in topo_map:
-                continue
-            torus_val = topo_map["Torus2D"]
-            if torus_val <= 0:
-                continue
-            shape_label, tp, pp = combo
-            mesh_norm = topo_map["Mesh2D"] / torus_val
-            experiments.append(
-                {
-                    "label": _format_train_label(shape_label, tp, pp),
-                    "mesh": mesh_norm,
-                    "torus": 1.0,
-                }
-            )
-        experiments.sort(key=lambda item: item["label"])
-        train_experiments[model_label] = experiments
-
-    if len(train_experiments) > 1:
-        label_sets = [
-            set(item["label"] for item in items)
-            for items in train_experiments.values()
-            if items
-        ]
-        if label_sets:
-            common_labels = set.intersection(*label_sets)
-            if common_labels:
-                for model_label, items in train_experiments.items():
-                    train_experiments[model_label] = [
-                        item for item in items if item["label"] in common_labels
-                    ]
-        for model_label, items in train_experiments.items():
-            items.sort(key=lambda item: item["label"])
-
-    train_order = [model["label"] for model in TRAIN_MODELS]
-    if any(train_experiments.get(label) for label in train_order):
-        max_items = max(
-            len(train_experiments.get(label, [])) for label in train_order if train_order
-        )
-        axis_width = max(5.5, max_items * 0.7)
-        fig, axes = plt.subplots(
-            1,
-            len(train_order),
-            figsize=(axis_width * len(train_order), 6),
-            sharey=True,
-        )
-        if len(train_order) == 1:
-            axes = [axes]
-        legend_handles: Optional[List[Any]] = None
-        legend_labels: Optional[List[str]] = None
-        for ax, model_label in zip(axes, train_order):
-            entries = train_experiments.get(model_label, [])
-            title = train_titles.get(model_label, model_label)
-            if not entries:
-                ax.set_title(title)
-                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
-                ax.set_axis_off()
-                continue
-            labels = [item["label"] for item in entries]
-            mesh_vals = [item["mesh"] for item in entries]
-            torus_vals = [item["torus"] for item in entries]
-            handles, labels_text = _plot_dual_topology_axis(
-                ax,
-                labels,
-                mesh_vals,
-                torus_vals,
-                title=title,
-                ylabel=Y_LABEL if legend_handles is None else None,
-            )
-            if legend_handles is None:
-                legend_handles = handles
-                legend_labels = labels_text
-        fig.suptitle("Training runtime vs 2D topology (64 GPUs)", y=0.99)
-        if legend_handles and legend_labels:
-            axes[-1].legend(legend_handles, legend_labels, loc="lower right")
-        fig.subplots_adjust(top=0.81, bottom=0.11, left=0.1, right=0.98, wspace=0.08)
-        fig.savefig(PLOT_DIR / f"2d_test_train_topology_{bw_tag}.png", dpi=200)
-        plt.close(fig)
-
     inf_ok = [row for row in inf_rows if row.get("runtime_s") != "error"]
-    inf_groups: Dict[str, Dict[str, Dict[str, float]]] = {}
-    for row in inf_ok:
-        model = str(row.get("model", ""))
-        shape_label = str(row.get("shape", ""))
-        inf_groups.setdefault(model, {}).setdefault(shape_label, {})[
-            row["topology"]
-        ] = float(row["runtime_s"])
-
-    inf_experiments: Dict[str, List[Dict[str, Any]]] = {}
-    for model_label, shape_map in inf_groups.items():
-        entries = []
-        for shape_label, topo_map in shape_map.items():
-            if "Mesh2D" not in topo_map or "Torus2D" not in topo_map:
-                continue
-            torus_val = topo_map["Torus2D"]
-            if torus_val <= 0:
-                continue
-            dims = _shape_key(shape_label)
-            tp = int(dims[0]) * int(dims[1])
-            mesh_norm = topo_map["Mesh2D"] / torus_val
-            entries.append(
-                {
-                    "label": _format_inf_label(shape_label, tp),
-                    "mesh": mesh_norm,
-                    "torus": 1.0,
-                }
-            )
-        entries.sort(key=lambda item: item["label"])
-        inf_experiments[model_label] = entries
-
-    if len(inf_experiments) > 1:
-        label_sets = [
-            set(item["label"] for item in items)
-            for items in inf_experiments.values()
-            if items
-        ]
-        if label_sets:
-            common_labels = set.intersection(*label_sets)
-            if common_labels:
-                for model_label, items in inf_experiments.items():
-                    inf_experiments[model_label] = [
-                        item for item in items if item["label"] in common_labels
-                    ]
-        for model_label, items in inf_experiments.items():
-            items.sort(key=lambda item: item["label"])
-
-    inf_order = [model["label"] for model in INF_MODELS]
-    if any(inf_experiments.get(label) for label in inf_order):
-        max_items = max(
-            len(inf_experiments.get(label, [])) for label in inf_order if inf_order
-        )
-        axis_width = max(5.5, max_items * 0.7)
-        fig, axes = plt.subplots(
-            1,
-            len(inf_order),
-            figsize=(axis_width * len(inf_order), 6),
-            sharey=True,
-        )
-        if len(inf_order) == 1:
-            axes = [axes]
-        legend_handles = None
-        legend_labels = None
-        for ax, model_label in zip(axes, inf_order):
-            entries = inf_experiments.get(model_label, [])
-            title = inf_titles.get(model_label, model_label)
-            if not entries:
-                ax.set_title(title)
-                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
-                ax.set_axis_off()
-                continue
-            labels = [item["label"] for item in entries]
-            mesh_vals = [item["mesh"] for item in entries]
-            torus_vals = [item["torus"] for item in entries]
-            handles, labels_text = _plot_dual_topology_axis(
-                ax,
-                labels,
-                mesh_vals,
-                torus_vals,
-                title=title,
-                ylabel=Y_LABEL if legend_handles is None else None,
-            )
-            if legend_handles is None:
-                legend_handles = handles
-                legend_labels = labels_text
-        fig.suptitle("Inference runtime vs 2D topology (TP only)", y=0.99)
-        if legend_handles and legend_labels:
-            axes[-1].legend(legend_handles, legend_labels, loc="lower right")
-        fig.subplots_adjust(top=0.81, bottom=0.11, left=0.08, right=0.98, wspace=0.08)
-        fig.savefig(PLOT_DIR / f"2d_test_inf_topology_{bw_tag}.png", dpi=200)
-        plt.close(fig)
 
     speedup_maps: Dict[str, Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]] = {}
     for topo in COMP_TOPO:
@@ -1601,13 +1532,6 @@ def _run_for_bandwidth(
         if model["label"] not in merged_order:
             merged_order.append(model["label"])
     if merged_shapes:
-        _plot_speedup_by_model(
-            train_speedup,
-            inf_speedup,
-            model_order=merged_order,
-            shapes=merged_shapes,
-            output_path=PLOT_DIR / f"2d_test_merged_by_model_{bw_tag}.png",
-        )
         for topo in COMP_TOPO:
             if topo not in COMP_TOPO_SPECS:
                 continue
@@ -1660,6 +1584,30 @@ def main() -> None:
     inf_hw_base = read_yaml(INF_HW_CONFIG)
     train_hw_sig = _file_signature(TRAIN_HW_CONFIG)
     inf_hw_sig = _file_signature(INF_HW_CONFIG)
+    active_derates = _load_device_derates(DERATE_CONFIG, DERATE_DEVICE_TYPE)
+    _apply_device_derates(train_hw_base, active_derates)
+    _apply_device_derates(inf_hw_base, active_derates)
+    derate_sig = (
+        f"|derate:{Path(DERATE_CONFIG).resolve()}:{_normalize_device_type_key(DERATE_DEVICE_TYPE)}"
+        f":klo={active_derates['kernel_launch_overhead_s']:.12g}"
+        f":dram={active_derates['dram_util']:.12g}"
+        f":net={active_derates['network_util']:.12g}"
+        f":core={active_derates['compute_util']:.12g}"
+    )
+    train_hw_sig = f"{train_hw_sig}{derate_sig}"
+    inf_hw_sig = f"{inf_hw_sig}{derate_sig}"
+    print(
+        "Applying derates from {} for {}: kernel_launch_overhead={}, dram.util={}, "
+        "network.dim0.util={}, core.util={}".format(
+            Path(DERATE_CONFIG).resolve(),
+            _normalize_device_type_key(DERATE_DEVICE_TYPE),
+            active_derates["kernel_launch_overhead_s"],
+            active_derates["dram_util"],
+            active_derates["network_util"],
+            active_derates["compute_util"],
+        ),
+        flush=True,
+    )
     train_model_sigs = {model["config"]: _file_signature(model["config"]) for model in TRAIN_MODELS}
     inf_model_sigs = {model["config"]: _file_signature(model["config"]) for model in INF_MODELS}
 
