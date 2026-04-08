@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+import yaml
 
 try:
     from . import mosiacml_train as mosaic_train
     from . import nvidia_inf
     from . import nvidia_train_validation as nvidia_train
-    from . import uci_train_validation as uci_train
+    from . import uci_train_validation
     from .validation_helpers import (
         ValidationResult,
         ValidationSpec,
@@ -46,7 +47,7 @@ except ImportError:
     from validation_scripts import mosiacml_train as mosaic_train  # type: ignore
     from validation_scripts import nvidia_inf  # type: ignore
     from validation_scripts import nvidia_train_validation as nvidia_train  # type: ignore
-    from validation_scripts import uci_train_validation as uci_train  # type: ignore
+    from validation_scripts import uci_train_validation  # type: ignore
     from validation_scripts.validation_helpers import (  # type: ignore
         ValidationResult,
         ValidationSpec,
@@ -59,16 +60,21 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "output" / "validation" / "harness"
 DEFAULT_SUITES = ("nvidia_inf", "nvidia_train", "uci_train", "mosaic_train")
+DEFAULT_DERATE_CONFIG = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "harness_derates.yaml"
 
-# nvidia_train_validation.py points to a path that does not exist in this repo.
-_NVIDIA_TRAIN_DEFAULT_HW_PRIMARY = PROJECT_ROOT / "tools" / "comp" / "nvidia_graph" / "a100_80GB_train_validation.yaml"
-_NVIDIA_TRAIN_DEFAULT_HW_FALLBACK = (
-    PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB_train_validation.yaml"
-)
 NVIDIA_TRAIN_DEFAULT_HW = (
-    _NVIDIA_TRAIN_DEFAULT_HW_PRIMARY
-    if _NVIDIA_TRAIN_DEFAULT_HW_PRIMARY.exists()
-    else _NVIDIA_TRAIN_DEFAULT_HW_FALLBACK
+    PROJECT_ROOT
+    / "validation_scripts"
+    / "validation_configs"
+    / "hardware-config"
+    / "A100_SXM4_80GB_train_validation.yaml"
+)
+UCI_TRAIN_DEFAULT_HW = (
+    PROJECT_ROOT
+    / "validation_scripts"
+    / "validation_configs"
+    / "hardware-config"
+    / "A100_PCIe_80GB_train_validation.yaml"
 )
 NVIDIA_TRAIN_DEFAULT_INPUT = (
     PROJECT_ROOT / "validation_scripts" / "train_validation_data" / "nvidia_train_validation_cases.csv"
@@ -85,6 +91,35 @@ class SuiteBundle:
     name: str
     specs: List[ValidationSpec]
     finalize: Callable[[List[ValidationResult], Path, bool], Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class DerateConfig:
+    path: Path
+    shared: Dict[str, Any]
+    device_type_derates: Dict[str, Dict[str, float]]
+
+
+DEVICE_TYPE_A100_PCIE = "A100_PCIE"
+DEVICE_TYPE_A100_SXM4 = "A100_SXM4"
+DEVICE_TYPE_H100_SXM5 = "H100_SXM5"
+
+# Maps suite/device pairs to the corresponding hardware class derates.
+SUITE_DEVICE_TYPE_BY_DEVICE: Dict[str, Dict[str, str]] = {
+    "nvidia_inf": {
+        "A100": DEVICE_TYPE_A100_SXM4,
+        "H100": DEVICE_TYPE_H100_SXM5,
+    },
+    "nvidia_train": {
+        "A100": DEVICE_TYPE_A100_SXM4,
+    },
+    "uci_train": {
+        "A100": DEVICE_TYPE_A100_PCIE,
+    },
+    "mosaic_train": {
+        "H100": DEVICE_TYPE_H100_SXM5,
+    },
+}
 
 
 def _new_run_id() -> str:
@@ -107,6 +142,20 @@ def _resolve_repo_relative_path(path_like: Path | str) -> Path:
     return repo_candidate
 
 
+def _assert_uci_suite_module_binding() -> None:
+    module_file = getattr(uci_train_validation, "__file__", None)
+    if not module_file:
+        raise RuntimeError(
+            "Failed to resolve UCI suite module file; expected uci_train_validation.py."
+        )
+    module_path = Path(str(module_file)).resolve()
+    if module_path.name != "uci_train_validation.py":
+        raise RuntimeError(
+            "UCI suite is miswired: expected validation_scripts/uci_train_validation.py "
+            f"but resolved {module_path}."
+        )
+
+
 def _parse_suite_list(raw: str) -> List[str]:
     suites: List[str] = []
     for part in str(raw).split(","):
@@ -122,6 +171,220 @@ def _parse_suite_list(raw: str) -> List[str]:
     if not suites:
         return list(DEFAULT_SUITES)
     return suites
+
+
+def _parse_inference_devices(raw: str) -> List[str]:
+    tokens = [d.strip().upper() for d in str(raw).split(",") if d.strip()]
+    if not tokens:
+        return ["A100", "H100"]
+    unknown = [dev for dev in tokens if dev not in {"A100", "H100"}]
+    if unknown:
+        raise ValueError(
+            f"Unsupported inference device(s): {', '.join(unknown)}. Expected A100 and/or H100."
+        )
+    ordered: List[str] = []
+    seen = set()
+    for dev in tokens:
+        if dev not in seen:
+            ordered.append(dev)
+            seen.add(dev)
+    return ordered or ["A100", "H100"]
+
+
+def _order_suites_for_submission(suites: Sequence[str]) -> List[str]:
+    indexed = list(enumerate(suites))
+    indexed.sort(key=lambda item: (0 if item[1] == "nvidia_train" else 1, item[0]))
+    return [name for _, name in indexed]
+
+
+def _to_positive_float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Expected numeric value for '{field_name}', got {value!r}.")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"Expected '{field_name}' > 0, got {value!r}.")
+    return parsed
+
+
+def _to_unit_interval_float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Expected numeric value for '{field_name}', got {value!r}.")
+    if not math.isfinite(parsed) or parsed < 0.0 or parsed > 1.0:
+        raise ValueError(f"Expected '{field_name}' to be in [0.0, 1.0], got {value!r}.")
+    return parsed
+
+
+def _normalize_device_type_key(value: Any) -> str:
+    text = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text
+
+
+def _device_type_for_suite_device(suite: str, device: str) -> str:
+    suite_key = str(suite).strip().lower()
+    device_key = str(device).strip().upper()
+    suite_map = SUITE_DEVICE_TYPE_BY_DEVICE.get(suite_key)
+    if suite_map is None:
+        raise ValueError(f"No device-type mapping for suite {suite!r}.")
+    device_type = suite_map.get(device_key)
+    if device_type is None:
+        raise ValueError(
+            f"No device-type mapping for suite={suite!r}, device={device_key!r}."
+        )
+    return device_type
+
+
+def _required_suite_devices(
+    selected_suites: Sequence[str],
+    *,
+    inference_devices: Sequence[str],
+) -> Dict[str, List[str]]:
+    required: Dict[str, List[str]] = {}
+    for suite in selected_suites:
+        if suite == "nvidia_inf":
+            required[suite] = [d.upper() for d in inference_devices]
+        elif suite in {"nvidia_train", "uci_train"}:
+            required[suite] = ["A100"]
+        elif suite == "mosaic_train":
+            required[suite] = ["H100"]
+    return required
+
+
+def _load_derate_config(
+    path_like: Path | str,
+    *,
+    selected_suites: Sequence[str],
+    inference_devices: Sequence[str],
+) -> DerateConfig:
+    path = _resolve_repo_relative_path(path_like)
+    if not path.exists():
+        raise FileNotFoundError(f"Derate config YAML not found: {path}")
+
+    with path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Derate config must be a YAML mapping at root: {path}")
+
+    shared_raw = raw.get("shared")
+    if not isinstance(shared_raw, Mapping):
+        raise ValueError("Derate config requires a 'shared' mapping.")
+    shared_network_raw = shared_raw.get("network")
+    if not isinstance(shared_network_raw, Mapping):
+        raise ValueError("Derate config requires a 'shared.network' mapping.")
+    shared_overlap_raw = shared_network_raw.get("overlap")
+    if not isinstance(shared_overlap_raw, Mapping):
+        raise ValueError("Derate config requires a 'shared.network.overlap' mapping.")
+    shared_overlap = {
+        "tp_overlap": _to_unit_interval_float(
+            shared_overlap_raw.get("tp_overlap"),
+            "shared.network.overlap.tp_overlap",
+        ),
+        "tp_sp_overlap": _to_unit_interval_float(
+            shared_overlap_raw.get("tp_sp_overlap"),
+            "shared.network.overlap.tp_sp_overlap",
+        ),
+        "cp_overlap": _to_unit_interval_float(
+            shared_overlap_raw.get("cp_overlap"),
+            "shared.network.overlap.cp_overlap",
+        ),
+    }
+    shared = {
+        "kernel_launch_overhead_s": _to_positive_float(
+            shared_raw.get("kernel_launch_overhead_s"),
+            "shared.kernel_launch_overhead_s",
+        ),
+        "network": {
+            "overlap": shared_overlap,
+        },
+    }
+
+    device_types_raw = raw.get("device_types")
+    if not isinstance(device_types_raw, Mapping):
+        raise ValueError("Derate config requires a 'device_types' mapping.")
+    device_type_derates: Dict[str, Dict[str, float]] = {}
+    for raw_name, derate_raw in device_types_raw.items():
+        device_type = _normalize_device_type_key(raw_name)
+        if not device_type:
+            raise ValueError(f"Invalid empty device type in config: {raw_name!r}")
+        if device_type in device_type_derates:
+            raise ValueError(f"Duplicate derate device type entry: {device_type!r}")
+        if not isinstance(derate_raw, Mapping):
+            raise ValueError(f"Derate config mapping required for device_types.{raw_name}")
+        device_type_derates[device_type] = {
+            "dram_util": _to_positive_float(
+                derate_raw.get("dram_util"),
+                f"device_types.{raw_name}.dram_util",
+            ),
+            "network_util": _to_positive_float(
+                derate_raw.get("network_util"),
+                f"device_types.{raw_name}.network_util",
+            ),
+            "compute_util": _to_positive_float(
+                derate_raw.get("compute_util"),
+                f"device_types.{raw_name}.compute_util",
+            ),
+        }
+
+    required = _required_suite_devices(
+        selected_suites,
+        inference_devices=inference_devices,
+    )
+    for suite, devices in required.items():
+        for device in devices:
+            device_type = _device_type_for_suite_device(suite, device)
+            if device_type not in device_type_derates:
+                raise ValueError(
+                    "Derate config missing device type entry for "
+                    f"suite={suite}, device={device}: device_types.{device_type}"
+                )
+
+    return DerateConfig(
+        path=path,
+        shared=shared,
+        device_type_derates=device_type_derates,
+    )
+
+
+def _suite_compute_util_from_device_type_derates(
+    *,
+    selected_suites: Sequence[str],
+    inference_devices: Sequence[str],
+    derate_config: DerateConfig,
+) -> Dict[str, Dict[str, float]]:
+    required = _required_suite_devices(
+        selected_suites,
+        inference_devices=inference_devices,
+    )
+    suite_compute_util: Dict[str, Dict[str, float]] = {}
+    for suite, devices in required.items():
+        suite_compute_util[suite] = {}
+        for device in devices:
+            device_type = _device_type_for_suite_device(suite, device)
+            suite_compute_util[suite][device] = float(
+                derate_config.device_type_derates[device_type]["compute_util"]
+            )
+    return suite_compute_util
+
+
+def _suite_device_type_map(
+    *,
+    selected_suites: Sequence[str],
+    inference_devices: Sequence[str],
+) -> Dict[str, Dict[str, str]]:
+    required = _required_suite_devices(
+        selected_suites,
+        inference_devices=inference_devices,
+    )
+    out: Dict[str, Dict[str, str]] = {}
+    for suite, devices in required.items():
+        out[suite] = {}
+        for device in devices:
+            out[suite][device] = _device_type_for_suite_device(suite, device)
+    return out
 
 
 def _is_list_of_dicts(value: Any) -> bool:
@@ -193,25 +456,34 @@ def _mean_abs(values: Iterable[float]) -> float:
     return sum(finite) / len(finite)
 
 
-def _compute_util_for_device(device: str, args: argparse.Namespace) -> Optional[float]:
-    if args.compute_util is not None:
-        return float(args.compute_util)
+def _max_abs(values: Iterable[float]) -> float:
+    finite = [abs(float(v)) for v in values if v is not None and math.isfinite(float(v))]
+    if not finite:
+        return float("nan")
+    return max(finite)
+
+
+def _common_hw_override(
+    *,
+    suite_name: str,
+    device: str,
+    derate_config: DerateConfig,
+) -> Dict[str, Any]:
     device_upper = str(device).upper()
-    if device_upper == "A100":
-        return float(args.compute_util_a100) if args.compute_util_a100 is not None else None
-    if device_upper == "H100":
-        return float(args.compute_util_h100) if args.compute_util_h100 is not None else None
-    return None
-
-
-def _common_hw_override(device: str, args: argparse.Namespace) -> Dict[str, Any]:
+    device_type = _device_type_for_suite_device(suite_name, device_upper)
+    device_derates = derate_config.device_type_derates.get(device_type)
+    if device_derates is None:
+        raise ValueError(
+            f"Missing derate entry for device_type={device_type!r} "
+            f"(suite={suite_name!r}, device={device_upper!r}) in {derate_config.path}."
+        )
     common: Dict[str, Any] = {
         "sw_param": {
-            "kernel_launch_overhead": float(args.kernel_launch_overhead),
+            "kernel_launch_overhead": float(derate_config.shared["kernel_launch_overhead_s"]),
         },
         "tech_param": {
             "DRAM": {
-                "util": float(args.dram_util),
+                "util": float(device_derates["dram_util"]),
             }
         },
         "network": {
@@ -219,16 +491,15 @@ def _common_hw_override(device: str, args: argparse.Namespace) -> Dict[str, Any]
                 {
                     "id": "dim0",
                     "topology": {
-                        "util": float(args.dim0_util),
+                        "util": float(device_derates["network_util"]),
                     },
                 }
-            ]
+            ],
+            "overlap": copy.deepcopy(derate_config.shared["network"]["overlap"]),
         },
     }
-    core_util = _compute_util_for_device(device=device, args=args)
-    if core_util is not None:
-        common.setdefault("tech_param", {}).setdefault("core", {})
-        common["tech_param"]["core"]["util"] = float(core_util)
+    common.setdefault("tech_param", {}).setdefault("core", {})
+    common["tech_param"]["core"]["util"] = float(device_derates["compute_util"])
     return common
 
 
@@ -236,12 +507,16 @@ def _apply_common_override(
     spec: ValidationSpec,
     *,
     suite_name: str,
-    args: argparse.Namespace,
+    derate_config: DerateConfig,
 ) -> ValidationSpec:
     metadata = dict(spec.metadata or {})
     metadata["suite"] = suite_name
     device = str(metadata.get("device", "A100")).upper()
-    common = _common_hw_override(device=device, args=args)
+    common = _common_hw_override(
+        suite_name=suite_name,
+        device=device,
+        derate_config=derate_config,
+    )
 
     hw_overrides = copy.deepcopy(spec.hardware_overrides or {})
     merged_hw = _deep_update(hw_overrides, common)
@@ -288,9 +563,7 @@ def _augment_specs(
 
 
 def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
-    devices = [d.strip().upper() for d in str(args.inference_devices).split(",") if d.strip()]
-    if not devices:
-        devices = ["A100", "H100"]
+    devices = _parse_inference_devices(args.inference_devices)
 
     all_specs: List[ValidationSpec] = []
     imec_lookup: Dict[str, Dict[Tuple[str, int], float]] = {}
@@ -337,6 +610,7 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
         all_pct_errors: List[float] = []
         total_cases = 0
         total_success = 0
+        per_device_summaries: List[Dict[str, Any]] = []
         imec_plot_inputs: Dict[str, pd.DataFrame] = {}
         nvidia_plot_inputs: Dict[str, pd.DataFrame] = {}
 
@@ -344,6 +618,22 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
         nvidia_all_rows: List[Dict[str, object]] = []
 
         for device in devices:
+            vidur_rows: Optional[List[Dict[str, object]]] = None
+            vidur_nvidia_rows: Optional[List[Dict[str, object]]] = None
+            genz_rows: Optional[List[Dict[str, object]]] = None
+            genz_nvidia_rows: Optional[List[Dict[str, object]]] = None
+            if device == "A100":
+                vidur_rows = nvidia_inf._load_vidur_imec_errors(nvidia_inf.VIDUR_IMEC)
+                vidur_nvidia_rows = nvidia_inf._load_vidur_nvidia_errors(
+                    nvidia_inf.VIDUR_NVIDIA,
+                    device=device,
+                )
+                genz_rows = nvidia_inf._load_genz_imec_errors(nvidia_inf.GENZ_IMEC)
+                genz_nvidia_rows = nvidia_inf._load_genz_nvidia_errors(
+                    nvidia_inf.GENZ_NVIDIA,
+                    device=device,
+                )
+
             device_imec_results = [
                 res
                 for res in results
@@ -421,6 +711,30 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
             csv_paths.append(str(nv_csv))
             nvidia_plot_inputs[device] = nv_df.copy()
 
+            device_pct_errors: List[float] = [
+                float(row["pct_error"])
+                for row in imec_rows
+                if row.get("pct_error") is not None and math.isfinite(float(row["pct_error"]))
+            ]
+            device_pct_errors.extend(
+                float(row["pct_error"])
+                for row in nv_rows
+                if row.get("pct_error") is not None and math.isfinite(float(row["pct_error"]))
+            )
+            device_cases_total = len(imec_rows) + len(nv_rows)
+            device_cases_success = sum(1 for row in imec_rows if bool(row.get("success")))
+            device_cases_success += sum(1 for row in nv_rows if bool(row.get("success")))
+            per_device_summaries.append(
+                {
+                    "suite": "nvidia_inf",
+                    "device": device,
+                    "cases_total": device_cases_total,
+                    "cases_success": device_cases_success,
+                    "avg_abs_pct_error": _mean_abs(device_pct_errors),
+                    "max_abs_pct_error": _max_abs(device_pct_errors),
+                }
+            )
+
             if enable_plot:
                 nvidia_tp = int(
                     nvidia_inf.NVIDIA_DATASETS.get(device, {}).get(
@@ -430,8 +744,20 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
                         else 8,
                     )
                 )
-                imec_plot = nvidia_inf.plot_device(imec_df, device, suite_dir)
-                nv_plot = nvidia_inf.plot_nvidia_device(nv_df, device, suite_dir)
+                imec_plot = nvidia_inf.plot_device(
+                    imec_df,
+                    device,
+                    suite_dir,
+                    vidur_rows=vidur_rows,
+                    genz_rows=genz_rows,
+                )
+                nv_plot = nvidia_inf.plot_nvidia_device(
+                    nv_df,
+                    device,
+                    suite_dir,
+                    vidur_rows=vidur_nvidia_rows,
+                    genz_rows=genz_nvidia_rows,
+                )
                 parity_plot = nvidia_inf.plot_validation_parity_combined(
                     imec_df,
                     nv_df,
@@ -451,12 +777,20 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
                     nvidia_all_rows,
                     suite_dir,
                     device=device,
+                    vidur_rows=vidur_rows,
+                    vidur_nvidia_rows=vidur_nvidia_rows,
+                    genz_nvidia_rows=genz_nvidia_rows,
+                    genz_rows=genz_rows,
                 )
                 combined_ratio = nvidia_inf._plot_combined_ratio_grids(
                     imec_all_rows,
                     nvidia_all_rows,
                     suite_dir,
                     device=device,
+                    vidur_rows=vidur_rows,
+                    vidur_nvidia_rows=vidur_nvidia_rows,
+                    genz_nvidia_rows=genz_nvidia_rows,
+                    genz_rows=genz_rows,
                 )
                 if combined_error is not None:
                     plot_paths.append(str(combined_error))
@@ -486,6 +820,8 @@ def _build_nvidia_inf_bundle(args: argparse.Namespace) -> SuiteBundle:
             "cases_total": total_cases,
             "cases_success": total_success,
             "avg_abs_pct_error": _mean_abs(all_pct_errors),
+            "max_abs_pct_error": _max_abs(all_pct_errors),
+            "per_device": per_device_summaries,
             "csv_paths": csv_paths,
             "plot_paths": plot_paths,
         }
@@ -608,6 +944,7 @@ def _build_nvidia_train_bundle(args: argparse.Namespace) -> SuiteBundle:
             "cases_total": len(ordered_rows),
             "cases_success": success_count,
             "avg_abs_pct_error": _mean_abs(abs_errors),
+            "max_abs_pct_error": _max_abs(abs_errors),
             "csv_paths": [str(output_csv)],
             "plot_paths": plot_paths,
         }
@@ -631,9 +968,9 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
     if not hardware_config.exists():
         raise FileNotFoundError(f"UCI hardware config not found: {hardware_config}")
 
-    include_keys = uci_train._load_case_keys(include_csv) if include_csv else None
-    exclude_keys = uci_train._load_case_keys(exclude_csv) if exclude_csv else set()
-    cases = uci_train._load_cases(
+    include_keys = uci_train_validation._load_case_keys(include_csv) if include_csv else None
+    exclude_keys = uci_train_validation._load_case_keys(exclude_csv) if exclude_csv else set()
+    cases = uci_train_validation._load_cases(
         input_csv,
         tuple(args.uci_variants),
         include_keys=include_keys,
@@ -642,25 +979,35 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
     if not cases:
         raise ValueError("No UCI validation cases after filtering.")
 
-    astra_modes = list(args.uci_astra_modes) if args.uci_astra_modes else list(uci_train.DEFAULT_ASTRA_MODES)
+    astra_modes = (
+        list(args.uci_astra_modes)
+        if args.uci_astra_modes
+        else list(uci_train_validation.DEFAULT_ASTRA_MODES)
+    )
     normalized_modes: List[str] = []
     seen_modes = set()
     for mode in astra_modes:
-        normalized = uci_train._normalize_astra_mode(mode)
+        normalized = uci_train_validation._normalize_astra_mode(mode)
         if normalized not in seen_modes:
             normalized_modes.append(normalized)
             seen_modes.add(normalized)
     if not normalized_modes:
-        normalized_modes = list(uci_train.DEFAULT_ASTRA_MODES)
+        normalized_modes = list(uci_train_validation.DEFAULT_ASTRA_MODES)
 
     specs: List[ValidationSpec] = []
-    case_order_keys: List[Tuple[str, str, str, str, str]] = [uci_train._case_order_key(case) for case in cases]
+    case_order_keys: List[Tuple[str, str, str, str, str]] = [
+        uci_train_validation._case_order_key(case) for case in cases
+    ]
     for mode in normalized_modes:
         for idx, case in enumerate(cases):
             label = f"{case.variant.upper()} TP={case.tp} PP={case.pp} CP={case.cp} DP={case.dp}"
-            mb = uci_train.GLOBAL_BATCH_SIZE // (uci_train.MICRO_BATCH_SIZE * case.dp)
-            eff_mb = mb if int(case.pp) > 1 else 1
-            network_override, mapping_desc = uci_train._build_network_override(
+            local_step_batch = (
+                uci_train_validation.GLOBAL_BATCH_SIZE
+                // (uci_train_validation.MICRO_BATCH_SIZE * case.dp)
+            )
+            grad_acc_steps = 1 if int(case.pp) > 1 else int(local_step_batch)
+            eff_mb = int(local_step_batch) if int(case.pp) > 1 else 1
+            network_override, mapping_desc = uci_train_validation._build_network_override(
                 case.tp,
                 case.pp,
                 case.cp,
@@ -669,6 +1016,9 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
             )
             model_overrides = {
                 "model_param": {
+                    "global_batch_size": uci_train_validation.GLOBAL_BATCH_SIZE,
+                    "gradient_accumulation_steps": int(grad_acc_steps),
+                    "micro_batch_size": uci_train_validation.MICRO_BATCH_SIZE,
                     "seq_len": 4096,
                     "run_type": "training",
                 }
@@ -684,7 +1034,8 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
                     "inference": {"replica_count": 1, "moe_dp": 1},
                 },
                 "sw_param": {
-                    "dp_zero_stage": 0 if case.variant.upper() == "DDP" else 3,
+                    "dp_zero_stage": 1 if case.variant.upper() == "DDP" else 3,
+                    "activation_checkpointing": "selective",
                 },
             }
             hw_overrides.update(network_override)
@@ -702,7 +1053,7 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
                 "dp": int(case.dp),
                 "actual_training_time_s": float(case.actual),
                 "network_mapping": mapping_desc,
-                "astra": uci_train._normalize_astra_mode(mode),
+                "astra": uci_train_validation._normalize_astra_mode(mode),
             }
             specs.append(
                 ValidationSpec(
@@ -770,11 +1121,15 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
 
         plot_paths: List[str] = []
         if enable_plot and stage_csv.exists():
-            stage_rows = uci_train._read_csv(stage_csv)
-            labels, series = uci_train._build_compare_series(rows, stage_rows, key_order=case_order_keys)
+            stage_rows = uci_train_validation._read_csv(stage_csv)
+            labels, series = uci_train_validation._build_compare_series(
+                rows,
+                stage_rows,
+                key_order=case_order_keys,
+            )
             if labels:
                 plot_output = suite_dir / "uci_train_validation_compare.png"
-                out_plot = uci_train._plot_compare_results(
+                out_plot = uci_train_validation._plot_compare_results(
                     list(reversed(labels)),
                     {name: list(reversed(values)) for name, values in series.items()},
                     plot_output,
@@ -793,6 +1148,7 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
             "cases_total": len(rows),
             "cases_success": success_count,
             "avg_abs_pct_error": _mean_abs(pct_values),
+            "max_abs_pct_error": _max_abs(pct_values),
             "csv_paths": [str(output_csv)],
             "plot_paths": plot_paths,
         }
@@ -876,6 +1232,7 @@ def _build_mosaic_train_bundle(args: argparse.Namespace) -> SuiteBundle:
             "cases_total": len(rows),
             "cases_success": success_count,
             "avg_abs_pct_error": _mean_abs(pct_values),
+            "max_abs_pct_error": _max_abs(pct_values),
             "csv_paths": [str(output_csv)],
             "plot_paths": plot_paths,
         }
@@ -902,7 +1259,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Unified validation harness: run selected inference/training suites in one shared "
-            "worker pool with common hardware-util overrides."
+            "worker pool with YAML-defined shared and device-type derate overrides."
         )
     )
     parser.add_argument(
@@ -923,22 +1280,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(show_progress=True)
 
-    parser.add_argument("--dram-util", type=float, required=True, help="Shared DRAM util factor for all suites.")
-    parser.add_argument("--dim0-util", type=float, required=True, help="Shared network dim0 util factor for all suites.")
     parser.add_argument(
-        "--kernel-launch-overhead",
-        type=float,
-        required=True,
-        help="Shared kernel launch overhead (seconds) for all suites.",
+        "--derate-config",
+        type=Path,
+        default=DEFAULT_DERATE_CONFIG,
+        help=f"YAML file with shared and device-type util derates (default: {DEFAULT_DERATE_CONFIG}).",
     )
-    parser.add_argument(
-        "--compute-util",
-        type=float,
-        default=None,
-        help="Optional single compute util for both A100 and H100.",
-    )
-    parser.add_argument("--compute-util-a100", type=float, default=None, help="Optional A100 compute util.")
-    parser.add_argument("--compute-util-h100", type=float, default=None, help="Optional H100 compute util.")
 
     parser.add_argument(
         "--inference-devices",
@@ -972,24 +1319,49 @@ def _parse_args() -> argparse.Namespace:
         help="NVIDIA train plot title.",
     )
 
-    parser.add_argument("--uci-hardware-config", type=Path, default=uci_train.DEFAULT_HW_CONFIG)
-    parser.add_argument("--uci-model-config", type=Path, default=uci_train.DEFAULT_MODEL_CONFIG)
-    parser.add_argument("--uci-input-csv", type=Path, default=uci_train.DEFAULT_INPUT_CSV)
-    parser.add_argument("--uci-include-csv", type=Path, default=uci_train.DEFAULT_INCLUDE_CSV)
+    parser.add_argument(
+        "--uci-hardware-config",
+        type=Path,
+        default=UCI_TRAIN_DEFAULT_HW,
+        help=f"Hardware config used for the uci_train suite (default: {UCI_TRAIN_DEFAULT_HW}).",
+    )
+    parser.add_argument(
+        "--uci-model-config",
+        type=Path,
+        default=uci_train_validation.DEFAULT_MODEL_CONFIG,
+        help="Model config used for the uci_train suite (from uci_train_validation.py).",
+    )
+    parser.add_argument(
+        "--uci-input-csv",
+        type=Path,
+        default=uci_train_validation.DEFAULT_INPUT_CSV,
+        help="Input CSV for the uci_train suite (uci_train_validation.py format).",
+    )
+    parser.add_argument(
+        "--uci-include-csv",
+        type=Path,
+        default=uci_train_validation.DEFAULT_INCLUDE_CSV,
+        help="Optional include CSV for uci_train case filtering.",
+    )
     parser.add_argument("--uci-exclude-csv", type=Path, default=None)
-    parser.add_argument("--uci-stage-csv", type=Path, default=uci_train.TRAIN_VALIDATION_DATA / "uci_train_stg_mlsynth.csv")
+    parser.add_argument(
+        "--uci-stage-csv",
+        type=Path,
+        default=uci_train_validation.TRAIN_VALIDATION_DATA / "uci_train_stg_mlsynth.csv",
+        help="STAGE/MLSynth comparison CSV for uci_train_validation plotting.",
+    )
     parser.add_argument(
         "--uci-variants",
         nargs="+",
         default=["ddp"],
         choices=["ddp", "fsdp"],
-        help="UCI variants to include.",
+        help="UCI variants to include (uci_train_validation.py semantics).",
     )
     parser.add_argument(
         "--uci-astra-modes",
         nargs="+",
         default=None,
-        help="Optional UCI Astra modes.",
+        help="Optional Astra modes for uci_train_validation.py behavior.",
     )
 
     parser.add_argument("--mosaic-input-csv", type=Path, default=mosaic_train.DEFAULT_INPUT_CSV)
@@ -1009,25 +1381,42 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     suites = _parse_suite_list(args.suites)
+    if "uci_train" in suites:
+        _assert_uci_suite_module_binding()
+    ordered_suites = _order_suites_for_submission(suites)
+    inference_devices = (
+        _parse_inference_devices(args.inference_devices)
+        if "nvidia_inf" in ordered_suites
+        else ["A100", "H100"]
+    )
+    derate_config = _load_derate_config(
+        args.derate_config,
+        selected_suites=ordered_suites,
+        inference_devices=inference_devices,
+    )
     run_root = args.output_root / _new_run_id()
     run_root.mkdir(parents=True, exist_ok=True)
 
-    bundles: List[SuiteBundle] = []
-    if "nvidia_inf" in suites:
-        bundles.append(_build_nvidia_inf_bundle(args))
-    if "nvidia_train" in suites:
-        bundles.append(_build_nvidia_train_bundle(args))
-    if "uci_train" in suites:
-        bundles.append(_build_uci_train_bundle(args))
-    if "mosaic_train" in suites:
-        bundles.append(_build_mosaic_train_bundle(args))
+    suite_builders: Dict[str, Callable[[argparse.Namespace], SuiteBundle]] = {
+        "nvidia_inf": _build_nvidia_inf_bundle,
+        "nvidia_train": _build_nvidia_train_bundle,
+        "uci_train": _build_uci_train_bundle,
+        "mosaic_train": _build_mosaic_train_bundle,
+    }
+    bundles: List[SuiteBundle] = [suite_builders[name](args) for name in ordered_suites]
 
     all_specs: List[ValidationSpec] = []
     segments: List[Tuple[SuiteBundle, int, int]] = []
     for bundle in bundles:
         start = len(all_specs)
         for spec in bundle.specs:
-            all_specs.append(_apply_common_override(spec, suite_name=bundle.name, args=args))
+            all_specs.append(
+                _apply_common_override(
+                    spec,
+                    suite_name=bundle.name,
+                    derate_config=derate_config,
+                )
+            )
         end = len(all_specs)
         segments.append((bundle, start, end))
 
@@ -1039,8 +1428,9 @@ def main() -> int:
     if not base_model or not base_hw:
         raise ValueError("Unable to resolve base model/hardware config paths from generated specs.")
 
-    print(f"[harness] Running {len(all_specs)} spec(s) across suites: {', '.join(suites)}")
+    print(f"[harness] Running {len(all_specs)} spec(s) across suites: {', '.join(ordered_suites)}")
     print(f"[harness] Output root: {run_root}")
+    print(f"[harness] Derate config: {derate_config.path}")
 
     results = run_validation_suite(
         all_specs,
@@ -1051,6 +1441,7 @@ def main() -> int:
         max_workers=args.workers,
         cache_mode=str(args.cache_mode),
         show_progress=bool(args.show_progress),
+        progress_group_key="suite",
     )
 
     suite_summaries: List[Dict[str, Any]] = []
@@ -1069,23 +1460,51 @@ def main() -> int:
                 "cases_total": row.get("cases_total"),
                 "cases_success": row.get("cases_success"),
                 "avg_abs_pct_error": row.get("avg_abs_pct_error"),
+                "max_abs_pct_error": row.get("max_abs_pct_error"),
                 "output_dir": row.get("output_dir"),
             }
         )
+        per_device = row.get("per_device")
+        if isinstance(per_device, list):
+            for device_row in per_device:
+                if not isinstance(device_row, Mapping):
+                    continue
+                device = str(device_row.get("device", "")).upper()
+                summary_csv_rows.append(
+                    {
+                        "suite": f"{row.get('suite')}[{device}]" if device else row.get("suite"),
+                        "parent_suite": row.get("suite"),
+                        "device": device,
+                        "cases_total": device_row.get("cases_total"),
+                        "cases_success": device_row.get("cases_success"),
+                        "avg_abs_pct_error": device_row.get("avg_abs_pct_error"),
+                        "max_abs_pct_error": device_row.get("max_abs_pct_error"),
+                        "output_dir": row.get("output_dir"),
+                    }
+                )
     summary_csv = run_root / "summary.csv"
     _write_summary_csv(summary_csv_rows, summary_csv)
 
     summary_json = run_root / "summary.json"
+    suite_device_types = _suite_device_type_map(
+        selected_suites=ordered_suites,
+        inference_devices=inference_devices,
+    )
+    suite_compute_util = _suite_compute_util_from_device_type_derates(
+        selected_suites=ordered_suites,
+        inference_devices=inference_devices,
+        derate_config=derate_config,
+    )
     summary_payload = {
         "run_root": str(run_root),
         "suites": suite_summaries,
         "config": {
-            "dram_util": float(args.dram_util),
-            "dim0_util": float(args.dim0_util),
-            "kernel_launch_overhead": float(args.kernel_launch_overhead),
-            "compute_util": args.compute_util,
-            "compute_util_a100": args.compute_util_a100,
-            "compute_util_h100": args.compute_util_h100,
+            "derate_config_path": str(derate_config.path),
+            "shared_params": dict(derate_config.shared),
+            "device_type_derates": copy.deepcopy(derate_config.device_type_derates),
+            "suite_device_types": suite_device_types,
+            "suite_compute_util": suite_compute_util,
+            "suite_submission_order": list(ordered_suites),
             "workers": args.workers,
             "cache_mode": args.cache_mode,
             "show_progress": bool(args.show_progress),
@@ -1097,9 +1516,12 @@ def main() -> int:
     print("[harness] Suite summary:")
     for row in summary_csv_rows:
         avg_abs = row.get("avg_abs_pct_error")
+        max_abs = row.get("max_abs_pct_error")
         avg_abs_text = "nan" if avg_abs is None or not math.isfinite(float(avg_abs)) else f"{float(avg_abs):.2f}%"
+        max_abs_text = "nan" if max_abs is None or not math.isfinite(float(max_abs)) else f"{float(max_abs):.2f}%"
         print(
             f"  - {row.get('suite')}: avg_abs_pct_error={avg_abs_text}, "
+            f"max_abs_pct_error={max_abs_text}, "
             f"success={row.get('cases_success')}/{row.get('cases_total')}"
         )
     print(f"[harness] Wrote summary CSV: {summary_csv}")

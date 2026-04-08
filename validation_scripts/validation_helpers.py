@@ -23,7 +23,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -149,32 +148,6 @@ def _summarize_network_config(hw_config_path: str) -> str:
     )
   return "\n".join(lines)
 
-
-def _find_network_config(search_roots: Sequence[Path]) -> Optional[Path]:
-  candidates: List[Path] = []
-  for root in search_roots:
-    if not root.exists():
-      continue
-    candidates.extend(root.rglob("network_analytical_*.yml"))
-  if not candidates:
-    return None
-  return max(candidates, key=lambda path: path.stat().st_mtime)
-
-
-def _log_astrasim_artifacts(tmp_dir: str, env: Mapping[str, str]) -> None:
-  roots = [Path(tmp_dir)]
-  astra_cache = env.get("ASTRA_CACHE_DIR")
-  if astra_cache:
-    roots.append(Path(astra_cache))
-  roots.append(Path(tmp_dir) / "output")
-  roots.append(Path(PROJECT_ROOT) / "output")
-  path = _find_network_config(roots)
-  if path is None:
-    return
-  work_dir = path.parent
-  cache_desc = f" (ASTRA_CACHE_DIR={astra_cache})" if astra_cache else ""
-  print(f"[validation] AstraSim artifacts: work_dir={work_dir}{cache_desc}")
-  print(f"[validation] AstraSim network config: {path}")
 
 def _deep_update(target: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
   for key, value in overrides.items():
@@ -319,7 +292,6 @@ def _execute_spec(spec: ValidationSpec) -> ValidationResult:
     )
     duration = time.time() - start_time
     output = proc.stdout or ""
-    _log_astrasim_artifacts(tmp_dir, env)
     if proc.returncode != 0:
       if "Assertion `0 <= dest && dest < devices_count' failed" in output:
         summary = _summarize_network_config(hardware_config_path)
@@ -383,6 +355,7 @@ def run_validation_suite(
   cache_mode: str = "NO_CACHE",
   extra_run_perf_args: Optional[Sequence[str]] = None,
   show_progress: bool = False,
+  progress_group_key: Optional[str] = None,
 ) -> List[ValidationResult]:
   if not specs:
     return []
@@ -420,12 +393,37 @@ def run_validation_suite(
   )
   results: List[ValidationResult] = []
   progress = None
+  grouped_progress: Dict[str, Any] = {}
+
+  def _group_label(spec: ValidationSpec) -> str:
+    if not progress_group_key:
+      return "validation"
+    value = None
+    if isinstance(spec.metadata, dict):
+      value = spec.metadata.get(progress_group_key)
+    text = str(value).strip() if value is not None else ""
+    return text if text else "ungrouped"
+
   if show_progress:
     try:
       from tqdm import tqdm  # type: ignore
-      progress = tqdm(total=len(assigned_specs), desc="validation", leave=True)
+      if progress_group_key:
+        group_totals: Dict[str, int] = {}
+        for spec in assigned_specs:
+          label = _group_label(spec)
+          group_totals[label] = group_totals.get(label, 0) + 1
+        for position, (label, total) in enumerate(group_totals.items()):
+          grouped_progress[label] = tqdm(
+            total=total,
+            desc=f"{progress_group_key}:{label}",
+            leave=True,
+            position=position,
+          )
+      else:
+        progress = tqdm(total=len(assigned_specs), desc="validation", leave=True)
     except Exception:
       progress = None
+      grouped_progress = {}
 
   with ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init, initargs=(context,)) as executor:
     future_map = {executor.submit(_execute_spec, spec): spec for spec in assigned_specs}
@@ -448,8 +446,18 @@ def run_validation_suite(
       results.append(result)
       if progress is not None:
         progress.update(1)
+      elif grouped_progress:
+        label = _group_label(spec)
+        bar = grouped_progress.get(label)
+        if bar is not None:
+          bar.update(1)
   if progress is not None:
     progress.close()
+  for bar in grouped_progress.values():
+    try:
+      bar.close()
+    except Exception:
+      pass
   results.sort(key=lambda item: item.spec.order)
   return results
 

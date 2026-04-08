@@ -40,7 +40,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_PERF = PROJECT_ROOT / "run_perf.py"
-DEFAULT_HW_CONFIG = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB_train_validation.yaml"
+DEFAULT_HW_CONFIG = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "A100_PCIe_80GB_train_validation.yaml"
 DEFAULT_MODEL_CONFIG = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama2-7B.yaml"
 TRAIN_VALIDATION_DATA = PROJECT_ROOT / "validation_scripts" / "train_validation_data"
 DEFAULT_INPUT_CSV = PROJECT_ROOT / "validation_scripts" / "train_validation_data" / "uci_train.csv"
@@ -342,12 +342,16 @@ def _run_case(
     log_path = spec_root / "worker.log"
     spec_root.mkdir(parents=True, exist_ok=True)
 
-    mb = GLOBAL_BATCH_SIZE // (MICRO_BATCH_SIZE * case.dp)
-    eff_mb = mb if int(case.pp) > 1 else 1
+    local_step_batch = GLOBAL_BATCH_SIZE // (MICRO_BATCH_SIZE * case.dp)
+    grad_acc_steps = 1 if int(case.pp) > 1 else int(local_step_batch)
+    eff_mb = int(local_step_batch) if int(case.pp) > 1 else 1
     network_override, mapping_desc = _build_network_override(case.tp, case.pp, case.cp, case.dp, astra_mode)
 
     model_overrides = {
         "model_param": {
+            "global_batch_size": GLOBAL_BATCH_SIZE,
+            "gradient_accumulation_steps": int(grad_acc_steps),
+            "micro_batch_size": MICRO_BATCH_SIZE,
             "seq_len": 4096,
             "run_type": "training",
         }
@@ -363,7 +367,8 @@ def _run_case(
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
         "sw_param": {
-            "dp_zero_stage": 0 if case.variant.upper() == "DDP" else 3,
+            "dp_zero_stage": 1 if case.variant.upper() == "DDP" else 3,
+            "activation_checkpointing": "selective",
         },
     }
     hw_overrides.update(network_override)

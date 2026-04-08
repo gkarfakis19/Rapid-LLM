@@ -47,7 +47,12 @@ LEAF_SIZE_BY_MODEL = {
     "GPT 530B": 35,
 }
 
-SWITCH_HARDWARE_CONFIG = Path("validation_scripts/validation_configs/hardware-config/a100_80GB_train_validation_switch.yaml")
+DEFAULT_TRAIN_HARDWARE_CONFIG = Path(
+    "validation_scripts/validation_configs/hardware-config/A100_SXM4_80GB_train_validation.yaml"
+)
+SWITCH_HARDWARE_CONFIG = Path(
+    "validation_scripts/validation_configs/hardware-config/A100_SXM4_80GB_train_validation_switch.yaml"
+)
 RAPID_TIME_COLUMN = "rapid_llm_time_s"
 
 _TRAIN_TIME_PATTERN = re.compile(r"Training time for batch:\s*([0-9]+(?:\.[0-9]+)?)s")
@@ -88,6 +93,11 @@ def _parse_bool(value: object) -> bool:
     if text in {"0", "false", "no", "n", "f", ""}:
         return False
     return bool(value)
+
+
+def _is_full_recomputation(value: object) -> bool:
+    mode = str(value).strip().lower()
+    return mode in {"full", "true", "yes", "on", "1"}
 
 
 def _norm_tp_sp(value: object) -> str:
@@ -315,9 +325,7 @@ def _build_overrides(row: Mapping[str, str]) -> Tuple[Dict[str, object], Dict[st
     pp = int(row.get("pp", "0"))
     cp = int(row.get("cp", "0"))
     tp_sp = _parse_bool(row.get("tp_sp"))
-    recomputation = str(row.get("recomputation", "")).strip().lower()
-
-    full_recompute = recomputation in {"full", "true", "yes", "on", "1"}
+    full_recompute = _is_full_recomputation(row.get("recomputation", ""))
 
     model_overrides = {
         "model_param": {
@@ -516,7 +524,7 @@ def main() -> int:
     parser.add_argument(
         "--hardware-config",
         type=Path,
-        default=Path("tools/comp/nvidia_graph/a100_80GB_train_validation.yaml"),
+        default=DEFAULT_TRAIN_HARDWARE_CONFIG,
         help="Hardware config YAML to use for all cases.",
     )
     parser.add_argument(

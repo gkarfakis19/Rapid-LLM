@@ -113,6 +113,11 @@ def _iter_tests(df):
     )
 
 
+def _is_full_recomputation(value: object) -> bool:
+  mode = str(value).strip().lower()
+  return mode in {"full", "true", "yes", "on", "1"}
+
+
 def _build_spec(
   device: str,
   model: str,
@@ -128,8 +133,7 @@ def _build_spec(
 ) -> Tuple[ValidationSpec, str, str]:
   label = f"{device} {model} bs={batch} mb={mb} dp={dp} tp={tp} pp={pp} cp={cp} tp_sp={tp_sp}"
 
-  recomputation_mode = str(recomputation).strip().lower()
-  full_recompute = recomputation_mode in {"full", "true", "yes", "on", "1"}
+  full_recompute = _is_full_recomputation(recomputation)
 
   model_overrides = {
     "model_param": {
