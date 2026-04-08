@@ -116,7 +116,7 @@ CACHE_PATH = OUTPUT_DIR / "validation_cache.jsonl"
 CACHE_KEY_VERSION = 15
 HARD_CLEANUP_BETWEEN_CHUNKS = True
 # Cache-only rebuild mode (skip RAPID execution)
-REBUILD_FROM_CACHE_ONLY = True
+REBUILD_FROM_CACHE_ONLY = False
 # Fast mode: enforce per-row worker timeouts (best-effort)
 FAST_MODE = True
 FAST_MODE_TIMEOUT_S = 45.0

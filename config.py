@@ -1625,6 +1625,7 @@ class LLMConfig:
     n_tokens: int
     attention: LLMAttentionConfig
     moe: MoEConfig
+    micro_batch_size: Optional[int] = None
     vision: Optional[ViTConfig] = None
 
     @property
@@ -1810,6 +1811,19 @@ class LLMConfig:
                 ) from exc
             if gradient_accumulation_steps <= 0:
                 raise ValueError("model_param.gradient_accumulation_steps must be a positive integer")
+        micro_batch_size_raw = model_dict.get("micro_batch_size", None)
+        if micro_batch_size_raw is None:
+            micro_batch_size = None
+        else:
+            try:
+                micro_batch_size = int(micro_batch_size_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.micro_batch_size must be an integer (got {micro_batch_size_raw!r})"
+                ) from exc
+            if micro_batch_size <= 0:
+                raise ValueError("model_param.micro_batch_size must be a positive integer")
+
         vision = None
         if _is_vit_model_type(model_type):
             vision = ViTConfig.from_dict(_require_field("model_param", model_dict, "vision"))
@@ -1969,6 +1983,7 @@ class LLMConfig:
             n_tokens=0,
             attention=attention,
             moe=moe,
+            micro_batch_size=micro_batch_size,
             vision=vision,
         )
 
@@ -2006,10 +2021,15 @@ class SWConfig:
     precision: PrecisionConfig
     h2d_bandwidth: float
     dp_zero_stage: int
+    activation_checkpointing: str
+    selective_checkpointing: bool
     full_recomputation: bool
     dp_microbatch: str
     const_mem_offset: float
     grad_acc_overhead: float
+    zero3_embedding_gather_local_comp_time: float
+    zero3_transformer_gather_local_comp_time: float
+    zero3_softmax_gather_local_comp_time: float
 
     @classmethod
     def from_dict(cls, sw_block: Dict[str, object]) -> "SWConfig":
@@ -2019,10 +2039,38 @@ class SWConfig:
         kernel_launch_overhead = float(_require_field("sw_param", sw_block, "kernel_launch_overhead"))
         h2d_bandwidth = float(sw_block.get("h2d_bandwidth", -1))
         dp_zero_stage = _coerce_int(sw_block.get("dp_zero_stage", 0), "sw_param.dp_zero_stage", min_value=0)
-        full_recomputation = _coerce_bool(
-            sw_block.get("full_recomputation", False),
-            "sw_param.full_recomputation",
-        )
+        raw_activation_checkpointing = sw_block.get("activation_checkpointing", None)
+        raw_full_recomputation = sw_block.get("full_recomputation", None)
+        if raw_activation_checkpointing is None:
+            full_recomputation = _coerce_bool(
+                raw_full_recomputation if raw_full_recomputation is not None else False,
+                "sw_param.full_recomputation",
+            )
+            activation_checkpointing = "full" if full_recomputation else "none"
+        else:
+            activation_checkpointing = str(raw_activation_checkpointing).strip().lower()
+            if activation_checkpointing not in {"none", "selective", "full"}:
+                raise ValueError(
+                    "sw_param.activation_checkpointing must be one of: none, selective, full"
+                )
+            if raw_full_recomputation is not None:
+                full_recomputation = _coerce_bool(
+                    raw_full_recomputation,
+                    "sw_param.full_recomputation",
+                )
+                if full_recomputation and activation_checkpointing != "full":
+                    raise ValueError(
+                        "sw_param.full_recomputation=true conflicts with "
+                        f"sw_param.activation_checkpointing={activation_checkpointing!r}"
+                    )
+                if not full_recomputation and activation_checkpointing == "full":
+                    raise ValueError(
+                        "sw_param.full_recomputation=false conflicts with "
+                        "sw_param.activation_checkpointing='full'"
+                    )
+            else:
+                full_recomputation = activation_checkpointing == "full"
+        selective_checkpointing = activation_checkpointing == "selective"
         dp_microbatch_raw = sw_block.get("dp_microbatch", "every_mb")
         dp_microbatch = str(dp_microbatch_raw).strip().lower()
         if dp_microbatch not in {"every_mb", "last_mb"}:
@@ -2047,15 +2095,53 @@ class SWConfig:
                 raise ValueError(
                     f"sw_param.grad_acc_overhead must be a float-compatible value (got {grad_acc_overhead_raw!r})"
                 ) from exc
+        zero3_embedding_local_raw = sw_block.get("zero3_embedding_gather_local_comp_time", 0.0)
+        if zero3_embedding_local_raw is None:
+            zero3_embedding_local = 0.0
+        else:
+            try:
+                zero3_embedding_local = float(zero3_embedding_local_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "sw_param.zero3_embedding_gather_local_comp_time must be a float-compatible value "
+                    f"(got {zero3_embedding_local_raw!r})"
+                ) from exc
+        zero3_transformer_local_raw = sw_block.get("zero3_transformer_gather_local_comp_time", 0.0)
+        if zero3_transformer_local_raw is None:
+            zero3_transformer_local = 0.0
+        else:
+            try:
+                zero3_transformer_local = float(zero3_transformer_local_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "sw_param.zero3_transformer_gather_local_comp_time must be a float-compatible value "
+                    f"(got {zero3_transformer_local_raw!r})"
+                ) from exc
+        zero3_softmax_local_raw = sw_block.get("zero3_softmax_gather_local_comp_time", 0.0)
+        if zero3_softmax_local_raw is None:
+            zero3_softmax_local = 0.0
+        else:
+            try:
+                zero3_softmax_local = float(zero3_softmax_local_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "sw_param.zero3_softmax_gather_local_comp_time must be a float-compatible value "
+                    f"(got {zero3_softmax_local_raw!r})"
+                ) from exc
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
             h2d_bandwidth=h2d_bandwidth,
             dp_zero_stage=dp_zero_stage,
+            activation_checkpointing=activation_checkpointing,
+            selective_checkpointing=selective_checkpointing,
             full_recomputation=full_recomputation,
             dp_microbatch=dp_microbatch,
             const_mem_offset=const_mem_offset,
             grad_acc_overhead=grad_acc_overhead,
+            zero3_embedding_gather_local_comp_time=zero3_embedding_local,
+            zero3_transformer_gather_local_comp_time=zero3_transformer_local,
+            zero3_softmax_gather_local_comp_time=zero3_softmax_local,
         )
 
 
@@ -2558,8 +2644,23 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
                 raise ValueError(f"Batch size must be divisible by dp*ep when MoE is enabled: {batch_size} % {dp_dense} != 0")
             raise ValueError(f"Batch size must be divisible by data parallelism degree: {batch_size} % {train_dp} != 0")
         mini_batch = batch_size // dp_dense
-        if mini_batch % mb != 0:
-            raise ValueError(f"Batch size must be divisible by micro-batch size: {mini_batch} % {mb} != 0")
+        explicit_micro_batch = getattr(model, "micro_batch_size", None)
+        if pp > 1:
+            if mini_batch % mb != 0:
+                raise ValueError(f"Batch size must be divisible by micro-batch size: {mini_batch} % {mb} != 0")
+            derived_micro_batch = mini_batch // mb
+        else:
+            derived_micro_batch = mini_batch
+            if explicit_micro_batch is not None and mb != 1:
+                raise ValueError(
+                    "parallelism.mb must be 1 when model_param.micro_batch_size is set and parallelism.pp == 1"
+                )
+        if explicit_micro_batch is not None and derived_micro_batch != explicit_micro_batch:
+            raise ValueError(
+                "model_param.micro_batch_size does not match the training shape derived from "
+                f"global_batch_size/gradient_accumulation_steps/data-parallelism/pipeline micro-batching "
+                f"(expected {derived_micro_batch}, got {explicit_micro_batch})"
+            )
 
         if not model.use_moe and train_ep > 1:
             raise ValueError(

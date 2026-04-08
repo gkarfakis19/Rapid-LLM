@@ -100,7 +100,13 @@ class MemoryEstimator:
         moe_group = ep
         zero_stage = int(getattr(tc, "zero_stage", 0) or 0)
         flash_attention = bool(getattr(tc, "flash_attention", False))
-        full_recomputation = bool(getattr(tc, "full_recomputation", False))
+        raw_activation_checkpointing = str(getattr(tc, "activation_checkpointing", "none") or "none").lower()
+        raw_full_recomputation = bool(getattr(tc, "full_recomputation", False))
+        if raw_full_recomputation:
+            activation_checkpointing = "full"
+        else:
+            activation_checkpointing = "none" if raw_activation_checkpointing == "full" else raw_activation_checkpointing
+        full_recomputation = activation_checkpointing == "full"
         use_moe = bool(getattr(tc, "use_moe", False))
         disable_embedding_unembedding = bool(
             getattr(tc, "disable_embedding_unembedding", False)
@@ -141,6 +147,7 @@ class MemoryEstimator:
             zero_stage=zero_stage,
             flash_attention=flash_attention,
             full_recomputation=full_recomputation,
+            activation_checkpointing=activation_checkpointing,
             attention_type=getattr(tc, "attention_type", "mha"),
             q_lora_rank=getattr(tc, "q_lora_rank", None),
             kv_lora_rank=getattr(tc, "kv_lora_rank", None),
@@ -222,6 +229,7 @@ class MemoryEstimator:
                 zero_stage=zero_stage,
                 flash_attention=flash_attention,
                 full_recomputation=full_recomputation,
+                activation_checkpointing=activation_checkpointing,
                 attention_type=getattr(tc, "attention_type", "mha"),
                 q_lora_rank=getattr(tc, "q_lora_rank", None),
                 kv_lora_rank=getattr(tc, "kv_lora_rank", None),
@@ -450,7 +458,12 @@ class MemoryEstimator:
             transformer_act_layer_local: float,
             transformer_act_layer_inf_local: float,
             use_moe_local: bool,
-        ) -> Tuple[Dict[MemKind, float], Dict[MemKind, float], Dict[MemKind, float]]:
+        ) -> Tuple[
+            Dict[MemKind, float],
+            Dict[MemKind, float],
+            Dict[MemKind, float],
+            Dict[MemKind, float],
+        ]:
             def _gemm_out_bytes(key: str, gemm_type: str) -> float:
                 if key not in gemm_shapes_local:
                     raise RuntimeError(f"Missing GEMM shape for '{key}'")
@@ -575,24 +588,69 @@ class MemoryEstimator:
 
             persistent_bytes_by_kind = {kind: 0.0 for kind in base_outputs}
             transient_bytes_by_kind = {kind: 0.0 for kind in base_outputs}
+            recompute_transient_bytes_by_kind = {kind: 0.0 for kind in base_outputs}
 
-            store_outputs = mode == "training" and not full_recomputation
-            if store_outputs:
+            if mode != "training":
                 for kind, bytes_val in base_outputs.items():
-                    persistent_bytes_by_kind[kind] = float(bytes_val or 0.0)
-                if attn_score_bytes:
-                    persistent_bytes_by_kind[MemKind.ATTENTION] += float(attn_score_bytes)
-                persistent_bytes_by_kind[MemKind.MLP] += float(ffn1_bytes)
-            else:
+                    transient_bytes_by_kind[kind] = float(bytes_val or 0.0)
+                return (
+                    base_outputs,
+                    persistent_bytes_by_kind,
+                    transient_bytes_by_kind,
+                    recompute_transient_bytes_by_kind,
+                )
+
+            if activation_checkpointing == "full":
                 for kind, bytes_val in base_outputs.items():
                     transient_bytes_by_kind[kind] = float(bytes_val or 0.0)
                 if attn_score_bytes:
                     transient_bytes_by_kind[MemKind.ATTENTION] += float(attn_score_bytes)
                 transient_bytes_by_kind[MemKind.MLP] += float(ffn1_bytes)
+                recompute_transient_bytes_by_kind.update(transient_bytes_by_kind)
+                transient_bytes_by_kind[MemKind.TRANSFORMER] = float(transformer_act_layer_local)
+                recompute_transient_bytes_by_kind[MemKind.TRANSFORMER] = float(transformer_act_layer_local)
+            elif activation_checkpointing == "selective":
+                checkpointed_kinds = {MemKind.LAYERNORM1, MemKind.LAYERNORM2, MemKind.MLP}
+                for kind, bytes_val in base_outputs.items():
+                    if kind in checkpointed_kinds:
+                        transient_bytes_by_kind[kind] = float(bytes_val or 0.0)
+                    else:
+                        persistent_bytes_by_kind[kind] = float(bytes_val or 0.0)
+                transient_bytes_by_kind[MemKind.MLP] = float(ffn1_bytes)
+                recompute_transient_bytes_by_kind[MemKind.LAYERNORM1] = float(base_outputs[MemKind.LAYERNORM1] or 0.0)
+                recompute_transient_bytes_by_kind[MemKind.LAYERNORM2] = float(base_outputs[MemKind.LAYERNORM2] or 0.0)
+                recompute_transient_bytes_by_kind[MemKind.MLP] = float(ffn1_bytes)
+                persistent_bytes_by_kind[MemKind.TRANSFORMER] = float(transformer_act_layer_local)
+                selective_transient_transformer = max(
+                    0.0,
+                    float(transformer_fallback_bytes) - float(transformer_act_layer_local),
+                )
+                transient_bytes_by_kind[MemKind.TRANSFORMER] = selective_transient_transformer
+                recompute_transient_bytes_by_kind[MemKind.TRANSFORMER] = selective_transient_transformer
+                if attn_score_bytes:
+                    transient_bytes_by_kind[MemKind.ATTENTION] = float(attn_score_bytes)
+                    recompute_transient_bytes_by_kind[MemKind.ATTENTION] = float(attn_score_bytes)
+            else:
+                for kind, bytes_val in base_outputs.items():
+                    persistent_bytes_by_kind[kind] = float(bytes_val or 0.0)
+                if attn_score_bytes:
+                    persistent_bytes_by_kind[MemKind.ATTENTION] += float(attn_score_bytes)
+                persistent_bytes_by_kind[MemKind.MLP] += float(ffn1_bytes)
+                persistent_bytes_by_kind[MemKind.TRANSFORMER] = float(transformer_act_layer_local)
 
-            return base_outputs, persistent_bytes_by_kind, transient_bytes_by_kind
+            return (
+                base_outputs,
+                persistent_bytes_by_kind,
+                transient_bytes_by_kind,
+                recompute_transient_bytes_by_kind,
+            )
 
-        _, persistent_bytes_by_kind_dense, transient_bytes_by_kind_dense = _build_activation_maps(
+        (
+            _,
+            persistent_bytes_by_kind_dense,
+            transient_bytes_by_kind_dense,
+            recompute_transient_bytes_by_kind_dense,
+        ) = _build_activation_maps(
             gemm_shapes_dense,
             transformer_act_layer_dense,
             transformer_act_layer_inf_dense,
@@ -600,8 +658,14 @@ class MemoryEstimator:
         )
         persistent_bytes_by_kind_moe = persistent_bytes_by_kind_dense
         transient_bytes_by_kind_moe = transient_bytes_by_kind_dense
+        recompute_transient_bytes_by_kind_moe = recompute_transient_bytes_by_kind_dense
         if use_moe:
-            base_outputs_moe, persistent_bytes_by_kind_moe, transient_bytes_by_kind_moe = _build_activation_maps(
+            (
+                base_outputs_moe,
+                persistent_bytes_by_kind_moe,
+                transient_bytes_by_kind_moe,
+                recompute_transient_bytes_by_kind_moe,
+            ) = _build_activation_maps(
                 gemm_shapes_moe,
                 transformer_act_layer_moe,
                 transformer_act_layer_inf_moe,
@@ -617,6 +681,7 @@ class MemoryEstimator:
                 )
         persistent_bytes_by_kind = persistent_bytes_by_kind_dense
         transient_bytes_by_kind = transient_bytes_by_kind_dense
+        recompute_transient_bytes_by_kind = recompute_transient_bytes_by_kind_dense
 
         if mode != "training" and kv_cache_tokens:
             # KV cache stores K and V tensors with shape (kv_heads, head_dim, seq).
@@ -686,6 +751,9 @@ class MemoryEstimator:
             "persistent_bytes_by_kind_moe": persistent_bytes_by_kind_moe,
             "transient_bytes_by_kind_dense": transient_bytes_by_kind_dense,
             "transient_bytes_by_kind_moe": transient_bytes_by_kind_moe,
+            "recompute_transient_bytes_by_kind": recompute_transient_bytes_by_kind,
+            "recompute_transient_bytes_by_kind_dense": recompute_transient_bytes_by_kind_dense,
+            "recompute_transient_bytes_by_kind_moe": recompute_transient_bytes_by_kind_moe,
             "extra_static_bytes_per_device": extra_static_bytes_per_device,
             "kv_cache_bytes_per_layer": kv_cache_bytes_per_layer,
             "zero3_ephemeral_peak_bytes": zero3_ephemeral_peak_bytes,

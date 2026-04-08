@@ -1,6 +1,6 @@
 sw_param:
   full_recomputation: false
-  kernel_launch_overhead: 5.43e-06
+  kernel_launch_overhead: 6.0e-6 # 7.5e-6
   dp_zero_stage: 1
   precision:
     tensor_format: bf16
@@ -24,13 +24,13 @@ tech_param:
     FMA_d1: 8
     FMA_d2: 4
     dataflow: best
-    util: 0.971529516579381
+    util: 1 # 0.937309439867489
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
-    util: 0.79016531231439
+    util: 1 # 0.9165826164041229
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB
@@ -82,10 +82,10 @@ network:
     size: auto
     topology:
       type: FullyConnected
-      bandwidth: 250 GB
+      bandwidth: 50 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.846587354592159
+      util: 1 # 0.761755969040375
       optimize_2dmap: false
     collective_override: {}
     parallelisms:
@@ -117,7 +117,7 @@ network:
     parallelisms: []
     collective_override: {}
   overlap:
-    tp_sp_overlap: 0.03775607555883787
+    tp_sp_overlap: 0 # 0.13576036675862677
     tp_overlap: 0.6
     cp_overlap: 0.0
 execution_backend:

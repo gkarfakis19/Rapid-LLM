@@ -623,6 +623,7 @@ def get_transformer_mem_layer(
     zero_stage=0,
     flash_attention=False,
     full_recomputation=False,
+    activation_checkpointing="none",
     model_type="gpt",
     attention_type="mha",
     q_lora_rank=None,
@@ -636,6 +637,14 @@ def get_transformer_mem_layer(
 ):  #  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     """Approximate transformer-layer memory sizing for training/inference."""
     #Activations refer to output activations that need to be stored
+
+    checkpointing_mode = str(activation_checkpointing or "").strip().lower()
+    if not checkpointing_mode:
+        checkpointing_mode = "full" if full_recomputation else "none"
+    if checkpointing_mode not in {"none", "selective", "full"}:
+        raise ValueError(
+            f"Unsupported activation checkpointing mode: {activation_checkpointing!r}"
+        )
 
     if str(attention_type or "").lower() == "mla":
         mla_activation = mla_activation_tensor_bytes(
@@ -653,15 +662,17 @@ def get_transformer_mem_layer(
             precision_bytes=precision.activations,
             model_type=model_type,
             flash_attention=flash_attention,
-            full_recomputation=full_recomputation,
+            full_recomputation=(checkpointing_mode == "full"),
             tp=tp,
             cp=cp,
         )
         act_memory_layer = mla_activation["training_bytes"]
         act_memory_layer_inf = mla_activation["inference_peak_bytes"]
     else:
-        if full_recomputation:
+        if checkpointing_mode == "full":
             act_memory_layer = seq_len * batch_size * hidden_dim * (2 ) * (precision.activations / 2) #full recompute:
+        elif checkpointing_mode == "selective":
+            act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2)
         elif flash_attention:
             act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #assuming selective recompute
         else:

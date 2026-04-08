@@ -376,6 +376,7 @@ class Evaluator:
         fixed_core_util: float,
         use_flashattention: bool,
         attention_tile_size: int | None,
+        activation_checkpointing_true_mode: str,
     ) -> None:
         self.base_hw = copy.deepcopy(base_hw)
         self.full_csv = full_csv
@@ -392,6 +393,7 @@ class Evaluator:
         self.attention_tile_size = (
             int(attention_tile_size) if attention_tile_size is not None else None
         )
+        self.activation_checkpointing_true_mode = str(activation_checkpointing_true_mode).strip().lower()
 
         self._cache: Dict[Tuple[str, Tuple[float, float, float, float]], CandidateResult] = {}
         self.run_artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -464,6 +466,7 @@ class Evaluator:
                 emit_logs=False,
                 use_flashattention=self.use_flashattention,
                 attention_tile_size=self.attention_tile_size,
+                activation_checkpointing_true_mode=self.activation_checkpointing_true_mode,
             )
         finally:
             if env_prev_workers is None:
@@ -1053,6 +1056,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Default: keep model-config tile size."
         ),
     )
+    p.add_argument(
+        "--activation-checkpointing-true-mode",
+        choices=("full", "selective"),
+        default="full",
+        help=(
+            "Interpretation of CSV activation_checkpointing=True during fitting. "
+            "'full' maps to full recomputation; 'selective' maps to selective checkpointing."
+        ),
+    )
 
     return p
 
@@ -1108,6 +1120,7 @@ def run_fit(args: argparse.Namespace) -> int:
         fixed_core_util=float(base_params_raw.core_util),
         use_flashattention=(not bool(args.disable_flashattention)),
         attention_tile_size=(None if args.attention_tile_size is None else int(args.attention_tile_size)),
+        activation_checkpointing_true_mode=str(args.activation_checkpointing_true_mode),
     )
 
     base_params = evaluator.clamp_params(base_params_raw)
@@ -1125,6 +1138,7 @@ def run_fit(args: argparse.Namespace) -> int:
     print(f"fit_core_util: {bool(args.fit_core_util)}")
     print(f"flashattention: {not bool(args.disable_flashattention)}")
     print(f"attention_tile_size: {args.attention_tile_size}")
+    print(f"activation_checkpointing_true_mode: {args.activation_checkpointing_true_mode}")
     print(f"base params: {_format_params(base_params)}")
     print(f"initial bounds: {asdict(bounds)}")
 

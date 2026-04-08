@@ -147,7 +147,7 @@ network:
 
   overlap:
     # fraction of TP+SP compute that can overlap TP/SP comm
-    tp_sp_overlap: 0.63
+    tp_sp_overlap: 0.0
     # fraction of TP compute that can overlap TP comm
     tp_overlap: 0.6
     # fraction of CP comm that can overlap CP compute

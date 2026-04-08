@@ -40,6 +40,7 @@ tech_param:
     operating_frequency: 1.98e9     # (Hz) GPU boost clock frequency [TePU]
     num_bundles: 132     # number of bundles (SMs) [TePU]
     nominal_flop_rate_per_mcu: 1024     # F16 FLOP / cycle / SM is 4096 [Semi]
+    vector_nominal_flop_rate_per_mcu: 1024
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 4     # number of tensorcores per SM [TePU]
     FMA_d1: 16                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
@@ -119,6 +120,7 @@ network:
       parallelisms: [tp, cp]
     - id: dim1
       label: inter_torus_infiniband
+      size: auto
       topology:
         type: FullyConnected
         bandwidth: 50 GB   # per-GPU one-way if 400 Gb/s per GPU rail
