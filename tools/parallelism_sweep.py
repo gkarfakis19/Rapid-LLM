@@ -446,6 +446,15 @@ def determine_model_mode(model_config_path):
     return mode
 
 
+def determine_run_type(model_config_path):
+    model_dict = read_yaml(model_config_path)
+    model_param = model_dict.get("model_param") or {}
+    run_type = str(model_param.get("run_type", "training")).strip().lower()
+    if run_type not in {"training", "inference"}:
+        return "training"
+    return run_type
+
+
 def _cache_key(hw_path: str, model_id: str, settings: Dict[str, object]) -> Tuple[str, str, str]:
     hw_id = str(Path(hw_path).resolve())
     settings_json = json.dumps(settings, sort_keys=True)
@@ -1804,12 +1813,28 @@ def main():
             plot_results(results, plot_path)
         return
 
-    gpu_axes = list(PARALLELISM_SWEEP.keys())
-    other_axes = list(OTHER_PARALLELISM_OPTIONS.keys())
-    gpu_combos = list(cartesian_product(PARALLELISM_SWEEP))
-    other_combos = list(cartesian_product(OTHER_PARALLELISM_OPTIONS))
+    model_run_type = determine_run_type(active_model_config_path)
+    if model_run_type == "inference":
+        gpu_option_map = {k: v for k, v in PARALLELISM_SWEEP.items() if k != "dp"}
+        other_option_map = dict(OTHER_PARALLELISM_OPTIONS)
+        other_option_map["replica_count"] = [1]
+        print("Inference sweep mode: excluding dp axis; fixing inference.replica_count=1.")
+    else:
+        gpu_option_map = PARALLELISM_SWEEP
+        other_option_map = OTHER_PARALLELISM_OPTIONS
+
+    gpu_axes = list(gpu_option_map.keys())
+    other_axes = list(other_option_map.keys())
+    gpu_combos = list(cartesian_product(gpu_option_map))
+    other_combos = list(cartesian_product(other_option_map))
     task_items = _build_tasks(gpu_combos, other_combos)
-    print("Enumerating {} parallelism combinations: {}".format(len(task_items), ", ".join(gpu_axes)))
+    print(
+        "Enumerating {} parallelism combinations: {}{}".format(
+            len(task_items),
+            ", ".join(gpu_axes),
+            (", " + ", ".join(other_axes)) if other_axes else "",
+        )
+    )
 
     filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
     skipped_out_of_range = 0
@@ -1845,7 +1870,7 @@ def main():
     else:
         worker_limit = min(MAX_WORKERS, max(1, available_cpus - 1))
     worker_count = max(1, worker_limit)
-    print(f"Using {worker_count} worker process(es) (out of {available_cpus} CPUs).")
+    print(f"Worker limit: {worker_count} process(es) (out of {available_cpus} CPUs).")
 
     best_runtime_entries: List[Dict[str, object]] = []
     best_runtime_by_gpu_count: Dict[int, List[Dict[str, object]]] = {}
@@ -1971,11 +1996,16 @@ def main():
                     }
                     results.append(entry)
 
-                if worker_count > 1 and len(tasks_to_eval) > 1:
+                active_worker_count = min(worker_count, max(1, len(tasks_to_eval)))
+                if active_worker_count > 1 and len(tasks_to_eval) > 1:
                     futures = {}
                     processed_futures = set()
                     pending_items: List[Tuple[Tuple[str, object], ...]] = []
                     pool_broken = False
+                    print(
+                        f"Using {active_worker_count} worker process(es) for "
+                        f"{len(tasks_to_eval)} task(s)."
+                    )
 
                     def _retry_isolated(items: Tuple[Tuple[str, object], ...]) -> None:
                         nonlocal skipped_errors
@@ -1997,13 +2027,13 @@ def main():
                     try:
                         if USE_THREADPOOL:
                             Executor = ThreadPoolExecutor
-                            executor_kwargs = {"max_workers": worker_count}
+                            executor_kwargs = {"max_workers": active_worker_count}
                             # Threads share process memory; seed globals once.
                             _worker_init(base_hw_dict, model_config_path, mode)
                         else:
                             Executor = ProcessPoolExecutor
                             executor_kwargs = {
-                                "max_workers": worker_count,
+                                "max_workers": active_worker_count,
                                 "initializer": _worker_init,
                                 "initargs": (base_hw_dict, model_config_path, mode),
                             }
@@ -2147,6 +2177,12 @@ def main():
                 print("Encountered errors for configurations:")
                 for msg in error_messages:
                     print(f"  {msg}")
+            if not results_from_report:
+                try:
+                    write_report(results, report_path)
+                    print("Wrote detailed report to {}".format(report_path))
+                except Exception as exc:
+                    print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
             continue
 
         if results_from_report:
@@ -2162,6 +2198,13 @@ def main():
                 for msg in error_messages:
                     print(f"  {msg}")
 
+        if not results_from_report:
+            try:
+                write_report(results, report_path)
+                print("Wrote detailed report to {}".format(report_path))
+            except Exception as exc:
+                print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
+
         best_candidates = [
             item for item in results
             if not item.get("memory_exceeded") and math.isfinite(item.get("runtime", float("nan")))
@@ -2172,6 +2215,8 @@ def main():
                 "skipping best/runtime summary for this hardware.",
                 file=sys.stderr,
             )
+            if results:
+                plot_results(results, plot_path)
             continue
 
         # Track best runtime per GPU count for this hardware (exclude memory violations).
@@ -2200,13 +2245,6 @@ def main():
             best_runtime_by_gpu_count.setdefault(num_gpus, []).append(
                 {"label": hw_label, "runtime": runtime_val}
             )
-
-        if not results_from_report:
-            try:
-                write_report(results, report_path)
-                print("Wrote detailed report to {}".format(report_path))
-            except Exception as exc:
-                print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
 
         if results:
             plot_results(results, plot_path)
