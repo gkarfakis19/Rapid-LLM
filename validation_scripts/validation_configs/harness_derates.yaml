@@ -1,0 +1,18 @@
+shared:
+  kernel_launch_overhead_s: 6.e-06
+
+device_types:
+  A100_PCIe:
+    dram_util: 0.70
+    network_util: 0.85
+    compute_util: 0.60
+
+  A100_SXM4:
+    dram_util: 0.7
+    network_util: 0.8
+    compute_util: 0.9
+
+  H100_SXM5:
+    dram_util: 0.80
+    network_util: 0.85
+    compute_util: 0.56
