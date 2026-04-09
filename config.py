@@ -2383,9 +2383,9 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             global _MLA_DECODE_FLASH_WARNED
             if not _MLA_DECODE_FLASH_WARNED:
                 print(
-                    "[WARNING]: MLA inference does not model FlashMLA decode. "
+                    "[WARNING]: MLA inference models the latent-cache decode path without FlashMLA-specific kernels. "
                     "model_param.attention.use_flashattention only affects MLA prefill; "
-                    "decode continues to use the non-flash path."
+                    "decode continues to use the non-flash latent-cache path."
                 )
                 _MLA_DECODE_FLASH_WARNED = True
     if run_type == "inference":

@@ -3024,7 +3024,13 @@ class TimeCalculationLLM(TimeCalculation):
         return int(elements)
 
     def _mla_query_state_bytes(self, gemm_shapes: Dict[str, Tuple[int, ...]], precision_bytes: int) -> int:
-        if "U_proj_q" in gemm_shapes:
+        if "Q_absorb" in gemm_shapes:
+            score_spec = self._shard_gemm_descriptor(
+                gemm_shapes["attention_score"],
+                GemmType.ATTENTION_SCORE,
+            )
+            elements = int(score_spec.shard_batch * score_spec.shard_m * score_spec.k)
+        elif "U_proj_q" in gemm_shapes:
             elements = self._mla_component_output_elements(
                 gemm_shapes["U_proj_q"],
                 GemmType.QKV,
@@ -3044,6 +3050,7 @@ class TimeCalculationLLM(TimeCalculation):
         *,
         visible_cp: bool,
     ) -> int:
+        """Return expanded MLA K/V state bytes used by local attention execution."""
         if "U_proj_kv" in gemm_shapes:
             score_spec = self._shard_gemm_descriptor(
                 gemm_shapes["attention_score"],
@@ -3065,6 +3072,21 @@ class TimeCalculationLLM(TimeCalculation):
                 GemmType.MLA_DOWN_PROJ,
                 visible_cp=visible_cp,
             )
+        return int(math.ceil(float(elements) * float(precision_bytes)))
+
+    def _mla_latent_state_bytes(
+        self,
+        gemm_shapes: Dict[str, Tuple[int, ...]],
+        precision_bytes: int,
+        *,
+        visible_cp: bool,
+    ) -> int:
+        """Return latent MLA KV-state bytes used for CP communication."""
+        elements = self._mla_component_output_elements(
+            gemm_shapes["D_proj_kv"],
+            GemmType.MLA_DOWN_PROJ,
+            visible_cp=visible_cp,
+        )
         return int(math.ceil(float(elements) * float(precision_bytes)))
 
     def _mla_attention_ctx_bytes(
@@ -3188,7 +3210,7 @@ class TimeCalculationLLM(TimeCalculation):
         size_bytes = (
             self._mla_query_state_bytes(gemm_shapes, self.precision.activations)
             if decode
-            else self._mla_cache_state_bytes(
+            else self._mla_latent_state_bytes(
                 gemm_shapes,
                 self.precision.activations,
                 visible_cp=True,
@@ -3236,7 +3258,7 @@ class TimeCalculationLLM(TimeCalculation):
         mode = self.get_parallelism_mode()
         if mode not in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
             return 0, 0.0
-        size_bytes = self._mla_cache_state_bytes(
+        size_bytes = self._mla_latent_state_bytes(
             gemm_shapes,
             self.precision.grad_communication,
             visible_cp=True,
@@ -3276,7 +3298,7 @@ class TimeCalculationLLM(TimeCalculation):
         mode = self.get_parallelism_mode()
         if mode not in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
             return 0, 0.0
-        size_bytes = self._mla_cache_state_bytes(
+        size_bytes = self._mla_latent_state_bytes(
             gemm_shapes,
             self.precision.activations,
             visible_cp=True,
@@ -3397,19 +3419,22 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim: int,
         decode: bool = False,
     ) -> OperationTiming:
-        components = (
+        components = [
             ("mla_d_proj_q", gemm_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ),
             ("mla_d_proj_kv", gemm_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ),
             ("mla_u_proj_q", gemm_shapes["U_proj_q"], GemmType.QKV),
-            ("mla_u_proj_kv", gemm_shapes["U_proj_kv"], GemmType.QKV),
-        )
+        ]
+        if "U_proj_kv" in gemm_shapes:
+            components.append(("mla_u_proj_kv", gemm_shapes["U_proj_kv"], GemmType.QKV))
+        if "Q_absorb" in gemm_shapes:
+            components.append(("mla_q_absorb", gemm_shapes["Q_absorb"], GemmType.QKV))
         forward_comm_bytes, forward_comm_time = self._mla_projection_forward_comm(
             gemm_shapes,
             decode=decode,
         )
         forward = self._mla_composite_direction(
             stage_name="mla_qkv_proj_f",
-            components=components,
+            components=tuple(components),
             backward=False,
             comm_bytes=forward_comm_bytes,
             comm_time=forward_comm_time,
@@ -3419,7 +3444,7 @@ class TimeCalculationLLM(TimeCalculation):
             backward_comm_bytes, backward_comm_time = self._mla_projection_backward_comm(gemm_shapes)
             backward_dir = self._mla_composite_direction(
                 stage_name="mla_qkv_proj_b",
-                components=components,
+                components=tuple(components),
                 backward=True,
                 grad_accum_elems=self._mla_param_stage_sizes(hidden_dim)["projection_stage"],
                 comm_bytes=backward_comm_bytes,
@@ -3647,13 +3672,14 @@ class TimeCalculationLLM(TimeCalculation):
         include_backward: bool,
         hidden_dim: int,
     ) -> OperationTiming:
-        components = (
-            ("mla_output_proj", gemm_shapes["output_proj"], GemmType.OUT_PROJ),
-        )
+        components = []
+        if "U_proj_v" in gemm_shapes:
+            components.append(("mla_u_proj_v", gemm_shapes["U_proj_v"], GemmType.QKV))
+        components.append(("mla_output_proj", gemm_shapes["output_proj"], GemmType.OUT_PROJ))
         forward_comm_bytes, forward_comm_time = self._mla_output_forward_comm(gemm_shapes)
         forward = self._mla_composite_direction(
             stage_name="mla_output_proj_f",
-            components=components,
+            components=tuple(components),
             backward=False,
             comm_bytes=forward_comm_bytes,
             comm_time=forward_comm_time,
@@ -3663,7 +3689,7 @@ class TimeCalculationLLM(TimeCalculation):
             backward_comm_bytes, backward_comm_time = self._mla_output_backward_comm(gemm_shapes)
             backward_dir = self._mla_composite_direction(
                 stage_name="mla_output_proj_b",
-                components=components,
+                components=tuple(components),
                 backward=True,
                 grad_accum_elems=self._mla_param_stage_sizes(hidden_dim)["output_stage"],
                 comm_bytes=backward_comm_bytes,

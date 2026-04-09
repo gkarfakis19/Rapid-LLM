@@ -257,16 +257,12 @@ def mla_kv_cache_token_bytes(
     qk_rope_head_dim,
     precision_bytes,
     *,
-    num_heads,
-    qk_nope_head_dim,
-    v_head_dim,
+    kv_lora_rank,
 ):
-    """Return per-token MLA KV-cache bytes for the default full-cache decode contract."""
-    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
+    """Return per-token MLA KV-cache bytes for the latent-cache decode contract."""
     return (
         int(batch_size)
-        * int(num_heads)
-        * (qk_head_dim + int(v_head_dim))
+        * (int(kv_lora_rank) + int(qk_rope_head_dim))
         * float(precision_bytes)
     )
 
@@ -296,6 +292,37 @@ def mla_runtime_proxy_sizes(
     }
 
 
+def mla_decode_runtime_proxy_sizes(
+    num_heads,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
+):
+    """Return proxy stage-output widths for the latent-cache MLA decode path."""
+    qk_head_dim, q_size, _v_size, _kv_up_size = mla_dim_sizes(
+        num_heads,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+    )
+    q_absorb_size = int(num_heads) * int(kv_lora_rank)
+    qkv_output_size = (
+        int(q_lora_rank)
+        + int(kv_lora_rank)
+        + int(qk_rope_head_dim)
+        + int(q_size)
+        + q_absorb_size
+    )
+    attention_output_size = int(kv_lora_rank)
+    return {
+        "qkv_output_size": qkv_output_size,
+        "attention_output_size": attention_output_size,
+        "output_proj_input_size": int(num_heads) * int(v_head_dim),
+    }
+
+
 def mla_runtime_op_shapes(
     *,
     batch_size,
@@ -308,7 +335,7 @@ def mla_runtime_op_shapes(
     qk_rope_head_dim,
     v_head_dim,
 ):
-    """Return MLA component GEMM shapes for the default full-cache runtime path."""
+    """Return MLA component GEMM shapes for the training/prefill runtime path."""
     qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
     return OrderedDict(
         {
@@ -330,6 +357,51 @@ def mla_runtime_op_shapes(
                 query_seq_len,
                 kv_lora_rank,
                 int(num_heads) * (int(qk_nope_head_dim) + int(v_head_dim)),
+            ),
+        }
+    )
+
+
+def mla_decode_runtime_op_shapes(
+    *,
+    batch_size,
+    query_seq_len,
+    hidden_dim,
+    num_heads,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_nope_head_dim,
+    qk_rope_head_dim,
+    v_head_dim,
+):
+    """Return MLA decode GEMM shapes for the vLLM-style latent-cache path."""
+    qk_head_dim = int(qk_nope_head_dim) + int(qk_rope_head_dim)
+    return OrderedDict(
+        {
+            "D_proj_q": (batch_size, query_seq_len, hidden_dim, q_lora_rank),
+            "D_proj_kv": (
+                batch_size,
+                query_seq_len,
+                hidden_dim,
+                int(kv_lora_rank) + int(qk_rope_head_dim),
+            ),
+            "U_proj_q": (
+                batch_size,
+                query_seq_len,
+                q_lora_rank,
+                int(num_heads) * qk_head_dim,
+            ),
+            "Q_absorb": (
+                batch_size,
+                query_seq_len,
+                int(qk_nope_head_dim),
+                int(num_heads) * int(kv_lora_rank),
+            ),
+            "U_proj_v": (
+                batch_size,
+                query_seq_len,
+                int(kv_lora_rank),
+                int(num_heads) * int(v_head_dim),
             ),
         }
     )
@@ -437,11 +509,9 @@ def attention_kv_cache_token_bytes(
     if str(attention_type or "").lower() == "mla":
         return mla_kv_cache_token_bytes(
             batch_size=batch_size,
+            kv_lora_rank=kv_lora_rank,
             qk_rope_head_dim=qk_rope_head_dim,
             precision_bytes=precision_bytes,
-            num_heads=num_heads,
-            qk_nope_head_dim=qk_nope_head_dim,
-            v_head_dim=v_head_dim,
         )
     return kv_cache_token_bytes(
         batch_size=batch_size,
@@ -1029,13 +1099,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
 
     # Decode-specific GEMM shapes with KV-cache handling (always enabled)
     if attention_type == "mla" and run_type == "inference":
-        qk_head_dim, _q_size_mla, _v_size_mla, _kv_up_size = mla_dim_sizes(
-            num_heads,
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
-            self.v_head_dim,
-        )
-        runtime_ops = mla_runtime_op_shapes(
+        runtime_ops = mla_decode_runtime_op_shapes(
             batch_size=batch_size,
             query_seq_len=1,
             hidden_dim=d_model,
@@ -1047,7 +1111,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             v_head_dim=self.v_head_dim,
         )
         gemms.update(runtime_ops)
-        proxy_sizes = mla_runtime_proxy_sizes(
+        proxy_sizes = mla_decode_runtime_proxy_sizes(
             num_heads,
             self.q_lora_rank,
             self.kv_lora_rank,
@@ -1059,7 +1123,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         gemms["attention_score"] = (
             batch_size * num_heads,
             1,
-            qk_head_dim,
+            int(self.kv_lora_rank) + int(self.qk_rope_head_dim),
             current_seq_len,
         )
         gemms["attention_output"] = (

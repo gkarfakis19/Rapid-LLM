@@ -235,7 +235,7 @@ def test_mla_inference_prefill_shapes_follow_full_megatron_runtime_path():
     assert gemm_shapes["output_proj"] == (32, 32, 64)
 
 
-def test_mla_inference_decode_defaults_to_full_cache_path():
+def test_mla_inference_decode_uses_latent_cache_path():
     hw_config = _build_hw_config(tp=2)
     hw_config.inference_config = hw_config.sch_config.inference
     model = _build_mla_model(run_type="inference")
@@ -257,12 +257,13 @@ def test_mla_inference_decode_defaults_to_full_cache_path():
     assert gemm_shapes["D_proj_q"] == (4, 64, 8)
     assert gemm_shapes["D_proj_kv"] == (4, 64, 8)
     assert gemm_shapes["U_proj_q"] == (4, 8, 64)
-    assert gemm_shapes["U_proj_kv"] == (4, 4, 80)
-    assert gemm_shapes["attention_score"] == (16, 1, 16, 8)
-    assert gemm_shapes["attention_output"] == (16, 1, 8, 8)
+    assert gemm_shapes["Q_absorb"] == (4, 12, 16)
+    assert gemm_shapes["U_proj_v"] == (4, 4, 32)
+    assert gemm_shapes["attention_score"] == (16, 1, 8, 8)
+    assert gemm_shapes["attention_output"] == (16, 1, 8, 4)
     assert gemm_shapes["output_proj"] == (4, 32, 64)
     assert "attention_score_1" not in gemm_shapes
-    assert "O_proj_absorbed" not in gemm_shapes
+    assert "U_proj_kv" not in gemm_shapes
 
 
 def test_mla_local_projection_shapes_match_megatron_tp_and_cp_rules():
@@ -311,8 +312,9 @@ def test_mla_decode_cp_shapes_match_megatron_local_rules():
     assert _local_output_elements(full_tc, full_shapes["D_proj_q"], GemmType.MLA_DOWN_PROJ) == 16
     assert _local_output_elements(full_tc, full_shapes["D_proj_kv"], GemmType.MLA_DOWN_PROJ) == 16
     assert _local_output_elements(full_tc, full_shapes["U_proj_q"], GemmType.QKV) == 64
-    assert _local_output_elements(full_tc, full_shapes["U_proj_kv"], GemmType.QKV) == 80
-    assert _local_output_elements(full_tc, full_shapes["attention_output"], GemmType.ATTENTION_OUTPUT) == 64
+    assert _local_output_elements(full_tc, full_shapes["Q_absorb"], GemmType.QKV) == 16
+    assert _local_output_elements(full_tc, full_shapes["U_proj_v"], GemmType.QKV) == 32
+    assert _local_output_elements(full_tc, full_shapes["attention_output"], GemmType.ATTENTION_OUTPUT) == 32
 
 def test_mla_activation_tensor_bytes_match_full_runtime_formula():
     activation = llm_util.mla_activation_tensor_bytes(
@@ -459,7 +461,7 @@ def test_mla_training_parallel_configs_validate_and_run(tp, cp, tp_sp):
     assert timings["output_proj"].forward.compute_time > 0.0
 
 
-def test_mla_training_tp_and_cp_comm_bytes_follow_megatron_contract():
+def test_mla_training_tp_and_cp_comm_bytes_use_latent_cp_contract():
     hw_tp = _build_hw_config(tp=2)
     model = _build_mla_model()
     config.validate_configs(hw_tp, model)
@@ -491,9 +493,9 @@ def test_mla_training_tp_and_cp_comm_bytes_follow_megatron_contract():
         tc_cp.intermediate_size,
         tc_cp.hw_config.tech_config.core.num_bundles,
     )
-    assert timings_cp["qkv_proj"].forward.comm_bytes == 6144
-    assert timings_cp["attention"].backward.comm_bytes == 6144
-    assert timings_cp["output_proj"].backward.comm_bytes == 6144
+    assert timings_cp["qkv_proj"].forward.comm_bytes == 512
+    assert timings_cp["attention"].backward.comm_bytes == 512
+    assert timings_cp["output_proj"].backward.comm_bytes == 512
 
     hw_hybrid = _build_hw_config(tp=2, cp=2)
     config.validate_configs(hw_hybrid, model)
@@ -508,14 +510,14 @@ def test_mla_training_tp_and_cp_comm_bytes_follow_megatron_contract():
         tc_hybrid.intermediate_size,
         tc_hybrid.hw_config.tech_config.core.num_bundles,
     )
-    assert timings_hybrid["qkv_proj"].forward.comm_bytes == 3072
+    assert timings_hybrid["qkv_proj"].forward.comm_bytes == 512
     assert timings_hybrid["qkv_proj"].backward.comm_bytes == 512
-    assert timings_hybrid["attention"].backward.comm_bytes == 3072
+    assert timings_hybrid["attention"].backward.comm_bytes == 512
     assert timings_hybrid["output_proj"].forward.comm_bytes == 2048
-    assert timings_hybrid["output_proj"].backward.comm_bytes == 3072
+    assert timings_hybrid["output_proj"].backward.comm_bytes == 512
 
 
-def test_mla_inference_prefill_and_decode_comm_bytes_follow_full_cache_mode():
+def test_mla_inference_prefill_and_decode_comm_bytes_use_latent_cp_contract():
     hw_config = _build_hw_config(tp=2, cp=2)
     hw_config.inference_config = hw_config.sch_config.inference
     model = _build_mla_model(run_type="inference")
@@ -550,7 +552,7 @@ def test_mla_inference_prefill_and_decode_comm_bytes_follow_full_cache_mode():
         gemm_shapes=decode_shapes,
     )
 
-    assert prefill_timings["qkv_proj"].forward.comm_bytes == 1536
+    assert prefill_timings["qkv_proj"].forward.comm_bytes == 256
     assert prefill_timings["output_proj"].forward.comm_bytes == 1024
     assert decode_timings["qkv_proj"].forward.comm_bytes == 128
     assert decode_timings["output_proj"].forward.comm_bytes == 256
@@ -717,7 +719,7 @@ def test_mla_moe_training_only_changes_attention_side():
     assert "moe_combine" in moe_timings
 
 
-def test_mla_kv_cache_bytes_and_memory_follow_full_cache_mode():
+def test_mla_kv_cache_bytes_and_memory_follow_latent_decode_mode():
     full_bytes = llm_util.attention_kv_cache_token_bytes(
         "mla",
         batch_size=4,
@@ -731,7 +733,7 @@ def test_mla_kv_cache_bytes_and_memory_follow_full_cache_mode():
         v_head_dim=8,
     )
 
-    assert full_bytes == 768
+    assert full_bytes == 64
 
     hw_config = _build_hw_config(tp=2, cp=2)
     hw_config.inference_config = hw_config.sch_config.inference
@@ -745,10 +747,10 @@ def test_mla_kv_cache_bytes_and_memory_follow_full_cache_mode():
         seq_len=1,
         kv_cache_tokens=8,
     )
-    assert full_memory["kv_cache_bytes_per_layer"] == pytest.approx(1536.0)
+    assert full_memory["kv_cache_bytes_per_layer"] == pytest.approx(256.0)
 
 
-def test_mla_inference_decode_sampling_runs_for_full_mode():
+def test_mla_inference_decode_sampling_runs_for_latent_mode():
     hw_config = _build_hw_config()
     hw_config.inference_config = hw_config.sch_config.inference
     model = _build_mla_model(run_type="inference")

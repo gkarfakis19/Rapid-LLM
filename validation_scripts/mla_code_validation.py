@@ -203,7 +203,7 @@ def _rapid_mla_cache_token_bytes_per_rank(case: ToyCase) -> float:
         qk_rope_head_dim=4,
         v_head_dim=8,
     )
-    return float(total) / float(case.tp)
+    return float(total) / float(max(1, case.cp))
 
 
 def _megatron_reference_shapes(case: ToyCase) -> Dict[str, int]:
@@ -230,11 +230,10 @@ def _megatron_reference_shapes(case: ToyCase) -> Dict[str, int]:
     }
 
 
-def _megatron_cache_bytes_per_rank(*, tp: int) -> float:
+def _vllm_latent_cache_bytes_per_rank(*, cp: int) -> float:
     precision = 2
-    batch_size = 4
-    heads_local = 4 // tp
-    return float(batch_size * heads_local * (12 + 4 + 8) * precision)
+    batch_local = math.ceil(4 / max(1, cp))
+    return float(batch_local * (4 + 4) * precision)
 
 
 def _check_reference_code_facts() -> List[CheckResult]:
@@ -366,8 +365,6 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
     )
 
     rapid_q_up = _rapid_local_output_elements(case, "U_proj_q", GemmType.QKV)
-    rapid_kv_up = _rapid_local_output_elements(case, "U_proj_kv", GemmType.QKV)
-    rapid_output_input = _rapid_local_output_elements(case, "attention_output", GemmType.ATTENTION_OUTPUT)
     results.append(
         CheckResult(
             name="Local q up-projection output elements",
@@ -378,38 +375,77 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
             case=case.name,
         )
     )
-    results.append(
-        CheckResult(
-            name="Local kv up-projection output elements",
-            status="PASS" if rapid_kv_up == ref["kv_up_local_elems"] else "MISMATCH",
-            details="Megatron TP column-shards the MLA kv up-projection over local heads.",
-            rapid_value=rapid_kv_up,
-            reference_value=ref["kv_up_local_elems"],
-            case=case.name,
+    if case.run_type == "inference" and case.phase == "decode":
+        rapid_q_absorb = _rapid_local_output_elements(case, "Q_absorb", GemmType.QKV)
+        rapid_v_up = _rapid_local_output_elements(case, "U_proj_v", GemmType.QKV)
+        rapid_output_input = _rapid_local_output_elements(case, "attention_output", GemmType.ATTENTION_OUTPUT)
+        batch_local = math.ceil(4 / max(1, case.cp))
+        heads_local = 4 // case.tp
+        results.append(
+            CheckResult(
+                name="Local query-absorb output elements",
+                status="PASS" if rapid_q_absorb == batch_local * heads_local * 4 else "MISMATCH",
+                details="vLLM-style MLA decode absorbs q_nope into latent query space before attention.",
+                rapid_value=rapid_q_absorb,
+                reference_value=batch_local * heads_local * 4,
+                case=case.name,
+            )
         )
-    )
-    results.append(
-        CheckResult(
-            name="Local attention-output elements",
-            status="PASS" if rapid_output_input == ref["output_proj_input_local_elems"] else "MISMATCH",
-            details="Megatron default MLA attention emits local-head value vectors into the row-parallel output projection.",
-            rapid_value=rapid_output_input,
-            reference_value=ref["output_proj_input_local_elems"],
-            case=case.name,
+        results.append(
+            CheckResult(
+                name="Local value up-projection output elements",
+                status="PASS" if rapid_v_up == batch_local * heads_local * 8 else "MISMATCH",
+                details="vLLM-style MLA decode applies the value up-projection after latent attention.",
+                rapid_value=rapid_v_up,
+                reference_value=batch_local * heads_local * 8,
+                case=case.name,
+            )
         )
-    )
+        results.append(
+            CheckResult(
+                name="Local latent attention-output elements",
+                status="PASS" if rapid_output_input == 4 * heads_local * 4 else "MISMATCH",
+                details="vLLM-style MLA decode emits latent per-head outputs before the value up-projection.",
+                rapid_value=rapid_output_input,
+                reference_value=4 * heads_local * 4,
+                case=case.name,
+            )
+        )
+    else:
+        rapid_kv_up = _rapid_local_output_elements(case, "U_proj_kv", GemmType.QKV)
+        rapid_output_input = _rapid_local_output_elements(case, "attention_output", GemmType.ATTENTION_OUTPUT)
+        results.append(
+            CheckResult(
+                name="Local kv up-projection output elements",
+                status="PASS" if rapid_kv_up == ref["kv_up_local_elems"] else "MISMATCH",
+                details="Megatron TP column-shards the MLA kv up-projection over local heads.",
+                rapid_value=rapid_kv_up,
+                reference_value=ref["kv_up_local_elems"],
+                case=case.name,
+            )
+        )
+        results.append(
+            CheckResult(
+                name="Local attention-output elements",
+                status="PASS" if rapid_output_input == ref["output_proj_input_local_elems"] else "MISMATCH",
+                details="Megatron default MLA attention emits local-head value vectors into the row-parallel output projection.",
+                rapid_value=rapid_output_input,
+                reference_value=ref["output_proj_input_local_elems"],
+                case=case.name,
+            )
+        )
 
     if case.run_type == "inference":
         rapid_cache = _rapid_mla_cache_token_bytes_per_rank(case)
-        megatron_full = _megatron_cache_bytes_per_rank(tp=case.tp)
-        cache_status = "PASS" if math.isclose(rapid_cache, megatron_full) else "MISMATCH"
+        reference_cache = _vllm_latent_cache_bytes_per_rank(cp=case.cp)
+        cache_status = "PASS" if math.isclose(rapid_cache, reference_cache) else "MISMATCH"
         results.append(
             CheckResult(
                 name="Per-rank inference KV-cache bytes per token",
                 status=cache_status,
-                details="RAPID MLA cache bytes compared against Megatron's default full-cache mode.",
+                details="RAPID MLA cache bytes compared against the vLLM-style latent-cache inference contract.",
                 rapid_value=rapid_cache,
-                reference_value=megatron_full,
+                reference_value=reference_cache,
                 case=case.name,
             )
         )
@@ -457,20 +493,30 @@ def _compare_case(case: ToyCase) -> List[CheckResult]:
     else:
         results.append(
             CheckResult(
-                name="Inference decode default full-cache contract",
-                status="PASS" if "U_proj_q" in shapes and "U_proj_kv" in shapes and "attention_score_1" not in shapes else "MISMATCH",
+                name="Inference decode latent-cache contract",
+                status=(
+                    "PASS"
+                    if "U_proj_q" in shapes
+                    and "Q_absorb" in shapes
+                    and "U_proj_v" in shapes
+                    and "U_proj_kv" not in shapes
+                    and "attention_score_1" not in shapes
+                    else "MISMATCH"
+                ),
                 details=(
-                    "Megatron default decode uses the full-cache MLA path with explicit q/kv up-projections."
+                    "vLLM-style MLA decode uses latent-cache attention with absorbed query projection and post-attention value up-projection."
                 ),
                 rapid_value=str(
                     {
                         "U_proj_q": shapes.get("U_proj_q"),
+                        "Q_absorb": shapes.get("Q_absorb"),
+                        "U_proj_v": shapes.get("U_proj_v"),
                         "U_proj_kv": shapes.get("U_proj_kv"),
                         "attention_score_1": shapes.get("attention_score_1"),
                         "output_proj": shapes["output_proj"],
                     }
                 ),
-                reference_value="Megatron default decode uses the full-cache MLA path",
+                reference_value="vLLM decode uses q_up -> q_absorb -> latent attention(kv_c + k_pe) -> v_up -> output",
                 case=case.name,
             )
         )

@@ -626,15 +626,13 @@ class MemoryEstimator:
             if getattr(tc, "attention_type", "mha") == "mla":
                 per_token_bytes = llm_util.mla_kv_cache_token_bytes(
                     batch_size=batch_size,
+                    kv_lora_rank=getattr(tc, "kv_lora_rank", 0),
                     qk_rope_head_dim=getattr(tc, "qk_rope_head_dim", 0),
                     precision_bytes=precision.kv_cache,
-                    num_heads=getattr(tc, "num_heads", None),
-                    qk_nope_head_dim=getattr(tc, "qk_nope_head_dim", None),
-                    v_head_dim=getattr(tc, "v_head_dim", None),
                 )
                 kv_tokens_local = math.ceil(float(kv_tokens) / float(max(1, cp)))
                 kv_cache_bytes_per_layer = (
-                    float(per_token_bytes) * float(kv_tokens_local) / float(max(1, tp))
+                    float(per_token_bytes) * float(kv_tokens_local)
                 )
             else:
                 kv_heads = int(getattr(tc, "kv_heads", tc.num_heads))
