@@ -1,4 +1,4 @@
-# Base H100 inference/training case-study hardware.
+# Case E: Case C with 2x network bandwidth on both dim0 and dim1
 sw_param:
   full_recomputation: true
   kernel_launch_overhead: 9e-6
@@ -27,8 +27,8 @@ tech_param:
     dataflow: best
     util: 1.0
   DRAM:
-    size: 80 GB
-    bandwidth: 3.43e12
+    size: 160 GB
+    bandwidth: 1.82819e13
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
     util: 1
@@ -87,7 +87,7 @@ network:
       size: auto
       topology:
         type: Ring
-        bandwidth: 100 GB
+        bandwidth: 200 GB
         latency: 5e-6
         energy_per_bit: 8e-12
         util: 1.0
@@ -99,7 +99,7 @@ network:
       size: auto
       topology:
         type: Ring
-        bandwidth: 25 GB
+        bandwidth: 50 GB
         latency: 5e-6
         energy_per_bit: 8e-12
         util: 1.0

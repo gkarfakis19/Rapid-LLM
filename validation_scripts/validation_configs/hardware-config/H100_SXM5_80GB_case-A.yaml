@@ -1,4 +1,4 @@
-# Base H100 inference/training case-study hardware.
+# Case A: base H100 hardware; sweep applies 20% higher compute util derate (0.672 vs 0.56).
 sw_param:
   full_recomputation: true
   kernel_launch_overhead: 9e-6

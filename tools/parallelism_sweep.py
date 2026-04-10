@@ -31,18 +31,23 @@ import argparse
 import ast
 import copy
 import csv
+import hashlib
 import itertools
 import json
 import math
 import os
 import random
+import signal
 import traceback
 import shutil
 import sys
 import tempfile
+import time
+import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stdout, redirect_stderr
+from functools import lru_cache
 from typing import Dict, Iterable, List, Tuple
 from pathlib import Path
 
@@ -84,10 +89,30 @@ MODEL_CONFIG_PATH = "validation_scripts/validation_configs/model-config/Llama3.1
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Values map to the training parallelism block (parallelism.train.dp, etc.).
 PARALLELISM_SWEEP = {
-    "tp": [2**i for i in range(0, 7)],
-    "cp": [2**i for i in range(0, 7)],
-    "dp": [2**i for i in range(0, 11)],
-    "pp": [2**i for i in range(0, 6)],
+    "tp": [2**i for i in range(2, 5)],
+    "cp": [1, 2, 4],
+    "dp": [2**i for i in range(0, 5)],
+    "pp": [2**i for i in range(0, 5)],
+}
+
+# Optional expert-parallel axis. Default now covers the reduced MoE search
+# space up to EP=16.
+EP_SWEEP = [2**i for i in range(0, 5)]
+
+# Inference uses a much smaller and more targeted search space than training.
+# This keeps runtime bounded while still covering the families that have won in
+# the recent DeepSeek/GLM studies, plus enough flexibility to hit 48- and
+# 80-GPU runs without blowing up the search space.
+INFERENCE_PARALLELISM_SWEEP = {
+    "tp": [8, 16],
+    "cp": [1, 2, 3, 4, 5],
+    "pp": [1, 2, 3],
+}
+INFERENCE_EP_SWEEP = [1, 2, 4]
+
+# Hardware-case-specific derate overrides layered on top of harness_derates.yaml.
+CASE_SPECIFIC_DERATE_OVERRIDES = {
+    "H100_SXM5_80GB_case-A.yaml": {"compute_util": 0.672},
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -96,7 +121,7 @@ OTHER_PARALLELISM_OPTIONS = {
     "tp_sp": [True],
 }
 
-# GPU count filter: only evaluate combinations whose TP*CP*DP*PP fall inside
+# GPU count filter: only evaluate combinations whose TP*CP*DP*PP*EP fall inside
 # this inclusive range.
 GPU_COUNT_MIN = 128
 GPU_COUNT_MAX = 2048
@@ -140,9 +165,19 @@ MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in p
 EVALUATE_MEMORY_EXCEEDED = True  # When True, still compute runtime even if memory limits are exceeded (may crash).
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 127
+MAX_WORKERS = 80
 # When True, use a thread pool instead of a process pool (more stable, avoids worker crashes at the cost of GIL contention).
 USE_THREADPOOL = False
+# When True, launch each config in its own isolated subprocess but drive many
+# of those subprocesses concurrently from a thread pool. This is slower than a
+# shared process pool, but a hard-crashing config only kills its own subprocess.
+USE_PARALLEL_ISOLATED_WORKERS = False
+# Hard wall-time limit per config evaluation inside a worker process. Long-tail
+# configs get dropped instead of monopolizing the pool indefinitely.
+PER_CONFIG_TIMEOUT_S = 180.0
+# Persist runtime cache every N new results so interrupted runs still leave a
+# useful resume point on disk.
+CACHE_SAVE_EVERY = 10
 
 
 # -----------------------------------------------------------------------------
@@ -296,6 +331,11 @@ def _load_device_derates(path_like: str, device_type: str) -> Dict[str, float]:
     }
 
 
+def _case_specific_derate_overrides(hw_config_path: str) -> Dict[str, float]:
+    overrides = CASE_SPECIFIC_DERATE_OVERRIDES.get(Path(hw_config_path).name, {})
+    return {str(key): float(value) for key, value in dict(overrides).items()}
+
+
 def _apply_device_derates(hw_dict: Dict[str, object], derates: Dict[str, float]) -> None:
     sw_param = hw_dict.setdefault("sw_param", {})
     if not isinstance(sw_param, dict):
@@ -335,6 +375,34 @@ def _apply_device_derates(hw_dict: Dict[str, object], derates: Dict[str, float])
         break
     if not dim0_found:
         raise ValueError("Expected a network dimension with id='dim0' in hardware config.")
+
+
+@lru_cache(maxsize=None)
+def _config_cache_id(path_like: str) -> str:
+    resolved = Path(path_like).resolve()
+    digest = hashlib.sha1(resolved.read_bytes()).hexdigest()[:16]
+    return f"{resolved}:{digest}"
+
+
+def _derate_cache_tag(
+    resolved_derate_path: Path,
+    device_type_key: str,
+    derates: Dict[str, float],
+) -> str:
+    return (
+        f"|derate:{_config_cache_id(str(resolved_derate_path))}:{device_type_key}"
+        f":klo={derates['kernel_launch_overhead_s']:.12g}"
+        f":dram={derates['dram_util']:.12g}"
+        f":net={derates['network_util']:.12g}"
+        f":core={derates['compute_util']:.12g}"
+    )
+
+
+def _latest_input_mtime(path_likes: Iterable[str]) -> float:
+    latest = 0.0
+    for path_like in path_likes:
+        latest = max(latest, Path(path_like).resolve().stat().st_mtime)
+    return latest
 
 
 def _tagged_output_path(base_path: str, tag: str) -> str:
@@ -379,62 +447,9 @@ def _hardware_label(index: int, hw_path: str) -> str:
     return Path(hw_path).stem
 
 
-def _model_config_with_overrides(base_model_path: str, hw_config_path: str) -> Tuple[str, str]:
-    """
-    Return a path to a model config that includes hardware-specific overrides.
-    Case A scales attention tile size with the larger effective L2 only when
-    FlashAttention is enabled in the base model config.
-    """
-    hw_name = Path(hw_config_path).name
-    cache_id = str(Path(base_model_path).resolve())
-    if hw_name != "A100_SXM4_80GB_case-A.yaml":
-        return base_model_path, cache_id
-
-    def _parse_size_to_bytes(value) -> int:
-        if isinstance(value, (int, float)):
-            return int(value)
-        text = str(value).strip()
-        number, unit = text.split(None, 1)
-        scale = {
-            "B": 1,
-            "KB": 1024,
-            "MB": 1024 ** 2,
-            "GB": 1024 ** 3,
-            "TB": 1024 ** 4,
-        }
-        return int(float(number) * scale[unit.upper()])
-
-    model_dict = read_yaml(base_model_path)
-    model_param = model_dict.setdefault("model_param", {})
-    attention = model_param.setdefault("attention", {})
-    if not bool(attention.get("use_flashattention", False)):
-        return base_model_path, cache_id
-    base_hw_path = (
-        Path(__file__).resolve().parents[1]
-        / "validation_scripts"
-        / "validation_configs"
-        / "hardware-config"
-        / "A100_SXM4_80GB_base.yaml"
-    )
-    base_hw = read_yaml(str(base_hw_path))
-    case_hw = read_yaml(hw_config_path)
-    base_l2 = _parse_size_to_bytes(base_hw["tech_param"]["SRAM-L2"]["size"])
-    case_l2 = _parse_size_to_bytes(case_hw["tech_param"]["SRAM-L2"]["size"])
-    base_tile = int(attention.get("attention_tile_size", 128) or 128)
-    scaled_tile = max(1, int(base_tile * (float(case_l2) / float(base_l2))))
-    attention["attention_tile_size"] = scaled_tile
-
-    tmp_handle = tempfile.NamedTemporaryFile("w", suffix="_model_override.yaml", delete=False)
-    try:
-        yaml.safe_dump(model_dict, tmp_handle, default_flow_style=False, sort_keys=False)
-        tmp_handle.flush()
-        cache_id = f"{cache_id}|caseA_flashattention_tile={scaled_tile}"
-        return tmp_handle.name, cache_id
-    finally:
-        try:
-            tmp_handle.close()
-        except Exception:
-            pass
+def _resolve_model_config(base_model_path: str) -> Tuple[str, str]:
+    resolved = _resolve_repo_relative_path(base_model_path)
+    return str(resolved), _config_cache_id(str(resolved))
 
 
 def determine_model_mode(model_config_path):
@@ -456,7 +471,7 @@ def determine_run_type(model_config_path):
 
 
 def _cache_key(hw_path: str, model_id: str, settings: Dict[str, object]) -> Tuple[str, str, str]:
-    hw_id = str(Path(hw_path).resolve())
+    hw_id = _config_cache_id(hw_path)
     settings_json = json.dumps(settings, sort_keys=True)
     return (hw_id, model_id, settings_json)
 
@@ -483,6 +498,8 @@ def _load_runtime_cache(path: str) -> Dict[Tuple[str, str, str], Dict[str, objec
                     "hardware_config": hw_id,
                     "model_config": model_id,
                     "parallelism": settings,
+                    "status": str(row.get("status", "ok") or "ok"),
+                    "error": str(row.get("error", "") or ""),
                     "num_gpus": int(row.get("num_gpus", 0)),
                     "runtime": float(row.get("runtime", "nan")),
                     "prefill_time": float(row.get("prefill_time", "nan")),
@@ -494,6 +511,7 @@ def _load_runtime_cache(path: str) -> Dict[Tuple[str, str, str], Dict[str, objec
                     "mfu": float(row.get("mfu", "nan")),
                     "memory_exceeded": str(row.get("memory_exceeded", "")).strip().lower() == "true",
                     "memory_violation_gb": float(row.get("memory_violation_gb", "0.0") or 0.0),
+                    "eval_wall_time_s": float(row.get("eval_wall_time_s", "nan")),
                 }
                 cache[key] = entry
     except Exception as exc:
@@ -508,6 +526,8 @@ def _save_runtime_cache(cache: Dict[Tuple[str, str, str], Dict[str, object]], pa
         "hardware_config",
         "model_config",
         "parallelism",
+        "status",
+        "error",
         "num_gpus",
         "runtime",
         "prefill_time",
@@ -519,6 +539,7 @@ def _save_runtime_cache(cache: Dict[Tuple[str, str, str], Dict[str, object]], pa
         "mfu",
         "memory_exceeded",
         "memory_violation_gb",
+        "eval_wall_time_s",
     ]
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -583,6 +604,7 @@ def _parallelism_snapshot(parallelism: Dict[str, object]) -> Dict[str, int]:
         "tp": int(parallelism.get("tp", 1) or 1),
         "cp": int(parallelism.get("cp", 1) or 1),
         "dp": int(train_block["dp"]),
+        "ep": int(train_block.get("ep", 1) or 1),
         "pp": int(parallelism.get("pp", 1) or 1),
     }
 
@@ -590,7 +612,7 @@ def _parallelism_snapshot(parallelism: Dict[str, object]) -> Dict[str, int]:
 def total_gpu_count(parallel_cfg):
     values = _parallelism_snapshot(parallel_cfg)
     total = 1
-    for axis in ("tp", "cp", "dp", "pp"):
+    for axis in ("tp", "cp", "dp", "ep", "pp"):
         total *= max(1, int(values.get(axis, 1)))
     return total
 
@@ -894,6 +916,7 @@ def write_report(results, path):
         "mfu",
         "memory_exceeded",
         "memory_violation_gb",
+        "eval_wall_time_s",
         "parallelism",
     ]
     with open(path, "w") as handle:
@@ -915,6 +938,11 @@ def write_report(results, path):
                 "{:.6f}".format(entry["mfu"]) if entry["mfu"] == entry["mfu"] else "nan",
                 str(entry["memory_exceeded"]),
                 "{:.6f}".format(entry["memory_violation_gb"]),
+                (
+                    "{:.6f}".format(entry.get("eval_wall_time_s", float("nan")))
+                    if entry.get("eval_wall_time_s", float("nan")) == entry.get("eval_wall_time_s", float("nan"))
+                    else "nan"
+                ),
                 repr(entry["parallelism"]),
             ]
             handle.write("\t".join(row) + "\n")
@@ -957,6 +985,7 @@ def load_results_from_report(path: str) -> List[Dict[str, object]]:
                 "mfu": _parse_float(row.get("mfu")),
                 "memory_exceeded": str(row.get("memory_exceeded", "")).strip().lower() == "true",
                 "memory_violation_gb": _parse_float(row.get("memory_violation_gb")),
+                "eval_wall_time_s": _parse_float(row.get("eval_wall_time_s")),
                 "parallelism": parallelism,
             }
             results.append(entry)
@@ -1018,6 +1047,16 @@ def parse_args():
         type=int,
         default=None,
         help="Maximum total GPU count to evaluate (overrides GPU_COUNT_MAX).",
+    )
+    parser.add_argument(
+        "--ep-values",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated EP values to sweep. When unset, training uses the "
+            f"built-in default ({','.join(str(v) for v in EP_SWEEP)}) and inference uses "
+            f"({','.join(str(v) for v in INFERENCE_EP_SWEEP)})."
+        ),
     )
     parser.add_argument(
         "--derate-config",
@@ -1613,6 +1652,10 @@ _GLOBAL_MODE = None
 _GLOBAL_HW_DICT = None
 
 
+class _PerConfigTimeout(TimeoutError):
+    pass
+
+
 def _worker_init(hw_dict, model_config_path, mode):
     global _GLOBAL_MODEL_CONFIG, _GLOBAL_MODE, _GLOBAL_HW_DICT
     _GLOBAL_HW_DICT = hw_dict
@@ -1623,13 +1666,30 @@ def _worker_init(hw_dict, model_config_path, mode):
 def _worker_task(parallel_items: Tuple[Tuple[str, object], ...]):
     flat_settings = {k: v for k, v in parallel_items}
     parallel_settings = build_parallelism_settings(flat_settings)
+    start_time = time.perf_counter()
+    old_handler = None
+    timeout_enabled = bool(
+        PER_CONFIG_TIMEOUT_S
+        and PER_CONFIG_TIMEOUT_S > 0
+        and threading.current_thread() is threading.main_thread()
+    )
+
+    def _timeout_handler(signum, frame):
+        raise _PerConfigTimeout(
+            f"config evaluation exceeded {float(PER_CONFIG_TIMEOUT_S):.1f}s wall time"
+        )
+
     try:
+        if timeout_enabled:
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.setitimer(signal.ITIMER_REAL, float(PER_CONFIG_TIMEOUT_S))
         metrics = evaluate_parallelism(
             _GLOBAL_HW_DICT,
             _GLOBAL_MODEL_CONFIG,
             _GLOBAL_MODE,
             parallel_settings,
         )
+        metrics["eval_wall_time_s"] = time.perf_counter() - start_time
         return {
             "status": "ok",
             "parallelism": parallel_settings,
@@ -1641,7 +1701,13 @@ def _worker_task(parallel_items: Tuple[Tuple[str, object], ...]):
             "parallelism": parallel_settings,
             "error": f"{exc.__class__.__name__}: {exc}",
             "traceback": traceback.format_exc(),
+            "eval_wall_time_s": time.perf_counter() - start_time,
         }
+    finally:
+        if timeout_enabled:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
 
 
 def _run_task_in_isolated_process(
@@ -1692,20 +1758,14 @@ def main():
     if bool(derate_config_path) != bool(derate_device_type):
         raise ValueError("Both --derate-config and --derate-device-type must be provided together.")
     active_derates: Dict[str, float] = {}
-    derate_cache_tag = ""
+    resolved_derate_path: Path | None = None
+    device_type_key = ""
     if derate_config_path and derate_device_type:
         active_derates = _load_device_derates(derate_config_path, derate_device_type)
         resolved_derate_path = _resolve_repo_relative_path(derate_config_path)
         device_type_key = _normalize_device_type_key(derate_device_type)
-        derate_cache_tag = (
-            f"|derate:{resolved_derate_path.resolve()}:{device_type_key}"
-            f":klo={active_derates['kernel_launch_overhead_s']:.12g}"
-            f":dram={active_derates['dram_util']:.12g}"
-            f":net={active_derates['network_util']:.12g}"
-            f":core={active_derates['compute_util']:.12g}"
-        )
         print(
-            "Applying derates from {} for {}: kernel_launch_overhead={}, dram.util={}, "
+            "Applying base derates from {} for {}: kernel_launch_overhead={}, dram.util={}, "
             "network.dim0.util={}, core.util={}".format(
                 resolved_derate_path,
                 device_type_key,
@@ -1720,6 +1780,16 @@ def main():
     active_model_config_path = str(args.model_config or "").strip() or MODEL_CONFIG_PATH
     active_gpu_count_min = GPU_COUNT_MIN if args.gpu_count_min is None else int(args.gpu_count_min)
     active_gpu_count_max = GPU_COUNT_MAX if args.gpu_count_max is None else int(args.gpu_count_max)
+    model_run_type = determine_run_type(active_model_config_path)
+    active_ep_sweep = list(INFERENCE_EP_SWEEP if model_run_type == "inference" else EP_SWEEP)
+    if str(args.ep_values or "").strip():
+        active_ep_sweep = [
+            int(part.strip())
+            for part in str(args.ep_values).split(",")
+            if str(part).strip()
+        ]
+    if not active_ep_sweep:
+        raise ValueError("--ep-values must include at least one integer when provided.")
     if active_gpu_count_min > active_gpu_count_max:
         raise ValueError(
             f"--gpu-count-min ({active_gpu_count_min}) must be <= --gpu-count-max ({active_gpu_count_max})."
@@ -1813,19 +1883,25 @@ def main():
             plot_results(results, plot_path)
         return
 
-    model_run_type = determine_run_type(active_model_config_path)
     if model_run_type == "inference":
-        gpu_option_map = {k: v for k, v in PARALLELISM_SWEEP.items() if k != "dp"}
+        gpu_option_map = dict(INFERENCE_PARALLELISM_SWEEP)
         other_option_map = dict(OTHER_PARALLELISM_OPTIONS)
         other_option_map["replica_count"] = [1]
-        print("Inference sweep mode: excluding dp axis; fixing inference.replica_count=1.")
+        print(
+            "Inference sweep mode: using bounded inference grid "
+            f"(tp={INFERENCE_PARALLELISM_SWEEP['tp']}, cp={INFERENCE_PARALLELISM_SWEEP['cp']}, "
+            f"pp={INFERENCE_PARALLELISM_SWEEP['pp']}, ep={active_ep_sweep}) and "
+            "fixing inference.replica_count=1."
+        )
     else:
         gpu_option_map = PARALLELISM_SWEEP
         other_option_map = OTHER_PARALLELISM_OPTIONS
 
-    gpu_axes = list(gpu_option_map.keys())
+    active_parallelism_sweep = dict(gpu_option_map)
+    active_parallelism_sweep["ep"] = active_ep_sweep
+    gpu_axes = list(active_parallelism_sweep.keys())
     other_axes = list(other_option_map.keys())
-    gpu_combos = list(cartesian_product(gpu_option_map))
+    gpu_combos = list(cartesian_product(active_parallelism_sweep))
     other_combos = list(cartesian_product(other_option_map))
     task_items = _build_tasks(gpu_combos, other_combos)
     print(
@@ -1890,16 +1966,80 @@ def main():
         memory_violations = 0
         error_messages: List[str] = []
         evaluated = 0
+        cached_non_ok = 0
+        completed_since_flush = 0
         model_config_id = ""
+        model_config_path, model_config_id = _resolve_model_config(active_model_config_path)
+        hw_derates = dict(active_derates)
+        hw_derate_overrides = _case_specific_derate_overrides(hw_path) if active_derates else {}
+        if hw_derate_overrides:
+            hw_derates.update(hw_derate_overrides)
+            print(f"Applying case-specific derate overrides for {Path(hw_path).name}: {hw_derate_overrides}")
+        hw_derate_cache_tag = ""
+        if hw_derates:
+            if resolved_derate_path is not None:
+                hw_derate_cache_tag = _derate_cache_tag(resolved_derate_path, device_type_key, hw_derates)
+            print(
+                "Final derates for {}: kernel_launch_overhead={}, dram.util={}, network.dim0.util={}, "
+                "core.util={}".format(
+                    Path(hw_path).name,
+                    hw_derates["kernel_launch_overhead_s"],
+                    hw_derates["dram_util"],
+                    hw_derates["network_util"],
+                    hw_derates["compute_util"],
+                )
+            )
+        current_input_mtime = _latest_input_mtime(
+            [
+                hw_path,
+                model_config_path,
+                __file__,
+                *([str(resolved_derate_path)] if resolved_derate_path is not None else []),
+            ]
+        )
 
         def _consume_worker_result(result: Dict[str, object]) -> None:
-            nonlocal skipped_errors, memory_violations, evaluated, cache_dirty
+            nonlocal skipped_errors, memory_violations, evaluated, cache_dirty, completed_since_flush
             settings = result.get("parallelism", {})
             num_gpus = total_gpu_count(settings)
+            key = _cache_key(hw_path, model_config_id, settings)
+
+            def _flush_runtime_cache(force: bool = False) -> None:
+                nonlocal cache_dirty, completed_since_flush
+                if not cache_dirty:
+                    return
+                if not force and (CACHE_SAVE_EVERY is None or CACHE_SAVE_EVERY <= 0 or completed_since_flush < CACHE_SAVE_EVERY):
+                    return
+                _save_runtime_cache(runtime_cache, rooted_runtime_cache_path)
+                cache_dirty = False
+                completed_since_flush = 0
+
             if result.get("status") != "ok":
                 skipped_errors += 1
                 msg = result.get("error") or "unknown error"
                 tb = result.get("traceback")
+                runtime_cache[key] = {
+                    "hardware_config": str(Path(hw_path).resolve()),
+                    "model_config": model_config_id,
+                    "parallelism": dict(settings),
+                    "status": "error",
+                    "error": str(msg),
+                    "num_gpus": num_gpus,
+                    "runtime": float("nan"),
+                    "prefill_time": float("nan"),
+                    "decode_time": float("nan"),
+                    "performance": float("nan"),
+                    "total_flops": float("nan"),
+                    "achieved_flops": float("nan"),
+                    "peak_flops": float("nan"),
+                    "mfu": float("nan"),
+                    "memory_exceeded": False,
+                    "memory_violation_gb": 0.0,
+                    "eval_wall_time_s": float(result.get("eval_wall_time_s", float("nan"))),
+                }
+                cache_dirty = True
+                completed_since_flush += 1
+                _flush_runtime_cache()
                 if tb:
                     error_messages.append(f"{settings}: {msg}\n{tb}")
                 else:
@@ -1919,12 +2059,14 @@ def main():
                 "mfu": metrics["mfu"],
                 "memory_exceeded": metrics["memory_exceeded"],
                 "memory_violation_gb": metrics["memory_violation_gb"],
+                "eval_wall_time_s": metrics.get("eval_wall_time_s", float("nan")),
             }
-            key = _cache_key(hw_path, model_config_id, settings)
             runtime_cache[key] = {
                 "hardware_config": str(Path(hw_path).resolve()),
                 "model_config": model_config_id,
                 "parallelism": dict(settings),
+                "status": "ok",
+                "error": "",
                 "num_gpus": num_gpus,
                 "runtime": entry["runtime"],
                 "prefill_time": entry["prefill_time"],
@@ -1936,8 +2078,11 @@ def main():
                 "mfu": entry["mfu"],
                 "memory_exceeded": entry["memory_exceeded"],
                 "memory_violation_gb": entry["memory_violation_gb"],
+                "eval_wall_time_s": entry["eval_wall_time_s"],
             }
             cache_dirty = True
+            completed_since_flush += 1
+            _flush_runtime_cache()
 
             if metrics.get("memory_exceeded"):
                 memory_violations += 1
@@ -1945,23 +2090,26 @@ def main():
             results.append(entry)
 
         if os.path.exists(report_path):
-            try:
-                loaded = load_results_from_report(report_path)
-                if loaded:
-                    results = loaded
-                    results_from_report = True
-                    print(f"Found existing TSV report at {report_path}; using cached results.")
-                else:
-                    print(f"Existing TSV report at {report_path} is empty; running sweep.")
-            except Exception as exc:
-                print(f"Warning: failed to load existing TSV report {report_path}: {exc}; running sweep.")
+            report_mtime = Path(report_path).stat().st_mtime
+            if report_mtime < current_input_mtime:
+                print(f"Existing TSV report at {report_path} is older than current inputs; running sweep.")
+            else:
+                try:
+                    loaded = load_results_from_report(report_path)
+                    if loaded:
+                        results = loaded
+                        results_from_report = True
+                        print(f"Found existing TSV report at {report_path}; using cached results.")
+                    else:
+                        print(f"Existing TSV report at {report_path} is empty; running sweep.")
+                except Exception as exc:
+                    print(f"Warning: failed to load existing TSV report {report_path}: {exc}; running sweep.")
 
         if not results_from_report:
             base_hw_dict = read_yaml(hw_path)
-            model_config_path, model_config_id = _model_config_with_overrides(active_model_config_path, hw_path)
-            if active_derates:
-                _apply_device_derates(base_hw_dict, active_derates)
-                model_config_id = f"{model_config_id}{derate_cache_tag}"
+            if hw_derates:
+                _apply_device_derates(base_hw_dict, hw_derates)
+                model_config_id = f"{model_config_id}{hw_derate_cache_tag}"
             model_config_obj = config.parse_config(model_config_path, config_type=mode)
             active_run_type = str(
                 getattr(getattr(model_config_obj, "model_config", None), "run_type", "training")
@@ -1975,10 +2123,20 @@ def main():
                     key = _cache_key(hw_path, model_config_id, settings)
                     cached_entry = runtime_cache.get(key)
                     if cached_entry is None or (
-                        active_run_type == "inference"
-                        and not _cache_entry_has_inference_breakdown(cached_entry)
+                        str(cached_entry.get("status", "ok") or "ok") == "ok"
+                        and (
+                            active_run_type == "inference"
+                            and not _cache_entry_has_inference_breakdown(cached_entry)
+                        )
                     ):
+                        if cached_entry is not None and str(cached_entry.get("status", "ok") or "ok") != "ok":
+                            cached_non_ok += 1
+                            continue
                         tasks_to_eval.append(items)
+                        continue
+                    cached_status = str(cached_entry.get("status", "ok") or "ok")
+                    if cached_status != "ok":
+                        cached_non_ok += 1
                         continue
                     entry = {
                         "parallelism": settings,
@@ -1993,53 +2151,28 @@ def main():
                         "mfu": float(cached_entry.get("mfu", float("nan"))),
                         "memory_exceeded": bool(cached_entry.get("memory_exceeded", False)),
                         "memory_violation_gb": float(cached_entry.get("memory_violation_gb", 0.0) or 0.0),
+                        "eval_wall_time_s": float(cached_entry.get("eval_wall_time_s", float("nan"))),
                     }
                     results.append(entry)
 
                 active_worker_count = min(worker_count, max(1, len(tasks_to_eval)))
                 if active_worker_count > 1 and len(tasks_to_eval) > 1:
-                    futures = {}
-                    processed_futures = set()
-                    pending_items: List[Tuple[Tuple[str, object], ...]] = []
-                    pool_broken = False
-                    print(
-                        f"Using {active_worker_count} worker process(es) for "
-                        f"{len(tasks_to_eval)} task(s)."
-                    )
-
-                    def _retry_isolated(items: Tuple[Tuple[str, object], ...]) -> None:
-                        nonlocal skipped_errors
-                        try:
-                            result = _run_task_in_isolated_process(items, base_hw_dict, model_config_path, mode)
-                        except BrokenProcessPool as exc2:
-                            skipped_errors += 1
-                            error_messages.append(f"{dict(items)}: isolated worker died ({exc2})")
-                            return
-                        except BaseException as exc2:
-                            skipped_errors += 1
-                            error_messages.append(
-                                f"{dict(items)}: isolated retry crashed ({exc2.__class__.__name__}: {exc2})\n"
-                                f"{traceback.format_exc()}"
-                            )
-                            return
-                        _consume_worker_result(result)
-
-                    try:
-                        if USE_THREADPOOL:
-                            Executor = ThreadPoolExecutor
-                            executor_kwargs = {"max_workers": active_worker_count}
-                            # Threads share process memory; seed globals once.
-                            _worker_init(base_hw_dict, model_config_path, mode)
-                        else:
-                            Executor = ProcessPoolExecutor
-                            executor_kwargs = {
-                                "max_workers": active_worker_count,
-                                "initializer": _worker_init,
-                                "initargs": (base_hw_dict, model_config_path, mode),
+                    if USE_PARALLEL_ISOLATED_WORKERS:
+                        print(
+                            f"Using {active_worker_count} isolated worker subprocess(es) for "
+                            f"{len(tasks_to_eval)} task(s)."
+                        )
+                        with ThreadPoolExecutor(max_workers=active_worker_count) as executor:
+                            futures = {
+                                executor.submit(
+                                    _run_task_in_isolated_process,
+                                    items,
+                                    base_hw_dict,
+                                    model_config_path,
+                                    mode,
+                                ): items
+                                for items in tasks_to_eval
                             }
-
-                        with Executor(**executor_kwargs) as executor:
-                            futures = {executor.submit(_worker_task, items): items for items in tasks_to_eval}
                             with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
                                 for future in as_completed(futures):
                                     items = futures[future]
@@ -2047,74 +2180,163 @@ def main():
                                     try:
                                         result = future.result()
                                     except BrokenProcessPool as exc:
-                                        pool_broken = True
+                                        skipped_errors += 1
+                                        error_messages.append(f"{dict(items)}: isolated worker died ({exc})")
+                                        continue
+                                    except Exception as exc:
+                                        skipped_errors += 1
+                                        error_messages.append(
+                                            f"{dict(items)}: isolated worker crashed "
+                                            f"({exc.__class__.__name__}: {exc})\n{traceback.format_exc()}"
+                                        )
+                                        continue
+                                    _consume_worker_result(result)
+                    else:
+                        futures = {}
+                        processed_futures = set()
+                        pending_items: List[Tuple[Tuple[str, object], ...]] = []
+                        pool_broken = False
+                        print(
+                            f"Using {active_worker_count} worker process(es) for "
+                            f"{len(tasks_to_eval)} task(s)."
+                        )
+
+                        def _retry_isolated(items: Tuple[Tuple[str, object], ...]) -> None:
+                            nonlocal skipped_errors
+                            try:
+                                result = _run_task_in_isolated_process(items, base_hw_dict, model_config_path, mode)
+                            except BrokenProcessPool as exc2:
+                                skipped_errors += 1
+                                error_messages.append(f"{dict(items)}: isolated worker died ({exc2})")
+                                return
+                            except BaseException as exc2:
+                                skipped_errors += 1
+                                error_messages.append(
+                                    f"{dict(items)}: isolated retry crashed ({exc2.__class__.__name__}: {exc2})\n"
+                                    f"{traceback.format_exc()}"
+                                )
+                                return
+                            _consume_worker_result(result)
+
+                        try:
+                            if USE_THREADPOOL:
+                                Executor = ThreadPoolExecutor
+                                executor_kwargs = {"max_workers": active_worker_count}
+                                # Threads share process memory; seed globals once.
+                                _worker_init(base_hw_dict, model_config_path, mode)
+                            else:
+                                Executor = ProcessPoolExecutor
+                                executor_kwargs = {
+                                    "max_workers": active_worker_count,
+                                    "initializer": _worker_init,
+                                    "initargs": (base_hw_dict, model_config_path, mode),
+                                }
+
+                            with Executor(**executor_kwargs) as executor:
+                                futures = {executor.submit(_worker_task, items): items for items in tasks_to_eval}
+                                with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
+                                    for future in as_completed(futures):
+                                        items = futures[future]
+                                        progress.update(1)
+                                        try:
+                                            result = future.result()
+                                        except BrokenProcessPool as exc:
+                                            pool_broken = True
+                                            skipped_errors += 1
+                                            error_messages.append(f"{dict(items)}: worker process died ({exc})")
+                                            processed_futures.add(future)
+                                            _retry_isolated(items)
+                                            break
+                                        except Exception as exc:
+                                            skipped_errors += 1
+                                            error_messages.append(f"{dict(items)}: {exc}")
+                                            processed_futures.add(future)
+                                            _retry_isolated(items)
+                                            continue
+                                        processed_futures.add(future)
+                                        _consume_worker_result(result)
+                        except BrokenProcessPool as exc:
+                            pool_broken = True
+                            skipped_errors += 1
+                            error_messages.append(f"worker pool terminated early: {exc}")
+
+                        if pool_broken:
+                            if not futures:
+                                pending_items = list(tasks_to_eval)
+                            else:
+                                for future, items in futures.items():
+                                    if future in processed_futures:
+                                        continue
+                                    if future.done():
+                                        try:
+                                            result = future.result()
+                                        except Exception as exc:
+                                            skipped_errors += 1
+                                            error_messages.append(f"{dict(items)}: {exc}")
+                                            continue
+                                        _consume_worker_result(result)
+                                    else:
+                                        pending_items.append(items)
+
+                            if pending_items:
+                                print(
+                                    "Worker pool broke; retrying remaining configs in isolated workers.",
+                                    file=sys.stderr,
+                                )
+                                for items in pending_items:
+                                    try:
+                                        result = _run_task_in_isolated_process(
+                                            items, base_hw_dict, model_config_path, mode
+                                        )
+                                    except BrokenProcessPool as exc:
                                         skipped_errors += 1
                                         error_messages.append(f"{dict(items)}: worker process died ({exc})")
-                                        processed_futures.add(future)
-                                        _retry_isolated(items)
-                                        break
-                                    except Exception as exc:
-                                        skipped_errors += 1
-                                        error_messages.append(f"{dict(items)}: {exc}")
-                                        processed_futures.add(future)
-                                        _retry_isolated(items)
                                         continue
-                                    processed_futures.add(future)
-                                    _consume_worker_result(result)
-                    except BrokenProcessPool as exc:
-                        pool_broken = True
-                        skipped_errors += 1
-                        error_messages.append(f"worker pool terminated early: {exc}")
-
-                    if pool_broken:
-                        if not futures:
-                            pending_items = list(tasks_to_eval)
-                        else:
-                            for future, items in futures.items():
-                                if future in processed_futures:
-                                    continue
-                                if future.done():
-                                    try:
-                                        result = future.result()
                                     except Exception as exc:
                                         skipped_errors += 1
                                         error_messages.append(f"{dict(items)}: {exc}")
                                         continue
                                     _consume_worker_result(result)
-                                else:
-                                    pending_items.append(items)
-
-                        if pending_items:
-                            print(
-                                "Worker pool broke; retrying remaining configs in isolated workers.",
-                                file=sys.stderr,
-                            )
-                            for items in pending_items:
-                                try:
-                                    result = _run_task_in_isolated_process(
-                                        items, base_hw_dict, model_config_path, mode
-                                    )
-                                except BrokenProcessPool as exc:
-                                    skipped_errors += 1
-                                    error_messages.append(f"{dict(items)}: worker process died ({exc})")
-                                    continue
-                                except Exception as exc:
-                                    skipped_errors += 1
-                                    error_messages.append(f"{dict(items)}: {exc}")
-                                    continue
-                                _consume_worker_result(result)
                 elif tasks_to_eval:
                     with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
                         for items in tasks_to_eval:
                             settings = build_parallelism_settings(dict(items))
                             num_gpus = total_gpu_count(settings)
                             progress.update(1)
+                            start_time = time.perf_counter()
                             try:
                                 metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
                             except Exception as exc:
                                 skipped_errors += 1
+                                key = _cache_key(hw_path, model_config_id, settings)
+                                runtime_cache[key] = {
+                                    "hardware_config": str(Path(hw_path).resolve()),
+                                    "model_config": model_config_id,
+                                    "parallelism": dict(settings),
+                                    "status": "error",
+                                    "error": f"{exc.__class__.__name__}: {exc}",
+                                    "num_gpus": num_gpus,
+                                    "runtime": float("nan"),
+                                    "prefill_time": float("nan"),
+                                    "decode_time": float("nan"),
+                                    "performance": float("nan"),
+                                    "total_flops": float("nan"),
+                                    "achieved_flops": float("nan"),
+                                    "peak_flops": float("nan"),
+                                    "mfu": float("nan"),
+                                    "memory_exceeded": False,
+                                    "memory_violation_gb": 0.0,
+                                    "eval_wall_time_s": time.perf_counter() - start_time,
+                                }
+                                cache_dirty = True
+                                completed_since_flush += 1
+                                if CACHE_SAVE_EVERY and CACHE_SAVE_EVERY > 0 and completed_since_flush >= CACHE_SAVE_EVERY:
+                                    _save_runtime_cache(runtime_cache, rooted_runtime_cache_path)
+                                    cache_dirty = False
+                                    completed_since_flush = 0
                                 error_messages.append(f"{settings}: {exc}")
                                 continue
+                            metrics["eval_wall_time_s"] = time.perf_counter() - start_time
 
                             entry = {
                                 "parallelism": settings,
@@ -2129,12 +2351,15 @@ def main():
                                 "mfu": metrics["mfu"],
                                 "memory_exceeded": metrics["memory_exceeded"],
                                 "memory_violation_gb": metrics["memory_violation_gb"],
+                                "eval_wall_time_s": metrics.get("eval_wall_time_s", float("nan")),
                             }
                             key = _cache_key(hw_path, model_config_id, settings)
                             runtime_cache[key] = {
                                 "hardware_config": str(Path(hw_path).resolve()),
                                 "model_config": model_config_id,
                                 "parallelism": dict(settings),
+                                "status": "ok",
+                                "error": "",
                                 "num_gpus": num_gpus,
                                 "runtime": metrics["runtime"],
                                 "prefill_time": metrics.get("prefill_time", float("nan")),
@@ -2146,8 +2371,14 @@ def main():
                                 "mfu": metrics["mfu"],
                                 "memory_exceeded": metrics["memory_exceeded"],
                                 "memory_violation_gb": metrics["memory_violation_gb"],
+                                "eval_wall_time_s": metrics.get("eval_wall_time_s", float("nan")),
                             }
                             cache_dirty = True
+                            completed_since_flush += 1
+                            if CACHE_SAVE_EVERY and CACHE_SAVE_EVERY > 0 and completed_since_flush >= CACHE_SAVE_EVERY:
+                                _save_runtime_cache(runtime_cache, rooted_runtime_cache_path)
+                                cache_dirty = False
+                                completed_since_flush = 0
 
                             if metrics.get("memory_exceeded"):
                                 memory_violations += 1
@@ -2160,12 +2391,10 @@ def main():
                             evaluated += 1
                             results.append(entry)
             finally:
-                if model_config_path != active_model_config_path and os.path.exists(model_config_path):
-                    try:
-                        os.unlink(model_config_path)
-                    except Exception:
-                        pass
-
+                if cache_dirty:
+                    _save_runtime_cache(runtime_cache, rooted_runtime_cache_path)
+                    cache_dirty = False
+                    completed_since_flush = 0
         total_skipped = skipped_out_of_range + skipped_errors
         if not results:
             print(
@@ -2191,7 +2420,7 @@ def main():
             print(
                 f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
                 f"(out_of_range={skipped_out_of_range}, errors={skipped_errors}); "
-                f"memory violations={memory_violations}."
+                f"memory violations={memory_violations}; cached_non_ok={cached_non_ok}."
             )
             if error_messages:
                 print("Some configurations failed:")
@@ -2210,13 +2439,13 @@ def main():
             if not item.get("memory_exceeded") and math.isfinite(item.get("runtime", float("nan")))
         ]
         if not best_candidates:
+            if results:
+                plot_results(results, plot_path)
             print(
                 "No valid (non-memory-violating) configurations for best-runtime selection; "
                 "skipping best/runtime summary for this hardware.",
                 file=sys.stderr,
             )
-            if results:
-                plot_results(results, plot_path)
             continue
 
         # Track best runtime per GPU count for this hardware (exclude memory violations).

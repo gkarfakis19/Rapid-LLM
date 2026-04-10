@@ -1,6 +1,7 @@
 *.swp
 *.swo
 .cursor/
+.codex
 __pycache__/
 output/
 venv/
@@ -14,6 +15,7 @@ tools/*.png
 tools/*.tsv
 tools/*.json
 tools/gmap_artifacts/
+tools/parallelism_results/
 *.md
 !MOE_ONE_HOT_EXPERT_MODEL.md
 !MLA_FIX_PLAN.md

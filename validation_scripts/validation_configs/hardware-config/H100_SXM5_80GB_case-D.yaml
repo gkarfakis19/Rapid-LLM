@@ -1,4 +1,4 @@
-# Base H100 inference/training case-study hardware.
+# Case D: Case C capacity throttled to 73% peak HBM bandwidth
 sw_param:
   full_recomputation: true
   kernel_launch_overhead: 9e-6
@@ -27,8 +27,8 @@ tech_param:
     dataflow: best
     util: 1.0
   DRAM:
-    size: 80 GB
-    bandwidth: 3.43e12
+    size: 160 GB
+    bandwidth: 1.3345787e13
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
     util: 1

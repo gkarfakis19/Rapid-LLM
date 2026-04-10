@@ -1,4 +1,4 @@
-# Base H100 inference/training case-study hardware.
+# Case B: 160 GB HBM capacity
 sw_param:
   full_recomputation: true
   kernel_launch_overhead: 9e-6
@@ -27,7 +27,7 @@ tech_param:
     dataflow: best
     util: 1.0
   DRAM:
-    size: 80 GB
+    size: 160 GB
     bandwidth: 3.43e12
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
