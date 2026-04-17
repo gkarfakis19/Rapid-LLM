@@ -27,6 +27,14 @@ from memory_estimation import MemKind, mem_kind_from_op_name, NON_TRANSFORMER_KI
 debug = False
 BYTES_PER_GIB = 1024 ** 3
 
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "no"}
+
 class Node:
     def __init__(
         self,
@@ -1730,42 +1738,110 @@ class Graph:
         ready_list = []
 
         self._reset_execution_state(root)
-
-        
         ready_list.append(root)
         root.scheduled = True
-        ###find number of devices needed
-        base_devices = max(1, int(self.pp) if self.pp else 1)
-        max_hw_id = -1
-        visited_nodes: Set[int] = set()
-        stack = list(root if isinstance(root, (list, tuple)) else [root])
-        while stack:
-            node = stack.pop()
-            node_id = id(node)
-            if node_id in visited_nodes:
-                continue
-            visited_nodes.add(node_id)
 
-            hw_id = getattr(node, "hw_id", None)
-            if hw_id is not None:
+        persistent_by_kind = memory_data.get("persistent_bytes_by_kind", {}) or {}
+        transient_by_kind = memory_data.get("transient_bytes_by_kind", {}) or {}
+        persistent_by_kind_dense = memory_data.get("persistent_bytes_by_kind_dense", persistent_by_kind) or {}
+        persistent_by_kind_moe = memory_data.get("persistent_bytes_by_kind_moe", persistent_by_kind_dense) or {}
+        transient_by_kind_dense = memory_data.get("transient_bytes_by_kind_dense", transient_by_kind) or {}
+        transient_by_kind_moe = memory_data.get("transient_bytes_by_kind_moe", transient_by_kind_dense) or {}
+        valid_kinds = set(persistent_by_kind) | set(transient_by_kind)
+        param_gather_bytes = float(memory_data.get("param_gather_bytes", 0.0) or 0.0)
+
+        def _is_transformer_block(node: Any) -> bool:
+            """Return True when node represents a transformer compute block."""
+            if not isinstance(node, Node):
+                return False
+            mem_kind = getattr(node, "mem_kind", None)
+            if not isinstance(mem_kind, MemKind):
+                return False
+            if mem_kind in NON_TRANSFORMER_KINDS:
+                return False
+            return mem_kind in TRANSFORMER_OP_KINDS or mem_kind in valid_kinds
+
+        def _node_mem_kind(node: Any) -> Optional[MemKind]:
+            if not isinstance(node, Node):
+                return None
+            mem_kind = getattr(node, "mem_kind", None)
+            return mem_kind if isinstance(mem_kind, MemKind) else None
+
+        def _bytes_for_kind(kind: Optional[MemKind], mapping: Dict[MemKind, float]) -> float:
+            if kind not in mapping:
+                return 0.0
+            return float(mapping[kind] or 0.0)
+
+        def _persistent_bytes_for_node(node: Any) -> float:
+            mem_kind = _node_mem_kind(node)
+            mapping = persistent_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else persistent_by_kind_dense
+            return _bytes_for_kind(mem_kind, mapping)
+
+        def _transient_bytes_for_node(node: Any) -> float:
+            mem_kind = _node_mem_kind(node)
+            mapping = transient_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else transient_by_kind_dense
+            return _bytes_for_kind(mem_kind, mapping)
+
+        def _collect_graph_layout(root_obj: Any) -> Tuple[int, List[int], List[int]]:
+            base_devices_local = max(1, int(self.pp) if self.pp else 1)
+            max_hw_id_local = -1
+            dense_layers_by_device: Dict[int, Set[Any]] = {}
+            moe_layers_by_device: Dict[int, Set[Any]] = {}
+            visited_local: Set[int] = set()
+            stack_local = list(root_obj if isinstance(root_obj, (list, tuple)) else [root_obj])
+
+            while stack_local:
+                current = stack_local.pop()
+                current_id = id(current)
+                if current_id in visited_local:
+                    continue
+                visited_local.add(current_id)
+
+                children = getattr(current, "children", None)
+                if isinstance(children, (list, tuple)):
+                    stack_local.extend(children)
+                elif children is not None:
+                    stack_local.append(children)
+
+                if not isinstance(current, Node):
+                    continue
+
+                hw_id = getattr(current, "hw_id", None)
                 try:
                     hw_val = int(hw_id)
                 except (TypeError, ValueError):
                     hw_val = None
-                if hw_val is not None and hw_val >= 0:
-                    max_hw_id = max(max_hw_id, hw_val)
+                if hw_val is None or hw_val < 0:
+                    continue
 
-            stack.extend(getattr(node, "children", []))
+                max_hw_id_local = max(max_hw_id_local, hw_val)
+                layer_idx = getattr(current, "layer_index", None)
+                if (
+                    layer_idx is None
+                    or not _is_transformer_block(current)
+                    or not getattr(current, "fwd", True)
+                ):
+                    continue
+                if getattr(current, "is_moe_layer", False):
+                    moe_layers_by_device.setdefault(hw_val, set()).add(layer_idx)
+                else:
+                    dense_layers_by_device.setdefault(hw_val, set()).add(layer_idx)
 
-        if max_hw_id >= 0:
-            base_devices = max(base_devices, max_hw_id + 1)
+            if max_hw_id_local >= 0:
+                base_devices_local = max(base_devices_local, max_hw_id_local + 1)
+
+            dense_counts = [len(dense_layers_by_device.get(idx, ())) for idx in range(base_devices_local)]
+            moe_counts = [len(moe_layers_by_device.get(idx, ())) for idx in range(base_devices_local)]
+            return base_devices_local, dense_counts, moe_counts
+
+        write_memory_logs = _env_flag("RAPID_DEBUG_MEMORY") or _env_flag("RAPID_MEMORY_EVENT_LOGS")
+        base_devices, transformer_dense_layers_per_device, transformer_moe_layers_per_device = _collect_graph_layout(root)
 
         class _MemorySnapshot:
             def __init__(self, num_devices: int, output_dir: Optional[str], file_basename: str) -> None:
                 self.static: List[float] = [0.0 for _ in range(num_devices)]
                 self.current: List[float] = [0.0 for _ in range(num_devices)]
                 self.peak: List[float] = [0.0 for _ in range(num_devices)]
-                # self.activation_allocations: memory_data["activation_allocations"]
                 self._log_files: List[Optional[Any]] = [None for _ in range(num_devices)]
                 self._log_paths: List[Optional[str]] = [None for _ in range(num_devices)]
                 if output_dir:
@@ -1773,7 +1849,7 @@ class Graph:
                     for gpu_idx in range(num_devices):
                         log_path = os.path.join(output_dir, f"{file_basename}_gpu_{gpu_idx}_memory_log.txt")
                         self._log_paths[gpu_idx] = log_path
-                        log_file = open(log_path, "w", encoding="utf-8")
+                        log_file = open(log_path, "w", encoding="utf-8", buffering=1024 * 1024)
                         log_file.write(
                             "timestamp_s | action               | delta_gib   | static_gib  | current_gib | peak_gib    | details\n"
                         )
@@ -1801,10 +1877,6 @@ class Graph:
                 size_bytes: float,
                 action: str = "allocate_activation",
             ) -> None:
-                node_identifier = getattr(node, "op_id", None)
-                if node_identifier is None:
-                    node_identifier = id(node)
-
                 if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
                     return
                 self.current[gpu_id] += size_bytes
@@ -1824,10 +1896,6 @@ class Graph:
                 size_bytes: float,
                 action: str = "release_activation",
             ) -> None:
-                node_identifier = getattr(node, "op_id", None)
-                if node_identifier is None:
-                    node_identifier = id(node)
-
                 if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
                     return
                 self.current[gpu_id] = max(0.0, self.current[gpu_id] - size_bytes)
@@ -1906,7 +1974,6 @@ class Graph:
                 if details:
                     line = f"{line} | {details}"
                 log_file.write(line + "\n")
-                log_file.flush()
 
             def close(self) -> None:
                 if not self._log_files:
@@ -1915,82 +1982,9 @@ class Graph:
                     if handle:
                         handle.close()
 
-        persistent_by_kind = memory_data.get("persistent_bytes_by_kind", {}) or {}
-        transient_by_kind = memory_data.get("transient_bytes_by_kind", {}) or {}
-        persistent_by_kind_dense = memory_data.get("persistent_bytes_by_kind_dense", persistent_by_kind) or {}
-        persistent_by_kind_moe = memory_data.get("persistent_bytes_by_kind_moe", persistent_by_kind_dense) or {}
-        transient_by_kind_dense = memory_data.get("transient_bytes_by_kind_dense", transient_by_kind) or {}
-        transient_by_kind_moe = memory_data.get("transient_bytes_by_kind_moe", transient_by_kind_dense) or {}
-        valid_kinds = set(persistent_by_kind) | set(transient_by_kind)
-        param_gather_bytes = float(memory_data.get("param_gather_bytes", 0.0) or 0.0)
-
-        def _is_transformer_block(node: Any) -> bool:
-            """Return True when node represents a transformer compute block."""
-            if not isinstance(node, Node):
-                return False
-            mem_kind = getattr(node, "mem_kind", None)
-            if not isinstance(mem_kind, MemKind):
-                return False
-            if mem_kind in NON_TRANSFORMER_KINDS:
-                return False
-            return mem_kind in TRANSFORMER_OP_KINDS or mem_kind in valid_kinds
-
-        def _node_mem_kind(node: Any) -> Optional[MemKind]:
-            if not isinstance(node, Node):
-                return None
-            mem_kind = getattr(node, "mem_kind", None)
-            return mem_kind if isinstance(mem_kind, MemKind) else None
-
-        def _bytes_for_kind(kind: MemKind, mapping: Dict[MemKind, float], label: str) -> float:
-            if kind not in mapping:
-                return 0.0
-            return float(mapping[kind] or 0.0)
-
-        def _persistent_bytes_for_node(node: Any) -> float:
-            mem_kind = _node_mem_kind(node)
-            mapping = persistent_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else persistent_by_kind_dense
-            return _bytes_for_kind(mem_kind, mapping, "persistent")
-
-        def _transient_bytes_for_node(node: Any) -> float:
-            mem_kind = _node_mem_kind(node)
-            mapping = transient_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else transient_by_kind_dense
-            return _bytes_for_kind(mem_kind, mapping, "transient")
-
-        def _count_transformer_layers_per_device(root_obj: Any, num_devices: int) -> Tuple[List[int], List[int]]:
-            dense_sets: List[Set[Any]] = [set() for _ in range(num_devices)]
-            moe_sets: List[Set[Any]] = [set() for _ in range(num_devices)]
-            stack_local = list(root_obj if isinstance(root_obj, (list, tuple)) else [root_obj])
-            visited_local: Set[int] = set()
-            while stack_local:
-                current = stack_local.pop()
-                current_id = id(current)
-                if current_id in visited_local:
-                    continue
-                visited_local.add(current_id)
-
-                if isinstance(current, Node):
-                    hw_id = getattr(current, "hw_id", None)
-                    layer_idx = getattr(current, "layer_index", None)
-                    if (
-                        layer_idx is not None
-                        and isinstance(hw_id, int)
-                        and 0 <= hw_id < num_devices
-                        and _is_transformer_block(current)
-                        and getattr(current, "fwd", True)
-                    ):
-                        if getattr(current, "is_moe_layer", False):
-                            moe_sets[hw_id].add(layer_idx)
-                        else:
-                            dense_sets[hw_id].add(layer_idx)
-
-                stack_local.extend(getattr(current, "children", []))
-            return ([len(layer_set) for layer_set in dense_sets], [len(layer_set) for layer_set in moe_sets])
-
         memory_output_dir: Optional[str] = None
-        if output_folder:
+        if output_folder and write_memory_logs:
             memory_output_dir = os.path.join(output_folder, "memory-summary")
-
-        transformer_dense_layers_per_device, transformer_moe_layers_per_device = _count_transformer_layers_per_device(root, base_devices)
         static_mem_per_layer = memory_data.get("static_mem_per_layer", 0)
         static_mem_per_layer_dense = memory_data.get("static_mem_per_layer_dense", static_mem_per_layer)
         static_mem_per_layer_moe = memory_data.get("static_mem_per_layer_moe", static_mem_per_layer_dense)
