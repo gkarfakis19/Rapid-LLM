@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -52,11 +53,80 @@ def _launch_browser(playwright):
     pytest.skip("No Playwright-compatible browser available: " + " | ".join(errors))
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _seed_completed_sweep(workspace: Path) -> None:
+    now = "2026-04-26T20:00:00+00:00"
+    sweep_root = workspace / "sweeps" / "sweep-ui-detail"
+    payload = {
+        "run_mode": "sweep",
+        "model_preset_id": "Llama2-7B.yaml",
+        "hardware_preset_id": "A100_SXM4_80GB_base.yaml",
+        "metric": "training_time_s",
+        "x_axis": "batch_size",
+        "series_axis": None,
+        "simple": {"run_type": "training", "tp": 4, "cp": 1, "pp": 1, "dp": 1, "ep": 1, "replica_count": 1},
+    }
+    _write_json(
+        sweep_root / "request.json",
+        {
+            "id": "sweep-ui-detail",
+            "kind": "sweep",
+            "created_at": now,
+            "title": "UI Detail Smoke",
+            "payload": payload,
+            "preview": {"optimizer_enabled": False, "top_level_case_count": 2},
+        },
+    )
+    _write_json(sweep_root / "status.json", {"created_at": now, "updated_at": now, "status": "completed", "progress_completed": 2, "progress_total": 2})
+    _write_json(sweep_root / "summary.json", {"title": "UI Detail Smoke", "best_metric_label": "Training Time", "best_metric_value": 1.2})
+    _write_json(
+        sweep_root / "cases" / "case-0001.json",
+        {
+            "case_id": "case-0001",
+            "label": "batch 64",
+            "status": "completed",
+            "dimension_values": {"batch_size": 64, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB_base.yaml"},
+            "metrics": {
+                "training_time_s": 1.2,
+                "total_flops": 4.56e14,
+                "achieved_flops": 3.2e14,
+                "peak_system_flops": 1.56e15,
+                "num_gpus": 4,
+                "memory_exceeded": False,
+                "memory_violation_gb": 0.0,
+            },
+        },
+    )
+    _write_json(
+        sweep_root / "cases" / "case-0002.json",
+        {
+            "case_id": "case-0002",
+            "label": "batch 128",
+            "status": "failed",
+            "dimension_values": {"batch_size": 128, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB_base.yaml"},
+            "metrics": {
+                "training_time_s": 9.9,
+                "total_flops": 9.12e14,
+                "achieved_flops": 6.4e14,
+                "peak_system_flops": 1.56e15,
+                "num_gpus": 4,
+                "memory_exceeded": True,
+                "memory_violation_gb": 12.5,
+            },
+        },
+    )
+
+
 @pytest.mark.webui_browser
 def test_webui_layout_and_visual_health(tmp_path):
     sync_api = pytest.importorskip("playwright.sync_api")
     port = _free_port()
     workspace = tmp_path / "workspace"
+    _seed_completed_sweep(workspace)
     env = {
         **os.environ,
         "RAPID_WEBUI_PORT": str(port),
@@ -84,7 +154,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
             page.goto(url, wait_until="networkidle")
             page.get_by_text("RAPID-LLM Workbench").wait_for(timeout=15000)
-            page.get_by_text("Launch Preview").wait_for(timeout=15000)
+            page.get_by_text("Launch Plan").wait_for(timeout=15000)
             screenshot_dir = Path(os.environ.get("RAPID_WEBUI_SCREENSHOT_DIR", tmp_path))
             screenshot_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -119,6 +189,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert dropdown_metrics["lowContrastOptions"] == 0
             page.screenshot(path=screenshot_dir / f"webui-dropdown-{stamp}.png", full_page=True)
             page.keyboard.press("Escape")
+            page.evaluate("document.querySelector('.builder-left-scroll')?.scrollTo(0, 0)")
 
             page.screenshot(path=screenshot_dir / f"webui-desktop-{stamp}.png", full_page=True)
 
@@ -135,37 +206,96 @@ def test_webui_layout_and_visual_health(tmp_path):
                         paperCount: document.querySelectorAll('.mantine-Paper-root').length,
                         buttonCount: document.querySelectorAll('button').length,
                         uniqueBackgrounds: Array.from(new Set(backgrounds)).length,
-                        hasBuilder: text.includes('1 Run'),
-                        hasHistory: text.includes('2 History'),
-                        hasDetails: text.includes('3 Details'),
-                        hasRunSetup: text.includes('Run Setup'),
+                        hasBuilder: text.includes('1 Launch'),
+                        hasHistory: text.includes('2 Run log'),
+                        hasTopDetailsTab: text.includes('3 Details'),
+                        hasOldLoadDetailsButton: text.includes('Load Details'),
+                        hasLaunchSetup: text.includes('Launch Setup'),
                         hasBasicOptions: text.includes('Basic Options'),
-                        hasHeaderHelp: text.includes('Run') && text.includes('History') && text.includes('Details') && text.includes('Hover any control for details.'),
+                        hasHeaderHelp: text.includes('Launch') && text.includes('Run log') && text.includes('Details') && text.includes('Hover any control for details.'),
                         hasEditorTabs: text.includes('Selected file editor') && text.includes('MODEL FILES') && text.includes('HARDWARE FILES'),
+                        hasFileActions: text.includes('File actions') && text.includes('New copy') && text.includes('Rename'),
                         hasDespisedRunSetupCopy: text.includes('Choose one hardware target and any number of models'),
                         hasParallelismSearch: text.includes('Parallelism search'),
+                        hasOptimizerWarning: text.includes('WARNING: This may increase runtime dramatically.'),
                         hasUseAstraSim: text.includes('Use AstraSim'),
                         hasAdvancedBackendMode: text.includes('Execution backend') || text.includes('Execution mode') || text.includes('hybrid') || text.includes('flattened'),
                         hasWorkers: text.includes('Workers') && text.includes('CPU cores detected'),
-                        hasWorkflow: text.includes('Run -> History -> Load -> Details'),
+                        hasWorkflow: text.includes('Launch -> Run log -> Details'),
+                        hasPreviewButton: text.includes('Preview Launch'),
+                        hasLiveLaunchButton: /Launch \\d+ runs?/.test(text),
                         hasRawOverride: text.includes('Use raw YAML override'),
                         hasReadOnlySeeds: text.includes('Read-only seeds'),
                         hasMetaReferences: /\\bv1\\b|prototype|deferred|future/i.test(text),
-                        darkInputIconCount: Array.from(document.querySelectorAll('.mantine-Input-section svg, .mantine-Select-section svg, .mantine-MultiSelect-section svg, .mantine-NumberInput-section svg, .mantine-NumberInput-controls svg, .mantine-NumberInput-control svg'))
-                            .filter((el) => {
-                                const style = getComputedStyle(el);
-                                const color = (style.stroke && style.stroke !== 'none' ? style.stroke : style.color).match(/\\d+/g);
-                                if (!color) return false;
-                                const [r, g, b] = color.map(Number);
-                                return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 85;
-                            }).length,
-                        lowContrastTextCount: Array.from(document.querySelectorAll('.mantine-Alert-root, .mantine-Accordion-control'))
-                            .filter((el) => {
-                                const color = getComputedStyle(el).color.match(/\\d+/g);
-                                if (!color) return false;
-                                const [r, g, b] = color.map(Number);
-                                return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 110;
-                            }).length,
+                        lowContrastIconCount: (() => {
+                            const rgb = (raw) => {
+                                const nums = (raw || '').match(/\\d+(?:\\.\\d+)?/g);
+                                if (nums && nums.length >= 4 && Number(nums[3]) === 0) return null;
+                                return nums ? nums.slice(0, 3).map(Number) : null;
+                            };
+                            const channel = (v) => {
+                                const s = v / 255;
+                                return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+                            };
+                            const lum = (c) => 0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2]);
+                            const ratio = (a, b) => {
+                                const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+                                return (hi + 0.05) / (lo + 0.05);
+                            };
+                            const bgFor = (el) => {
+                                let cur = el;
+                                while (cur && cur !== document.documentElement) {
+                                    const bg = rgb(getComputedStyle(cur).backgroundColor);
+                                    if (bg) return bg;
+                                    cur = cur.parentElement;
+                                }
+                                return [255, 255, 255];
+                            };
+                            return Array.from(document.querySelectorAll('.mantine-Input-section svg, .mantine-Select-section svg, .mantine-MultiSelect-section svg, .mantine-NumberInput-section svg, .mantine-NumberInput-controls svg, .mantine-NumberInput-control svg'))
+                                .filter((el) => {
+                                    const style = getComputedStyle(el);
+                                    const color = rgb(style.stroke && style.stroke !== 'none' ? style.stroke : style.color);
+                                    return color && ratio(color, bgFor(el)) < 3;
+                                }).length;
+                        })(),
+                        lowContrastTextSamples: (() => {
+                            const rgb = (raw) => {
+                                const nums = (raw || '').match(/\\d+(?:\\.\\d+)?/g);
+                                if (nums && nums.length >= 4 && Number(nums[3]) === 0) return null;
+                                return nums ? nums.slice(0, 3).map(Number) : null;
+                            };
+                            const channel = (v) => {
+                                const s = v / 255;
+                                return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+                            };
+                            const lum = (c) => 0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2]);
+                            const ratio = (a, b) => {
+                                const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+                                return (hi + 0.05) / (lo + 0.05);
+                            };
+                            const bgFor = (el) => {
+                                let cur = el;
+                                while (cur && cur !== document.documentElement) {
+                                    const bg = rgb(getComputedStyle(cur).backgroundColor);
+                                    if (bg) return bg;
+                                    cur = cur.parentElement;
+                                }
+                                return [255, 255, 255];
+                            };
+                            return Array.from(document.querySelectorAll('.mantine-Alert-root, .mantine-Accordion-control, .mantine-Input-input, .mantine-Select-input, .mantine-NumberInput-input, .mantine-Tabs-tab, button'))
+                                .filter((el) => el.getClientRects().length > 0)
+                                .map((el) => {
+                                    const text = (el.textContent || el.value || '').trim();
+                                    if (!text) return null;
+                                    const color = rgb(getComputedStyle(el).color);
+                                    if (!color) return null;
+                                    const bg = bgFor(el);
+                                    const contrast = ratio(color, bg);
+                                    return contrast < 4.5 ? {text: text.slice(0, 40), contrast} : null;
+                                })
+                                .filter(Boolean)
+                                .slice(0, 8);
+                        })(),
                     };
                 }"""
             )
@@ -175,47 +305,119 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert desktop_metrics["uniqueBackgrounds"] >= 6
             assert desktop_metrics["hasBuilder"]
             assert desktop_metrics["hasHistory"]
-            assert desktop_metrics["hasDetails"]
-            assert desktop_metrics["hasRunSetup"]
+            assert not desktop_metrics["hasTopDetailsTab"]
+            assert desktop_metrics["hasOldLoadDetailsButton"] is False
+            assert desktop_metrics["hasLaunchSetup"]
             assert desktop_metrics["hasBasicOptions"]
             assert desktop_metrics["hasHeaderHelp"]
             assert desktop_metrics["hasEditorTabs"]
+            assert desktop_metrics["hasFileActions"]
             assert not desktop_metrics["hasDespisedRunSetupCopy"]
             assert desktop_metrics["hasParallelismSearch"]
+            assert desktop_metrics["hasOptimizerWarning"]
             assert desktop_metrics["hasUseAstraSim"]
             assert not desktop_metrics["hasAdvancedBackendMode"]
             assert desktop_metrics["hasWorkers"]
             assert desktop_metrics["hasWorkflow"]
+            assert not desktop_metrics["hasPreviewButton"]
+            assert desktop_metrics["hasLiveLaunchButton"]
             assert not desktop_metrics["hasRawOverride"]
             assert not desktop_metrics["hasReadOnlySeeds"]
             assert not desktop_metrics["hasMetaReferences"]
-            assert desktop_metrics["darkInputIconCount"] == 0
-            assert desktop_metrics["lowContrastTextCount"] == 0
-            page.get_by_role("tab", name="2 History").click()
-            page.get_by_text("No runs yet. Use the builder tab to create one.").wait_for(timeout=5000)
-            page.get_by_role("tab", name="1 Run").click()
+            assert desktop_metrics["lowContrastIconCount"] == 0
+            assert desktop_metrics["lowContrastTextSamples"] == []
+            page.get_by_role("tab", name="2 Run log").click()
+            page.get_by_text("UI Detail Smoke").wait_for(timeout=5000)
+            page.locator("button").filter(has_text="Details").first.click()
+            page.get_by_role("dialog").wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Normal plot", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Scatter", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Bar chart", exact=True).wait_for(timeout=5000)
+            page.get_by_text("Memory Exceeded").wait_for(timeout=5000)
+            page.get_by_text("12.5 GB").wait_for(timeout=5000)
+            page.get_by_text("case-0001 - Llama2-7B").wait_for(timeout=5000)
+            page.get_by_text("Fixed parallelism").wait_for(timeout=5000)
+            page.get_by_text("0.00 us").wait_for(timeout=5000)
+            page.wait_for_function(
+                """() => Array.from(document.querySelectorAll('.js-plotly-plot'))
+                    .filter((plot) => plot.getClientRects().length > 0)
+                    .some((plot) => ((plot.data || plot._fullData || []).length > 0))""",
+                timeout=5000,
+            )
+            detail_metrics = page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('[role="dialog"]');
+                    const plot = Array.from(document.querySelectorAll('.js-plotly-plot')).find((item) => item.getClientRects().length > 0);
+                    const legendText = Array.from(document.querySelectorAll('.legendtext')).map((el) => el.textContent || '').join('\\n');
+                    return {
+                        visible: !!dialog && getComputedStyle(dialog).display !== 'none',
+                        hasStatusLegend: /status/i.test(legendText),
+                        hasPlot: !!plot,
+                    };
+                }"""
+            )
+            assert detail_metrics["visible"]
+            assert detail_metrics["hasPlot"]
+            assert not detail_metrics["hasStatusLegend"]
+            page.screenshot(path=screenshot_dir / f"webui-details-{stamp}.png", full_page=True)
+            page.locator("#detail-close-button").click()
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#detail-overlay')).display === 'none'", timeout=5000)
+            page.get_by_role("tab", name="1 Launch").click()
             page.get_by_label("Batch size").hover()
             page.get_by_text("Global batch size across all participating devices.").wait_for(timeout=5000)
             page.get_by_label("Optimize parallelism").hover()
             page.get_by_text("Search TP, CP, PP, DP, and EP combinations for each Total GPUs target.").wait_for(timeout=5000)
+            page.locator("#optimize-switch").click(force=True)
+            page.wait_for_function("() => document.querySelector('#simple-tp-wrap')?.classList.contains('is-auto')", timeout=5000)
+            auto_state = page.evaluate(
+                """() => {
+                    const wrap = document.querySelector('#simple-tp-wrap');
+                    const input = document.querySelector('#simple-tp');
+                    return {
+                        hasAutoClass: wrap.classList.contains('is-auto'),
+                        autoContent: getComputedStyle(wrap, '::after').content,
+                        inputTransparent: getComputedStyle(input).color === 'rgba(0, 0, 0, 0)' || getComputedStyle(input).color === 'transparent',
+                    };
+                }"""
+            )
+            assert auto_state["hasAutoClass"]
+            assert auto_state["autoContent"] == '"Auto"'
             page.get_by_label("Use AstraSim").hover()
             page.get_by_text("Run the simulator through AstraSim using hierarchical mode.").wait_for(timeout=5000)
             page.get_by_label("Workers").hover()
             page.get_by_text("Number of local worker processes used inside a sweep.").wait_for(timeout=5000)
             page.get_by_text("Selected file editor").hover()
             page.get_by_text("Switch tabs before changing fields to edit a different selected file.").wait_for(timeout=5000)
-            page.locator("#adv-model-mode").scroll_into_view_if_needed()
+            page.locator("#adv-model-type").scroll_into_view_if_needed()
             page.get_by_text("Advanced Options").wait_for(timeout=5000)
             page.get_by_text("Model").first.wait_for(timeout=5000)
             page.get_by_text("Hardware").first.wait_for(timeout=5000)
-            page.get_by_text("Type guide").wait_for(timeout=5000)
+            page.get_by_text("Model type guide").wait_for(timeout=5000)
+            page.get_by_text("Execution family guide").wait_for(timeout=5000)
+            page.get_by_text("deepseek_v3").first.wait_for(timeout=5000)
+            page.get_by_text("glm4_moe").first.wait_for(timeout=5000)
             page.get_by_text("LLM").first.wait_for(timeout=5000)
             page.get_by_text("ViT").first.wait_for(timeout=5000)
             page.get_by_text("GEMM").first.wait_for(timeout=5000)
+            page.locator("#adv-model-type").hover()
+            page.get_by_text("Select the architecture family written to model_param.model_type.").wait_for(timeout=5000)
+            page.get_by_text("deepseek_v3").first.hover()
+            page.get_by_text("DeepSeek-V3 family.").wait_for(timeout=5000)
             page.locator("#adv-model-mode").hover()
-            page.get_by_text("Select the model execution family written to model_param.mode.").wait_for(timeout=5000)
-            page.get_by_text("ViT").first.hover()
-            page.get_by_text("Vision Transformer path.").wait_for(timeout=5000)
+            page.get_by_text("Select the execution family written to model_param.mode.").wait_for(timeout=5000)
+            page.locator("#adv-tensor-format").scroll_into_view_if_needed()
+            page.locator("#adv-tensor-format").click(force=True)
+            page.get_by_role("option", name="mxfp4 (4.25)").wait_for(timeout=5000)
+            tensor_option_text = page.evaluate(
+                """() => Array.from(document.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]'))
+                    .map((el) => el.textContent || '')
+                    .join('\\n')"""
+            )
+            assert "mxfp4 (4.25)" in tensor_option_text
+            assert "int4 (4)" in tensor_option_text
+            assert "fp8 (8)" in tensor_option_text
+            assert "fp32 (32)" in tensor_option_text
+            page.keyboard.press("Escape")
 
             page.locator("#dim-1-field").scroll_into_view_if_needed()
             page.locator("#dim-1-field").click(force=True)
@@ -226,7 +428,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert "Data Parallelism" not in sweep_option_text
             assert "Total GPUs" in sweep_option_text
             page.get_by_role("option", name="Batch Size").click()
-            page.wait_for_timeout(250)
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-values-wrap')).display !== 'none'", timeout=5000)
             sweep_values_state = page.evaluate(
                 """() => ({
                     values: getComputedStyle(document.querySelector('#dim-1-values-wrap')).display,
@@ -238,7 +440,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert sweep_values_state["configs"] == "none"
             assert sweep_values_state["range"] == "none"
             page.locator("#dim-1-mode-wrap").get_by_text("Range").click()
-            page.wait_for_timeout(250)
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-range-wrap')).display !== 'none'", timeout=5000)
             sweep_range_state = page.evaluate(
                 """() => ({
                     values: getComputedStyle(document.querySelector('#dim-1-values-wrap')).display,
@@ -257,13 +459,13 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("Preview: 1, 3, 5, 7, 9, 11, 13, 15, 17, 19 (10 values)").wait_for(timeout=5000)
             page.locator("#dim-1-end").fill("80")
             page.get_by_text("Preview: 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, ... (40 values)").wait_for(timeout=5000)
-            page.locator("#run-mode").get_by_text("Single Run").click()
+            page.locator("#run-mode").get_by_text("Single Launch").click()
             page.wait_for_timeout(250)
             single_run_state = page.evaluate(
                 """() => ({
                     sweepDisplay: getComputedStyle(document.querySelector('#sweep-dimensions-section')).display,
                     hasPreviewButton: document.body.innerText.includes('Preview Launch'),
-                    hasRunButton: document.body.innerText.includes('Run'),
+                    hasLaunchButton: /Launch \\d+ runs?/.test(document.body.innerText),
                     visibleSweepTitle: Array.from(document.querySelectorAll('*')).some((el) => {
                         if (el.textContent !== 'Sweep Dimensions') return false;
                         return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
@@ -271,8 +473,8 @@ def test_webui_layout_and_visual_health(tmp_path):
                 })"""
             )
             assert single_run_state["sweepDisplay"] == "none"
-            assert single_run_state["hasPreviewButton"]
-            assert single_run_state["hasRunButton"]
+            assert not single_run_state["hasPreviewButton"]
+            assert single_run_state["hasLaunchButton"]
             assert not single_run_state["visibleSweepTitle"]
 
             page.evaluate("window.scrollTo(0, 0)")

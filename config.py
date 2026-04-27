@@ -23,6 +23,8 @@ from yaml import YAMLError as _YAMLError
 
 
 _PRECISION_DTYPE_BYTES = {
+    "mxfp4": 4.25 / 8.0,
+    "int4": 0.5,
     "fp8": 1.0,
     "fp16": 2.0,
     "half": 2.0,
@@ -103,7 +105,7 @@ def _parse_precision_block(spec: dict) -> PrecisionConfig:
 
     Each field can be:
     - A numeric byte count (e.g., 2.0, 4.0)
-    - A dtype string (e.g., "fp16", "bf16", "fp32")
+    - A dtype string (e.g., "mxfp4", "int4", "fp8", "fp16", "bf16", "fp32")
     - "as_tensor_format" (only for kv_cache, parameters, gradients, grad_communication)
     """
     tensor_bytes = _coerce_precision_value(spec["tensor_format"])

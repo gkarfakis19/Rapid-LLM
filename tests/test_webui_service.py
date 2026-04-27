@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import config as rapid_config
 from webui.service import core
 
 
@@ -105,6 +106,37 @@ def test_form_edits_are_saved_to_editable_yaml_files(monkeypatch, tmp_path):
     assert hardware_yaml["network"]["dimensions"][0]["topology"]["util"] == 0.81
 
 
+def test_config_files_can_be_created_and_renamed(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+
+    created = core.create_config_copy("models", "Llama2-7B.yaml", "my llama copy")
+    renamed = core.rename_config_file("models", created, "renamed_llama")
+
+    assert created == "my_llama_copy.yaml"
+    assert renamed == "renamed_llama.yaml"
+    assert not (workspace / "configs" / "models" / created).exists()
+    assert (workspace / "configs" / "models" / renamed).exists()
+    assert any(item["id"] == renamed for item in core.list_presets("models"))
+
+
+def test_config_file_actions_reject_case_names_and_duplicates(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+
+    try:
+        core.create_config_copy("models", "Llama2-7B.yaml", "case-a")
+    except ValueError as exc:
+        assert "reserved" in str(exc)
+    else:
+        raise AssertionError("case-style config name should be rejected")
+
+    try:
+        core.rename_config_file("hardware", "H100_SXM5_80GB_base.yaml", "A100_SXM4_80GB_base.yaml")
+    except FileExistsError as exc:
+        assert "already exists" in str(exc)
+    else:
+        raise AssertionError("renaming over an existing config should fail")
+
+
 def test_use_astrasim_simple_option_forces_hierarchical_backend(monkeypatch, tmp_path):
     workspace = _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
@@ -133,14 +165,37 @@ def test_use_astrasim_simple_option_forces_hierarchical_backend(monkeypatch, tmp
 def test_model_type_advanced_option_is_saved(monkeypatch, tmp_path):
     workspace = _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
-    payload["advanced"]["model_mode"] = "VIT"
+    payload["advanced"]["model_type"] = "deepseek_v3"
 
     model, _, errors = core.save_config_edits_from_payload(payload)
 
     assert errors == []
     assert model is not None
     model_yaml = core._yaml_load(workspace / "configs" / "models" / "Llama2-7B.yaml")
-    assert model_yaml["model_param"]["mode"] == "VIT"
+    assert model_yaml["model_param"]["model_type"] == "deepseek_v3"
+
+
+def test_low_precision_strings_use_expected_byte_widths():
+    assert rapid_config._coerce_precision_value("mxfp4") == 4.25 / 8.0
+    assert rapid_config._coerce_precision_value("int4") == 0.5
+
+
+def test_tensor_format_advanced_option_saves_and_validates_low_precision(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+
+    for tensor_format in ("mxfp4", "int4"):
+        payload = _payload()
+        payload["advanced"]["tensor_format"] = tensor_format
+
+        _, hardware, errors = core.save_config_edits_from_payload(payload)
+        preview = core.build_launch_preview(payload)
+
+        assert errors == []
+        assert hardware is not None
+        assert preview["ok"] is True
+        hardware_yaml = core._yaml_load(workspace / "configs" / "hardware" / "H100_SXM5_80GB_base.yaml")
+        assert hardware_yaml["sw_param"]["precision"]["tensor_format"] == tensor_format
+        assert preview["top_level_cases"][0]["hardware"]["sw_param"]["precision"]["tensor_format"] == tensor_format
 
 
 def test_form_edits_are_saved_only_to_active_editor_configs(monkeypatch, tmp_path):
@@ -290,7 +345,7 @@ def test_single_run_mode_ignores_sweep_dimensions_and_optimizer(monkeypatch, tmp
     assert preview["optimizer_enabled"] is False
     assert preview["top_level_case_count"] == 1
     assert preview["total_invocations"] == 1
-    assert any("Single Run mode ignores" in warning for warning in preview["warnings"])
+    assert any("Single launch mode ignores" in warning for warning in preview["warnings"])
 
 
 def test_scalar_sweep_expands_shared_dimensions(monkeypatch, tmp_path):

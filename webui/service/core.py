@@ -93,6 +93,7 @@ METRIC_LABELS = {
     "prefill_time_s": "Prefill Time",
     "decode_throughput_tok_s": "Decode Throughput",
 }
+SUPPORTED_MODEL_TYPES = {"gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"}
 
 OPTIMIZER_PRESETS = {
     "Fast": {
@@ -214,6 +215,27 @@ def prettify_name(stem: str) -> str:
     return stem.replace("_", " ")
 
 
+def _config_filename_from_user_text(raw_name: str) -> str:
+    text = Path(str(raw_name or "").strip()).name
+    if not text:
+        raise ValueError("Enter a config filename.")
+    if text.endswith((".yaml", ".yml")):
+        stem = Path(text).stem
+        suffix = Path(text).suffix
+    else:
+        stem = text
+        suffix = ".yaml"
+    stem = re.sub(r"\s+", "_", stem.strip())
+    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)
+    stem = stem.strip("._-")
+    if not stem:
+        raise ValueError("Config filename must contain letters or numbers.")
+    filename = f"{stem}{suffix}"
+    if _is_case_config_name(Path(filename)):
+        raise ValueError("Case-generated config names are reserved.")
+    return filename
+
+
 def config_file_path(kind: str, preset_id: str) -> Path:
     if kind not in {"models", "hardware"}:
         raise ValueError(f"Unknown config kind: {kind}")
@@ -242,6 +264,33 @@ def load_preset(kind: str, preset_id: str) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Preset not found: {path}")
     return _yaml_load(path)
+
+
+def create_config_copy(kind: str, source_id: str, new_name: str) -> str:
+    ensure_workspace()
+    source = config_file_path(kind, source_id)
+    if not source.exists():
+        raise FileNotFoundError(f"Preset not found: {source}")
+    filename = _config_filename_from_user_text(new_name)
+    target = config_file_path(kind, filename)
+    if target.exists():
+        raise FileExistsError(f"Config already exists: {filename}")
+    shutil.copyfile(source, target)
+    return filename
+
+
+def rename_config_file(kind: str, preset_id: str, new_name: str) -> str:
+    ensure_workspace()
+    source = config_file_path(kind, preset_id)
+    if not source.exists():
+        raise FileNotFoundError(f"Preset not found: {source}")
+    filename = _config_filename_from_user_text(new_name)
+    target = config_file_path(kind, filename)
+    if target.exists() and target != source:
+        raise FileExistsError(f"Config already exists: {filename}")
+    if target != source:
+        source.rename(target)
+    return filename
 
 
 def parse_size_to_gb(raw: Any) -> float:
@@ -300,6 +349,11 @@ def get_model_run_type(model_dict: Dict[str, Any]) -> str:
 
 def get_model_mode(model_dict: Dict[str, Any]) -> str:
     return str(model_dict.get("model_param", {}).get("mode", "LLM")).upper()
+
+
+def get_model_type(model_dict: Dict[str, Any]) -> str:
+    raw = str(model_dict.get("model_param", {}).get("model_type", "gpt")).strip().lower()
+    return "glm4_moe" if raw in {"glm", "glm4"} else raw
 
 
 def get_total_gpu_count(hw_dict: Dict[str, Any], run_type: str) -> int:
@@ -396,6 +450,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
         },
         "advanced": {
             "model_mode": get_model_mode(model),
+            "model_type": get_model_type(model),
             "full_recomputation": bool(hardware.get("sw_param", {}).get("full_recomputation", False)),
             "dp_zero_stage": int(hardware.get("sw_param", {}).get("dp_zero_stage", 0) or 0),
             "tensor_format": str(hardware.get("sw_param", {}).get("precision", {}).get("tensor_format", "bf16")),
@@ -452,6 +507,12 @@ def _apply_model_overrides(model: Dict[str, Any], payload: Dict[str, Any]) -> No
     moe = model_param.setdefault("moe", {})
     if advanced.get("model_mode"):
         model_param["mode"] = str(advanced["model_mode"]).strip().upper()
+    if advanced.get("model_type"):
+        model_type = str(advanced["model_type"]).strip().lower()
+        if model_type in {"glm", "glm4"}:
+            model_type = "glm4_moe"
+        if model_type in SUPPORTED_MODEL_TYPES:
+            model_param["model_type"] = model_type
     model_param["run_type"] = run_type
     model_param["seq_len"] = _safe_int(simple.get("seq_len"), _safe_int(model_param.get("seq_len"), 0))
     if run_type == "inference":
@@ -791,7 +852,7 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     errors = list(base_errors)
     warnings: List[str] = []
     if single_run_mode and (payload.get("dimensions") or payload.get("optimize_parallelism")):
-        warnings.append("Single Run mode ignores sweep dimensions and parallelism optimization.")
+        warnings.append("Single launch mode ignores sweep dimensions and parallelism optimization.")
     if any(dim.get("field_key") == "model_config" for dim in dimensions):
         run_types = []
         for dim in dimensions:
@@ -1107,7 +1168,7 @@ class RunManager:
         _json_dump(job_root / "result.json", result)
         _json_dump(job_root / "metrics.json", result.get("metrics", {}))
         return {
-            "title": "Single Run",
+            "title": "Single Launch",
             "status": result.get("status"),
             "primary_metric_label": result.get("primary_metric_label"),
             "primary_metric_value": result.get("primary_metric_value"),

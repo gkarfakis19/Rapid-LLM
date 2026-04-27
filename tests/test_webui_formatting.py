@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from dash import dash_table
+from dash import dash_table, dcc
 
 from webui.service.core import FIELD_OPTIONS
 from webui.app.main import (
+    MODEL_ARCH_TYPE_HELP,
+    MODEL_ARCH_TYPE_OPTIONS,
+    TENSOR_FORMAT_OPTIONS,
     build_range_preview,
     config_dimensions_from_selection,
     editor_tabs_children,
@@ -40,6 +43,25 @@ def test_other_large_quantities_are_compacted():
 def test_metric_labels_resolve_to_formatter_keys():
     assert metric_key_from_label("Time / Batch") == "training_time_s"
     assert metric_key_from_label("Decode Throughput") == "decode_throughput_tok_s"
+
+
+def test_supported_model_types_have_explanations():
+    values = [item["value"] for item in MODEL_ARCH_TYPE_OPTIONS]
+
+    assert values == ["gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"]
+    assert set(values) == set(MODEL_ARCH_TYPE_HELP)
+    assert all(len(MODEL_ARCH_TYPE_HELP[value]) > 40 for value in values)
+
+
+def test_tensor_format_options_show_precision_widths():
+    assert TENSOR_FORMAT_OPTIONS == [
+        {"value": "mxfp4", "label": "mxfp4 (4.25)"},
+        {"value": "int4", "label": "int4 (4)"},
+        {"value": "fp8", "label": "fp8 (8)"},
+        {"value": "fp16", "label": "fp16 (16)"},
+        {"value": "bf16", "label": "bf16 (16)"},
+        {"value": "fp32", "label": "fp32 (32)"},
+    ]
 
 
 def test_sweep_controls_mutate_by_field_kind():
@@ -129,6 +151,20 @@ def _collect_datatables(component):
     return tables
 
 
+def _collect_graphs(component):
+    if isinstance(component, dcc.Graph):
+        return [component]
+    children = getattr(component, "children", None)
+    if children is None:
+        return []
+    if not isinstance(children, list):
+        children = [children]
+    graphs = []
+    for child in children:
+        graphs.extend(_collect_graphs(child))
+    return graphs
+
+
 def test_detail_tables_explain_metric_columns():
     detail = {
         "kind": "run",
@@ -151,3 +187,70 @@ def test_detail_tables_explain_metric_columns():
     assert tables[0].tooltip_header["metric"] == "Metric name emitted by the worker."
     assert "system-wide" in help_for_key("achieved_flops").lower()
     assert any("Peak System FLOPS" == row["metric"] for row in tables[0].data)
+
+
+def test_detail_memory_fields_are_merged():
+    detail = {
+        "kind": "run",
+        "title": "Memory run",
+        "request_record": {"payload": {"model_preset_id": "Llama2-7B.yaml", "hardware_preset_id": "A100.yaml", "simple": {"tp": 1, "cp": 1, "pp": 1, "dp": 1, "ep": 1}}},
+        "result": {
+            "status": "completed",
+            "metrics": {
+                "training_time_s": 1.0,
+                "memory_exceeded": True,
+                "memory_violation_gb": 12.5,
+            },
+            "primary_metric_value": 1.0,
+        },
+    }
+
+    table = _collect_datatables(render_detail(detail))[0]
+
+    labels = [row["metric"] for row in table.data]
+    assert "Memory Exceeded" in labels
+    assert "Memory Violation" not in labels
+    assert next(row["value"] for row in table.data if row["metric"] == "Memory Exceeded") == "12.5 GB"
+
+
+def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
+    detail = {
+        "kind": "sweep",
+        "title": "Sweep",
+        "request_record": {
+            "payload": {
+                "model_preset_id": "Llama2-7B.yaml",
+                "hardware_preset_id": "H100.yaml",
+                "metric": "training_time_s",
+                "simple": {"tp": 1, "cp": 1, "pp": 1, "dp": 8, "ep": 1},
+            },
+            "preview": {"optimizer_enabled": True},
+        },
+        "cases": [
+            {
+                "case_id": "case-0001",
+                "label": "Model Config=Llama2-7B.yaml",
+                "status": "completed",
+                "dimension_values": {"model_config": "Llama2-7B.yaml"},
+                "chosen_candidate": {"tp": 2, "cp": 1, "pp": 1, "dp": 4, "ep": 1},
+                "metrics": {"training_time_s": 2.0, "memory_exceeded": False, "memory_violation_gb": 0.0},
+            },
+            {
+                "case_id": "case-0002",
+                "label": "Model Config=Llama3.yaml",
+                "status": "failed",
+                "dimension_values": {"model_config": "Llama3.yaml"},
+                "chosen_candidate": {"tp": 4, "cp": 1, "pp": 1, "dp": 2, "ep": 1},
+                "metrics": {},
+            },
+        ],
+    }
+
+    rendered = render_detail(detail)
+    table = _collect_datatables(rendered)[0]
+    graph = _collect_graphs(rendered)[0]
+
+    assert table.data[0]["case"] == "case-0001 - Llama2-7B"
+    assert table.data[0]["parallelism"] == "TP 2 / CP 1 / PP 1 / DP 4 / EP 1"
+    assert table.data[1]["training_time_s"] == "0.00 us"
+    assert all(trace.name not in {"completed", "failed", "timed_out"} for trace in graph.figure.data)
