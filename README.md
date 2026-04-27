@@ -24,6 +24,16 @@ cd Rapid-LLM
 
 If you want the example scripts to run through uv, set `RAPID_UV_RUN=1` before invoking them. Otherwise they default to `python`.
 
+### Launch Web UI
+
+After `uv sync`, run from the repository root:
+
+```bash
+./launch_webui.sh
+```
+
+Open `http://127.0.0.1:8050` in a browser. The launcher runs `uv run --frozen --no-sync python -m webui.app.main`; override the bind address with `RAPID_WEBUI_HOST` or `RAPID_WEBUI_PORT` if needed.
+
 #### Option B: Using pip
 
 - `python3 -m venv [/path/to/new/virtual/environment]`

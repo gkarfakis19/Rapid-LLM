@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import itertools
 import json
 import math
@@ -10,11 +11,14 @@ import shutil
 import subprocess
 import threading
 import uuid
+from bisect import insort
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import psutil
 import yaml
@@ -24,6 +28,7 @@ import config as rapid_config
 
 ROOT = Path(__file__).resolve().parents[2]
 WEBUI_ROOT = ROOT / "webui"
+CONFIG_SEEDS_ROOT = WEBUI_ROOT / "config_seeds"
 WORKSPACE_ROOT = Path(os.environ.get("RAPID_WEBUI_WORKSPACE_ROOT", WEBUI_ROOT / "workspace")).expanduser().resolve()
 RUNS_ROOT = WORKSPACE_ROOT / "runs"
 SWEEPS_ROOT = WORKSPACE_ROOT / "sweeps"
@@ -36,25 +41,23 @@ PYTHON_BIN = Path(os.environ.get("RAPID_WEBUI_PYTHON_BIN", ROOT / ".venv" / "bin
 ACTIVE_JOB_LOCK = LOCKS_ROOT / "active_job.lock"
 SCHEMA_VERSION_PATH = WORKSPACE_ROOT / "schema_version.json"
 WORKER_MODULE = "webui.service.worker_runner"
-DEFAULT_MODEL_CONFIG_SOURCES = [
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama2-7B.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama2-7B_inf.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama3.1-70B_2d_train.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama3.1-70B_2d_inf.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama3.1-405B_2d_train.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama3.1-405B_2d_inf.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "DeepSeekV3.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "DeepSeekV3_inf_16k.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "model-config" / "GLM4.7_358B_inf_16k.yaml",
-]
-DEFAULT_HARDWARE_CONFIG_SOURCES = [
-    ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB_2d.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB_base.yaml",
-    ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "A100_SXM4_80GB_base.yaml",
-    ROOT / "configs" / "hardware-config" / "a100_80GB.yaml",
-    ROOT / "configs" / "hardware-config" / "H100_SXM5_80GB_superpod.yaml",
-]
+SWEEP_CASES_JSONL = "cases.jsonl"
+LAST_UI_STATE_FILENAME = "last_ui_state.json"
+LAST_UI_STATE_LIMIT = 5
+LAST_UI_STATE_MAX_TEXT = 2048
+HF_TO_CONFIG_PATH = ROOT / "configs" / "model-config" / "hf_to_config.py"
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+YAML_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+_YAML_CACHE: Dict[Path, Tuple[int, int, Dict[str, Any]]] = {}
+DEFAULT_MODEL_CONFIG_SOURCES = sorted((CONFIG_SEEDS_ROOT / "models").glob("*.yaml"))
+DEFAULT_HARDWARE_CONFIG_SOURCES = sorted((CONFIG_SEEDS_ROOT / "hardware").glob("*.yaml"))
+LEGACY_WEBUI_HARDWARE_CONFIG_NAMES = {
+    "A100_SXM4_80GB_base.yaml",
+    "H100_SXM5_80GB_2d.yaml",
+    "H100_SXM5_80GB_base.yaml",
+    "H100_SXM5_80GB_superpod.yaml",
+    "a100_80GB.yaml",
+}
 
 
 FIELD_OPTIONS: List[Dict[str, str]] = [
@@ -91,7 +94,16 @@ METRIC_LABELS = {
     "training_time_s": "Time / Batch",
     "approx_mfu": "Approx. MFU",
     "prefill_time_s": "Prefill Time",
-    "decode_throughput_tok_s": "Decode Throughput",
+    "decode_throughput_tok_s": "Throughput (TPOT)",
+    "ttft_s": "TTFT",
+    "total_inference_time_s": "Time / Batch",
+}
+INNER_HIERARCHICAL_AXES = ["tp", "cp", "ep"]
+PP_TOPOLOGY_DIMENSIONS = {"dim1_shared", "dim1_dim2", "dim1", "dim2", "dim2_shared"}
+PAPER_DERATE_DEFAULTS = {
+    "A100_PCIe_80GB.yaml": {"compute": 0.60, "memory": 0.70, "communication": 0.85},
+    "A100_SXM4_80GB.yaml": {"compute": 0.90, "memory": 0.70, "communication": 0.80},
+    "H100_SXM5_80GB.yaml": {"compute": 0.56, "memory": 0.80, "communication": 0.85},
 }
 SUPPORTED_MODEL_TYPES = {"gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"}
 VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
@@ -163,6 +175,9 @@ def _seed_editable_configs() -> None:
     for kind, source_paths in seed_groups.items():
         target_dir = CONFIGS_ROOT / kind
         target_dir.mkdir(parents=True, exist_ok=True)
+        if kind == "hardware":
+            for legacy_name in LEGACY_WEBUI_HARDWARE_CONFIG_NAMES:
+                (target_dir / legacy_name).unlink(missing_ok=True)
         for source in source_paths:
             if not source.exists() or _is_case_config_name(source):
                 continue
@@ -182,6 +197,7 @@ def ensure_workspace() -> None:
         LOGS_ROOT,
         DB_ROOT,
         ARTIFACTS_ROOT,
+        WORKSPACE_ROOT / "scratch",
     ]:
         path.mkdir(parents=True, exist_ok=True)
     _seed_editable_configs()
@@ -189,12 +205,31 @@ def ensure_workspace() -> None:
         SCHEMA_VERSION_PATH.write_text(json.dumps({"schema_version": 1}, indent=2))
 
 
+def _yaml_cache_key(path: Path) -> tuple[Path, int, int]:
+    stat = path.stat()
+    return path.resolve(), stat.st_mtime_ns, stat.st_size
+
+
 def _yaml_load(path: Path) -> Dict[str, Any]:
-    return yaml.safe_load(path.read_text()) or {}
+    resolved_path, mtime_ns, size = _yaml_cache_key(path)
+    cached = _YAML_CACHE.get(resolved_path)
+    if cached and cached[0] == mtime_ns and cached[1] == size:
+        return copy.deepcopy(cached[2])
+    data = yaml.load(path.read_text(), Loader=YAML_LOADER) or {}
+    _YAML_CACHE[resolved_path] = (mtime_ns, size, data)
+    return copy.deepcopy(data)
 
 
 def _yaml_dump(data: Dict[str, Any]) -> str:
-    return yaml.safe_dump(data, sort_keys=False)
+    return yaml.dump(data, Dumper=YAML_DUMPER, sort_keys=False)
+
+
+def _yaml_write_if_changed(path: Path, data: Dict[str, Any]) -> None:
+    text = _yaml_dump(data)
+    if path.exists() and path.read_text() == text:
+        return
+    path.write_text(text)
+    _YAML_CACHE.pop(path.resolve(), None)
 
 
 def _json_dump(path: Path, payload: Dict[str, Any]) -> None:
@@ -206,6 +241,151 @@ def _json_load(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def _last_ui_state_path() -> Path:
+    return WORKSPACE_ROOT / "scratch" / LAST_UI_STATE_FILENAME
+
+
+def _trim_text(value: Any, limit: int = LAST_UI_STATE_MAX_TEXT) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text[:limit]
+
+
+def _trim_string_list(values: Any, limit: int = 24) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    trimmed: List[str] = []
+    for value in values[:limit]:
+        text = _trim_text(value, 256)
+        if text:
+            trimmed.append(text)
+    return trimmed
+
+
+def _trim_number(value: Any) -> int | float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric.is_integer():
+        return int(numeric)
+    return numeric
+
+
+def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    if not isinstance(rows, list):
+        rows = []
+    for row in rows[:3]:
+        row = row if isinstance(row, dict) else {}
+        mode = row.get("mode") if row.get("mode") in {"values", "range"} else "values"
+        sanitized.append(
+            {
+                "field": _trim_text(row.get("field"), 128),
+                "mode": mode,
+                "list_text": _trim_text(row.get("list_text"), LAST_UI_STATE_MAX_TEXT) or "",
+                "config_values": _trim_string_list(row.get("config_values"), 24),
+                "start": _trim_number(row.get("start")),
+                "end": _trim_number(row.get("end")),
+                "step_or_points": _trim_number(row.get("step_or_points")),
+            }
+        )
+    while len(sanitized) < 3:
+        sanitized.append({"field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
+    return sanitized
+
+
+def sanitize_last_ui_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
+    state = state if isinstance(state, dict) else {}
+    return {
+        "model_run_configs": _trim_string_list(state.get("model_run_configs"), 24),
+        "hardware_run_configs": _trim_string_list(state.get("hardware_run_configs"), 24),
+        "model_preset": _trim_text(state.get("model_preset"), 256),
+        "hardware_preset": _trim_text(state.get("hardware_preset"), 256),
+        "active_config_tab": _trim_text(state.get("active_config_tab"), 320),
+        "run_mode": state.get("run_mode") if state.get("run_mode") in {"sweep", "single"} else "sweep",
+        "optimize_parallelism": bool(state.get("optimize_parallelism")),
+        "optimizer_preset": _trim_text(state.get("optimizer_preset"), 64) or "Fast",
+        "sweep_rows": _sanitize_dimension_controls(state.get("sweep_rows")),
+        "metric": _trim_text(state.get("metric"), 128),
+        "x_axis": _trim_text(state.get("x_axis"), 128),
+        "series_axis": _trim_text(state.get("series_axis"), 128),
+        "worker_count": _trim_number(state.get("worker_count")),
+        "timeout_seconds": _trim_number(state.get("timeout_seconds")),
+    }
+
+
+def load_last_ui_state() -> Dict[str, Any]:
+    path = _last_ui_state_path()
+    if not path.exists():
+        return {}
+    try:
+        record = _json_load(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    current = record.get("current") if isinstance(record, dict) else None
+    return sanitize_last_ui_state(current) if isinstance(current, dict) else {}
+
+
+def save_last_ui_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = sanitize_last_ui_state(state)
+    path = _last_ui_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    recent: List[Dict[str, Any]] = []
+    if path.exists():
+        try:
+            existing = _json_load(path)
+            recent = list(existing.get("recent") or [])
+        except (OSError, json.JSONDecodeError):
+            recent = []
+    entry = {"saved_at": utc_now(), "state": sanitized}
+    deduped = [item for item in recent if item.get("state") != sanitized]
+    record = {"schema_version": 1, "current": sanitized, "recent": [entry, *deduped][:LAST_UI_STATE_LIMIT]}
+    _json_dump(path, record)
+    return record
+
+
+def clear_last_ui_state() -> None:
+    _last_ui_state_path().unlink(missing_ok=True)
+
+
+def _write_sweep_cases_jsonl(job_root: Path, case_records: List[Dict[str, Any]]) -> Path:
+    path = job_root / SWEEP_CASES_JSONL
+    tmp_path = path.with_suffix(".jsonl.tmp")
+    with tmp_path.open("w") as handle:
+        for index, record in enumerate(case_records, start=1):
+            indexed_record = dict(record)
+            indexed_record.setdefault("case_index", index)
+            handle.write(json.dumps(indexed_record, sort_keys=True) + "\n")
+    tmp_path.replace(path)
+    return path
+
+
+def _iter_sweep_cases_from_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    with path.open() as handle:
+        for line in handle:
+            text = line.strip()
+            if text:
+                yield json.loads(text)
+
+
+def _iter_sweep_case_records(job_root: Path) -> Tuple[Iterable[Dict[str, Any]], str]:
+    jsonl_path = job_root / SWEEP_CASES_JSONL
+    if jsonl_path.exists():
+        return _iter_sweep_cases_from_jsonl(jsonl_path), "jsonl"
+    cases_dir = job_root / "cases"
+    if cases_dir.exists():
+        return (_json_load(case_path) for case_path in sorted(cases_dir.glob("*.json"))), "legacy-json"
+    return iter(()), "missing"
+
+
 def _path_artifact_type(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in {".yaml", ".yml"}:
@@ -214,7 +394,7 @@ def _path_artifact_type(path: Path) -> str:
         return "json"
     if suffix == ".log":
         return "log"
-    if suffix in {".csv", ".tsv"}:
+    if suffix in {".csv", ".tsv", ".jsonl"}:
         return "table"
     if suffix in {".png", ".jpg", ".jpeg", ".svg", ".html"}:
         return "visual"
@@ -223,6 +403,12 @@ def _path_artifact_type(path: Path) -> str:
 
 def prettify_name(stem: str) -> str:
     return stem.replace("_", " ")
+
+
+def config_label(config_id: Any) -> str:
+    if not config_id:
+        return ""
+    return prettify_name(Path(str(config_id)).stem)
 
 
 def _config_filename_from_user_text(raw_name: str) -> str:
@@ -301,6 +487,92 @@ def rename_config_file(kind: str, preset_id: str, new_name: str) -> str:
     if target != source:
         source.rename(target)
     return filename
+
+
+def parse_huggingface_model_reference(raw_reference: str) -> Tuple[str, str]:
+    text = str(raw_reference or "").strip()
+    if not text:
+        raise ValueError("Enter a Hugging Face model URL or model id.")
+    if "://" not in text:
+        if "@" in text:
+            model_id, revision = text.rsplit("@", 1)
+            return model_id.strip("/"), revision or "main"
+        return text.strip("/"), "main"
+
+    parsed = urlparse(text)
+    host = parsed.netloc.lower()
+    if host not in {"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"}:
+        raise ValueError("Use a huggingface.co or hf.co model URL.")
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if parts and parts[0] == "models":
+        parts = parts[1:]
+    if not parts:
+        raise ValueError("Hugging Face URL does not contain a model id.")
+
+    revision = "main"
+    for marker in ("resolve", "blob", "tree"):
+        if marker in parts:
+            marker_index = parts.index(marker)
+            model_parts = parts[:marker_index]
+            if marker_index + 1 < len(parts):
+                revision = parts[marker_index + 1]
+            break
+    else:
+        model_parts = parts[:2] if len(parts) >= 2 else parts[:1]
+    if not model_parts:
+        raise ValueError("Hugging Face URL does not contain a model id.")
+    return "/".join(model_parts), revision or "main"
+
+
+def _load_hf_to_config_module():
+    if not HF_TO_CONFIG_PATH.exists():
+        raise FileNotFoundError(f"Hugging Face converter not found: {HF_TO_CONFIG_PATH}")
+    spec = importlib.util.spec_from_file_location("rapid_llm_hf_to_config", HF_TO_CONFIG_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load Hugging Face converter: {HF_TO_CONFIG_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def create_model_config_from_huggingface(raw_reference: str, new_name: str | None = None) -> Dict[str, Any]:
+    ensure_workspace()
+    model_id, revision = parse_huggingface_model_reference(raw_reference)
+    filename = _config_filename_from_user_text(new_name or f"{Path(model_id).name}_hf")
+    target = config_file_path("models", filename)
+    if target.exists():
+        raise FileExistsError(f"Config already exists: {filename}")
+    try:
+        converter = _load_hf_to_config_module()
+        hf_config = converter._fetch_hf_config(model_id, revision=revision)
+        inferred_model_type, alias = converter._infer_model_type(hf_config.get("model_type"))
+        args = SimpleNamespace(
+            global_batch_size=1,
+            gradient_accumulation_steps=1,
+            seq_len=None,
+            decode_len=0,
+            run_type="training",
+            use_flashattention=None,
+            flash_tile_size=None,
+        )
+        yaml_config = converter._build_yaml_config(hf_config, args, inferred_model_type)
+    except SystemExit as exc:
+        message = str(exc) or "Hugging Face config conversion failed."
+        raise ValueError(message) from exc
+    yaml_config.setdefault("metadata", {})["huggingface_source"] = {
+        "model_id": model_id,
+        "revision": revision,
+        "reference": raw_reference,
+    }
+    _yaml_write_if_changed(target, yaml_config)
+    return {
+        "id": filename,
+        "model_id": model_id,
+        "revision": revision,
+        "model_type": inferred_model_type,
+        "alias": alias,
+        "path": str(target),
+    }
 
 
 def parse_size_to_gb(raw: Any) -> float:
@@ -385,14 +657,15 @@ def get_total_gpu_count(hw_dict: Dict[str, Any], run_type: str) -> int:
 
 
 def get_default_metric_for_run_type(run_type: str) -> str:
-    return "prefill_time_s" if run_type == "inference" else "training_time_s"
+    return "decode_throughput_tok_s" if str(run_type).lower() == "inference" else "training_time_s"
 
 
 def get_metric_options(run_type: str) -> List[Dict[str, str]]:
-    if run_type == "inference":
+    if str(run_type).lower() == "inference":
         return [
-            {"value": "prefill_time_s", "label": METRIC_LABELS["prefill_time_s"]},
             {"value": "decode_throughput_tok_s", "label": METRIC_LABELS["decode_throughput_tok_s"]},
+            {"value": "ttft_s", "label": METRIC_LABELS["ttft_s"]},
+            {"value": "total_inference_time_s", "label": METRIC_LABELS["total_inference_time_s"]},
         ]
     return [
         {"value": "training_time_s", "label": METRIC_LABELS["training_time_s"]},
@@ -419,6 +692,82 @@ def _initial_network_derate(hw_dict: Dict[str, Any]) -> float:
     return sum(utils) / len(utils) if utils else 1.0
 
 
+def infer_pp_topology_dimension(hw_dict: Dict[str, Any]) -> str:
+    dimensions = hw_dict.get("network", {}).get("dimensions", []) or []
+    dim1_axes = {str(axis).strip().lower() for axis in (dimensions[1].get("parallelisms", []) if len(dimensions) > 1 else []) or []}
+    dim2_axes = {str(axis).strip().lower() for axis in (dimensions[2].get("parallelisms", []) if len(dimensions) > 2 else []) or []}
+    if {"pp", "dp"} <= dim1_axes:
+        return "dim1_shared"
+    if "pp" in dim1_axes and "dp" in dim2_axes:
+        return "dim1_dim2"
+    if {"pp", "dp"} <= dim2_axes:
+        return "dim1_dim2"
+    for idx, dim in enumerate(dimensions):
+        axes = {str(axis).strip().lower() for axis in dim.get("parallelisms", []) or []}
+        if "pp" in axes:
+            return "dim1_dim2" if idx >= 2 else "dim1_shared"
+    return "dim1_shared"
+
+
+def _normalize_pp_topology_dimension(value: Any) -> str:
+    text = str(value or "dim1_shared").strip().lower()
+    if text == "dim1":
+        return "dim1_dim2"
+    if text in {"dim2", "dim2_shared"}:
+        return "dim1_dim2"
+    return text if text in PP_TOPOLOGY_DIMENSIONS else "dim1_shared"
+
+
+def _apply_parallelism_topology_mapping(hardware: Dict[str, Any], pp_dimension: Any) -> None:
+    dimensions = hardware.setdefault("network", {}).setdefault("dimensions", [])
+    if not dimensions:
+        return
+
+    dimensions[0]["parallelisms"] = list(INNER_HIERARCHICAL_AXES)
+    for idx in range(1, len(dimensions)):
+        dimensions[idx]["parallelisms"] = []
+    if len(dimensions) == 1:
+        return
+
+    pp_dimension = _normalize_pp_topology_dimension(pp_dimension)
+    dim1_idx = 1
+    dim2_idx = min(2, len(dimensions) - 1)
+    if pp_dimension == "dim1_shared":
+        dimensions[dim1_idx]["parallelisms"] = ["pp", "dp"]
+    else:
+        dimensions[dim1_idx]["parallelisms"] = ["pp"]
+        dimensions[dim2_idx]["parallelisms"] = ["dp"]
+
+
+def paper_derate_defaults_for_hardware(hardware_id: str | None, hardware: Dict[str, Any] | None = None) -> Dict[str, float] | None:
+    config_name = Path(str(hardware_id or "")).name
+    if config_name in PAPER_DERATE_DEFAULTS:
+        return copy.deepcopy(PAPER_DERATE_DEFAULTS[config_name])
+
+    if hardware is None and config_name:
+        try:
+            hardware = load_preset("hardware", config_name)
+        except Exception:
+            hardware = None
+
+    metadata = (hardware or {}).get("metadata", {}) or {}
+    signature = " ".join(
+        str(value)
+        for value in [
+            config_name,
+            metadata.get("display_name", ""),
+            metadata.get("source_config", ""),
+        ]
+    ).lower()
+    if "a100" in signature and "pcie" in signature:
+        return copy.deepcopy(PAPER_DERATE_DEFAULTS["A100_PCIe_80GB.yaml"])
+    if "a100" in signature and "sxm" in signature:
+        return copy.deepcopy(PAPER_DERATE_DEFAULTS["A100_SXM4_80GB.yaml"])
+    if "h100" in signature and "sxm" in signature:
+        return copy.deepcopy(PAPER_DERATE_DEFAULTS["H100_SXM5_80GB.yaml"])
+    return None
+
+
 def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[str, Any]:
     model = load_preset("models", model_preset_id)
     hardware = load_preset("hardware", hardware_preset_id)
@@ -429,13 +778,17 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
     dimensions = []
     for idx, dim in enumerate(hardware.get("network", {}).get("dimensions", []) or []):
         topology = dim.get("topology", {}) or {}
+        topology_type = str(topology.get("type", "Ring"))
+        if topology_type.strip().lower() == "superpod":
+            topology_type = "Ring"
         dimensions.append(
             {
                 "id": dim.get("id") or f"dim{idx}",
                 "label": f"Dimension {idx}",
-                "topology_type": str(topology.get("type", "Ring")),
+                "topology_type": topology_type,
                 "bandwidth": _format_bandwidth_field(topology.get("bandwidth", "")),
                 "util": float(topology.get("util", 1.0) or 1.0),
+                "parallelisms": [str(axis).upper() for axis in dim.get("parallelisms", []) or []],
             }
         )
     precision = hardware.get("sw_param", {}).get("precision", {}) or {}
@@ -454,7 +807,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "pp": int(parallelism.get("pp", 1) or 1),
             "dp": int(train_block.get("dp", 1) or 1),
             "ep": int(train_block.get("ep", 1) or 1),
-            "replica_count": int(inference_block.get("replica_count", 1) or 1),
+            "replica_count": int(inference_block.get("replica_count", 1) or 1) if run_type == "inference" else 1,
             "hbm_gb": parse_size_to_gb(hardware.get("tech_param", {}).get("DRAM", {}).get("size", "0 GB")),
             "compute_derate": float(hardware.get("tech_param", {}).get("core", {}).get("util", 1.0) or 1.0),
             "memory_derate": float(hardware.get("tech_param", {}).get("DRAM", {}).get("util", 1.0) or 1.0),
@@ -476,6 +829,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "precision_optimizer_states": str(precision.get("optimizer_states", "fp32")),
             "precision_stats": str(precision.get("stats", "fp32")),
             "precision_master_parameters": "0" if str(precision.get("master_parameters", 0.0)).strip().lower() in {"0", "0.0"} else str(precision.get("master_parameters", 0.0)),
+            "pp_network_dimension": infer_pp_topology_dimension(hardware),
             "execution_backend": str(hardware.get("execution_backend", {}).get("model", "analytical")),
             "execution_mode": str(hardware.get("execution_backend", {}).get("astra", {}).get("mode", "full_astrasim_hierarchical")),
             "tied_embeddings": bool(model.get("model_param", {}).get("tied_embeddings", False)),
@@ -570,6 +924,7 @@ def _apply_model_overrides(model: Dict[str, Any], payload: Dict[str, Any]) -> No
 def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any]) -> None:
     simple = payload.get("simple", {}) or {}
     advanced = payload.get("advanced", {}) or {}
+    run_type = str(simple.get("run_type") or "training").lower()
     sw_param = hardware.setdefault("sw_param", {})
     precision = sw_param.setdefault("precision", {})
     sw_param["full_recomputation"] = bool(advanced.get("full_recomputation", sw_param.get("full_recomputation", False)))
@@ -601,7 +956,7 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
     inference_block = parallelism.setdefault("inference", {})
     train_block["dp"] = _safe_int(simple.get("dp"), _safe_int(train_block.get("dp"), 1))
     train_block["ep"] = _safe_int(simple.get("ep"), _safe_int(train_block.get("ep"), 1))
-    inference_block["replica_count"] = _safe_int(simple.get("replica_count"), _safe_int(inference_block.get("replica_count"), 1))
+    inference_block["replica_count"] = _safe_int(simple.get("replica_count"), _safe_int(inference_block.get("replica_count"), 1)) if run_type == "inference" else 1
     execution_backend = hardware.setdefault("execution_backend", {})
     execution_backend["model"] = "astra" if bool(simple.get("use_astrasim", False)) else "analytical"
     astra = execution_backend.setdefault("astra", {})
@@ -610,18 +965,34 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
     network = hardware.setdefault("network", {})
     dimensions = network.setdefault("dimensions", [])
     network_derate = _safe_float(simple.get("network_derate"), _initial_network_derate(hardware))
+    uses_astra_only_topology = False
     for idx, row in enumerate(payload.get("network_dimensions", []) or []):
         if idx >= len(dimensions):
             continue
         topology = dimensions[idx].setdefault("topology", {})
         if row.get("topology_type"):
             topology["type"] = row["topology_type"]
+            topology_type = str(row["topology_type"]).strip().lower()
+            if topology_type != "ring":
+                uses_astra_only_topology = True
+            if topology_type == "superpod":
+                topology["superpod_variant"] = "h100"
+                topology["leaf_size"] = 1
         if row.get("bandwidth") not in (None, ""):
-            topology["bandwidth"] = _coerce_network_bandwidth(row["bandwidth"])
+            bandwidth = _coerce_network_bandwidth(row["bandwidth"])
+            if str(topology.get("type", "")).strip().lower() == "superpod" and not isinstance(bandwidth, (list, tuple)):
+                bandwidth = [bandwidth, bandwidth]
+            topology["bandwidth"] = bandwidth
         topology["util"] = _safe_float(row.get("util"), network_derate)
     for idx in range(len(payload.get("network_dimensions", []) or []), len(dimensions)):
         topology = dimensions[idx].setdefault("topology", {})
         topology["util"] = network_derate
+        if str(topology.get("type", "")).strip().lower() != "ring":
+            uses_astra_only_topology = True
+    _apply_parallelism_topology_mapping(hardware, advanced.get("pp_network_dimension"))
+    if uses_astra_only_topology:
+        execution_backend["model"] = "astra"
+        astra["mode"] = "full_astrasim_hierarchical"
 
 
 def _apply_form_overrides(model: Dict[str, Any], hardware: Dict[str, Any], payload: Dict[str, Any]) -> None:
@@ -674,8 +1045,8 @@ def save_config_edits_from_payload(payload: Dict[str, Any]) -> Tuple[Optional[Di
     try:
         model_path = config_file_path("models", payload["model_preset_id"])
         hardware_path = config_file_path("hardware", payload["hardware_preset_id"])
-        model_path.write_text(_yaml_dump(model))
-        hardware_path.write_text(_yaml_dump(hardware))
+        _yaml_write_if_changed(model_path, model)
+        _yaml_write_if_changed(hardware_path, hardware)
     except (OSError, ValueError) as exc:
         return None, None, [str(exc)]
     return model, hardware, []
@@ -696,7 +1067,7 @@ def save_config_edits_for_selection(payload: Dict[str, Any], model_ids: List[str
             errors.extend(model_errors)
             continue
         try:
-            config_file_path("models", model_id).write_text(_yaml_dump(model))
+            _yaml_write_if_changed(config_file_path("models", model_id), model)
         except (OSError, ValueError) as exc:
             errors.append(str(exc))
     for hardware_id in selected_hardware:
@@ -706,7 +1077,7 @@ def save_config_edits_for_selection(payload: Dict[str, Any], model_ids: List[str
             errors.extend(hardware_errors)
             continue
         try:
-            config_file_path("hardware", hardware_id).write_text(_yaml_dump(hardware))
+            _yaml_write_if_changed(config_file_path("hardware", hardware_id), hardware)
         except (OSError, ValueError) as exc:
             errors.append(str(exc))
     return errors
@@ -811,10 +1182,28 @@ def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], fie
         _set_path(target[0], target[1], target[2])
 
 
-def build_case_label(values: Dict[str, Any]) -> str:
+def _format_case_dimension(key: str, value: Any) -> str:
+    if key in {"model_config", "hardware_config"}:
+        return config_label(value)
+    return f"{dimension_label(key)} {value}"
+
+
+def build_case_label(values: Dict[str, Any], base_model_id: Any = None, base_hardware_id: Any = None) -> str:
     if not values:
         return "Base Case"
-    return " | ".join(f"{dimension_label(key)}={value}" for key, value in values.items())
+    has_config_dimension = "model_config" in values or "hardware_config" in values
+    pieces: List[str] = []
+    if has_config_dimension:
+        model_value = values.get("model_config") or base_model_id
+        hardware_value = values.get("hardware_config") or base_hardware_id
+        if model_value and hardware_value:
+            pieces.append(f"{config_label(model_value)} on {config_label(hardware_value)}")
+        elif model_value:
+            pieces.append(config_label(model_value))
+        elif hardware_value:
+            pieces.append(config_label(hardware_value))
+    pieces.extend(_format_case_dimension(key, value) for key, value in values.items() if key not in {"model_config", "hardware_config"})
+    return " | ".join(item for item in pieces if item) or "Base Case"
 
 
 def _has_dimension(dimensions: List[Dict[str, Any]], field_key: str) -> bool:
@@ -840,10 +1229,35 @@ def default_worker_count() -> int:
     return max(1, min(cpu_count, 8))
 
 
+def _candidate_axis_values(configured_values: Iterable[int], target_total_gpus: int) -> List[int]:
+    values = {1}
+    for raw_value in configured_values:
+        value = _safe_int(raw_value, 0)
+        if value >= 1 and value <= target_total_gpus and target_total_gpus % value == 0:
+            values.add(value)
+    return sorted(values)
+
+
+def _fallback_parallelism_candidate(run_type: str, target_total_gpus: int, replica_count: int = 1) -> Optional[Dict[str, int]]:
+    if target_total_gpus < 1:
+        return None
+    if run_type == "training":
+        return {"tp": 1, "cp": 1, "pp": 1, "dp": target_total_gpus, "ep": 1, "replica_count": 1}
+    replica_count = max(1, replica_count)
+    if target_total_gpus % replica_count != 0:
+        return None
+    return {"tp": target_total_gpus // replica_count, "cp": 1, "pp": 1, "dp": 1, "ep": 1, "replica_count": replica_count}
+
+
 def generate_parallelism_candidates(hardware_dict: Dict[str, Any], run_type: str, target_total_gpus: int, preset_name: str) -> List[Dict[str, Any]]:
     preset = OPTIMIZER_PRESETS.get(preset_name, OPTIMIZER_PRESETS["Fast"])[run_type]
     candidates = []
-    for tp, cp, pp, ep in itertools.product(preset["tp"], preset["cp"], preset["pp"], preset["ep"]):
+    target_total_gpus = _safe_int(target_total_gpus, 0)
+    tp_values = _candidate_axis_values(preset["tp"], target_total_gpus)
+    cp_values = _candidate_axis_values(preset["cp"], target_total_gpus)
+    pp_values = _candidate_axis_values(preset["pp"], target_total_gpus)
+    ep_values = _candidate_axis_values(preset["ep"], target_total_gpus)
+    for tp, cp, pp, ep in itertools.product(tp_values, cp_values, pp_values, ep_values):
         tp_cp = tp * cp
         if preset["tp_cp_min"] is not None and tp_cp < preset["tp_cp_min"]:
             continue
@@ -855,9 +1269,14 @@ def generate_parallelism_candidates(hardware_dict: Dict[str, Any], run_type: str
                 if total == target_total_gpus:
                     candidates.append({"tp": tp, "cp": cp, "pp": pp, "dp": dp, "ep": ep, "replica_count": 1})
         else:
-            total = tp * cp * pp * ep
+            replica_count = _safe_int((hardware_dict.get("parallelism", {}).get("inference", {}) or {}).get("replica_count"), 1)
+            total = tp * cp * pp * ep * replica_count
             if total == target_total_gpus:
-                candidates.append({"tp": tp, "cp": cp, "pp": pp, "dp": 1, "ep": ep, "replica_count": 1})
+                candidates.append({"tp": tp, "cp": cp, "pp": pp, "dp": 1, "ep": ep, "replica_count": replica_count})
+    if not candidates:
+        fallback = _fallback_parallelism_candidate(run_type, target_total_gpus, _safe_int((hardware_dict.get("parallelism", {}).get("inference", {}) or {}).get("replica_count"), 1))
+        if fallback:
+            candidates.append(fallback)
     return candidates
 
 
@@ -945,7 +1364,7 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             _validate_pair(case_model, case_hw)
             top_level_cases.append({
                 "case_id": f"case-{combo_index + 1:04d}",
-                "label": build_case_label(case_meta["dimension_values"]),
+                "label": build_case_label(case_meta["dimension_values"], payload.get("model_preset_id"), payload.get("hardware_preset_id")),
                 "model": case_model,
                 "hardware": case_hw,
                 "run_type": get_model_run_type(case_model),
@@ -953,11 +1372,17 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "dimension_values": case_meta["dimension_values"],
             })
         except Exception as exc:  # noqa: BLE001
-            invalid_cases.append({"label": build_case_label(case_meta["dimension_values"]), "error": str(exc)})
+            invalid_cases.append({"label": build_case_label(case_meta["dimension_values"], payload.get("model_preset_id"), payload.get("hardware_preset_id")), "error": str(exc)})
     if invalid_cases:
         warnings.append(f"Pruned {len(invalid_cases)} invalid case(s) before launch.")
+    if invalid_cases and not top_level_cases:
+        errors.append("All sweep cases were invalid. Check Total GPUs, fixed parallelism axes, or enable Optimize parallelism.")
+        return {"ok": False, "errors": errors, "warnings": warnings, "top_level_case_count": 0, "candidate_breakdown": [], "top_level_cases": [], "invalid_cases": invalid_cases[:20], "total_invocations": 0}
+    valid_metrics = {option["value"] for option in get_metric_options(run_type)}
     metric = payload.get("metric") or get_default_metric_for_run_type(run_type)
-    timeout_s = _safe_int(payload.get("timeout_seconds"), 180)
+    if metric not in valid_metrics:
+        metric = get_default_metric_for_run_type(run_type)
+    timeout_s = max(0, _safe_int(payload.get("timeout_seconds"), 180))
     workers = _safe_int(payload.get("worker_count"), default_worker_count())
     total_invocations, candidate_breakdown = 0, []
     if optimize:
@@ -982,7 +1407,7 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
         "top_level_case_count": len(top_level_cases),
         "candidate_breakdown": candidate_breakdown,
         "total_invocations": total_invocations,
-        "worst_case_wall_clock_s": math.ceil(total_invocations / max(1, workers)) * timeout_s if total_invocations else 0,
+        "worst_case_wall_clock_s": None if timeout_s == 0 and total_invocations else math.ceil(total_invocations / max(1, workers)) * timeout_s if total_invocations else 0,
         "invalid_cases": invalid_cases[:20],
         "top_level_cases": top_level_cases,
     }
@@ -1022,19 +1447,66 @@ def list_history(limit: int = 50) -> List[Dict[str, Any]]:
         for path in root.iterdir():
             if path.is_dir():
                 entries.append(_job_summary_from_dir(path, kind))
+    _assign_history_title_indices(entries)
     entries.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
     return entries[:limit]
 
 
-def load_job_detail(job_kind: str, job_id: str) -> Dict[str, Any]:
+def _assign_history_title_indices(entries: List[Dict[str, Any]]) -> None:
+    by_title: Dict[str, List[Dict[str, Any]]] = {}
+    for item in entries:
+        by_title.setdefault(str(item.get("title") or ""), []).append(item)
+    for group in by_title.values():
+        group.sort(key=lambda item: (item.get("created_at") or "", item.get("id") or ""))
+        duplicate_count = len(group)
+        for index, item in enumerate(group, start=1):
+            item["title_index"] = index
+            item["title_duplicate_count"] = duplicate_count
+
+
+def _case_sort_tuple(case: Dict[str, Any], metric: str, ordinal: int) -> Tuple[Tuple[int, float], str, int]:
+    metric_value = (case.get("metrics") or {}).get(metric)
+    return metric_sort_key(metric, metric_value), str(case.get("case_id") or ""), ordinal
+
+
+def _load_sweep_cases(job_root: Path, metric: str, case_limit: int | None = None, display_mode: str | None = "top") -> Tuple[List[Dict[str, Any]], int, int, str, str]:
+    mode = "full" if display_mode == "full" else "top"
+    records, source = _iter_sweep_case_records(job_root)
+    if mode == "full" or case_limit is None or case_limit < 0:
+        cases = list(records)
+        return cases, len(cases), len(cases), mode, source
+
+    limit = max(0, int(case_limit))
+    selected: List[Tuple[Tuple[Tuple[int, float], str, int], Dict[str, Any]]] = []
+    total = 0
+    for ordinal, case in enumerate(records):
+        total += 1
+        if limit == 0:
+            continue
+        insort(selected, (_case_sort_tuple(case, metric, ordinal), case))
+        if len(selected) > limit:
+            selected.pop()
+    cases = [case for _, case in selected]
+    return cases, total, len(cases), mode, source
+
+
+def load_job_detail(job_kind: str, job_id: str, case_limit: int | None = None, display_mode: str | None = "top") -> Dict[str, Any]:
     path = _detail_root(job_kind) / job_id
     detail = _job_summary_from_dir(path, job_kind)
     detail["status_record"] = _json_load(path / "status.json") if (path / "status.json").exists() else {}
     detail["request_record"] = _json_load(path / "request.json") if (path / "request.json").exists() else {}
     detail["summary_record"] = _json_load(path / "summary.json") if (path / "summary.json").exists() else {}
     if job_kind == "sweep":
-        cases_dir = path / "cases"
-        detail["cases"] = [_json_load(case_path) for case_path in sorted(cases_dir.glob("*.json"))] if cases_dir.exists() else []
+        payload = detail["request_record"].get("payload") or {}
+        metric = payload.get("metric") or detail.get("metric") or "training_time_s"
+        cases, total_cases, loaded_cases, mode, source = _load_sweep_cases(path, metric, case_limit, display_mode)
+        detail["cases"] = cases
+        detail["_case_count_total"] = total_cases
+        detail["_case_count_loaded"] = loaded_cases
+        detail["_case_limit"] = case_limit
+        detail["_case_display_mode"] = mode
+        detail["_case_sort_metric"] = metric
+        detail["_case_source"] = source
     else:
         detail["result"] = _json_load(path / "result.json") if (path / "result.json").exists() else {}
     return detail
@@ -1045,26 +1517,68 @@ def _slugify_artifact_name(raw: str) -> str:
     return slug or "plot"
 
 
-def save_plot_html(job_kind: str, job_id: str, title: str, html_text: str) -> str:
+def save_plot_png(job_kind: str, job_id: str, title: str, png_bytes: bytes) -> str:
     job_root = _detail_root(job_kind) / job_id
     if not job_root.exists():
         raise FileNotFoundError(f"Unknown job: {job_id}")
+    if not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Plot export did not produce a PNG image.")
     plot_dir = job_root / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
     slug = _slugify_artifact_name(title or job_id)
     index = 1
     while True:
-        path = plot_dir / f"{slug}-plot-{index:03d}.html"
+        path = plot_dir / f"{slug}-plot-{index:03d}.png"
         if not path.exists():
-            path.write_text(html_text)
+            path.write_bytes(png_bytes)
             return str(path)
         index += 1
 
 
+def save_table_export(job_kind: str, job_id: str, title: str, fmt: str, content: str) -> str:
+    job_root = _detail_root(job_kind) / job_id
+    if not job_root.exists():
+        raise FileNotFoundError(f"Unknown job: {job_id}")
+    normalized_fmt = str(fmt).lower()
+    if normalized_fmt not in {"csv", "json"}:
+        raise ValueError("Table exports support CSV or JSON.")
+    export_dir = job_root / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    slug = _slugify_artifact_name(title or job_id)
+    index = 1
+    while True:
+        path = export_dir / f"{slug}-table-{index:03d}.{normalized_fmt}"
+        if not path.exists():
+            path.write_text(content)
+            return str(path)
+        index += 1
+
+
+def _preview_config_values(preview: Dict[str, Any], field_key: str, fallback: Any) -> List[Any]:
+    values: List[Any] = []
+    for case in preview.get("top_level_cases", []) or []:
+        value = (case.get("dimension_values") or {}).get(field_key) or fallback
+        if value and value not in values:
+            values.append(value)
+    if not values and fallback:
+        values.append(fallback)
+    return values
+
+
 def build_job_title(payload: Dict[str, Any], preview: Dict[str, Any]) -> str:
-    model_label = prettify_name(Path(payload.get("model_preset_id", "model")).stem)
-    hw_label = prettify_name(Path(payload.get("hardware_preset_id", "hardware")).stem)
-    return f"{model_label} on {hw_label} Sweep" if preview.get("top_level_case_count", 0) > 1 or preview.get("optimizer_enabled") else f"{model_label} on {hw_label}"
+    model_values = _preview_config_values(preview, "model_config", payload.get("model_preset_id", "model"))
+    hardware_values = _preview_config_values(preview, "hardware_config", payload.get("hardware_preset_id", "hardware"))
+    run_type = str(preview.get("run_type") or (payload.get("simple") or {}).get("run_type") or "").strip().lower()
+    sweep_label = "Inference Sweep" if run_type == "inference" else "Training Sweep" if run_type == "training" else "Sweep"
+    if len(model_values) > 1 and len(hardware_values) > 1:
+        base = f"{len(model_values)} models x {len(hardware_values)} hardware targets"
+    elif len(model_values) > 1:
+        base = f"{len(model_values)} models on {config_label(hardware_values[0])}"
+    elif len(hardware_values) > 1:
+        base = f"{config_label(model_values[0])} on {len(hardware_values)} hardware targets"
+    else:
+        base = f"{config_label(model_values[0])} on {config_label(hardware_values[0])}"
+    return f"{base} {sweep_label}" if preview.get("top_level_case_count", 0) > 1 or preview.get("optimizer_enabled") else base
 
 
 def is_metric_better(metric: str, candidate: float, incumbent: float) -> bool:
@@ -1081,6 +1595,45 @@ def pick_best_result(results: List[Dict[str, Any]], metric: str) -> Dict[str, An
     return sorted(results, key=lambda item: metric_sort_key(metric, item.get("metrics", {}).get(metric)))[0]
 
 
+def result_memory_violation_gb(result: Dict[str, Any]) -> float:
+    metrics = result.get("metrics") or {}
+    try:
+        return max(0.0, float(metrics.get("memory_violation_gb") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def result_memory_exceeded(result: Dict[str, Any]) -> bool:
+    metrics = result.get("metrics") or {}
+    violation_gb = result_memory_violation_gb(result)
+    raw_exceeded = metrics.get("memory_exceeded")
+    if isinstance(raw_exceeded, str):
+        exceeded = raw_exceeded.strip().lower() in {"1", "true", "yes"}
+    else:
+        exceeded = bool(raw_exceeded)
+    return exceeded or violation_gb > 0
+
+
+def pick_best_optimized_result(results: List[Dict[str, Any]], metric: str) -> Dict[str, Any]:
+    memory_fitting = [item for item in results if not result_memory_exceeded(item)]
+    if memory_fitting:
+        return pick_best_result(memory_fitting, metric)
+    chosen = sorted(
+        results,
+        key=lambda item: (
+            result_memory_violation_gb(item),
+            metric_sort_key(metric, item.get("metrics", {}).get(metric)),
+        ),
+    )[0]
+    chosen = copy.deepcopy(chosen)
+    warnings = list(chosen.get("warnings") or [])
+    message = "Every tested parallelism candidate exceeded memory capacity."
+    if message not in warnings:
+        warnings.append(message)
+    chosen["warnings"] = warnings
+    return chosen
+
+
 def pick_fallback_result(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in results:
         if item.get("status") in {"timed_out", "failed"}:
@@ -1095,17 +1648,33 @@ class ActiveProcess:
     err_path: Path
 
 
+def worker_subprocess_env() -> Dict[str, str]:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    root_text = str(ROOT)
+    entries = [root_text]
+    if existing_pythonpath:
+        entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(entries)
+    return env
+
+
 class RunManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._cancel_event = threading.Event()
         self._active_job: Optional[Dict[str, Any]] = None
+        self._last_finished_job: Optional[Dict[str, Any]] = None
         self._thread: Optional[threading.Thread] = None
         self._processes: Dict[str, ActiveProcess] = {}
 
     def active_job(self) -> Optional[Dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._active_job)
+
+    def last_finished_job(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._last_finished_job)
 
     def _existing_active_lock(self) -> Optional[Dict[str, Any]]:
         if not ACTIVE_JOB_LOCK.exists():
@@ -1167,6 +1736,7 @@ class RunManager:
             if existing_lock:
                 return False, f"Another job appears active from process {existing_lock.get('pid')}."
             self._cancel_event.clear()
+            self._last_finished_job = None
             job_kind = "sweep" if preview.get("top_level_case_count", 0) > 1 or preview.get("optimizer_enabled") else "run"
             job_id = f"{job_kind}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
             job_root = _detail_root(job_kind) / job_id
@@ -1186,9 +1756,8 @@ class RunManager:
             self._write_expanded_cases(job_root, preview)
             if job_kind == "sweep":
                 _json_dump(job_root / "launch_preview.json", request_record["preview"])
-                (job_root / "cases").mkdir(parents=True, exist_ok=True)
             ACTIVE_JOB_LOCK.write_text(json.dumps({"job_id": job_id, "kind": job_kind, "pid": os.getpid(), "created_at": utc_now()}))
-            self._active_job = {"id": job_id, "kind": job_kind, "root": str(job_root), "status": "queued", "title": request_record["title"], "progress_completed": 0, "progress_total": preview.get("total_invocations", 0)}
+            self._active_job = {"id": job_id, "kind": job_kind, "root": str(job_root), "status": "queued", "title": request_record["title"], "created_at": request_record["created_at"], "updated_at": request_record["created_at"], "progress_completed": 0, "progress_total": preview.get("total_invocations", 0)}
             self._thread = threading.Thread(target=self._run_job_thread, args=(job_root, payload, preview), daemon=True)
             self._thread.start()
             return True, job_id
@@ -1233,6 +1802,12 @@ class RunManager:
             ACTIVE_JOB_LOCK.unlink(missing_ok=True)
             with self._lock:
                 self._processes.clear()
+                if self._active_job:
+                    finished_job = copy.deepcopy(self._active_job)
+                    total = _safe_int(finished_job.get("progress_total"), 0)
+                    if total > 0:
+                        finished_job["progress_completed"] = total
+                    self._last_finished_job = finished_job
                 self._active_job = None
 
     def _run_single(self, job_root: Path, preview: Dict[str, Any]) -> Dict[str, Any]:
@@ -1240,6 +1815,10 @@ class RunManager:
         (job_root / "model_resolved.yaml").write_text(_yaml_dump(case["model"]))
         (job_root / "hardware_resolved.yaml").write_text(_yaml_dump(case["hardware"]))
         result = self._execute_worker_case(job_root, "case-0001", case["model"], case["hardware"], 0, dimension_values=case.get("dimension_values", {}))
+        selected_metric = preview.get("metric")
+        if selected_metric in (result.get("metrics") or {}):
+            result["primary_metric_label"] = METRIC_LABELS.get(selected_metric, selected_metric)
+            result["primary_metric_value"] = result["metrics"][selected_metric]
         _json_dump(job_root / "result.json", result)
         _json_dump(job_root / "metrics.json", result.get("metrics", {}))
         return {
@@ -1294,16 +1873,17 @@ class RunManager:
         for top_case_id, result_list in results_by_top_case.items():
             if optimize:
                 successful = [item for item in result_list if item.get("status") == "completed" and item.get("metrics")]
-                chosen = pick_best_result(successful, metric) if successful else pick_fallback_result(result_list)
+                chosen = pick_best_optimized_result(successful, metric) if successful else pick_fallback_result(result_list)
                 case_record = {"case_id": top_case_id, "label": chosen.get("label"), "status": chosen.get("status"), "dimension_values": chosen.get("dimension_values", {}), "candidate_count": len(result_list), "chosen_candidate": chosen.get("candidate"), "metrics": chosen.get("metrics", {}), "warnings": chosen.get("warnings", []), "error": chosen.get("error")}
             else:
                 chosen = result_list[0]
                 case_record = {"case_id": top_case_id, "label": chosen.get("label"), "status": chosen.get("status"), "dimension_values": chosen.get("dimension_values", {}), "metrics": chosen.get("metrics", {}), "warnings": chosen.get("warnings", []), "error": chosen.get("error")}
-            _json_dump(job_root / "cases" / f"{top_case_id}.json", case_record)
             case_summaries.append(case_record)
             metric_value = case_record.get("metrics", {}).get(metric)
             if metric_value is not None and (best_metric_value is None or is_metric_better(metric, metric_value, best_metric_value)):
                 best_metric_value = metric_value
+        case_summaries.sort(key=lambda item: str(item.get("case_id") or ""))
+        _write_sweep_cases_jsonl(job_root, case_summaries)
         completed_case_count = sum(1 for item in case_summaries if item.get("status") == "completed")
         if completed_case_count == len(case_summaries):
             overall_status = "completed"
@@ -1314,15 +1894,16 @@ class RunManager:
         return {"title": "Sweep Results", "status": overall_status, "best_metric_label": best_metric_label, "best_metric_value": best_metric_value, "case_count": len(case_summaries), "completed_case_count": completed_case_count}
 
     def _execute_worker_case(self, job_root: Path, case_id: str, model_dict: Dict[str, Any], hardware_dict: Dict[str, Any], timeout_seconds: int, *, top_case_id: Optional[str] = None, candidate: Optional[Dict[str, Any]] = None, case_label: Optional[str] = None, dimension_values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        case_root = job_root / "artifacts" / case_id
+        case_root = (job_root / "artifacts" / case_id).resolve()
         case_root.mkdir(parents=True, exist_ok=True)
+        (case_root / "astra_cache").mkdir(exist_ok=True)
         model_path, hardware_path = case_root / "model.yaml", case_root / "hardware.yaml"
         result_path, stdout_path, stderr_path = case_root / "result.json", case_root / "stdout.log", case_root / "stderr.log"
         model_path.write_text(_yaml_dump(model_dict))
         hardware_path.write_text(_yaml_dump(hardware_dict))
         cmd = [str(PYTHON_BIN), "-m", WORKER_MODULE, "--model-config", str(model_path), "--hardware-config", str(hardware_path), "--result-json", str(result_path), "--output-dir", str(case_root)]
         with stdout_path.open("w") as stdout_handle, stderr_path.open("w") as stderr_handle:
-            process = subprocess.Popen(cmd, cwd=str(ROOT), stdout=stdout_handle, stderr=stderr_handle, env={**os.environ, "PYTHONUNBUFFERED": "1"})  # noqa: S603
+            process = subprocess.Popen(cmd, cwd=str(case_root), stdout=stdout_handle, stderr=stderr_handle, env=worker_subprocess_env())  # noqa: S603
             with self._lock:
                 self._processes[case_id] = ActiveProcess(process=process, log_path=stdout_path, err_path=stderr_path)
             try:
@@ -1365,7 +1946,7 @@ class RunManager:
         _json_dump(path, record)
         with self._lock:
             if self._active_job and str(job_root) == self._active_job.get("root"):
-                self._active_job.update({"status": record.get("status"), "progress_total": record.get("progress_total"), "progress_completed": record.get("progress_completed"), "updated_at": record.get("updated_at")})
+                self._active_job.update({"status": record.get("status"), "created_at": record.get("created_at"), "progress_total": record.get("progress_total"), "progress_completed": record.get("progress_completed"), "updated_at": record.get("updated_at")})
 
 
 RUN_MANAGER = RunManager()

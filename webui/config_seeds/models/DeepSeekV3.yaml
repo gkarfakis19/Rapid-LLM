@@ -1,0 +1,33 @@
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: false
+  model_type: deepseek_v3
+  global_batch_size: 64
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  hidden_dim: 7168
+  attention:
+    attention_type: mla
+    num_heads: 128
+    kv_lora_rank: 512
+    q_lora_rank: 1536
+    qk_nope_head_dim: 128
+    qk_rope_head_dim: 64
+    v_head_dim: 128
+    use_flashattention: true
+    attention_tile_size: 128
+  moe:
+    num_experts: 256
+    top_k: 8
+    moe_intermediate_size: 2048
+    n_shared_experts: 1
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 3
+  intermediate_size: 18432
+  vocab_size: 129280
+  num_layers: 61
+  decode_len: 0
+metadata:
+  source_config: validation_scripts/validation_configs/model-config/DeepSeekV3.yaml

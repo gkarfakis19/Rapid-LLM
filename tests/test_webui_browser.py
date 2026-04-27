@@ -64,7 +64,7 @@ def _seed_completed_sweep(workspace: Path) -> None:
     payload = {
         "run_mode": "sweep",
         "model_preset_id": "Llama2-7B.yaml",
-        "hardware_preset_id": "A100_SXM4_80GB_base.yaml",
+        "hardware_preset_id": "A100_SXM4_80GB.yaml",
         "metric": "training_time_s",
         "x_axis": "batch_size",
         "series_axis": None,
@@ -76,24 +76,25 @@ def _seed_completed_sweep(workspace: Path) -> None:
             "id": "sweep-ui-detail",
             "kind": "sweep",
             "created_at": now,
-            "title": "UI Detail Smoke",
+            "title": "Detail Smoke",
             "payload": payload,
             "preview": {"optimizer_enabled": False, "top_level_case_count": 2},
         },
     )
     _write_json(sweep_root / "status.json", {"created_at": now, "updated_at": now, "status": "completed", "progress_completed": 2, "progress_total": 2})
-    _write_json(sweep_root / "summary.json", {"title": "UI Detail Smoke", "best_metric_label": "Training Time", "best_metric_value": 1.2})
+    _write_json(sweep_root / "summary.json", {"title": "Detail Smoke", "best_metric_label": "Training Time", "best_metric_value": 1.2})
     _write_json(
         sweep_root / "cases" / "case-0001.json",
         {
             "case_id": "case-0001",
             "label": "batch 64",
             "status": "completed",
-            "dimension_values": {"batch_size": 64, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB_base.yaml"},
+            "dimension_values": {"batch_size": 64, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB.yaml"},
             "metrics": {
                 "training_time_s": 1.2,
                 "total_flops": 4.56e14,
                 "achieved_flops": 3.2e14,
+                "peak_flops_per_gpu": 3.9e14,
                 "peak_system_flops": 1.56e15,
                 "num_gpus": 4,
                 "memory_exceeded": False,
@@ -107,11 +108,12 @@ def _seed_completed_sweep(workspace: Path) -> None:
             "case_id": "case-0002",
             "label": "batch 128",
             "status": "failed",
-            "dimension_values": {"batch_size": 128, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB_base.yaml"},
+            "dimension_values": {"batch_size": 128, "model_config": "Llama2-7B.yaml", "hardware_config": "A100_SXM4_80GB.yaml"},
             "metrics": {
                 "training_time_s": 9.9,
                 "total_flops": 9.12e14,
                 "achieved_flops": 6.4e14,
+                "peak_flops_per_gpu": 3.9e14,
                 "peak_system_flops": 1.56e15,
                 "num_gpus": 4,
                 "memory_exceeded": True,
@@ -211,17 +213,27 @@ def test_webui_layout_and_visual_health(tmp_path):
                         hasTopDetailsTab: text.includes('3 Details'),
                         hasOldLoadDetailsButton: text.includes('Load Details'),
                         hasLaunchSetup: text.includes('Launch Setup'),
+                        hasConfigOptions: text.includes('Config Options'),
                         hasBasicOptions: text.includes('Basic Options'),
+                        hasAdvancedOptions: text.includes('Advanced Options'),
                         hasHeaderHelp: text.includes('Launch') && text.includes('Run log') && text.includes('Details') && text.includes('Hover any control for details.'),
-                        hasEditorTabs: text.includes('Selected file editor') && text.includes('MODEL FILES') && text.includes('HARDWARE FILES'),
-                        hasFileActions: text.includes('File actions') && text.includes('New copy') && text.includes('Rename'),
+                        hasNanocadLogo: !!document.querySelector('img.nanocad-logo[src*="nanocad-logo.png"][alt="NanoCAD"]'),
+                        hasNanocadLogoFrame: !!document.querySelector('.nanocad-logo-frame img.nanocad-logo[src*="nanocad-logo.png"]'),
+                        hasBrandOrb: !!document.querySelector('.brand-orb'),
+                        topbarTitleColor: getComputedStyle(document.querySelector('.topbar-title')).color,
+                        hoverHelpColor: getComputedStyle(document.querySelector('.flow-hover-copy')).color,
+                        telemetryBackdrop: getComputedStyle(document.querySelector('.telemetry-pills')).backgroundColor,
+                        hasSettingsBadge: text.includes('Updates as settings change'),
+                        hasRuntimeScalingCopy: text.includes('rapidly approach worst-case') && text.includes('beyond 256 GPUs'),
+                        hasEditorTabs: text.includes('ACTIVE YAML WORKBOOK') && text.includes('Model') && text.includes('Hardware'),
+                        hasFileActions: text.includes('Active file actions') && text.includes('New copy') && text.includes('Rename'),
                         hasDespisedRunSetupCopy: text.includes('Choose one hardware target and any number of models'),
                         hasParallelismSearch: text.includes('Parallelism search'),
                         hasOptimizerWarning: text.includes('WARNING: This may increase runtime dramatically.'),
                         hasUseAstraSim: text.includes('Use AstraSim'),
                         hasAdvancedBackendMode: text.includes('Execution backend') || text.includes('Execution mode') || text.includes('hybrid') || text.includes('flattened'),
                         hasWorkers: text.includes('Workers') && text.includes('CPU cores detected'),
-                        hasWorkflow: text.includes('Launch -> Run log -> Details'),
+                        hasWorkflowCaption: text.includes('Launch -> Run log -> Details'),
                         hasPreviewButton: text.includes('Preview Launch'),
                         hasLiveLaunchButton: /Launch \\d+ runs?/.test(text),
                         hasRawOverride: text.includes('Use raw YAML override'),
@@ -308,17 +320,27 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert not desktop_metrics["hasTopDetailsTab"]
             assert desktop_metrics["hasOldLoadDetailsButton"] is False
             assert desktop_metrics["hasLaunchSetup"]
+            assert desktop_metrics["hasConfigOptions"]
             assert desktop_metrics["hasBasicOptions"]
+            assert desktop_metrics["hasAdvancedOptions"]
             assert desktop_metrics["hasHeaderHelp"]
+            assert desktop_metrics["hasNanocadLogo"]
+            assert desktop_metrics["hasNanocadLogoFrame"]
+            assert not desktop_metrics["hasBrandOrb"]
+            assert desktop_metrics["topbarTitleColor"] == "rgb(255, 255, 255)"
+            assert desktop_metrics["hoverHelpColor"] == "rgb(223, 245, 253)"
+            assert desktop_metrics["telemetryBackdrop"] != "rgba(0, 0, 0, 0)"
+            assert not desktop_metrics["hasSettingsBadge"]
+            assert desktop_metrics["hasRuntimeScalingCopy"]
             assert desktop_metrics["hasEditorTabs"]
             assert desktop_metrics["hasFileActions"]
             assert not desktop_metrics["hasDespisedRunSetupCopy"]
-            assert desktop_metrics["hasParallelismSearch"]
-            assert desktop_metrics["hasOptimizerWarning"]
-            assert desktop_metrics["hasUseAstraSim"]
+            assert not desktop_metrics["hasParallelismSearch"]
+            assert not desktop_metrics["hasOptimizerWarning"]
+            assert not desktop_metrics["hasUseAstraSim"]
             assert not desktop_metrics["hasAdvancedBackendMode"]
             assert desktop_metrics["hasWorkers"]
-            assert desktop_metrics["hasWorkflow"]
+            assert not desktop_metrics["hasWorkflowCaption"]
             assert not desktop_metrics["hasPreviewButton"]
             assert desktop_metrics["hasLiveLaunchButton"]
             assert not desktop_metrics["hasRawOverride"]
@@ -326,8 +348,45 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert not desktop_metrics["hasMetaReferences"]
             assert desktop_metrics["lowContrastIconCount"] == 0
             assert desktop_metrics["lowContrastTextSamples"] == []
+
+            page.set_viewport_size({"width": 1024, "height": 900})
+            page.get_by_text("Config Options", exact=True).scroll_into_view_if_needed()
+            page.screenshot(path=screenshot_dir / f"webui-stacked-config-options-{stamp}.png", full_page=True)
+            stacked_config_metrics = page.evaluate(
+                """() => {
+                    const visible = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
+                    const grid = document.querySelector('.builder-grid');
+                    const left = document.querySelector('.builder-left-scroll');
+                    const card = document.querySelector('.config-options-card');
+                    const tabs = document.querySelector('.config-workbook-tab-list');
+                    const actions = document.querySelector('.config-file-actions');
+                    const gridStyle = grid ? getComputedStyle(grid) : null;
+                    const leftStyle = left ? getComputedStyle(left) : null;
+                    const cardStyle = card ? getComputedStyle(card) : null;
+                    const gridRect = grid ? grid.getBoundingClientRect() : {bottom: 0};
+                    const cardRect = card ? card.getBoundingClientRect() : {bottom: 0, height: 0};
+                    return {
+                        gridOverflowY: gridStyle ? gridStyle.overflowY : null,
+                        gridHeight: gridStyle ? gridStyle.height : null,
+                        leftOverflowY: leftStyle ? leftStyle.overflowY : null,
+                        leftMaxHeight: leftStyle ? leftStyle.maxHeight : null,
+                        cardOverflowY: cardStyle ? cardStyle.overflowY : null,
+                        cardHeight: cardRect.height,
+                        cardClippedByGrid: !!(grid && card && gridStyle.overflowY !== 'visible' && cardRect.bottom > gridRect.bottom + 2),
+                        tabsVisible: visible(tabs),
+                        actionsVisible: visible(actions),
+                    };
+                }"""
+            )
+            assert stacked_config_metrics["gridOverflowY"] == "visible"
+            assert stacked_config_metrics["leftOverflowY"] == "visible"
+            assert stacked_config_metrics["cardOverflowY"] == "visible"
+            assert not stacked_config_metrics["cardClippedByGrid"]
+            assert stacked_config_metrics["tabsVisible"]
+            assert stacked_config_metrics["actionsVisible"]
+
             page.get_by_role("tab", name="2 Run log").click()
-            page.get_by_text("UI Detail Smoke").wait_for(timeout=5000)
+            page.get_by_text("Detail Smoke").wait_for(timeout=5000)
             page.locator("button").filter(has_text="Details").first.click()
             page.get_by_role("dialog").wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Line Plot", exact=True).wait_for(timeout=5000)
@@ -336,11 +395,37 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).click()
             page.get_by_text("Saved plot:").wait_for(timeout=5000)
+            saved_plot_text = page.locator("#plot-save-status").inner_text(timeout=5000)
+            assert saved_plot_text.endswith(".png")
+            saved_plot_path = Path(saved_plot_text.removeprefix("Saved plot: ").strip())
+            assert saved_plot_path.exists()
+            assert saved_plot_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+            assert saved_plot_path.stat().st_size > 20_000
             page.get_by_text("Memory Exceeded").wait_for(timeout=5000)
             page.get_by_text("12.5 GB").wait_for(timeout=5000)
             page.get_by_text("case-0001 - Llama2-7B").wait_for(timeout=5000)
             page.get_by_text("Fixed parallelism").wait_for(timeout=5000)
+            page.get_by_text("Early termination rate: 50.0% (1/2 runs).").wait_for(timeout=5000)
+            page.get_by_text("Many runs terminated early").wait_for(timeout=5000)
             page.get_by_text("0.00 us").wait_for(timeout=5000)
+            filter_metrics = page.evaluate(
+                """() => {
+                    const input = Array.from(document.querySelectorAll('.dash-filter input, .dash-filter textarea'))
+                        .find((el) => el.getClientRects().length > 0);
+                    const style = input ? getComputedStyle(input) : null;
+                    const placeholder = input ? getComputedStyle(input, '::placeholder') : null;
+                    return {
+                        found: !!input,
+                        color: style?.color,
+                        backgroundColor: style?.backgroundColor,
+                        placeholderColor: placeholder?.color,
+                    };
+                }"""
+            )
+            assert filter_metrics["found"]
+            assert filter_metrics["color"] == "rgb(23, 33, 43)"
+            assert filter_metrics["backgroundColor"] == "rgb(255, 255, 255)"
+            assert filter_metrics["placeholderColor"] != "rgb(255, 255, 255)"
             page.wait_for_function(
                 """() => Array.from(document.querySelectorAll('.js-plotly-plot'))
                     .filter((plot) => plot.getClientRects().length > 0)
@@ -350,52 +435,68 @@ def test_webui_layout_and_visual_health(tmp_path):
             detail_metrics = page.evaluate(
                 """() => {
                     const dialog = document.querySelector('[role="dialog"]');
+                    const dialogText = dialog?.innerText || '';
                     const plot = Array.from(document.querySelectorAll('.js-plotly-plot')).find((item) => item.getClientRects().length > 0);
                     const legendText = Array.from(document.querySelectorAll('.legendtext')).map((el) => el.textContent || '').join('\\n');
                     return {
                         visible: !!dialog && getComputedStyle(dialog).display !== 'none',
                         hasStatusLegend: /status/i.test(legendText),
                         hasPlot: !!plot,
+                        hasPeakGpuFlops: dialogText.includes('Peak FLOPS / GPU'),
+                        hasPeakSystemFlops: dialogText.includes('Peak System FLOPS'),
                     };
                 }"""
             )
             assert detail_metrics["visible"]
             assert detail_metrics["hasPlot"]
             assert not detail_metrics["hasStatusLegend"]
+            assert not detail_metrics["hasPeakGpuFlops"]
+            assert not detail_metrics["hasPeakSystemFlops"]
             page.screenshot(path=screenshot_dir / f"webui-details-{stamp}.png", full_page=True)
             page.locator("#detail-close-button").click()
             page.wait_for_function("() => getComputedStyle(document.querySelector('#detail-overlay')).display === 'none'", timeout=5000)
             page.get_by_role("tab", name="1 Launch").click()
             page.get_by_label("Batch size").hover()
             page.get_by_text("Global batch size across all participating devices.").wait_for(timeout=5000)
+            page.locator("#simple-run-type").click(force=True)
+            page.get_by_role("option", name="Inference").click()
+            page.get_by_role("tab").filter(has_text="H100").click()
+            page.get_by_text("Parallelism search").wait_for(timeout=5000)
             page.get_by_label("Optimize parallelism").hover()
             page.get_by_text("Search TP, CP, PP, DP, and EP combinations for each Total GPUs target.").wait_for(timeout=5000)
-            page.locator("#optimize-switch").click(force=True)
             page.wait_for_function("() => document.querySelector('#simple-tp-wrap')?.classList.contains('is-auto')", timeout=5000)
             auto_state = page.evaluate(
                 """() => {
                     const wrap = document.querySelector('#simple-tp-wrap');
                     const input = document.querySelector('#simple-tp');
+                    const replicaWrap = document.querySelector('#simple-replica-count-wrap');
+                    const replicaInput = document.querySelector('#simple-replica-count');
                     return {
                         hasAutoClass: wrap.classList.contains('is-auto'),
                         autoContent: getComputedStyle(wrap, '::after').content,
                         inputTransparent: getComputedStyle(input).color === 'rgba(0, 0, 0, 0)' || getComputedStyle(input).color === 'transparent',
+                        replicaHasAutoClass: replicaWrap.classList.contains('is-auto'),
+                        replicaDisabled: replicaInput.disabled,
+                        replicaInputTransparent: getComputedStyle(replicaInput).color === 'rgba(0, 0, 0, 0)' || getComputedStyle(replicaInput).color === 'transparent',
                     };
                 }"""
             )
             assert auto_state["hasAutoClass"]
             assert auto_state["autoContent"] == '"Auto"'
+            assert not auto_state["replicaHasAutoClass"]
+            assert not auto_state["replicaDisabled"]
+            assert not auto_state["replicaInputTransparent"]
             page.get_by_label("Use AstraSim").hover()
             page.get_by_text("Run the simulator through AstraSim using hierarchical mode.").wait_for(timeout=5000)
             page.get_by_label("Workers").hover()
-            page.get_by_text("Number of local worker processes used inside a sweep.").wait_for(timeout=5000)
-            page.get_by_text("Selected file editor").hover()
-            page.get_by_text("Switch tabs before changing fields to edit a different selected file.").wait_for(timeout=5000)
+            page.get_by_text("Number of worker processes used inside a sweep.").wait_for(timeout=5000)
+            page.get_by_text("Config Options").hover()
+            page.get_by_text("Choose the YAML file to edit.").wait_for(timeout=5000)
+            page.get_by_role("tab").filter(has_text="Llama2").click()
             page.locator("#adv-model-type").scroll_into_view_if_needed()
-            page.get_by_text("Advanced Options").wait_for(timeout=5000)
-            page.get_by_text("Model").first.wait_for(timeout=5000)
-            page.get_by_text("Hardware").first.wait_for(timeout=5000)
+            page.locator("#model-options-pane").get_by_text("Advanced Options").wait_for(timeout=5000)
             page.get_by_text("Model type guide").wait_for(timeout=5000)
+            page.get_by_text("Hardware", exact=True).first.wait_for(timeout=5000)
             page.get_by_text("Execution family guide").wait_for(timeout=5000)
             page.get_by_text("deepseek_v3").first.wait_for(timeout=5000)
             page.get_by_text("glm4_moe").first.wait_for(timeout=5000)
@@ -408,6 +509,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("DeepSeek-V3 family.").wait_for(timeout=5000)
             page.locator("#adv-model-mode").hover()
             page.get_by_text("Select the execution family written to model_param.mode.").wait_for(timeout=5000)
+            page.get_by_role("tab").filter(has_text="H100").click()
             page.locator("#adv-tensor-format").scroll_into_view_if_needed()
             page.locator("#adv-tensor-format").click(force=True)
             page.get_by_role("option", name="MXFP4 (4.25 bits)").wait_for(timeout=5000)

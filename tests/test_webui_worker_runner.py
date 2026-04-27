@@ -13,7 +13,7 @@ from webui.service.worker_runner import gpu_peak_flops
 
 def test_worker_runner_executes_tiny_training_case(tmp_path):
     model = core.load_preset("models", "Llama2-7B.yaml")
-    hardware = core.load_preset("hardware", "H100_SXM5_80GB_base.yaml")
+    hardware = core.load_preset("hardware", "H100_SXM5_80GB.yaml")
 
     model_param = model["model_param"]
     model_param.update(
@@ -97,7 +97,7 @@ def test_worker_runner_executes_tiny_training_case(tmp_path):
 
 def test_a100_peak_flops_is_per_gpu_tensor_peak_not_system_pflops():
     core.ensure_workspace()
-    hardware = core.load_preset("hardware", "A100_SXM4_80GB_base.yaml")
+    hardware = core.load_preset("hardware", "A100_SXM4_80GB.yaml")
     core_fields = hardware["tech_param"]["core"]
     hw_cfg = SimpleNamespace(
         tech_config=SimpleNamespace(
@@ -119,7 +119,7 @@ def test_a100_peak_flops_is_per_gpu_tensor_peak_not_system_pflops():
 
 def test_h100_peak_flops_and_system_peak_are_consistent_for_eight_gpus():
     core.ensure_workspace()
-    hardware = core.load_preset("hardware", "H100_SXM5_80GB_base.yaml")
+    hardware = core.load_preset("hardware", "H100_SXM5_80GB.yaml")
     core_fields = hardware["tech_param"]["core"]
     hw_cfg = SimpleNamespace(
         tech_config=SimpleNamespace(
@@ -137,5 +137,5 @@ def test_h100_peak_flops_and_system_peak_are_consistent_for_eight_gpus():
     peak_per_gpu = gpu_peak_flops(hw_cfg)
     peak_system = peak_per_gpu * 8
 
-    assert peak_per_gpu == pytest.approx(1.07053056e15)
-    assert peak_system == pytest.approx(8.56424448e15)
+    assert peak_per_gpu == pytest.approx(5.994971136e14)
+    assert peak_system == pytest.approx(4.7959769088e15)

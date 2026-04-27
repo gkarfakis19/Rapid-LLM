@@ -1,0 +1,28 @@
+model_param:
+  mode: LLM
+  run_type: inference
+  tied_embeddings: true
+  model_type: llama
+  global_batch_size: 16
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 1024
+  hidden_dim: 5120
+  attention:
+    attention_type: mha
+    num_heads: 40
+    kv_heads: 8
+    use_flashattention: true
+    attention_tile_size: 256
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 13824
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 40
+  intermediate_size: 13824
+  vocab_size: 32000
+  num_layers: 40
+metadata:
+  source_config: configs/model-config/Llama2-13B_inf.yaml

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import csv
+import json
 import os
+from datetime import datetime, timedelta
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Dict, List
 
 import dash
 import dash_mantine_components as dmc
+import matplotlib
 import plotly.express as px
 from dash import ALL, Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
 from dash_iconify import DashIconify
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 from webui.service.core import (
     FIELD_OPTIONS,
@@ -16,10 +25,14 @@ from webui.service.core import (
     METRIC_LABELS,
     RUN_MANAGER,
     build_form_defaults,
+    build_case_label,
     build_job_title,
     build_launch_preview,
+    clear_last_ui_state,
     create_config_copy,
+    create_model_config_from_huggingface,
     default_worker_count,
+    config_label,
     dimension_label,
     ensure_workspace,
     get_default_metric_for_run_type,
@@ -27,10 +40,14 @@ from webui.service.core import (
     get_telemetry,
     list_history,
     list_presets,
+    load_last_ui_state,
     load_job_detail,
+    paper_derate_defaults_for_hardware,
     render_editable_config_texts,
     rename_config_file,
-    save_plot_html,
+    save_last_ui_state,
+    save_plot_png,
+    save_table_export,
     save_config_edits_from_payload,
 )
 
@@ -46,8 +63,23 @@ def humanize_seconds(value: float) -> str:
     return f"{hours}h {minutes}m"
 
 
+def format_worst_case_wall_clock(value: Any) -> str:
+    return "N/A" if value is None else humanize_seconds(float(value))
+
+
 FIELD_LABEL_MAP = {item["value"]: item["label"] for item in FIELD_OPTIONS}
-METRIC_KEY_BY_LABEL = {label: key for key, label in METRIC_LABELS.items()}
+METRIC_KEY_BY_LABEL: Dict[str, str] = {}
+for metric_key, metric_label in METRIC_LABELS.items():
+    METRIC_KEY_BY_LABEL.setdefault(metric_label, metric_key)
+METRIC_KEY_BY_LABEL.update(
+    {
+        "Decode Throughput": "decode_throughput_tok_s",
+        "Time To First Token": "ttft_s",
+        "Total Inference Time": "total_inference_time_s",
+        "Prefill Time": "prefill_time_s",
+        "Training Time": "training_time_s",
+    }
+)
 DISPLAY_LABELS = {
     "achieved_flops": "Achieved System FLOPS",
     "achieved_flops_per_gpu": "Achieved FLOPS / GPU",
@@ -56,13 +88,42 @@ DISPLAY_LABELS = {
     "memory_exceeded": "Memory Exceeded",
     "num_gpus": "GPUs",
     "parallelism": "Parallelism",
-    "peak_flops_per_gpu": "Peak FLOPS / GPU",
-    "peak_system_flops": "Peak System FLOPS",
     "total_flops": "Total FLOPs",
-    "approx_mfu": "MFU",
-    "total_inference_time_s": "Total Inference Time",
+    "approx_mfu": "Approx. MFU",
+    "total_inference_time_s": "Time / Batch",
     "ttft_s": "Time To First Token",
 }
+APP_CREDIT_TEXT = "By George Karfakis, georgekarfakis@ucla.edu"
+APP_LOGO_ASSET = "nanocad-logo.png"
+HF_SAMPLE_MODEL_URL = "https://huggingface.co/Qwen/Qwen2.5-7B"
+DEFAULT_OPTIMIZE_PARALLELISM = True
+DETAIL_RENDER_CASE_LIMIT = 2_000
+DETAIL_TABLE_ROW_LIMIT = 1_000
+DETAIL_PLOT_POINT_LIMIT = 1_500
+DETAIL_HIDDEN_METRIC_KEYS = {"peak_flops_per_gpu", "peak_system_flops"}
+DETAIL_TABLE_COLUMN_ORDER = [
+    "case",
+    "case_id",
+    "label",
+    "memory_exceeded",
+    "training_time_s",
+    "prefill_time_s",
+    "decode_time_s",
+    "total_inference_time_s",
+    "ttft_s",
+    "num_gpus",
+    "approx_mfu",
+    "total_flops",
+    "achieved_flops",
+    "achieved_flops_per_gpu",
+    "status",
+    "model_config",
+    "hardware_config",
+    "parallelism",
+    "model.decode_len",
+]
+EARLY_TERMINATION_MILD_THRESHOLD = 35.0
+EARLY_TERMINATION_BIG_THRESHOLD = 70.0
 FLOP_COUNT_KEYS = {"total_flops"}
 FLOP_RATE_KEYS = {"achieved_flops", "achieved_flops_per_gpu", "peak_flops_per_gpu", "peak_system_flops"}
 TOKEN_RATE_KEYS = {"decode_throughput_tok_s"}
@@ -102,24 +163,37 @@ TENSOR_FORMAT_OPTIONS = [
 ]
 PRECISION_FORMAT_OPTIONS = [{"value": "as_tensor_format", "label": "Match tensor format"}] + TENSOR_FORMAT_OPTIONS
 MASTER_PRECISION_OPTIONS = [{"value": "0", "label": "Disabled (0 bytes)"}] + PRECISION_FORMAT_OPTIONS
+ZERO_STAGE_OPTIONS = [
+    {"value": "0", "label": "0 (DDP)"},
+    {"value": "1", "label": "1 (optimizer shard)"},
+    {"value": "2", "label": "2 (optimizer+grad shard)"},
+    {"value": "3", "label": "3 (FSDP/full shard)"},
+]
+PP_TOPOLOGY_OPTIONS = [
+    {"value": "dim1_shared", "label": "Dimension 1 | Dimension 2: PP+DP | None"},
+    {"value": "dim1_dim2", "label": "Dimension 1 | Dimension 2: PP | DP"},
+]
 HELP_TEXT = {
-    "app_title": "RAPID-LLM local workbench for editing supported YAML fields, previewing launch size, running jobs, and loading saved details.",
+    "app_title": "RAPID-LLM launch workspace for editing YAML configs, previewing run size, launching jobs, and reviewing saved results.",
     "app_flow": "Basic flow: configure in Launch, start the run, open Run log, then click Details. Hover controls, metrics, and table columns for explanations.",
-    "telemetry_ram": "Currently available host memory reported by psutil.",
+    "telemetry_ram": "Available host memory reported by psutil.",
     "telemetry_cpu": "Current host CPU utilization reported by psutil.",
-    "telemetry_job": "Top-level Web UI job state.",
-    "models_to_run": "Select model YAML files to include as run cases. Use the model file tabs below to choose which selected model is loaded into the editor.",
-    "hardware_to_run": "Select hardware YAML files to include as run cases. Use the hardware file tabs below to choose which selected hardware file is loaded into the editor.",
-    "editor_tabs": "The highlighted model and hardware tabs are the YAML files currently loaded into the editor. Switch tabs before changing fields to edit a different selected file.",
-    "model_preset": "Selected model YAML currently loaded into Basic and Advanced model controls.",
-    "hardware_preset": "Selected hardware YAML currently loaded into Basic and Advanced hardware controls.",
-    "config_file_name": "Filename to create or rename. The UI writes YAML files under webui/workspace/configs.",
+    "telemetry_job": "Current job state.",
+    "models_to_run": "Select model YAML files to include as run cases.",
+    "hardware_to_run": "Select hardware YAML files to include as run cases.",
+    "editor_tabs": "Choose the YAML file to edit.",
+    "model_preset": "Active model YAML loaded for editing.",
+    "hardware_preset": "Active hardware YAML loaded for editing.",
+    "config_file_name": "Filename for a new or renamed YAML under webui/workspace/configs.",
     "new_config": "Create a new editable YAML by copying the active model or hardware config.",
     "rename_config": "Rename the active editable YAML file and keep it selected.",
-    "worker_count": "Number of local worker processes used inside a sweep. More workers consume more CPU and memory.",
-    "timeout": "Maximum wall-clock time allowed for each simulator invocation.",
+    "hf_model_url": "Hugging Face model page URL or model id. The importer reads config.json and maps architecture fields into a new editable model YAML.",
+    "hf_config_name": "Filename for the imported model YAML under webui/workspace/configs/models.",
+    "hf_import": "Create a model YAML from Hugging Face config.json. Workload choices that are not automatically determinable should be adjusted in the model options after import.",
+    "worker_count": "Number of worker processes used inside a sweep. More workers consume more CPU and memory.",
+    "timeout": "Maximum wall-clock time allowed for each simulator invocation. Set 0 to disable the timeout.",
     "run_type": "Choose training or inference; this controls which fields and result metrics are active.",
-    "model_mode": "Select the execution family written to model_param.mode. This UI currently offers LLM and ViT flows.",
+    "model_mode": "Execution family written to model_param.mode. LLM uses token sequences; ViT uses image and patch dimensions.",
     "model_type": "Select the architecture family written to model_param.model_type. This controls modeling details such as MLP style, ViT handling, and GLM/DeepSeek special cases.",
     "seq_len": "Number of tokens processed in the input context.",
     "decode_len": "Number of generated tokens to model for inference runs.",
@@ -133,7 +207,7 @@ HELP_TEXT = {
     "pp": "Pipeline parallel splits model layers into pipeline stages.",
     "dp": "Data parallel replicates the model across training batches.",
     "ep": "Expert parallel distributes MoE experts across devices.",
-    "replica_count": "Inference replica count used to scale throughput.",
+    "replica_count": "Inference replica count used to scale throughput. Training locks this to 1.",
     "hbm_gb": "Usable high-bandwidth memory capacity per GPU.",
     "gpu_clock": "GPU core clock used for peak compute estimates.",
     "memory_bw": "Memory bandwidth used by the analytical memory model.",
@@ -141,7 +215,10 @@ HELP_TEXT = {
     "compute_derate": "Multiplier for sustained compute efficiency.",
     "memory_derate": "Multiplier for sustained memory bandwidth efficiency.",
     "network_derate": "Default network utilization multiplier applied to dimensions without an explicit value.",
-    "network_topology": "Collective topology model for this network dimension.",
+    "reset_paper_derates": "Restore compute, memory, and communication derates from the calibrated paper defaults for this hardware target.",
+    "parallelism_topology": "Hierarchical AstraSim fixes Dimension 0 to TP, CP, and EP. Choose whether PP shares the active outer dimension with DP or gets a separate middle dimension.",
+    "pp_topology_dimension": "Select how PP and DP map to Dimensions 1 and 2. The PP+DP option disables Dimension 2 and leaves its YAML parallelisms list empty.",
+    "network_topology": "Collective topology model for this network dimension. SuperPOD is not exposed because support is not reliable enough yet.",
     "network_bandwidth": "Per-link or dimension bandwidth, such as 100 GB.",
     "network_util": "Utilization multiplier for this network dimension.",
     "full_recomp": "Enable full activation recomputation to trade compute for memory.",
@@ -154,30 +231,32 @@ HELP_TEXT = {
     "precision_optimizer_states": "Precision for optimizer state tensors.",
     "precision_stats": "Precision for normalization and statistics tensors.",
     "precision_master_parameters": "Precision for an optional master parameter copy. Disabled means no master copy is counted.",
-    "tied_embeddings": "Share token embedding and output projection weights when supported.",
+    "tied_embeddings": "Share token embedding and output projection weights for architectures that allow it.",
     "hidden_dim": "Transformer hidden dimension.",
     "intermediate_size": "Dense MLP intermediate dimension.",
     "num_layers": "Number of transformer layers.",
     "vocab_size": "Vocabulary size used by embeddings and output projection.",
     "attention_type": "Attention implementation family.",
     "num_heads": "Number of attention heads.",
-    "use_flash": "Enable FlashAttention for supported training or prefill paths.",
+    "use_flash": "Enable FlashAttention for training or prefill paths that model it.",
     "attention_tile": "Tile size used by FlashAttention estimates.",
     "num_experts": "Number of MoE experts.",
     "top_k": "Number of experts selected per token.",
     "moe_intermediate_size": "MoE expert MLP intermediate dimension.",
     "expert_imbalance": "Worst-case expert load multiplier for imbalanced routing.",
-    "metric": "Metric used for ranking sweep cases and picking the best result.",
+    "metric": "Metric used for ranking sweep cases and picking the best result. Inference runs offer TPOT throughput, TTFT, and time per batch.",
     "x_axis": "Sweep field used as the plot x-axis in Details. Defaults to the first active sweep dimension.",
     "series_axis": "Optional sweep field used to color plot series. Defaults to the last active sweep dimension when there is more than one.",
     "sweep_dimensions": "Sweep workload size or hardware scaling. Use Total GPUs for GPU scaling; raw TP/CP/PP/DP/EP are edited once or found by Optimize parallelism, not swept independently.",
-    "run_launch": "Start the live launch plan currently shown on the right.",
-    "cancel_job": "Request cancellation for the currently active top-level job.",
-    "load_details": "Open this saved job in the Details screen.",
+    "reset_last_state": "Clear remembered selections and return sweep/config controls to defaults.",
+    "run_launch": "Start the launch plan shown on the right.",
+    "progress_run_log": "Open the run log entry for the finished job.",
+    "cancel_job": "Request cancellation for the active job.",
+    "load_details": "Open this saved job's Details.",
 }
 METRIC_HELP = {
     "training_time_s": "Modeled time for one training batch.",
-    "approx_mfu": "Achieved system FLOPS divided by modeled system peak FLOPS. Values above 100% indicate an optimistic timing path or a FLOP accounting mismatch.",
+    "approx_mfu": "Approximate MFU = achieved system FLOPS divided by configured theoretical system FLOPS.",
     "prefill_time_s": "Modeled time to process the input prompt before token generation.",
     "decode_time_s": "Modeled time spent generating decode tokens.",
     "total_inference_time_s": "Prefill time plus modeled decode time.",
@@ -187,14 +266,13 @@ METRIC_HELP = {
     "total_flops": "Estimated total training work for the modeled batch. This is a count, not a rate.",
     "achieved_flops": "System-wide estimated FLOP/s: total modeled FLOPs divided by simulated runtime.",
     "achieved_flops_per_gpu": "System achieved FLOP/s divided by the number of modeled GPUs.",
-    "peak_flops_per_gpu": "Per-GPU theoretical tensor-core peak from the selected hardware YAML and compute derate.",
-    "peak_system_flops": "Per-GPU theoretical peak multiplied by modeled GPU count.",
-    "memory_exceeded": "No means estimated peak memory fits; otherwise this is the estimated amount over device memory.",
+    "memory_exceeded": "No means estimated peak memory fits. A GB value is the selected result's amount over device memory; under parallelism optimization it appears only when every tested candidate exceeded memory, and the least-over-capacity candidate is shown.",
 }
 DETAIL_COLUMN_HELP = {
     "case": "Case identifier plus the model config used for this row.",
     "case_id": "Stable case identifier generated by the launcher.",
     "label": "Human-readable case label derived from config and sweep choices.",
+    "model.decode_len": "Generated token count represented for this case. Training rows show 0 because training does not use decode length.",
     "status": "Completed, failed, timed out, partial, or cancelled.",
     "metric": "Metric name emitted by the worker.",
     "value": "Formatted metric value.",
@@ -240,7 +318,7 @@ def with_tip(component: Any, text: str) -> dmc.Tooltip:
 
 def mode_badge(value: str) -> dmc.Tooltip:
     label = next((item["label"] for item in MODEL_MODE_OPTIONS if item["value"] == value), value)
-    return with_tip(dmc.Badge(label, radius="xl", color="teal" if value == "LLM" else "blue" if value == "VIT" else "orange", variant="light"), MODEL_MODE_HELP[value])
+    return with_tip(dmc.Badge(label, radius="xl", color="teal" if value == "VIT" else "blue" if value == "LLM" else "orange", variant="light"), MODEL_MODE_HELP[value])
 
 
 def model_type_badge(value: str) -> dmc.Tooltip:
@@ -249,6 +327,7 @@ def model_type_badge(value: str) -> dmc.Tooltip:
 
 def flow_help() -> dmc.Group:
     return dmc.Group(
+        className="flow-help",
         gap=6,
         children=[
             DashIconify(icon="solar:rocket-2-bold", width=16),
@@ -259,7 +338,7 @@ def flow_help() -> dmc.Group:
             DashIconify(icon="solar:arrow-right-linear", width=14),
             DashIconify(icon="solar:chart-2-bold", width=16),
             dmc.Text("Details", size="xs", fw=700),
-            dmc.Text("Hover any control for details.", size="xs", c="dimmed", ml="xs"),
+            dmc.Text("Hover any control for details.", size="xs", fw=700, ml="xs", className="flow-hover-copy"),
         ],
     )
 
@@ -316,6 +395,8 @@ def format_metric_value(value: Any, metric_key: str | None = None) -> str:
             return _format_scaled(numeric, ["FLOPS", "KFLOPS", "MFLOPS", "GFLOPS", "TFLOPS", "PFLOPS", "EFLOPS"])
         if key in TOKEN_RATE_KEYS:
             return _format_scaled(numeric, ["tok/s", "Ktok/s", "Mtok/s", "Btok/s"])
+        if key == "timeout_seconds" and numeric <= 0:
+            return "Disabled"
         if key in TIME_KEYS or key.endswith("_time_s") or key.endswith("_seconds") or key.endswith("_s"):
             return _format_time_seconds(numeric)
         if key.endswith("_gb") or key == "hbm_gb":
@@ -385,15 +466,38 @@ def compact_timestamp(raw: str | None) -> str:
     return raw.replace("T", " ").replace("+00:00", " UTC")
 
 
+def format_finished_job_badge(job: Dict[str, Any]) -> str:
+    status = str(job.get("status") or "completed").replace("_", " ").title()
+    raw_time = job.get("updated_at") or job.get("created_at")
+    if not raw_time:
+        return status
+    try:
+        parsed = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return f"{status}, {parsed:%H:%M}"
+    except ValueError:
+        return status
+
+
+def to_local_datetime(value: datetime) -> datetime:
+    return value.astimezone() if value.tzinfo is not None else value
+
+
 def config_display_name(config_id: Any) -> str:
     if not config_id:
         return "base config"
-    return Path(str(config_id)).stem.replace("_", " ")
+    return config_label(config_id)
 
 
 def memory_exceeded_display(metrics: Dict[str, Any]) -> str:
-    violation_gb = float(metrics.get("memory_violation_gb") or 0.0)
-    exceeded = bool(metrics.get("memory_exceeded")) or violation_gb > 0
+    try:
+        violation_gb = float(metrics.get("memory_violation_gb") or 0.0)
+    except (TypeError, ValueError):
+        violation_gb = 0.0
+    raw_exceeded = metrics.get("memory_exceeded")
+    exceeded = raw_exceeded.strip().lower() in {"1", "true", "yes"} if isinstance(raw_exceeded, str) else bool(raw_exceeded)
+    exceeded = exceeded or violation_gb > 0
     if not exceeded:
         return "No"
     if violation_gb > 0:
@@ -422,7 +526,7 @@ def detail_metric_rows(metrics: Dict[str, Any]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     inserted_memory = False
     for key, value in metrics_with_derived_flops(metrics).items():
-        if key == "memory_violation_gb":
+        if key == "memory_violation_gb" or key in DETAIL_HIDDEN_METRIC_KEYS:
             continue
         if key == "memory_exceeded":
             rows.append({"metric": pretty_label(key), "value": memory_exceeded_display(metrics), "metric_key": key})
@@ -475,6 +579,29 @@ def detail_hardware_config(detail: Dict[str, Any], dimension_values: Dict[str, A
     return str(values.get("hardware_config") or payload.get("hardware_preset_id") or "hardware")
 
 
+def detail_run_type(detail: Dict[str, Any]) -> str:
+    payload = detail_payload(detail)
+    preview = (detail.get("request_record", {}).get("preview") or detail.get("request", {}).get("preview") or {})
+    raw = preview.get("run_type") or (payload.get("simple", {}) or {}).get("run_type") or detail.get("run_type") or "training"
+    return str(raw).lower()
+
+
+def detail_decode_length(detail: Dict[str, Any], dimension_values: Dict[str, Any] | None = None) -> int:
+    if detail_run_type(detail) == "training":
+        return 0
+    values = dimension_values or {}
+    if values.get("model.decode_len") not in (None, ""):
+        try:
+            return int(values["model.decode_len"])
+        except (TypeError, ValueError):
+            return 0
+    payload = detail_payload(detail)
+    try:
+        return int((payload.get("simple", {}) or {}).get("decode_len") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 dash._dash_renderer._set_react_version("18.2.0")
 ensure_workspace()
 MODEL_PRESETS = list_presets("models")
@@ -488,7 +615,17 @@ def preset_records(kind: str) -> List[Dict[str, Any]]:
     return list_presets(kind)
 
 
+def model_option_label(record: Dict[str, Any]) -> str:
+    label = str(record.get("label") or record.get("id") or "")
+    run_type = str(record.get("run_type") or "").strip().lower()
+    if run_type in {"training", "inference"}:
+        return f"{label} ({run_type})"
+    return label
+
+
 def preset_options(kind: str) -> List[Dict[str, str]]:
+    if kind == "models":
+        return [{"value": item["id"], "label": model_option_label(item)} for item in preset_records(kind)]
     return [{"value": item["id"], "label": item["label"]} for item in preset_records(kind)]
 
 
@@ -504,7 +641,7 @@ def _preferred_preset_id(records: List[Dict[str, Any]], preferred_id: str) -> st
 
 
 DEFAULT_MODEL_ID = _preferred_preset_id(MODEL_PRESETS, "Llama2-7B.yaml")
-DEFAULT_HW_ID = _preferred_preset_id(HW_PRESETS, "H100_SXM5_80GB_base.yaml")
+DEFAULT_HW_ID = _preferred_preset_id(HW_PRESETS, "H100_SXM5_80GB.yaml")
 DEFAULTS = build_form_defaults(DEFAULT_MODEL_ID, DEFAULT_HW_ID)
 DEFAULT_METRIC = get_default_metric_for_run_type(DEFAULTS["run_type"])
 
@@ -533,7 +670,7 @@ def _default_payload() -> Dict[str, Any]:
         "model_preset_id": DEFAULT_MODEL_ID,
         "hardware_preset_id": DEFAULT_HW_ID,
         "run_mode": "sweep",
-        "optimize_parallelism": False,
+        "optimize_parallelism": DEFAULT_OPTIMIZE_PARALLELISM,
         "optimizer_preset": "Fast",
         "use_raw_yaml": False,
         "model_yaml_text": "",
@@ -550,6 +687,101 @@ def _default_payload() -> Dict[str, Any]:
     }
 
 
+def default_sweep_rows() -> List[Dict[str, Any]]:
+    return [{"field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+
+
+def _valid_preset_ids(kind: str) -> set[str]:
+    return {item["id"] for item in preset_records(kind)}
+
+
+def _valid_preset_id(kind: str, candidate: Any, fallback: str) -> str:
+    text = str(candidate) if candidate else ""
+    return text if text in _valid_preset_ids(kind) else fallback
+
+
+def _valid_config_list(kind: str, values: Any, fallback: str) -> List[str]:
+    valid = _valid_preset_ids(kind)
+    selected = [str(item) for item in (values or []) if str(item) in valid]
+    if fallback not in selected:
+        selected.insert(0, fallback)
+    return selected or [fallback]
+
+
+def initial_ui_state(*, ignore_saved: bool = False) -> Dict[str, Any]:
+    saved = {} if ignore_saved else load_last_ui_state()
+    model_preset = _valid_preset_id("models", saved.get("model_preset"), DEFAULT_MODEL_ID)
+    hardware_preset = _valid_preset_id("hardware", saved.get("hardware_preset"), DEFAULT_HW_ID)
+    model_run_configs = _valid_config_list("models", saved.get("model_run_configs"), model_preset)
+    hardware_run_configs = _valid_config_list("hardware", saved.get("hardware_run_configs"), hardware_preset)
+    defaults = build_form_defaults(model_preset, hardware_preset)
+    active_tab = saved.get("active_config_tab")
+    kind, config_id = parse_config_tab(active_tab)
+    if kind == "models" and config_id not in model_run_configs:
+        active_tab = config_tab_value("models", model_preset)
+    elif kind == "hardware" and config_id not in hardware_run_configs:
+        active_tab = config_tab_value("hardware", hardware_preset)
+    elif kind not in {"models", "hardware"}:
+        active_tab = config_tab_value("models", model_preset)
+    return {
+        "model_preset": model_preset,
+        "hardware_preset": hardware_preset,
+        "model_run_configs": model_run_configs,
+        "hardware_run_configs": hardware_run_configs,
+        "active_config_tab": active_tab,
+        "run_mode": saved.get("run_mode") or "sweep",
+        "optimize_parallelism": saved.get("optimize_parallelism") if "optimize_parallelism" in saved else DEFAULT_OPTIMIZE_PARALLELISM,
+        "optimizer_preset": saved.get("optimizer_preset") or "Fast",
+        "sweep_rows": saved.get("sweep_rows") or default_sweep_rows(),
+        "metric": saved.get("metric") or get_default_metric_for_run_type(defaults["run_type"]),
+        "x_axis": saved.get("x_axis"),
+        "series_axis": saved.get("series_axis"),
+        "worker_count": int(saved.get("worker_count") or default_worker_count()),
+        "timeout_seconds": int(saved.get("timeout_seconds")) if saved.get("timeout_seconds") is not None else 180,
+        "defaults": defaults,
+    }
+
+
+def state_dimensions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = state.get("sweep_rows") or default_sweep_rows()
+    return _dimensions_from_inputs(
+        [
+            {
+                "field": row.get("field"),
+                "mode": row.get("mode"),
+                "list_text": row.get("list_text"),
+                "config_values": row.get("config_values"),
+                "start": row.get("start"),
+                "end": row.get("end"),
+                "step_or_points": row.get("step_or_points"),
+            }
+            for row in rows
+        ]
+    )
+
+
+def initial_payload_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = state["defaults"]
+    dimensions = config_dimensions_from_selection(state["model_run_configs"], state["hardware_run_configs"], state["model_preset"], state["hardware_preset"])
+    dimensions.extend(state_dimensions(state))
+    return collect_payload(
+        state["model_preset"],
+        state["hardware_preset"],
+        state["run_mode"],
+        bool(state["optimize_parallelism"]),
+        state["optimizer_preset"],
+        defaults["simple"] | {"run_type": defaults["run_type"]},
+        defaults["advanced"],
+        defaults["network_dimensions"],
+        dimensions,
+        state["metric"],
+        state["x_axis"],
+        state["series_axis"],
+        state["worker_count"],
+        state["timeout_seconds"],
+    )
+
+
 def selected_config_values(values: List[str] | None, fallback: str) -> List[str]:
     selected = [item for item in (values or []) if item]
     return selected or [fallback]
@@ -560,23 +792,85 @@ def selected_active_value(values: List[str] | None, fallback: str, current: str 
     return current if current in selected else selected[0]
 
 
-def editor_tabs_children(selected_ids: List[str] | None, fallback: str, labels: Dict[str, str], icon: str) -> List[Any]:
-    values = selected_config_values(selected_ids, fallback)
-    return [
-        dmc.TabsList(
-            className="config-editor-tab-list",
-            children=[
+def config_tab_value(kind: str, config_id: str) -> str:
+    return f"{kind}::{config_id}"
+
+
+def parse_config_tab(value: str | None) -> tuple[str | None, str | None]:
+    if not value or "::" not in value:
+        return None, None
+    kind, config_id = value.split("::", 1)
+    if kind not in {"models", "hardware"} or not config_id:
+        return None, None
+    return kind, config_id
+
+
+def active_config_tab_value(
+    model_ids: List[str] | None,
+    hardware_ids: List[str] | None,
+    fallback_model: str,
+    fallback_hardware: str,
+    current_tab: str | None,
+    current_model: str | None,
+    current_hardware: str | None,
+) -> str:
+    selected_models = selected_config_values(model_ids, fallback_model)
+    selected_hardware = selected_config_values(hardware_ids, fallback_hardware)
+    current_kind, current_id = parse_config_tab(current_tab)
+    if current_kind == "models" and current_id in selected_models:
+        return config_tab_value("models", current_id)
+    if current_kind == "hardware" and current_id in selected_hardware:
+        return config_tab_value("hardware", current_id)
+    if current_model in selected_models:
+        return config_tab_value("models", current_model or selected_models[0])
+    if current_hardware in selected_hardware:
+        return config_tab_value("hardware", current_hardware or selected_hardware[0])
+    return config_tab_value("models", selected_models[0]) if selected_models else config_tab_value("hardware", selected_hardware[0])
+
+
+def active_config_tab_for_selection_change(
+    model_ids: List[str] | None,
+    hardware_ids: List[str] | None,
+    fallback_model: str,
+    fallback_hardware: str,
+    current_tab: str | None,
+    current_model: str | None,
+    current_hardware: str | None,
+    triggered_id: str | None,
+) -> str:
+    selected_models = selected_config_values(model_ids, fallback_model)
+    selected_hardware = selected_config_values(hardware_ids, fallback_hardware)
+    if triggered_id == "model-run-configs":
+        return config_tab_value("models", selected_models[-1])
+    if triggered_id == "hardware-run-configs":
+        return config_tab_value("hardware", selected_hardware[-1])
+    return active_config_tab_value(model_ids, hardware_ids, fallback_model, fallback_hardware, current_tab, current_model, current_hardware)
+
+
+def config_workbook_tabs_children(model_ids: List[str] | None, hardware_ids: List[str] | None, model_labels: Dict[str, str], hardware_labels: Dict[str, str]) -> List[Any]:
+    tabs = []
+    for kind, values, labels, icon, badge in [
+        ("models", selected_config_values(model_ids, DEFAULT_MODEL_ID), model_labels, "solar:document-text-bold", "Model"),
+        ("hardware", selected_config_values(hardware_ids, DEFAULT_HW_ID), hardware_labels, "solar:cpu-bold", "Hardware"),
+    ]:
+        for value in values:
+            label = labels.get(value, Path(value).stem)
+            tabs.append(
                 dmc.TabsTab(
-                    labels.get(value, Path(value).stem),
-                    value=value,
+                    html.Div(
+                        className="config-workbook-tab-content",
+                        children=[
+                            html.Span(badge, className="config-workbook-tab-kind"),
+                            html.Span(label, className="config-workbook-tab-title"),
+                        ],
+                    ),
+                    value=config_tab_value(kind, value),
                     leftSection=DashIconify(icon=icon, width=15),
-                    className="config-editor-tab",
-                    attributes={"title": value},
+                    className="config-workbook-tab",
+                    attributes={"title": f"{badge}: {label}"},
                 )
-                for value in values
-            ],
-        )
-    ]
+            )
+    return [dmc.TabsList(className="config-workbook-tab-list", children=tabs)]
 
 
 def config_dimensions_from_selection(model_ids: List[str] | None, hardware_ids: List[str] | None, primary_model_id: str, primary_hardware_id: str) -> List[Dict[str, Any]]:
@@ -607,20 +901,107 @@ def render_error_summary(errors: List[str]) -> dmc.Stack:
     )
 
 
+def clamp_percent(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(100.0, numeric))
+
+
+def branded_progress_bar(progress: Any, count_label: str, status_label: str, *, show_run_log_button: bool = False) -> html.Div:
+    percent = clamp_percent(progress)
+    percent_text = f"{percent:.0f}%"
+    meta_children = [
+        html.Span(count_label, className="rapid-progress-meta-pill"),
+        html.Span(status_label, className="rapid-progress-meta-pill rapid-progress-meta-status"),
+    ]
+    if show_run_log_button:
+        meta_children.append(
+            html.Div(
+                className="rapid-progress-complete-action",
+                children=with_tip(
+                    dmc.Button(
+                        "Run Log",
+                        id="progress-run-log-button",
+                        className="rapid-progress-run-log-button",
+                        radius="xl",
+                        leftSection=DashIconify(icon="solar:clock-circle-bold", width=18),
+                    ),
+                    HELP_TEXT["progress_run_log"],
+                ),
+            )
+        )
+    return html.Div(
+        className="rapid-progress-shell",
+        children=[
+            html.Div(
+                className="rapid-progress-track",
+                role="progressbar",
+                style={"--rapid-progress": f"{percent:.2f}%"},
+                **{
+                    "aria-valuemin": "0",
+                    "aria-valuemax": "100",
+                    "aria-valuenow": f"{percent:.2f}",
+                    "aria-label": f"RAPID-LLM job progress {percent_text}",
+                },
+                children=[
+                    html.Div(className="rapid-progress-fill"),
+                    html.Div("RAPID-LLM", className="rapid-progress-core", **{"data-label": "RAPID-LLM"}),
+                    html.Div(percent_text, className="rapid-progress-percent"),
+                ],
+            ),
+            html.Div(
+                className="rapid-progress-meta",
+                children=meta_children,
+            ),
+        ],
+    )
+
+
+def detail_loading_placeholder(selected_detail: Dict[str, Any] | None) -> dmc.Paper:
+    label = "details" if not selected_detail else f"{selected_detail.get('kind', 'job')} details"
+    return dmc.Paper(
+        radius="xl",
+        p="xl",
+        withBorder=True,
+        children=dmc.Group(
+            gap="md",
+            align="center",
+            children=[
+                dmc.Loader(size="md", color="blue"),
+                dmc.Stack(
+                    gap=2,
+                    children=[
+                        dmc.Text(f"Loading {label}...", fw=800),
+                        dmc.Text("Preparing large sweep tables and plots.", size="sm", c="dimmed"),
+                    ],
+                ),
+            ],
+        ),
+    )
+
+
 def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
     if not preview.get("ok"):
         return render_error_summary(preview.get("errors", []))
     telemetry = get_telemetry()
     return dmc.Stack(
-        gap="md",
+        gap="sm",
         children=[
+            dmc.Alert(
+                "Worst-case wall clock assumes every simulator invocation hits its own timeout. Expected runtime is often 30-70% of worst-case for small and medium launches, but it can rapidly approach worst-case on larger runs, especially beyond 256 GPUs. If final runtime lands close to worst-case, increase the timeout for higher result fidelity.",
+                color="blue",
+                radius="lg",
+                className="preview-runtime-note",
+            ),
             dmc.SimpleGrid(
                 cols={"base": 1, "sm": 2, "lg": 4},
                 spacing="sm",
                 children=[
                     stat_card("Top-level cases", format_metric_value(preview["top_level_case_count"], "case_count"), "solar:box-bold", "teal"),
                     stat_card("Simulator invocations", format_metric_value(preview["total_invocations"], "invocation_count"), "solar:play-bold", "blue"),
-                    stat_card("Worst-case wall clock", humanize_seconds(preview["worst_case_wall_clock_s"]), "solar:clock-circle-bold", "orange"),
+                    stat_card("Worst-case wall clock", format_worst_case_wall_clock(preview["worst_case_wall_clock_s"]), "solar:clock-circle-bold", "orange"),
                     stat_card("Available RAM", format_metric_value(telemetry["available_ram_gb"], "available_ram_gb"), "solar:memory-bold", "grape"),
                 ],
             ),
@@ -629,15 +1010,10 @@ def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
                 children=[
                     dmc.Badge(f"Metric: {METRIC_LABELS.get(metric, metric)}", radius="xl", color="teal", variant="light"),
                     dmc.Badge(f"Workers: {format_metric_value(preview['worker_count'], 'worker_count')}", radius="xl", color="blue", variant="light"),
-                    dmc.Badge(f"Timeout: {format_metric_value(preview['timeout_seconds'], 'timeout_seconds')}", radius="xl", color="orange", variant="light"),
+                    dmc.Badge(f"Timeout: {format_metric_value(preview['timeout_seconds'], 'timeout_seconds')}", radius="xl", color="cyan", variant="light"),
                 ],
             ),
-            dmc.Text(
-                "Worst-case wall clock = ceil(simulator invocations / workers) x timeout per candidate, assuming every worker hits its own timeout. Expected runtime is typically 30-70% of worst-case wall clock and still scales with model size, GPU count, and backend choice.",
-                size="sm",
-                c="dimmed",
-            ),
-            dmc.Stack(children=[dmc.Alert(w, color="yellow", radius="lg") for w in preview.get("warnings", [])]) if preview.get("warnings") else html.Div(),
+            dmc.Stack(children=[dmc.Alert(w, color="red", radius="lg") for w in preview.get("warnings", [])]) if preview.get("warnings") else html.Div(),
         ],
     )
 
@@ -648,7 +1024,68 @@ def launch_button_label(preview: Dict[str, Any] | None) -> str:
     return f"Launch {count} {noun}"
 
 
-def dim_card(index: int) -> dmc.Paper:
+PREVIEW_LOAD_ONLY_TRIGGER_IDS = {"config-editor-tabs", "model-preset", "hardware-preset"}
+
+
+def preview_rebuild_is_load_only(triggered_prop_ids: Dict[str, Any] | None) -> bool:
+    triggered_ids = {str(prop_id).split(".", 1)[0] for prop_id in (triggered_prop_ids or {})}
+    return bool(triggered_ids) and triggered_ids <= PREVIEW_LOAD_ONLY_TRIGGER_IDS
+
+
+def progress_count_label(job: Dict[str, Any], *, terminal: bool = False) -> str:
+    total = int(job.get("progress_total") or 0)
+    completed = int(job.get("progress_completed") or 0)
+    if terminal:
+        if total > 0:
+            return f"{total} / {total}"
+        return "Done"
+    return f"{completed} / {total}"
+
+
+def _parse_job_timestamp(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return to_local_datetime(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def job_eta_readout(job: Dict[str, Any], now: datetime | None = None) -> str:
+    total = int(job.get("progress_total") or 0)
+    completed = int(job.get("progress_completed") or 0)
+    if total <= 0:
+        return "ETA: unavailable"
+    if completed >= total:
+        return "ETA: complete"
+    if completed <= 0:
+        return "ETA: calculating"
+    started_at = _parse_job_timestamp(job.get("created_at") or job.get("updated_at"))
+    if not started_at:
+        return "ETA: calculating"
+    if now is None:
+        now = datetime.now().astimezone() if started_at.tzinfo else datetime.now()
+    elif started_at.tzinfo and now.tzinfo is None:
+        now = now.replace(tzinfo=started_at.tzinfo)
+    elif now.tzinfo and started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=now.tzinfo)
+    elapsed_s = max(0.0, (now - started_at).total_seconds())
+    if elapsed_s <= 0:
+        return "ETA: calculating"
+    remaining_s = (elapsed_s / max(1, completed)) * max(0, total - completed)
+    finish_at = now + timedelta(seconds=remaining_s)
+    return f"ETA: ~{humanize_seconds(remaining_s)} remaining ({finish_at:%H:%M})"
+
+
+def history_title_component(item: Dict[str, Any]) -> dmc.Group:
+    children: List[Any] = [dmc.Text(item["title"], fw=700, size="lg")]
+    if int(item.get("title_duplicate_count") or 0) > 1:
+        children.append(html.Span(f"#{int(item.get('title_index') or 1)}", className="history-title-index"))
+    return dmc.Group(gap=8, align="baseline", children=children)
+
+
+def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
+    row = row or default_sweep_rows()[0]
     return dmc.Paper(
         radius="xl",
         p="md",
@@ -658,14 +1095,14 @@ def dim_card(index: int) -> dmc.Paper:
             gap="sm",
             children=[
                 dmc.Group(justify="space-between", children=[dmc.Text(f"Dimension {index}", fw=700, size="sm"), dmc.Badge("Optional", variant="light", color="gray")]),
-                with_tip(dmc.Select(id=f"dim-{index}-field", label="Field", placeholder="Select a sweep field", data=FIELD_OPTIONS, clearable=True), "Select a workload or hardware-scaling field to vary. Use Total GPUs for GPU scaling; individual parallelism axes are not sweep fields."),
+                with_tip(dmc.Select(id=f"dim-{index}-field", label="Field", placeholder="Select a sweep field", value=row.get("field"), data=FIELD_OPTIONS, clearable=True), "Select a workload or hardware-scaling field to vary. Use Total GPUs for GPU scaling; individual parallelism axes are not sweep fields."),
                 html.Div(
                     id=f"dim-{index}-mode-wrap",
                     style={"display": "none"},
-                    children=with_tip(dmc.SegmentedControl(id=f"dim-{index}-mode", fullWidth=True, data=[{"label": "Values", "value": "values"}, {"label": "Range", "value": "range"}], value="values"), "Values uses a comma-separated list; Range uses start, end, and step size."),
+                    children=with_tip(dmc.SegmentedControl(id=f"dim-{index}-mode", fullWidth=True, data=[{"label": "Values", "value": "values"}, {"label": "Range", "value": "range"}], value=row.get("mode") or "values"), "Values uses a comma-separated list; Range uses start, end, and step size."),
                 ),
-                html.Div(id=f"dim-{index}-values-wrap", style={"display": "none"}, children=with_tip(dmc.TextInput(id=f"dim-{index}-list", label="Values", placeholder="Example: 8192, 16384"), "Comma-separated values to run for the selected sweep field.")),
-                html.Div(id=f"dim-{index}-configs-wrap", style={"display": "none"}, children=with_tip(dmc.MultiSelect(id=f"dim-{index}-configs", label="Preset values", data=[], placeholder="Pick config files"), "Configuration file values for this sweep dimension.")),
+                html.Div(id=f"dim-{index}-values-wrap", style={"display": "none"}, children=with_tip(dmc.TextInput(id=f"dim-{index}-list", label="Values", value=row.get("list_text") or "", placeholder="Example: 8192, 16384"), "Comma-separated values to run for the selected sweep field.")),
+                html.Div(id=f"dim-{index}-configs-wrap", style={"display": "none"}, children=with_tip(dmc.MultiSelect(id=f"dim-{index}-configs", label="Preset values", value=row.get("config_values") or [], data=[], placeholder="Pick config files"), "Configuration file values for this sweep dimension.")),
                 html.Div(
                     id=f"dim-{index}-range-wrap",
                     style={"display": "none"},
@@ -676,9 +1113,9 @@ def dim_card(index: int) -> dmc.Paper:
                                 cols={"base": 1, "sm": 3},
                                 spacing="sm",
                                 children=[
-                                    with_tip(dmc.NumberInput(id=f"dim-{index}-start", label="Start", allowDecimal=True), "First value in the numeric sweep range."),
-                                    with_tip(dmc.NumberInput(id=f"dim-{index}-end", label="End", allowDecimal=True), "Last value included in the numeric sweep range."),
-                                    with_tip(dmc.NumberInput(id=f"dim-{index}-step_or_points", label="Step size", allowDecimal=True), "Increment between adjacent values in the numeric sweep range."),
+                                    with_tip(dmc.NumberInput(id=f"dim-{index}-start", label="Start", value=row.get("start"), allowDecimal=True), "First value in the numeric sweep range."),
+                                    with_tip(dmc.NumberInput(id=f"dim-{index}-end", label="End", value=row.get("end"), allowDecimal=True), "Last value included in the numeric sweep range."),
+                                    with_tip(dmc.NumberInput(id=f"dim-{index}-step_or_points", label="Step size", value=row.get("step_or_points"), allowDecimal=True), "Increment between adjacent values in the numeric sweep range."),
                                 ],
                             ),
                             html.Div(id=f"dim-{index}-range-preview", className="range-preview", children="Preview: enter start, end, and step size."),
@@ -690,9 +1127,77 @@ def dim_card(index: int) -> dmc.Paper:
     )
 
 
-def network_editor(defaults: List[Dict[str, Any]]) -> List[dmc.Paper]:
+def topology_axis_badges(axes: List[str] | None) -> dmc.Group:
+    items = [str(axis).upper() for axis in (axes or []) if str(axis).strip()]
+    if not items:
+        items = ["none"]
+    def _badge_color(axis: str) -> str:
+        return "gray" if axis.lower() in {"none", "disabled"} else "blue"
+    return dmc.Group(
+        gap=4,
+        children=[
+            dmc.Badge(axis, size="xs", radius="sm", color=_badge_color(axis), variant="light")
+            for axis in items
+        ],
+    )
+
+
+def parallelism_topology_preview(pp_dimension: str | None) -> dmc.Paper:
+    mode = str(pp_dimension or "dim1_shared")
+    if mode == "dim1":
+        mode = "dim1_dim2"
+    elif mode in {"dim2", "dim2_shared"}:
+        mode = "dim1_dim2"
+    if mode == "dim1_dim2":
+        dim1_axes, dim1_note = ["PP"], "Pipeline axis"
+        dim2_axes, dim2_note = ["DP"], "Outermost data-parallel axis"
+    else:
+        dim1_axes, dim1_note = ["PP", "DP"], "Pipeline and data share Dimension 1"
+        dim2_axes, dim2_note = ["disabled"], "Dimension 2 off"
+    rows = [
+        ("Dimension 0", ["TP", "CP", "EP"], "Fixed inner transformer/expert axis (intra-DGX box/waferscale)"),
+        ("Dimension 1", dim1_axes, dim1_note),
+        ("Dimension 2", dim2_axes, dim2_note),
+    ]
+    return dmc.Paper(
+        radius="md",
+        p="sm",
+        withBorder=True,
+        className="topology-mapping-preview",
+        children=dmc.SimpleGrid(
+            cols={"base": 1, "sm": 3},
+            spacing="xs",
+            children=[
+                html.Div(
+                    className="topology-mapping-cell",
+                    children=[
+                        dmc.Text(label, fw=800, size="sm"),
+                        topology_axis_badges(axes),
+                        dmc.Text(note, size="xs", c="dimmed"),
+                    ],
+                )
+                for label, axes, note in rows
+            ],
+        ),
+    )
+
+
+def disabled_network_dimension_indices(pp_dimension: str | None) -> set[int]:
+    mode = str(pp_dimension or "dim1_shared")
+    if mode == "dim1":
+        mode = "dim1_dim2"
+    elif mode in {"dim2", "dim2_shared"}:
+        mode = "dim1_dim2"
+    if mode == "dim1_shared":
+        return {2}
+    return set()
+
+
+def network_editor(defaults: List[Dict[str, Any]], pp_dimension: str | None = None) -> List[dmc.Paper]:
     rows: List[dmc.Paper] = []
+    disabled_indices = disabled_network_dimension_indices(pp_dimension)
     for idx, row in enumerate(defaults):
+        disabled = idx in disabled_indices
         rows.append(
             dmc.Paper(
                 radius="lg",
@@ -702,14 +1207,21 @@ def network_editor(defaults: List[Dict[str, Any]]) -> List[dmc.Paper]:
                 children=dmc.Stack(
                     gap="xs",
                     children=[
-                        dmc.Text(row["label"], fw=700, size="sm"),
+                        dmc.Group(
+                            justify="space-between",
+                            gap="xs",
+                            children=[
+                                dmc.Text(row["label"], fw=700, size="sm"),
+                                topology_axis_badges(row.get("parallelisms")),
+                            ],
+                        ),
                         dmc.SimpleGrid(
                             cols={"base": 1, "sm": 3},
                             spacing="sm",
                             children=[
-                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=[{"value": "Ring", "label": "Ring"}, {"value": "FC", "label": "Fully Connected"}, {"value": "SuperPOD", "label": "SuperPOD"}, {"value": "Torus2D", "label": "Torus2D"}]), HELP_TEXT["network_topology"]),
-                                with_tip(dmc.TextInput(id={"type": "net-bandwidth", "index": idx}, label="Bandwidth", value=str(row["bandwidth"])), HELP_TEXT["network_bandwidth"]),
-                                with_tip(dmc.NumberInput(id={"type": "net-util", "index": idx}, label="Utilization", min=0, max=1, step=0.01, decimalScale=3, value=float(row["util"])), HELP_TEXT["network_util"]),
+                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=[{"value": "Ring", "label": "Ring"}, {"value": "FC", "label": "Fully Connected"}, {"value": "Mesh2D", "label": "Mesh2D"}, {"value": "Torus2D", "label": "Torus2D"}], disabled=disabled), HELP_TEXT["network_topology"]),
+                                with_tip(dmc.TextInput(id={"type": "net-bandwidth", "index": idx}, label="Bandwidth", value=str(row["bandwidth"]), disabled=disabled), HELP_TEXT["network_bandwidth"]),
+                                with_tip(dmc.NumberInput(id={"type": "net-util", "index": idx}, label="Utilization", min=0, max=1, step=0.01, decimalScale=3, value=float(row["util"]), disabled=disabled), HELP_TEXT["network_util"]),
                             ],
                         ),
                     ],
@@ -731,24 +1243,41 @@ def build_header() -> html.Div:
                 h="100%",
                 children=[
                     dmc.Group(
+                        className="topbar-brand",
                         gap="md",
                         children=[
-                            with_tip(html.Div(className="brand-orb"), HELP_TEXT["app_title"]),
                             dmc.Stack(
                                 gap=2,
                                 children=[
-                                    with_tip(dmc.Title("RAPID-LLM Workbench", order=2, c="#0055A6"), HELP_TEXT["app_title"]),
+                                    with_tip(
+                                        html.Div(
+                                            className="topbar-title-block",
+                                            children=[
+                                                dmc.Title("RAPID-LLM Workbench", order=2, c="#ffffff", className="topbar-title"),
+                                                dmc.Text("v0.9, last updated 4/27/2026", className="topbar-version"),
+                                            ],
+                                        ),
+                                        HELP_TEXT["app_title"],
+                                    ),
                                     with_tip(flow_help(), HELP_TEXT["app_flow"]),
                                 ],
                             ),
                         ],
                     ),
+                    html.Div(
+                        className="topbar-logo-slot",
+                        children=html.Div(
+                            className="nanocad-logo-frame",
+                            children=html.Img(src=app.get_asset_url(APP_LOGO_ASSET), className="nanocad-logo", alt="NanoCAD"),
+                        ),
+                    ),
                     dmc.Group(
+                        className="telemetry-pills",
                         gap="sm",
                         children=[
-                            with_tip(dmc.Badge(id="telemetry-ram", size="lg", radius="xl", color="teal", variant="light"), HELP_TEXT["telemetry_ram"]),
-                            with_tip(dmc.Badge(id="telemetry-cpu", size="lg", radius="xl", color="orange", variant="light"), HELP_TEXT["telemetry_cpu"]),
-                            with_tip(dmc.Badge(id="telemetry-job", size="lg", radius="xl", color="blue", variant="light"), HELP_TEXT["telemetry_job"]),
+                            with_tip(dmc.Badge("RAM --", id="telemetry-ram", size="lg", radius="xl", color="teal", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_ram"]),
+                            with_tip(dmc.Badge("CPU --", id="telemetry-cpu", size="lg", radius="xl", color="cyan", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_cpu"]),
+                            with_tip(dmc.Badge("Idle", id="telemetry-job", size="lg", radius="xl", color="blue", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_job"]),
                         ],
                     ),
                 ],
@@ -758,7 +1287,8 @@ def build_header() -> html.Div:
 
 
 def create_layout() -> dmc.MantineProvider:
-    metric_options = get_metric_options(DEFAULTS["run_type"])
+    state = initial_ui_state()
+    metric_options = get_metric_options(state["defaults"]["run_type"])
     return dmc.MantineProvider(
         theme={"primaryColor": "blue", "fontFamily": "Arial, Calibri, Segoe UI, sans-serif", "defaultRadius": "sm"},
         children=html.Div(
@@ -793,7 +1323,7 @@ def create_layout() -> dmc.MantineProvider:
                                                         id="detail-plot-toolbar",
                                                         style={"display": "none"},
                                                         children=dmc.Stack(
-                                                            gap=2,
+                                                            gap=4,
                                                             children=[
                                                                 dmc.Group(
                                                                     gap="sm",
@@ -811,7 +1341,28 @@ def create_layout() -> dmc.MantineProvider:
                                                                         with_tip(dmc.Button("Save plot", id="save-plot-button", variant="light", leftSection=DashIconify(icon="solar:diskette-bold", width=18)), "Save the current plot as a standalone HTML file under this job's plots folder."),
                                                                     ],
                                                                 ),
+                                                                dmc.Group(
+                                                                    gap="sm",
+                                                                    align="center",
+                                                                    children=[
+                                                                        with_tip(
+                                                                            dmc.SegmentedControl(
+                                                                                id="detail-display-mode",
+                                                                                value="top",
+                                                                                data=[
+                                                                                    {"label": "Top results", "value": "top"},
+                                                                                    {"label": "All results (slow)", "value": "full"},
+                                                                                ],
+                                                                            ),
+                                                                            "Top results loads the best capped rows by the selected metric. All results renders every stored case and can be slow for large sweeps.",
+                                                                        ),
+                                                                        dmc.Text("Export full table", size="xs", fw=800),
+                                                                        with_tip(dmc.Button("CSV", id="export-table-csv-button", variant="light", size="xs"), "Save every stored detail row to CSV, regardless of the current display limit."),
+                                                                        with_tip(dmc.Button("JSON", id="export-table-json-button", variant="light", size="xs"), "Save every stored detail row to JSON, regardless of the current display limit."),
+                                                                    ],
+                                                                ),
                                                                 dmc.Text(id="plot-save-status", size="xs", c="dimmed"),
+                                                                dmc.Text(id="table-export-status", size="xs", c="dimmed"),
                                                             ],
                                                         ),
                                                     ),
@@ -840,6 +1391,7 @@ def create_layout() -> dmc.MantineProvider:
                     className="app-main",
                     children=[
                         dmc.Tabs(
+                            id="workspace-tabs",
                             value="builder",
                             children=[
                                 dmc.TabsList(
@@ -851,29 +1403,31 @@ def create_layout() -> dmc.MantineProvider:
                                         dmc.TabsTab("2 Run log", value="history", leftSection=DashIconify(icon="solar:clock-circle-bold")),
                                     ],
                                 ),
-                                dmc.TabsPanel(value="builder", children=builder_panel(metric_options)),
+                                dmc.TabsPanel(value="builder", children=builder_panel(metric_options, state)),
                                 dmc.TabsPanel(value="history", children=html.Div(id="history-panel")),
                             ],
                         )
                     ],
                 ),
+                html.Footer(APP_CREDIT_TEXT, className="app-credit"),
             ],
         ),
     )
 
 
-def builder_panel(metric_options: List[Dict[str, str]]) -> dmc.Grid:
+def builder_panel(metric_options: List[Dict[str, str]], state: Dict[str, Any] | None = None) -> dmc.Grid:
+    state = state or initial_ui_state(ignore_saved=True)
     return dmc.Grid(
         className="builder-grid",
         gutter="lg",
         children=[
-            dmc.GridCol(span={"base": 12, "xl": 5}, children=left_column(metric_options)),
-            dmc.GridCol(span={"base": 12, "xl": 7}, children=right_column()),
+            dmc.GridCol(span={"base": 12, "xl": 5}, children=left_column(metric_options, state)),
+            dmc.GridCol(span={"base": 12, "xl": 7}, children=right_column(state)),
         ],
     )
 
 
-def left_column(metric_options: List[Dict[str, str]]) -> dmc.Stack:
+def left_column(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> dmc.Stack:
     hero = dmc.Paper(
         className="hero-card",
         radius="xl",
@@ -891,7 +1445,7 @@ def left_column(metric_options: List[Dict[str, str]]) -> dmc.Stack:
                 ),
                 html.H2("Launch runs, review log, inspect details", className="hero-heading"),
                 html.P(
-                    "Pick editable YAML files, adjust supported options, launch the job, then open Details from the run log.",
+                    "Pick YAML files, adjust run options, launch the job, then open Details from the run log.",
                     className="hero-copy",
                 ),
             ],
@@ -902,17 +1456,16 @@ def left_column(metric_options: List[Dict[str, str]]) -> dmc.Stack:
         gap="lg",
         children=[
             hero,
-            run_setup_card(),
-            basic_options_card(),
-            html.Div(id="sweep-dimensions-section", children=dimensions_card()),
-            launch_controls_card(metric_options),
-            advanced_options_card(),
+            run_setup_card(state),
+            config_options_card(state),
+            html.Div(id="sweep-dimensions-section", children=dimensions_card(state)),
+            launch_controls_card(metric_options, state),
         ],
     )
 
 
-def right_column() -> dmc.Stack:
-    initial_preview = build_launch_preview(_default_payload())
+def right_column(state: Dict[str, Any]) -> dmc.Stack:
+    initial_preview = build_launch_preview(initial_payload_from_state(state))
     preview_card = dmc.Paper(
         radius="xl",
         p="lg",
@@ -921,13 +1474,7 @@ def right_column() -> dmc.Stack:
         children=dmc.Stack(
             gap="md",
             children=[
-                dmc.Group(
-                    justify="space-between",
-                    children=[
-                        dmc.Title("Launch Plan", order=3),
-                        dmc.Badge("Updates as settings change", color="blue", variant="light"),
-                    ],
-                ),
+                dmc.Title("Launch Plan", order=3),
                 html.Div(id="preview-summary", children=render_preview_summary(initial_preview, DEFAULT_METRIC)),
             ],
         ),
@@ -959,7 +1506,7 @@ def right_column() -> dmc.Stack:
             children=[
                 dmc.Group(
                     justify="space-between",
-                            children=[dmc.Title("Workflow", order=3), dmc.Text("Launch -> Run log -> Details", size="sm", c="dimmed")],
+                    children=[dmc.Title("Workflow", order=3)],
                 ),
                 dmc.SimpleGrid(
                     cols={"base": 1, "sm": 2},
@@ -968,7 +1515,7 @@ def right_column() -> dmc.Stack:
                             color="teal",
                             radius="lg",
                             title="Choose cases",
-                            children="Pick model and hardware YAML files above. Each selected file appears as an editable tab, and the selected tabs define the launch cases.",
+                            children="Pick model and hardware YAML files above to define the launch cases.",
                         ),
                         dmc.Alert(
                             color="violet",
@@ -992,7 +1539,7 @@ def right_column() -> dmc.Stack:
     )
 
 
-def run_setup_card() -> dmc.Paper:
+def run_setup_card(state: Dict[str, Any]) -> dmc.Paper:
     return dmc.Paper(
         radius="xl",
         p="lg",
@@ -1001,23 +1548,22 @@ def run_setup_card() -> dmc.Paper:
             gap="md",
             children=[
                 dmc.Group(justify="space-between", children=[dmc.Title("Launch Setup", order=3), dmc.Badge("workspace/configs", color="teal", variant="light")]),
-                with_tip(dmc.MultiSelect(id="model-run-configs", label="Models to run", value=[DEFAULT_MODEL_ID], data=preset_options("models"), clearable=False), HELP_TEXT["models_to_run"]),
-                with_tip(dmc.MultiSelect(id="hardware-run-configs", label="Hardware to run", value=[DEFAULT_HW_ID], data=preset_options("hardware"), clearable=False), HELP_TEXT["hardware_to_run"]),
-                editor_switchboard(),
+                with_tip(dmc.MultiSelect(id="model-run-configs", label="Models to run", value=state["model_run_configs"], data=preset_options("models"), clearable=False), HELP_TEXT["models_to_run"]),
+                with_tip(dmc.MultiSelect(id="hardware-run-configs", label="Hardware to run", value=state["hardware_run_configs"], data=preset_options("hardware"), clearable=False), HELP_TEXT["hardware_to_run"]),
                 html.Div(
                     style={"display": "none"},
                     children=[
-                        dmc.Select(id="model-preset", value=DEFAULT_MODEL_ID, data=preset_options("models")),
-                        dmc.Select(id="hardware-preset", value=DEFAULT_HW_ID, data=preset_options("hardware")),
+                        dmc.Select(id="model-preset", value=state["model_preset"], data=preset_options("models")),
+                        dmc.Select(id="hardware-preset", value=state["hardware_preset"], data=preset_options("hardware")),
                     ],
                 ),
-                with_tip(dmc.SegmentedControl(id="run-mode", fullWidth=True, value="sweep", data=[{"label": "Sweep", "value": "sweep"}, {"label": "Single Launch", "value": "single"}]), "Choose whether to launch one edited config or expand sweep dimensions into multiple cases."),
+                with_tip(dmc.SegmentedControl(id="run-mode", fullWidth=True, value=state["run_mode"], data=[{"label": "Sweep", "value": "sweep"}, {"label": "Single Launch", "value": "single"}]), "Choose whether to launch one edited config or expand sweep dimensions into multiple cases."),
                 dmc.SimpleGrid(
                     cols={"base": 1, "sm": 2},
                     spacing="sm",
                     children=[
-                        with_tip(dmc.NumberInput(id="worker-count", label="Workers", min=1, max=CPU_CORES, value=default_worker_count()), HELP_TEXT["worker_count"]),
-                        with_tip(dmc.NumberInput(id="timeout-seconds", label="Timeout / candidate (s)", min=1, value=180), HELP_TEXT["timeout"]),
+                        with_tip(dmc.NumberInput(id="worker-count", label="Workers", min=1, max=CPU_CORES, value=state["worker_count"]), HELP_TEXT["worker_count"]),
+                        with_tip(dmc.NumberInput(id="timeout-seconds", label="Timeout / candidate (s)", min=0, value=state["timeout_seconds"]), HELP_TEXT["timeout"]),
                     ],
                 ),
                 dmc.Text(f"CPU cores detected: {CPU_CORES}. Worker default: {default_worker_count()}.", size="xs", c="dimmed"),
@@ -1025,78 +1571,6 @@ def run_setup_card() -> dmc.Paper:
             ],
         ),
     )
-
-
-def editor_switchboard() -> html.Div:
-    return html.Div(
-        className="config-editor-switchboard",
-        children=[
-            dmc.Group(
-                justify="space-between",
-                align="center",
-                children=[
-                    with_tip(dmc.Text("Selected file editor", fw=800), HELP_TEXT["editor_tabs"]),
-                    dmc.Badge("active YAML tabs", radius="xl", color="teal", variant="light"),
-                ],
-            ),
-            with_tip(
-                dmc.Text("The highlighted model and hardware tabs are loaded below. Switch tabs to edit another selected YAML file.", size="sm", c="dimmed"),
-                HELP_TEXT["editor_tabs"],
-            ),
-            dmc.Stack(
-                gap="xs",
-                children=[
-                    dmc.Text("Model files", size="xs", fw=800, tt="uppercase", c="dimmed"),
-                    with_tip(
-                        dmc.Tabs(
-                            id="model-editor-tabs",
-                            value=DEFAULT_MODEL_ID,
-                            className="config-editor-tabs",
-                            children=editor_tabs_children([DEFAULT_MODEL_ID], DEFAULT_MODEL_ID, MODEL_LABELS, "solar:document-text-bold"),
-                        ),
-                        HELP_TEXT["model_preset"],
-                    ),
-                    dmc.Text("Hardware files", size="xs", fw=800, tt="uppercase", c="dimmed"),
-                    with_tip(
-                        dmc.Tabs(
-                            id="hardware-editor-tabs",
-                            value=DEFAULT_HW_ID,
-                            className="config-editor-tabs",
-                            children=editor_tabs_children([DEFAULT_HW_ID], DEFAULT_HW_ID, HW_LABELS, "solar:cpu-bold"),
-                        ),
-                        HELP_TEXT["hardware_preset"],
-                    ),
-                ],
-            ),
-            dmc.Divider(label="File actions", labelPosition="center"),
-            dmc.SimpleGrid(
-                cols={"base": 1, "sm": 3},
-                spacing="sm",
-                children=[
-                    with_tip(
-                        dmc.SegmentedControl(
-                            id="config-action-kind",
-                            value="models",
-                            data=[{"label": "Model", "value": "models"}, {"label": "Hardware", "value": "hardware"}],
-                            fullWidth=True,
-                        ),
-                        "Choose whether the action targets the active model tab or active hardware tab.",
-                    ),
-                    with_tip(dmc.TextInput(id="config-file-name", label="Config name", placeholder="my_experiment_config"), HELP_TEXT["config_file_name"]),
-                    dmc.Group(
-                        align="end",
-                        gap="xs",
-                        children=[
-                            with_tip(dmc.Button("New copy", id="create-config-button", variant="light", leftSection=DashIconify(icon="solar:add-circle-bold")), HELP_TEXT["new_config"]),
-                            with_tip(dmc.Button("Rename", id="rename-config-button", variant="light", leftSection=DashIconify(icon="solar:pen-bold")), HELP_TEXT["rename_config"]),
-                        ],
-                    ),
-                ],
-            ),
-            dmc.Text(id="config-action-status", size="xs", c="dimmed"),
-        ],
-    )
-
 
 def parallelism_axis_input(component_id: str, label: str, value: int, help_text: str) -> html.Div:
     return html.Div(
@@ -1106,116 +1580,327 @@ def parallelism_axis_input(component_id: str, label: str, value: int, help_text:
     )
 
 
-def basic_options_card() -> dmc.Paper:
-    return dmc.Paper(
-        radius="xl",
-        p="lg",
-        withBorder=True,
+def option_section(title: str, children: Any, subtitle: str | None = None) -> html.Div:
+    header_children: List[Any] = [dmc.Title(title, order=4)]
+    if subtitle:
+        header_children.append(dmc.Text(subtitle, size="sm", c="dimmed"))
+    return html.Div(
+        className="option-section",
         children=dmc.Stack(
-            gap="lg",
+            gap="sm",
             children=[
-                dmc.Title("Basic Options", order=3),
-                dmc.Accordion(
-                    multiple=True,
-                    value=["model", "hardware"],
-                    children=[
-                        dmc.AccordionItem(
-                            value="model",
-                            children=[
-                                dmc.AccordionControl("Model"),
-                                dmc.AccordionPanel(
-                                    dmc.Stack(
-                                        gap="sm",
-                                        children=[
-                                            with_tip(dmc.Select(id="simple-run-type", label="Run type", value=DEFAULTS["run_type"], data=[{"value": "training", "label": "Training"}, {"value": "inference", "label": "Inference"}]), HELP_TEXT["run_type"]),
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 2},
-                                                spacing="sm",
-                                                children=[
-                                                    with_tip(dmc.NumberInput(id="simple-seq-len", label="Sequence length", min=1, value=DEFAULTS["simple"]["seq_len"]), HELP_TEXT["seq_len"]),
-                                                    with_tip(dmc.NumberInput(id="simple-decode-len", label="Decode length", min=0, value=DEFAULTS["simple"]["decode_len"]), HELP_TEXT["decode_len"]),
-                                                    with_tip(dmc.NumberInput(id="simple-batch-size", label="Batch size", min=1, value=DEFAULTS["simple"]["batch_size"]), HELP_TEXT["batch_size"]),
-                                                    with_tip(dmc.NumberInput(id="simple-grad-accum", label="Grad accumulation", min=1, value=DEFAULTS["simple"]["grad_accum"]), HELP_TEXT["grad_accum"]),
-                                                ],
-                                            ),
-                                        ],
-                                    )
-                                ),
-                            ],
-                        ),
-                        dmc.AccordionItem(
-                            value="hardware",
-                            children=[
-                                dmc.AccordionControl("Hardware"),
-                                dmc.AccordionPanel(
-                                    dmc.Stack(
-                                        gap="sm",
-                                        children=[
-                                            dmc.Divider(label="Parallelism", labelPosition="center"),
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 2},
-                                                spacing="sm",
-                                                children=[
-                                                    dmc.Stack(
-                                                        gap=4,
-                                                        children=[
-                                                            with_tip(dmc.Switch(id="optimize-switch", size="md", checked=False, label="Optimize parallelism"), HELP_TEXT["optimize_parallelism"]),
-                                                            dmc.Text("WARNING: This may increase runtime dramatically.", c="red", size="xs", fw=800),
-                                                        ],
-                                                    ),
-                                                    with_tip(dmc.Select(id="optimizer-preset", label="Parallelism search", value="Fast", data=[{"value": "Fast", "label": "Fast candidate set"}, {"value": "Exhaustive", "label": "Full candidate set"}]), HELP_TEXT["optimizer_preset"]),
-                                                ],
-                                            ),
-                                            dmc.SimpleGrid(
-                                                className="parallelism-grid",
-                                                cols={"base": 1, "sm": 2},
-                                                spacing="sm",
-                                                children=[
-                                                    html.Div(id="simple-total-gpus-wrap", className="parallelism-axis-field", children=with_tip(dmc.NumberInput(id="simple-total-gpus", label="Total GPUs", min=1, value=DEFAULTS["simple"]["total_gpus"]), HELP_TEXT["total_gpus"])),
-                                                    parallelism_axis_input("simple-tp", "TP", DEFAULTS["simple"]["tp"], HELP_TEXT["tp"]),
-                                                    parallelism_axis_input("simple-cp", "CP", DEFAULTS["simple"]["cp"], HELP_TEXT["cp"]),
-                                                    parallelism_axis_input("simple-pp", "PP", DEFAULTS["simple"]["pp"], HELP_TEXT["pp"]),
-                                                    parallelism_axis_input("simple-dp", "DP", DEFAULTS["simple"]["dp"], HELP_TEXT["dp"]),
-                                                    parallelism_axis_input("simple-ep", "EP", DEFAULTS["simple"]["ep"], HELP_TEXT["ep"]),
-                                                    parallelism_axis_input("simple-replica-count", "Replica count", DEFAULTS["simple"]["replica_count"], HELP_TEXT["replica_count"]),
-                                                ],
-                                            ),
-                                            dmc.Divider(label="Derates", labelPosition="center"),
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 3},
-                                                spacing="sm",
-                                                children=[
-                                                    with_tip(dmc.NumberInput(id="simple-compute-derate", label="Compute derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=DEFAULTS["simple"]["compute_derate"]), HELP_TEXT["compute_derate"]),
-                                                    with_tip(dmc.NumberInput(id="simple-memory-derate", label="Memory derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=DEFAULTS["simple"]["memory_derate"]), HELP_TEXT["memory_derate"]),
-                                                    with_tip(dmc.NumberInput(id="simple-network-derate", label="Network derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=DEFAULTS["simple"]["network_derate"]), HELP_TEXT["network_derate"]),
-                                                ],
-                                            ),
-                                            dmc.Divider(label="Hardware limits", labelPosition="center"),
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 3},
-                                                spacing="sm",
-                                                children=[
-                                                    with_tip(dmc.NumberInput(id="simple-hbm-gb", label="HBM capacity (GB)", min=1, value=DEFAULTS["simple"]["hbm_gb"]), HELP_TEXT["hbm_gb"]),
-                                                    with_tip(dmc.NumberInput(id="simple-gpu-clock", label="GPU clock (GHz)", min=0.1, step=0.01, decimalScale=3, value=DEFAULTS["simple"]["gpu_clock_ghz"]), HELP_TEXT["gpu_clock"]),
-                                                    with_tip(dmc.NumberInput(id="simple-memory-bw", label="Memory BW (GB/s)", min=1, step=1, decimalScale=2, value=DEFAULTS["simple"]["memory_bw_gbs"]), HELP_TEXT["memory_bw"]),
-                                                    with_tip(dmc.Switch(id="simple-use-astrasim", checked=DEFAULTS["simple"]["use_astrasim"], label="Use AstraSim"), HELP_TEXT["use_astrasim"]),
-                                                ],
-                                            ),
-                                            dmc.Divider(label="Network dimensions", labelPosition="center"),
-                                            html.Div(id="network-dimensions-editor", children=network_editor(DEFAULTS["network_dimensions"])),
-                                        ],
-                                    )
-                                ),
-                            ],
-                        ),
-                    ],
-                ),
+                dmc.Stack(gap=2, children=header_children),
+                children,
             ],
         ),
     )
 
 
-def dimensions_card() -> dmc.Paper:
+def yaml_mirror_section(textarea_id: str, label: str, value: str) -> html.Details:
+    return html.Details(
+        className="option-section yaml-mirror-section",
+        open=False,
+        children=[
+            html.Summary(
+                className="yaml-mirror-summary",
+                children=[
+                    dmc.Title("YAML mirror", order=4),
+                    dmc.Text("Full-file edits belong in the YAML file; option fields above keep this mirror in sync.", size="sm", c="dimmed"),
+                ],
+            ),
+            dmc.Textarea(id=textarea_id, label=label, autosize=True, minRows=14, value=value, readOnly=True),
+        ],
+    )
+
+
+def config_file_actions() -> html.Div:
+    return html.Div(
+        className="config-file-actions",
+        children=dmc.Stack(
+            gap="sm",
+            children=[
+                dmc.Group(
+                    justify="space-between",
+                    align="center",
+                    children=[
+                        dmc.Text("Active file actions", size="sm", fw=800),
+                        dmc.Text(id="config-action-target", size="xs", c="dimmed"),
+                    ],
+                ),
+                dmc.SimpleGrid(
+                    cols={"base": 1, "sm": 2},
+                    spacing="sm",
+                    children=[
+                        with_tip(dmc.TextInput(id="config-file-name", label="Config name", placeholder="my_experiment_config"), HELP_TEXT["config_file_name"]),
+                        dmc.Group(
+                            align="end",
+                            gap="xs",
+                            children=[
+                                with_tip(dmc.Button("New copy", id="create-config-button", variant="light", leftSection=DashIconify(icon="solar:add-circle-bold")), HELP_TEXT["new_config"]),
+                                with_tip(dmc.Button("Rename", id="rename-config-button", variant="light", leftSection=DashIconify(icon="solar:pen-bold")), HELP_TEXT["rename_config"]),
+                            ],
+                        ),
+                    ],
+                ),
+                dmc.Text(id="config-action-status", size="xs", c="dimmed"),
+                dmc.Divider(label="Import model from Hugging Face", labelPosition="center"),
+                dmc.SimpleGrid(
+                    cols={"base": 1, "sm": 2},
+                    spacing="sm",
+                    children=[
+                        with_tip(dmc.TextInput(id="hf-model-url", label="Hugging Face URL or model ID", value=HF_SAMPLE_MODEL_URL), HELP_TEXT["hf_model_url"]),
+                        with_tip(dmc.TextInput(id="hf-config-name", label="Save as", placeholder="qwen2_5_7b_from_hf"), HELP_TEXT["hf_config_name"]),
+                    ],
+                ),
+                dmc.Group(
+                    justify="space-between",
+                    align="center",
+                    children=[
+                        with_tip(dmc.Button("Create model config", id="import-hf-config-button", variant="light", leftSection=DashIconify(icon="solar:download-bold", width=18)), HELP_TEXT["hf_import"]),
+                        dmc.Text("Not automatically determinable: run type, sequence length, decode length, batch size, gradient accumulation, and FlashAttention tile choices. Use the model options after import.", size="xs", c="dimmed", className="hf-import-note"),
+                    ],
+                ),
+                dmc.Text(id="hf-import-status", size="xs", c="dimmed"),
+            ],
+        ),
+    )
+
+
+def model_options_pane(state: Dict[str, Any]) -> html.Div:
+    defaults = state["defaults"]
+    return html.Div(
+        id="model-options-pane",
+        children=dmc.Stack(
+            gap="md",
+            children=[
+                option_section(
+                    "Basic Options",
+                    dmc.Stack(
+                        gap="sm",
+                        children=[
+                            with_tip(dmc.Select(id="simple-run-type", label="Run type", value=defaults["run_type"], data=[{"value": "training", "label": "Training"}, {"value": "inference", "label": "Inference"}]), HELP_TEXT["run_type"]),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.NumberInput(id="simple-seq-len", label="Sequence length", min=1, value=defaults["simple"]["seq_len"]), HELP_TEXT["seq_len"]),
+                                    with_tip(dmc.NumberInput(id="simple-decode-len", label="Decode length", min=0, value=defaults["simple"]["decode_len"]), HELP_TEXT["decode_len"]),
+                                    with_tip(dmc.NumberInput(id="simple-batch-size", label="Batch size", min=1, value=defaults["simple"]["batch_size"]), HELP_TEXT["batch_size"]),
+                                    with_tip(dmc.NumberInput(id="simple-grad-accum", label="Grad accumulation", min=1, value=defaults["simple"]["grad_accum"]), HELP_TEXT["grad_accum"]),
+                                ],
+                            ),
+                        ],
+                    ),
+                    "Workload fields saved into the active model YAML.",
+                ),
+                option_section(
+                    "Advanced Options",
+                    dmc.Stack(
+                        gap="sm",
+                        children=[
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.Select(id="adv-model-type", label="Model type", value=defaults["advanced"]["model_type"], data=MODEL_ARCH_TYPE_OPTIONS), HELP_TEXT["model_type"]),
+                                    with_tip(dmc.Select(id="adv-model-mode", label="Execution family", value=defaults["advanced"]["model_mode"], data=MODEL_MODE_OPTIONS), HELP_TEXT["model_mode"]),
+                                    with_tip(dmc.Switch(id="adv-tied-embeddings", checked=defaults["advanced"]["tied_embeddings"], label="Tied embeddings"), HELP_TEXT["tied_embeddings"]),
+                                ],
+                            ),
+                            dmc.Group(gap="xs", children=[dmc.Text("Model type guide", size="xs", c="dimmed"), *[model_type_badge(item["value"]) for item in MODEL_ARCH_TYPE_OPTIONS]]),
+                            dmc.Group(gap="xs", children=[dmc.Text("Execution family guide", size="xs", c="dimmed"), mode_badge("LLM"), mode_badge("VIT")]),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.NumberInput(id="adv-hidden-dim", label="Hidden dim", min=1, value=defaults["advanced"]["hidden_dim"]), HELP_TEXT["hidden_dim"]),
+                                    with_tip(dmc.NumberInput(id="adv-intermediate-size", label="Intermediate size", min=1, value=defaults["advanced"]["intermediate_size"]), HELP_TEXT["intermediate_size"]),
+                                    with_tip(dmc.NumberInput(id="adv-num-layers", label="Layers", min=1, value=defaults["advanced"]["num_layers"]), HELP_TEXT["num_layers"]),
+                                    with_tip(dmc.NumberInput(id="adv-vocab-size", label="Vocab size", min=1, value=defaults["advanced"]["vocab_size"]), HELP_TEXT["vocab_size"]),
+                                    with_tip(dmc.Select(id="adv-attention-type", label="Attention type", value=defaults["advanced"]["attention_type"], data=[{"value": "mha", "label": "MHA"}, {"value": "gqa", "label": "GQA"}, {"value": "mla", "label": "MLA"}]), HELP_TEXT["attention_type"]),
+                                    with_tip(dmc.NumberInput(id="adv-num-heads", label="Attention heads", min=1, value=defaults["advanced"]["num_heads"]), HELP_TEXT["num_heads"]),
+                                    with_tip(dmc.Switch(id="adv-use-flash", checked=defaults["advanced"]["use_flashattention"], label="Use FlashAttention"), HELP_TEXT["use_flash"]),
+                                    with_tip(dmc.NumberInput(id="adv-attn-tile", label="Attention tile", min=1, value=defaults["advanced"]["attention_tile_size"]), HELP_TEXT["attention_tile"]),
+                                    with_tip(dmc.NumberInput(id="adv-num-experts", label="Experts", min=1, value=defaults["advanced"]["num_experts"]), HELP_TEXT["num_experts"]),
+                                    with_tip(dmc.NumberInput(id="adv-top-k", label="MoE top-k", min=1, value=defaults["advanced"]["top_k"]), HELP_TEXT["top_k"]),
+                                    with_tip(dmc.NumberInput(id="adv-moe-intermediate-size", label="MoE intermediate size", min=1, value=defaults["advanced"]["moe_intermediate_size"]), HELP_TEXT["moe_intermediate_size"]),
+                                    with_tip(dmc.NumberInput(id="adv-imbalance", label="Expert imbalance", min=0.1, step=0.1, value=defaults["advanced"]["expert_imbalance_factor"]), HELP_TEXT["expert_imbalance"]),
+                                ],
+                            ),
+                        ],
+                    ),
+                    "Architecture fields saved into the active model YAML.",
+                ),
+                yaml_mirror_section("model-yaml", "Model YAML", defaults["model_yaml"]),
+            ],
+        ),
+    )
+
+
+def hardware_options_pane(state: Dict[str, Any]) -> html.Div:
+    defaults = state["defaults"]
+    return html.Div(
+        id="hardware-options-pane",
+        children=dmc.Stack(
+            gap="md",
+            children=[
+                option_section(
+                    "Basic Options",
+                    dmc.Stack(
+                        gap="sm",
+                        children=[
+                            dmc.Divider(label="Parallelism", labelPosition="center"),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    dmc.Stack(
+                                        gap=4,
+                                        children=[
+                                            with_tip(dmc.Switch(id="optimize-switch", size="md", checked=bool(state["optimize_parallelism"]), label="Optimize parallelism"), HELP_TEXT["optimize_parallelism"]),
+                                            dmc.Text("WARNING: This may increase runtime dramatically.", c="red", size="xs", fw=800),
+                                        ],
+                                    ),
+                                    with_tip(dmc.Select(id="optimizer-preset", label="Parallelism search", value=state["optimizer_preset"], data=[{"value": "Fast", "label": "Fast candidate set"}, {"value": "Exhaustive", "label": "Full candidate set"}]), HELP_TEXT["optimizer_preset"]),
+                                ],
+                            ),
+                            dmc.SimpleGrid(
+                                className="parallelism-grid",
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    html.Div(id="simple-total-gpus-wrap", className="parallelism-axis-field", children=with_tip(dmc.NumberInput(id="simple-total-gpus", label="Total GPUs", min=1, value=defaults["simple"]["total_gpus"]), HELP_TEXT["total_gpus"])),
+                                    parallelism_axis_input("simple-tp", "TP", defaults["simple"]["tp"], HELP_TEXT["tp"]),
+                                    parallelism_axis_input("simple-cp", "CP", defaults["simple"]["cp"], HELP_TEXT["cp"]),
+                                    parallelism_axis_input("simple-pp", "PP", defaults["simple"]["pp"], HELP_TEXT["pp"]),
+                                    parallelism_axis_input("simple-dp", "DP", defaults["simple"]["dp"], HELP_TEXT["dp"]),
+                                    parallelism_axis_input("simple-ep", "EP", defaults["simple"]["ep"], HELP_TEXT["ep"]),
+                                    parallelism_axis_input("simple-replica-count", "Replica count", defaults["simple"]["replica_count"], HELP_TEXT["replica_count"]),
+                                ],
+                            ),
+                            dmc.Divider(label="Derates", labelPosition="center"),
+                            dmc.Group(
+                                justify="flex-end",
+                                children=[
+                                    with_tip(
+                                        dmc.Button(
+                                            "Reset to paper defaults",
+                                            id="reset-paper-derates-button",
+                                            variant="light",
+                                            size="xs",
+                                            leftSection=DashIconify(icon="solar:restart-bold", width=16),
+                                        ),
+                                        HELP_TEXT["reset_paper_derates"],
+                                    )
+                                ],
+                            ),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 3},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.NumberInput(id="simple-compute-derate", label="Compute derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=defaults["simple"]["compute_derate"]), HELP_TEXT["compute_derate"]),
+                                    with_tip(dmc.NumberInput(id="simple-memory-derate", label="Memory derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=defaults["simple"]["memory_derate"]), HELP_TEXT["memory_derate"]),
+                                    with_tip(dmc.NumberInput(id="simple-network-derate", label="Network derate", min=0.0, max=1.0, step=0.01, decimalScale=3, value=defaults["simple"]["network_derate"]), HELP_TEXT["network_derate"]),
+                                ],
+                            ),
+                            dmc.Divider(label="Hardware limits", labelPosition="center"),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 3},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.NumberInput(id="simple-hbm-gb", label="HBM capacity (GB)", min=1, value=defaults["simple"]["hbm_gb"]), HELP_TEXT["hbm_gb"]),
+                                    with_tip(dmc.NumberInput(id="simple-gpu-clock", label="GPU clock (GHz)", min=0.1, step=0.01, decimalScale=3, value=defaults["simple"]["gpu_clock_ghz"]), HELP_TEXT["gpu_clock"]),
+                                    with_tip(dmc.NumberInput(id="simple-memory-bw", label="Memory BW (GB/s)", min=1, step=1, decimalScale=2, value=defaults["simple"]["memory_bw_gbs"]), HELP_TEXT["memory_bw"]),
+                                    with_tip(dmc.Switch(id="simple-use-astrasim", checked=defaults["simple"]["use_astrasim"], label="Use AstraSim"), HELP_TEXT["use_astrasim"]),
+                                ],
+                            ),
+                            dmc.Divider(label="Network dimensions", labelPosition="center"),
+                            dmc.Alert(
+                                "Hierarchical AstraSim uses Dimension 0 for TP/CP/EP. DP is always written to the outer network dimension.",
+                                color="blue",
+                                radius="md",
+                                className="topology-mapping-note",
+                            ),
+                            dmc.SimpleGrid(
+                                cols={"base": 1, "sm": 2},
+                                spacing="sm",
+                                children=[
+                                    with_tip(dmc.Select(id="parallelism-topology-mode", label="PP placement", value=defaults["advanced"]["pp_network_dimension"], data=PP_TOPOLOGY_OPTIONS, clearable=False), HELP_TEXT["pp_topology_dimension"]),
+                                    with_tip(dmc.Text("Choose the Dimension 1 | Dimension 2 mapping; then edit each active dimension's topology below.", size="sm", c="dimmed", className="topology-mapping-copy"), HELP_TEXT["parallelism_topology"]),
+                                ],
+                            ),
+                            html.Div(id="parallelism-topology-preview", children=parallelism_topology_preview(defaults["advanced"]["pp_network_dimension"])),
+                            html.Div(id="network-dimensions-editor", children=network_editor(defaults["network_dimensions"], defaults["advanced"]["pp_network_dimension"])),
+                        ],
+                    ),
+                    "Hardware scaling, bandwidth, derate, and backend fields saved into the active hardware YAML.",
+                ),
+                option_section(
+                    "Advanced Options",
+                    dmc.SimpleGrid(
+                        cols={"base": 1, "sm": 2},
+                        spacing="sm",
+                        children=[
+                            with_tip(dmc.Switch(id="adv-full-recomp", checked=defaults["advanced"]["full_recomputation"], label="Full recomputation"), HELP_TEXT["full_recomp"]),
+                            with_tip(dmc.Select(id="adv-dp-zero", label="ZeRO stage", value=str(defaults["advanced"]["dp_zero_stage"]), data=ZERO_STAGE_OPTIONS, clearable=False), HELP_TEXT["zero_stage"]),
+                            with_tip(dmc.Select(id="adv-tensor-format", label="Tensor format", value=defaults["advanced"]["tensor_format"], data=TENSOR_FORMAT_OPTIONS), HELP_TEXT["tensor_format"]),
+                            with_tip(dmc.Select(id="adv-precision-kv-cache", label="KV cache precision", value=defaults["advanced"]["precision_kv_cache"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_kv_cache"]),
+                            with_tip(dmc.Select(id="adv-precision-parameters", label="Parameter precision", value=defaults["advanced"]["precision_parameters"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_parameters"]),
+                            with_tip(dmc.Select(id="adv-precision-gradients", label="Gradient precision", value=defaults["advanced"]["precision_gradients"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_gradients"]),
+                            with_tip(dmc.Select(id="adv-precision-grad-communication", label="Gradient comm precision", value=defaults["advanced"]["precision_grad_communication"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_grad_communication"]),
+                            with_tip(dmc.Select(id="adv-precision-optimizer-states", label="Optimizer state precision", value=defaults["advanced"]["precision_optimizer_states"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_optimizer_states"]),
+                            with_tip(dmc.Select(id="adv-precision-stats", label="Stats precision", value=defaults["advanced"]["precision_stats"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_stats"]),
+                            with_tip(dmc.Select(id="adv-precision-master-parameters", label="Master parameter copy", value=str(defaults["advanced"]["precision_master_parameters"]), data=MASTER_PRECISION_OPTIONS), HELP_TEXT["precision_master_parameters"]),
+                        ],
+                    ),
+                    "Software and precision fields saved into the active hardware YAML.",
+                ),
+                yaml_mirror_section("hardware-yaml", "Hardware YAML", defaults["hardware_yaml"]),
+            ],
+        ),
+    )
+
+
+def config_options_card(state: Dict[str, Any]) -> dmc.Paper:
+    return dmc.Paper(
+        radius="xl",
+        p="lg",
+        withBorder=True,
+        className="config-options-card",
+        children=dmc.Stack(
+            gap="md",
+            children=[
+                dmc.Group(
+                    justify="space-between",
+                    align="center",
+                    children=[
+                        with_tip(dmc.Title("Config Options", order=3), HELP_TEXT["editor_tabs"]),
+                        dmc.Badge("active YAML workbook", radius="xl", color="teal", variant="light"),
+                    ],
+                ),
+                with_tip(
+                    dmc.Text("Choose a YAML file, then edit the options below.", size="sm", c="dimmed"),
+                    HELP_TEXT["editor_tabs"],
+                ),
+                with_tip(
+                    dmc.Tabs(
+                        id="config-editor-tabs",
+                        value=state["active_config_tab"],
+                        className="config-workbook-tabs",
+                        children=config_workbook_tabs_children(state["model_run_configs"], state["hardware_run_configs"], MODEL_LABELS, HW_LABELS),
+                    ),
+                    HELP_TEXT["editor_tabs"],
+                ),
+                config_file_actions(),
+                model_options_pane(state),
+                hardware_options_pane(state),
+            ],
+        ),
+    )
+
+
+def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
+    rows = state.get("sweep_rows") or default_sweep_rows()
     return dmc.Paper(
         radius="xl",
         p="lg",
@@ -1223,20 +1908,28 @@ def dimensions_card() -> dmc.Paper:
         children=dmc.Stack(
             gap="md",
             children=[
-                dmc.Title("Sweep Dimensions", order=3),
+                dmc.Group(
+                    justify="space-between",
+                    align="center",
+                    children=[
+                        dmc.Title("Sweep Dimensions", order=3),
+                        with_tip(dmc.Button("Reset selections", id="reset-last-state-button", variant="light", size="xs", leftSection=DashIconify(icon="solar:restart-bold", width=16)), HELP_TEXT["reset_last_state"]),
+                    ],
+                ),
                 with_tip(
                     dmc.Text("Sweep workload size and hardware scaling. Select multiple model or hardware files in Launch Setup for config comparisons.", size="sm", c="dimmed"),
                     HELP_TEXT["sweep_dimensions"],
                 ),
-                dim_card(1),
-                dim_card(2),
-                dim_card(3),
+                dmc.Text(id="last-state-status", size="xs", c="dimmed"),
+                dim_card(1, rows[0]),
+                dim_card(2, rows[1]),
+                dim_card(3, rows[2]),
                 dmc.SimpleGrid(
                     cols={"base": 1, "sm": 2},
                     spacing="sm",
                     children=[
-                        with_tip(dmc.Select(id="x-axis-select", label="X-axis", data=[]), HELP_TEXT["x_axis"]),
-                        with_tip(dmc.Select(id="series-select", label="Color grouping (optional)", data=[], clearable=True), HELP_TEXT["series_axis"]),
+                        with_tip(dmc.Select(id="x-axis-select", label="X-axis", value=state.get("x_axis"), data=[]), HELP_TEXT["x_axis"]),
+                        with_tip(dmc.Select(id="series-select", label="Color grouping (optional)", value=state.get("series_axis"), data=[], clearable=True), HELP_TEXT["series_axis"]),
                     ],
                 ),
             ],
@@ -1244,7 +1937,7 @@ def dimensions_card() -> dmc.Paper:
     )
 
 
-def launch_controls_card(metric_options: List[Dict[str, str]]) -> dmc.Paper:
+def launch_controls_card(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> dmc.Paper:
     return dmc.Paper(
         radius="xl",
         p="lg",
@@ -1253,113 +1946,12 @@ def launch_controls_card(metric_options: List[Dict[str, str]]) -> dmc.Paper:
             gap="md",
             children=[
                 dmc.Title("Launch", order=3),
-                with_tip(dmc.Select(id="metric-select", label="Metric", value=get_default_metric_for_run_type(DEFAULTS["run_type"]), data=metric_options), HELP_TEXT["metric"]),
+                with_tip(dmc.Select(id="metric-select", label="Metric", value=state["metric"], data=metric_options), HELP_TEXT["metric"]),
                 dmc.Group(
                     justify="flex-end",
                     children=[
                         with_tip(dmc.Button("Launch 1 run", id="run-button", leftSection=DashIconify(icon="solar:rocket-bold")), HELP_TEXT["run_launch"]),
                         with_tip(dmc.Button("Cancel Active Job", id="cancel-button", color="red", variant="light"), HELP_TEXT["cancel_job"]),
-                    ],
-                ),
-            ],
-        ),
-    )
-
-
-def advanced_options_card() -> dmc.Paper:
-    return dmc.Paper(
-        radius="xl",
-        p="lg",
-        withBorder=True,
-        children=dmc.Stack(
-            gap="md",
-            children=[
-                dmc.Title("Advanced Options", order=3),
-                dmc.Accordion(
-                    multiple=True,
-                    value=["model", "hardware"],
-                    children=[
-                        dmc.AccordionItem(
-                            value="model",
-                            children=[
-                                dmc.AccordionControl("Model"),
-                                dmc.AccordionPanel(
-                                    dmc.Stack(
-                                        gap="sm",
-                                        children=[
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 2},
-                                                spacing="sm",
-                                                children=[
-                                                    with_tip(dmc.Select(id="adv-model-type", label="Model type", value=DEFAULTS["advanced"]["model_type"], data=MODEL_ARCH_TYPE_OPTIONS), HELP_TEXT["model_type"]),
-                                                    with_tip(dmc.Select(id="adv-model-mode", label="Execution family", value=DEFAULTS["advanced"]["model_mode"], data=MODEL_MODE_OPTIONS), HELP_TEXT["model_mode"]),
-                                                    with_tip(dmc.Switch(id="adv-tied-embeddings", checked=DEFAULTS["advanced"]["tied_embeddings"], label="Tied embeddings"), HELP_TEXT["tied_embeddings"]),
-                                                ],
-                                            ),
-                                            dmc.Group(gap="xs", children=[dmc.Text("Model type guide", size="xs", c="dimmed"), *[model_type_badge(item["value"]) for item in MODEL_ARCH_TYPE_OPTIONS]]),
-                                            dmc.Group(gap="xs", children=[dmc.Text("Execution family guide", size="xs", c="dimmed"), mode_badge("LLM"), mode_badge("VIT")]),
-                                            dmc.SimpleGrid(
-                                                cols={"base": 1, "sm": 2},
-                                                spacing="sm",
-                                                children=[
-                                                    with_tip(dmc.NumberInput(id="adv-hidden-dim", label="Hidden dim", min=1, value=DEFAULTS["advanced"]["hidden_dim"]), HELP_TEXT["hidden_dim"]),
-                                                    with_tip(dmc.NumberInput(id="adv-intermediate-size", label="Intermediate size", min=1, value=DEFAULTS["advanced"]["intermediate_size"]), HELP_TEXT["intermediate_size"]),
-                                                    with_tip(dmc.NumberInput(id="adv-num-layers", label="Layers", min=1, value=DEFAULTS["advanced"]["num_layers"]), HELP_TEXT["num_layers"]),
-                                                    with_tip(dmc.NumberInput(id="adv-vocab-size", label="Vocab size", min=1, value=DEFAULTS["advanced"]["vocab_size"]), HELP_TEXT["vocab_size"]),
-                                                    with_tip(dmc.Select(id="adv-attention-type", label="Attention type", value=DEFAULTS["advanced"]["attention_type"], data=[{"value": "mha", "label": "MHA"}, {"value": "gqa", "label": "GQA"}, {"value": "mla", "label": "MLA"}]), HELP_TEXT["attention_type"]),
-                                                    with_tip(dmc.NumberInput(id="adv-num-heads", label="Attention heads", min=1, value=DEFAULTS["advanced"]["num_heads"]), HELP_TEXT["num_heads"]),
-                                                    with_tip(dmc.Switch(id="adv-use-flash", checked=DEFAULTS["advanced"]["use_flashattention"], label="Use FlashAttention"), HELP_TEXT["use_flash"]),
-                                                    with_tip(dmc.NumberInput(id="adv-attn-tile", label="Attention tile", min=1, value=DEFAULTS["advanced"]["attention_tile_size"]), HELP_TEXT["attention_tile"]),
-                                                    with_tip(dmc.NumberInput(id="adv-num-experts", label="Experts", min=1, value=DEFAULTS["advanced"]["num_experts"]), HELP_TEXT["num_experts"]),
-                                                    with_tip(dmc.NumberInput(id="adv-top-k", label="MoE top-k", min=1, value=DEFAULTS["advanced"]["top_k"]), HELP_TEXT["top_k"]),
-                                                    with_tip(dmc.NumberInput(id="adv-moe-intermediate-size", label="MoE intermediate size", min=1, value=DEFAULTS["advanced"]["moe_intermediate_size"]), HELP_TEXT["moe_intermediate_size"]),
-                                                    with_tip(dmc.NumberInput(id="adv-imbalance", label="Expert imbalance", min=0.1, step=0.1, value=DEFAULTS["advanced"]["expert_imbalance_factor"]), HELP_TEXT["expert_imbalance"]),
-                                                ],
-                                            ),
-                                        ],
-                                    )
-                                ),
-                            ],
-                        ),
-                        dmc.AccordionItem(
-                            value="hardware",
-                            children=[
-                                dmc.AccordionControl("Hardware"),
-                                dmc.AccordionPanel(
-                                    dmc.SimpleGrid(
-                                        cols={"base": 1, "sm": 2},
-                                        spacing="sm",
-                                        children=[
-                                            with_tip(dmc.Switch(id="adv-full-recomp", checked=DEFAULTS["advanced"]["full_recomputation"], label="Full recomputation"), HELP_TEXT["full_recomp"]),
-                                            with_tip(dmc.NumberInput(id="adv-dp-zero", label="ZeRO stage", min=0, max=3, value=DEFAULTS["advanced"]["dp_zero_stage"]), HELP_TEXT["zero_stage"]),
-                                            with_tip(dmc.Select(id="adv-tensor-format", label="Tensor format", value=DEFAULTS["advanced"]["tensor_format"], data=TENSOR_FORMAT_OPTIONS), HELP_TEXT["tensor_format"]),
-                                            with_tip(dmc.Select(id="adv-precision-kv-cache", label="KV cache precision", value=DEFAULTS["advanced"]["precision_kv_cache"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_kv_cache"]),
-                                            with_tip(dmc.Select(id="adv-precision-parameters", label="Parameter precision", value=DEFAULTS["advanced"]["precision_parameters"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_parameters"]),
-                                            with_tip(dmc.Select(id="adv-precision-gradients", label="Gradient precision", value=DEFAULTS["advanced"]["precision_gradients"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_gradients"]),
-                                            with_tip(dmc.Select(id="adv-precision-grad-communication", label="Gradient comm precision", value=DEFAULTS["advanced"]["precision_grad_communication"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_grad_communication"]),
-                                            with_tip(dmc.Select(id="adv-precision-optimizer-states", label="Optimizer state precision", value=DEFAULTS["advanced"]["precision_optimizer_states"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_optimizer_states"]),
-                                            with_tip(dmc.Select(id="adv-precision-stats", label="Stats precision", value=DEFAULTS["advanced"]["precision_stats"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_stats"]),
-                                            with_tip(dmc.Select(id="adv-precision-master-parameters", label="Master parameter copy", value=str(DEFAULTS["advanced"]["precision_master_parameters"]), data=MASTER_PRECISION_OPTIONS), HELP_TEXT["precision_master_parameters"]),
-                                        ],
-                                    )
-                                ),
-                            ],
-                        ),
-                        dmc.AccordionItem(
-                            value="yaml",
-                            children=[
-                                dmc.AccordionControl("YAML mirrors"),
-                                dmc.AccordionPanel(
-                                    dmc.Stack(
-                                        gap="sm",
-                                        children=[
-                                            dmc.Text("These mirrors show the selected YAML files after supported UI edits. Edit unsupported YAML fields directly in webui/workspace/configs.", size="sm", c="dimmed"),
-                                            dmc.SimpleGrid(cols={"base": 1, "xl": 2}, spacing="sm", children=[dmc.Textarea(id="model-yaml", label="Model YAML", autosize=True, minRows=16, value=DEFAULTS["model_yaml"], readOnly=True), dmc.Textarea(id="hardware-yaml", label="Hardware YAML", autosize=True, minRows=16, value=DEFAULTS["hardware_yaml"], readOnly=True)]),
-                                        ],
-                                    )
-                                ),
-                            ],
-                        ),
                     ],
                 ),
             ],
@@ -1402,7 +1994,7 @@ def collect_form_payload(
     adv_model_type: str,
     adv_model_mode: str,
     adv_full_recomp: bool,
-    adv_dp_zero: int,
+    adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
     adv_precision_parameters: str,
@@ -1427,6 +2019,7 @@ def collect_form_payload(
     net_topologies: List[str],
     net_bandwidths: List[str],
     net_utils: List[float],
+    parallelism_topology_mode: str,
     dimensions: List[Dict[str, Any]],
     metric: str,
     x_axis: str | None,
@@ -1440,8 +2033,8 @@ def collect_form_payload(
         run_mode,
         optimize_parallelism,
         optimizer_preset,
-        {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
-        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": adv_dp_zero, "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
+        {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count if simple_run_type == "inference" else 1, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
+        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": int(adv_dp_zero or 0), "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "pp_network_dimension": parallelism_topology_mode, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
         _network_rows_from_callback(net_topologies, net_bandwidths, net_utils),
         dimensions,
         metric,
@@ -1453,34 +2046,58 @@ def collect_form_payload(
 
 
 @callback(
-    Output("model-editor-tabs", "children"),
-    Output("model-editor-tabs", "value"),
-    Output("hardware-editor-tabs", "children"),
-    Output("hardware-editor-tabs", "value"),
+    Output("config-editor-tabs", "children"),
+    Output("config-editor-tabs", "value"),
     Input("model-run-configs", "value"),
     Input("hardware-run-configs", "value"),
-    State("model-editor-tabs", "value"),
-    State("hardware-editor-tabs", "value"),
+    State("config-editor-tabs", "value"),
+    State("model-preset", "value"),
+    State("hardware-preset", "value"),
 )
-def refresh_editor_tab_sets(model_ids: List[str] | None, hardware_ids: List[str] | None, current_model: str | None, current_hardware: str | None):
-    active_model = selected_active_value(model_ids, DEFAULT_MODEL_ID, current_model)
-    active_hardware = selected_active_value(hardware_ids, DEFAULT_HW_ID, current_hardware)
+def refresh_editor_tab_sets(model_ids: List[str] | None, hardware_ids: List[str] | None, current_tab: str | None, current_model: str | None, current_hardware: str | None):
+    active_tab = active_config_tab_for_selection_change(
+        model_ids,
+        hardware_ids,
+        DEFAULT_MODEL_ID,
+        DEFAULT_HW_ID,
+        current_tab,
+        current_model,
+        current_hardware,
+        dash.ctx.triggered_id,
+    )
     return (
-        editor_tabs_children(model_ids, DEFAULT_MODEL_ID, preset_labels("models"), "solar:document-text-bold"),
-        active_model,
-        editor_tabs_children(hardware_ids, DEFAULT_HW_ID, preset_labels("hardware"), "solar:cpu-bold"),
-        active_hardware,
+        config_workbook_tabs_children(model_ids, hardware_ids, preset_labels("models"), preset_labels("hardware")),
+        active_tab,
     )
 
 
 @callback(
     Output("model-preset", "value"),
     Output("hardware-preset", "value"),
-    Input("model-editor-tabs", "value"),
-    Input("hardware-editor-tabs", "value"),
+    Input("config-editor-tabs", "value"),
+    State("model-preset", "value"),
+    State("hardware-preset", "value"),
 )
-def sync_primary_config_selection(model_id: str | None, hardware_id: str | None):
-    return model_id or DEFAULT_MODEL_ID, hardware_id or DEFAULT_HW_ID
+def sync_primary_config_selection(active_tab: str | None, current_model: str | None, current_hardware: str | None):
+    kind, config_id = parse_config_tab(active_tab)
+    if kind == "models":
+        return config_id or DEFAULT_MODEL_ID, current_hardware or DEFAULT_HW_ID
+    if kind == "hardware":
+        return current_model or DEFAULT_MODEL_ID, config_id or DEFAULT_HW_ID
+    return current_model or DEFAULT_MODEL_ID, current_hardware or DEFAULT_HW_ID
+
+
+@callback(
+    Output("model-options-pane", "style"),
+    Output("hardware-options-pane", "style"),
+    Output("config-action-target", "children"),
+    Input("config-editor-tabs", "value"),
+)
+def show_active_config_options(active_tab: str | None):
+    kind, config_id = parse_config_tab(active_tab)
+    if kind == "hardware":
+        return {"display": "none"}, {}, f"Editing hardware: {Path(config_id or '').stem}"
+    return {}, {"display": "none"}, f"Editing model: {Path(config_id or '').stem}"
 
 
 def replace_selected_config(values: List[str] | None, old_id: str, new_id: str) -> List[str]:
@@ -1498,10 +2115,11 @@ def replace_selected_config(values: List[str] | None, old_id: str, new_id: str) 
     Output("hardware-preset", "data"),
     Output("model-run-configs", "value"),
     Output("hardware-run-configs", "value"),
+    Output("config-editor-tabs", "value", allow_duplicate=True),
     Input("create-config-button", "n_clicks"),
     Input("rename-config-button", "n_clicks"),
-    State("config-action-kind", "value"),
     State("config-file-name", "value"),
+    State("config-editor-tabs", "value"),
     State("model-preset", "value"),
     State("hardware-preset", "value"),
     State("model-run-configs", "value"),
@@ -1511,15 +2129,18 @@ def replace_selected_config(values: List[str] | None, old_id: str, new_id: str) 
 def handle_config_file_action(
     create_clicks: int | None,
     rename_clicks: int | None,
-    kind: str,
     new_name: str | None,
+    active_tab: str | None,
     model_preset: str,
     hardware_preset: str,
     model_values: List[str] | None,
     hardware_values: List[str] | None,
 ):
     del create_clicks, rename_clicks
-    source_id = model_preset if kind == "models" else hardware_preset
+    kind, active_id = parse_config_tab(active_tab)
+    if kind not in {"models", "hardware"}:
+        return "Choose a model or hardware tab before using file actions.", preset_options("models"), preset_options("hardware"), preset_options("models"), preset_options("hardware"), model_values, hardware_values, no_update
+    source_id = active_id or (model_preset if kind == "models" else hardware_preset)
     try:
         if dash.ctx.triggered_id == "create-config-button":
             new_id = create_config_copy(kind, source_id, new_name or "")
@@ -1536,10 +2157,42 @@ def handle_config_file_action(
             else:
                 hardware_values = replace_selected_config(hardware_values, source_id, new_id)
         else:
-            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
     except Exception as exc:  # noqa: BLE001
-        return f"Config action failed: {exc}", preset_options("models"), preset_options("hardware"), preset_options("models"), preset_options("hardware"), model_values, hardware_values
-    return message, preset_options("models"), preset_options("hardware"), preset_options("models"), preset_options("hardware"), model_values, hardware_values
+        return f"Config action failed: {exc}", preset_options("models"), preset_options("hardware"), preset_options("models"), preset_options("hardware"), model_values, hardware_values, no_update
+    return message, preset_options("models"), preset_options("hardware"), preset_options("models"), preset_options("hardware"), model_values, hardware_values, config_tab_value(kind, new_id)
+
+
+@callback(
+    Output("hf-import-status", "children"),
+    Output("model-run-configs", "data", allow_duplicate=True),
+    Output("model-preset", "data", allow_duplicate=True),
+    Output("model-run-configs", "value", allow_duplicate=True),
+    Output("model-preset", "value", allow_duplicate=True),
+    Output("config-editor-tabs", "value", allow_duplicate=True),
+    Input("import-hf-config-button", "n_clicks"),
+    State("hf-model-url", "value"),
+    State("hf-config-name", "value"),
+    State("model-run-configs", "value"),
+    prevent_initial_call=True,
+)
+def import_huggingface_model_config(n_clicks: int | None, hf_reference: str | None, config_name: str | None, model_values: List[str] | None):
+    if not n_clicks:
+        return no_update, no_update, no_update, no_update, no_update, no_update
+    try:
+        created = create_model_config_from_huggingface(hf_reference or "", config_name or "")
+    except Exception as exc:  # noqa: BLE001
+        return f"Hugging Face import failed: {exc}", preset_options("models"), preset_options("models"), model_values, no_update, no_update
+    model_ids = list(model_values or [])
+    if created["id"] not in model_ids:
+        model_ids.append(created["id"])
+    alias_note = f" Mapped source family through {created['alias']}." if created.get("alias") else ""
+    message = (
+        f"Created {created['id']} from {created['model_id']}@{created['revision']} with model_type={created['model_type']}."
+        f"{alias_note} Adjust not automatically determinable workload fields in Basic Options and Advanced Options before launch."
+    )
+    model_options = preset_options("models")
+    return message, model_options, model_options, model_ids, created["id"], config_tab_value("models", created["id"])
 
 
 @callback(
@@ -1589,11 +2242,14 @@ def handle_config_file_action(
     Output("adv-top-k", "value"),
     Output("adv-moe-intermediate-size", "value"),
     Output("adv-imbalance", "value"),
+    Output("parallelism-topology-mode", "value"),
+    Output("parallelism-topology-preview", "children"),
     Output("network-dimensions-editor", "children"),
     Output("metric-select", "data"),
     Output("metric-select", "value"),
     Input("model-preset", "value"),
     Input("hardware-preset", "value"),
+    prevent_initial_call=True,
 )
 def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
     defaults = build_form_defaults(model_preset_id, hardware_preset_id)
@@ -1623,7 +2279,7 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
         defaults["advanced"]["model_type"],
         defaults["advanced"]["model_mode"],
         defaults["advanced"]["full_recomputation"],
-        defaults["advanced"]["dp_zero_stage"],
+        str(defaults["advanced"]["dp_zero_stage"]),
         defaults["advanced"]["tensor_format"],
         defaults["advanced"]["precision_kv_cache"],
         defaults["advanced"]["precision_parameters"],
@@ -1645,10 +2301,70 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
         defaults["advanced"]["top_k"],
         defaults["advanced"]["moe_intermediate_size"],
         defaults["advanced"]["expert_imbalance_factor"],
-        network_editor(defaults["network_dimensions"]),
+        defaults["advanced"]["pp_network_dimension"],
+        parallelism_topology_preview(defaults["advanced"]["pp_network_dimension"]),
+        network_editor(defaults["network_dimensions"], defaults["advanced"]["pp_network_dimension"]),
         metric_options,
         get_default_metric_for_run_type(defaults["run_type"]),
     )
+
+
+@callback(
+    Output("simple-compute-derate", "value", allow_duplicate=True),
+    Output("simple-memory-derate", "value", allow_duplicate=True),
+    Output("simple-network-derate", "value", allow_duplicate=True),
+    Output({"type": "net-util", "index": ALL}, "value", allow_duplicate=True),
+    Input("reset-paper-derates-button", "n_clicks"),
+    State("hardware-preset", "value"),
+    State({"type": "net-util", "index": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def reset_paper_derates(n_clicks: int | None, hardware_preset_id: str | None, net_util_ids: List[Dict[str, Any]]):
+    if not n_clicks:
+        return no_update, no_update, no_update, no_update
+    defaults = paper_derate_defaults_for_hardware(hardware_preset_id)
+    if defaults is None:
+        return no_update, no_update, no_update, no_update
+    communication = defaults["communication"]
+    return defaults["compute"], defaults["memory"], communication, [communication for _ in net_util_ids]
+
+
+@callback(
+    Output("parallelism-topology-preview", "children", allow_duplicate=True),
+    Input("parallelism-topology-mode", "value"),
+    prevent_initial_call=True,
+)
+def refresh_parallelism_topology_preview(pp_dimension: str | None):
+    return parallelism_topology_preview(pp_dimension)
+
+
+@callback(
+    Output({"type": "net-topology", "index": ALL}, "disabled"),
+    Output({"type": "net-bandwidth", "index": ALL}, "disabled"),
+    Output({"type": "net-util", "index": ALL}, "disabled"),
+    Input("parallelism-topology-mode", "value"),
+    State({"type": "net-topology", "index": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def toggle_network_dimension_controls(pp_dimension: str | None, topology_ids: List[Dict[str, Any]]):
+    mode = str(pp_dimension or "dim1_shared")
+    if mode == "dim1":
+        mode = "dim1_dim2"
+    elif mode in {"dim2", "dim2_shared"}:
+        mode = "dim1_dim2"
+    disabled_indices = disabled_network_dimension_indices(mode)
+    disabled = [item.get("index") in disabled_indices for item in topology_ids]
+    return disabled, disabled, disabled
+
+
+@callback(
+    Output("metric-select", "data", allow_duplicate=True),
+    Output("metric-select", "value", allow_duplicate=True),
+    Input("simple-run-type", "value"),
+    prevent_initial_call=True,
+)
+def refresh_metric_options_for_run_type(run_type: str):
+    return get_metric_options(run_type), get_default_metric_for_run_type(run_type)
 
 
 @callback(
@@ -1682,6 +2398,7 @@ def toggle_inputs(run_type: str, optimize_parallelism: bool, run_mode: str, dim1
     total_gpus_swept = run_mode == "sweep" and "hardware.total_gpus" in {dim1_field, dim2_field, dim3_field}
     axis_class = "parallelism-axis-field is-auto" if manual_disabled else "parallelism-axis-field"
     total_gpus_class = "parallelism-axis-field is-swept" if total_gpus_swept else "parallelism-axis-field"
+    replica_class = "parallelism-axis-field"
     return (
         not inference,
         not inference,
@@ -1699,7 +2416,7 @@ def toggle_inputs(run_type: str, optimize_parallelism: bool, run_mode: str, dim1
         axis_class,
         axis_class,
         axis_class,
-        axis_class,
+        replica_class,
     )
 
 
@@ -1711,6 +2428,18 @@ def toggle_inputs(run_type: str, optimize_parallelism: bool, run_mode: str, dim1
 )
 def enforce_inference_grad_accum(run_type: str, current_value: int | None):
     return 1 if run_type == "inference" else current_value
+
+
+@callback(
+    Output("simple-replica-count", "value", allow_duplicate=True),
+    Input("simple-run-type", "value"),
+    State("simple-replica-count", "value"),
+    prevent_initial_call=True,
+)
+def enforce_training_replica_count(run_type: str, current_value: int | None):
+    if run_type == "inference":
+        return no_update
+    return 1
 
 
 @callback(Output("sweep-dimensions-section", "style"), Input("run-mode", "value"))
@@ -1837,6 +2566,77 @@ def refresh_range_previews(
     )
 
 
+def reset_last_state_values() -> tuple[Any, ...]:
+    state = initial_ui_state(ignore_saved=True)
+    rows = state["sweep_rows"]
+    row_values: List[Any] = []
+    for row in rows:
+        row_values.extend([row.get("field"), row.get("mode"), row.get("list_text"), row.get("config_values"), row.get("start"), row.get("end"), row.get("step_or_points")])
+    return (
+        "Restored default selections.",
+        state["model_run_configs"],
+        state["hardware_run_configs"],
+        state["model_preset"],
+        state["hardware_preset"],
+        state["active_config_tab"],
+        state["run_mode"],
+        state["optimize_parallelism"],
+        state["optimizer_preset"],
+        *row_values,
+        state["x_axis"],
+        state["series_axis"],
+        state["metric"],
+        state["worker_count"],
+        state["timeout_seconds"],
+    )
+
+
+@callback(
+    Output("last-state-status", "children"),
+    Output("model-run-configs", "value", allow_duplicate=True),
+    Output("hardware-run-configs", "value", allow_duplicate=True),
+    Output("model-preset", "value", allow_duplicate=True),
+    Output("hardware-preset", "value", allow_duplicate=True),
+    Output("config-editor-tabs", "value", allow_duplicate=True),
+    Output("run-mode", "value"),
+    Output("optimize-switch", "checked"),
+    Output("optimizer-preset", "value"),
+    Output("dim-1-field", "value"),
+    Output("dim-1-mode", "value"),
+    Output("dim-1-list", "value"),
+    Output("dim-1-configs", "value"),
+    Output("dim-1-start", "value"),
+    Output("dim-1-end", "value"),
+    Output("dim-1-step_or_points", "value"),
+    Output("dim-2-field", "value"),
+    Output("dim-2-mode", "value"),
+    Output("dim-2-list", "value"),
+    Output("dim-2-configs", "value"),
+    Output("dim-2-start", "value"),
+    Output("dim-2-end", "value"),
+    Output("dim-2-step_or_points", "value"),
+    Output("dim-3-field", "value"),
+    Output("dim-3-mode", "value"),
+    Output("dim-3-list", "value"),
+    Output("dim-3-configs", "value"),
+    Output("dim-3-start", "value"),
+    Output("dim-3-end", "value"),
+    Output("dim-3-step_or_points", "value"),
+    Output("x-axis-select", "value", allow_duplicate=True),
+    Output("series-select", "value", allow_duplicate=True),
+    Output("metric-select", "value", allow_duplicate=True),
+    Output("worker-count", "value"),
+    Output("timeout-seconds", "value"),
+    Input("reset-last-state-button", "n_clicks"),
+    prevent_initial_call=True,
+)
+def reset_saved_last_state(n_clicks: int | None):
+    if not n_clicks:
+        return tuple(no_update for _ in range(35))
+    clear_last_ui_state()
+    return reset_last_state_values()
+
+
 def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], utils: List[float]) -> List[Dict[str, Any]]:
     return [{"topology_type": topology, "bandwidth": bandwidth, "util": util} for topology, bandwidth, util in zip(topologies, bandwidths, utils)]
 
@@ -1901,6 +2701,7 @@ def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     Input({"type": "net-topology", "index": ALL}, "value"),
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
+    Input("parallelism-topology-mode", "value"),
     State("model-preset", "value"),
     State("hardware-preset", "value"),
     State("model-run-configs", "value"),
@@ -1938,7 +2739,7 @@ def sync_config_files(
     adv_model_type: str,
     adv_model_mode: str,
     adv_full_recomp: bool,
-    adv_dp_zero: int,
+    adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
     adv_precision_parameters: str,
@@ -1963,6 +2764,7 @@ def sync_config_files(
     net_topologies: List[str],
     net_bandwidths: List[str],
     net_utils: List[float],
+    parallelism_topology_mode: str,
     model_preset: str,
     hardware_preset: str,
     model_run_configs: List[str] | None,
@@ -2029,12 +2831,13 @@ def sync_config_files(
         net_topologies,
         net_bandwidths,
         net_utils,
+        parallelism_topology_mode,
         [],
         metric or get_default_metric_for_run_type(simple_run_type),
         x_axis,
         series_axis,
         worker_count or default_worker_count(),
-        timeout_seconds or 180,
+        timeout_seconds if timeout_seconds is not None else 180,
     )
     save_errors: List[str] = []
     _, _, save_errors = save_config_edits_from_payload(payload)
@@ -2043,7 +2846,7 @@ def sync_config_files(
     model_yaml, hardware_yaml, render_errors = render_editable_config_texts(payload)
     if render_errors:
         return no_update, no_update, f"Config sync failed: {render_errors[0]}"
-    return model_yaml, hardware_yaml, "Saved UI edits to the active model and hardware YAML files."
+    return model_yaml, hardware_yaml, ""
 
 
 @callback(
@@ -2104,6 +2907,7 @@ def sync_config_files(
     Input({"type": "net-topology", "index": ALL}, "value"),
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
+    Input("parallelism-topology-mode", "value"),
     Input("dim-1-field", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-1-list", "value"),
@@ -2130,6 +2934,7 @@ def sync_config_files(
     Input("series-select", "value"),
     Input("worker-count", "value"),
     Input("timeout-seconds", "value"),
+    Input("config-editor-tabs", "value"),
 )
 def build_preview(
     model_preset: str,
@@ -2161,7 +2966,7 @@ def build_preview(
     adv_model_type: str,
     adv_model_mode: str,
     adv_full_recomp: bool,
-    adv_dp_zero: int,
+    adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
     adv_precision_parameters: str,
@@ -2186,6 +2991,7 @@ def build_preview(
     net_topologies: List[str],
     net_bandwidths: List[str],
     net_utils: List[float],
+    parallelism_topology_mode: str,
     dim1_field: str,
     dim1_mode: str,
     dim1_list: str,
@@ -2212,9 +3018,17 @@ def build_preview(
     series_axis: str | None,
     worker_count: int,
     timeout_seconds: int,
+    active_config_tab: str | None,
 ):
+    if preview_rebuild_is_load_only(dash.ctx.triggered_prop_ids):
+        return no_update, no_update, no_update
+    sweep_rows = [
+        {"field": dim1_field, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
+        {"field": dim2_field, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
+        {"field": dim3_field, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points},
+    ]
     dimensions = config_dimensions_from_selection(model_run_configs, hardware_run_configs, model_preset, hardware_preset)
-    dimensions.extend(_dimensions_from_inputs([{"field": dim1_field, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points}, {"field": dim2_field, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points}, {"field": dim3_field, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points}]))
+    dimensions.extend(_dimensions_from_inputs(sweep_rows))
     payload = collect_form_payload(
         model_preset,
         hardware_preset,
@@ -2268,12 +3082,31 @@ def build_preview(
         net_topologies,
         net_bandwidths,
         net_utils,
+        parallelism_topology_mode,
         dimensions,
         metric,
         x_axis,
         series_axis,
         worker_count,
         timeout_seconds,
+    )
+    save_last_ui_state(
+        {
+            "model_run_configs": model_run_configs,
+            "hardware_run_configs": hardware_run_configs,
+            "model_preset": model_preset,
+            "hardware_preset": hardware_preset,
+            "active_config_tab": active_config_tab,
+            "run_mode": run_mode,
+            "optimize_parallelism": optimize_parallelism,
+            "optimizer_preset": optimizer_preset,
+            "sweep_rows": sweep_rows,
+            "metric": metric,
+            "x_axis": x_axis,
+            "series_axis": series_axis,
+            "worker_count": worker_count,
+            "timeout_seconds": timeout_seconds,
+        }
     )
     preview = build_launch_preview(payload)
     if not preview.get("ok"):
@@ -2289,13 +3122,22 @@ def launch_job(_: int, preview_store: Dict[str, Any] | None):
     if not preview.get("ok"):
         return dmc.Alert("Cannot run until preview errors are fixed.", color="red", radius="lg")
     ok, message = RUN_MANAGER.start_job(payload, preview)
-    return dmc.Alert(f"{'Launched' if ok else 'Did not launch'}: {message}", color="green" if ok else "red", radius="lg")
+    if ok:
+        return no_update
+    return dmc.Alert(f"Did not launch: {message}", color="red", radius="lg")
 
 
 @callback(Output("preview-summary", "children", allow_duplicate=True), Input("cancel-button", "n_clicks"), prevent_initial_call=True)
 def cancel_active_job(_: int):
     ok, message = RUN_MANAGER.cancel()
-    return dmc.Alert(message, color="yellow" if ok else "red", radius="lg")
+    return dmc.Alert(message, color="blue" if ok else "red", radius="lg")
+
+
+@callback(Output("workspace-tabs", "value"), Input("progress-run-log-button", "n_clicks"), prevent_initial_call=True)
+def open_run_log_from_completed_progress(n_clicks: int | None):
+    if not n_clicks:
+        return no_update
+    return "history"
 
 
 @callback(Output("selected-detail-store", "data"), Input({"type": "open-detail", "job_kind": ALL, "job_id": ALL}, "n_clicks"), prevent_initial_call=True)
@@ -2324,16 +3166,30 @@ def close_detail_modal(_: int | None, __: int | None):
     Output("detail-plot-toolbar", "style"),
     Output("detail-modal-title", "children"),
     Output("details-panel", "children", allow_duplicate=True),
+    Output("detail-display-mode", "value"),
     Input("selected-detail-store", "data"),
-    Input("detail-plot-type", "value"),
     prevent_initial_call=True,
 )
-def render_detail_modal(selected_detail: Dict[str, Any] | None, plot_type: str | None):
+def open_detail_modal_shell(selected_detail: Dict[str, Any] | None):
     if not selected_detail:
-        return {"display": "none"}, {"display": "none"}, "", render_detail(None, plot_type)
-    detail = load_job_detail(selected_detail["kind"], selected_detail["id"])
-    plot_toolbar_style = {"display": "block"} if detail.get("kind") == "sweep" else {"display": "none"}
-    return {"display": "flex"}, plot_toolbar_style, dmc.Text("Details", fw=800), render_detail(detail, plot_type or "line")
+        return {"display": "none"}, {"display": "none"}, "", render_detail(None), "top"
+    plot_toolbar_style = {"display": "block"} if selected_detail.get("kind") == "sweep" else {"display": "none"}
+    return {"display": "flex"}, plot_toolbar_style, dmc.Text("Details", fw=800), detail_loading_placeholder(selected_detail), "top"
+
+
+@callback(
+    Output("details-panel", "children", allow_duplicate=True),
+    Input("selected-detail-store", "data"),
+    Input("detail-plot-type", "value"),
+    Input("detail-display-mode", "value"),
+    prevent_initial_call=True,
+)
+def render_detail_modal_content(selected_detail: Dict[str, Any] | None, plot_type: str | None, display_mode: str | None):
+    if not selected_detail:
+        return render_detail(None, plot_type)
+    case_limit = None if display_mode == "full" else DETAIL_RENDER_CASE_LIMIT
+    detail = load_job_detail(selected_detail["kind"], selected_detail["id"], case_limit=case_limit, display_mode=display_mode or "top")
+    return render_detail(detail, plot_type or "line")
 
 
 @callback(
@@ -2358,9 +3214,33 @@ def save_current_detail_plot(n_clicks: int | None, selected_detail: Dict[str, An
             row[y_axis] = 0
         if row.get("status") != "completed" and y_axis:
             row[y_axis] = 0
-    figure = detail_plot_figure(rows, x_axis, y_axis, series_axis, plot_type or "line")
-    path = save_plot_html(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], figure.to_html(full_html=True, include_plotlyjs="cdn"))
+    png_bytes = detail_plot_png_bytes(rows, x_axis, y_axis, series_axis, plot_type or "line", detail.get("title") or selected_detail["id"])
+    path = save_plot_png(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], png_bytes)
     return f"Saved plot: {path}"
+
+
+@callback(
+    Output("table-export-status", "children"),
+    Input("export-table-csv-button", "n_clicks"),
+    Input("export-table-json-button", "n_clicks"),
+    State("selected-detail-store", "data"),
+    prevent_initial_call=True,
+)
+def export_current_detail_table(csv_clicks: int | None, json_clicks: int | None, selected_detail: Dict[str, Any] | None):
+    if not selected_detail or selected_detail.get("kind") != "sweep":
+        return "Only sweep details have an exportable table."
+    trigger = dash.ctx.triggered_id
+    if trigger not in {"export-table-csv-button", "export-table-json-button"}:
+        return no_update
+    if trigger == "export-table-csv-button" and not csv_clicks:
+        return no_update
+    if trigger == "export-table-json-button" and not json_clicks:
+        return no_update
+    fmt = "csv" if trigger == "export-table-csv-button" else "json"
+    detail = load_job_detail(selected_detail["kind"], selected_detail["id"], display_mode="full")
+    content, row_count = detail_table_export_payload(detail, fmt)
+    path = save_table_export(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], fmt, content)
+    return f"Exported {row_count:,} rows: {path}"
 
 
 @callback(
@@ -2379,11 +3259,38 @@ def refresh_status(_: int, selected_detail: Dict[str, Any] | None):
     active = RUN_MANAGER.active_job()
     if active:
         progress = ((active.get("progress_completed") or 0) / max(1, active.get("progress_total") or 1)) * 100
-        active_panel = dmc.Stack(gap="md", children=[dmc.Text(active["title"], fw=700, size="lg"), dmc.Progress(value=progress, size="xl", radius="xl"), dmc.Group(gap="sm", children=[dmc.Badge(f"{active.get('progress_completed', 0)} / {active.get('progress_total', 0)}", radius="xl"), dmc.Badge(active["status"], color="blue", radius="xl", variant="light")])])
+        active_panel = dmc.Stack(
+            gap="md",
+            children=[
+                dmc.Text(active["title"], fw=700, size="lg"),
+                branded_progress_bar(
+                    progress,
+                    progress_count_label(active),
+                    str(active["status"]).upper(),
+                ),
+                dmc.Text(job_eta_readout(active), size="sm", fw=800, className="live-status-eta"),
+            ],
+        )
         job_badge = f"Active: {active['status']}"
     else:
-        active_panel = dmc.Alert("No active job. Adjust settings and launch when ready.", color="green", radius="lg")
-        job_badge = "Idle"
+        finished = RUN_MANAGER.last_finished_job()
+        if finished:
+            active_panel = dmc.Stack(
+                gap="md",
+                children=[
+                    dmc.Text(finished["title"], fw=700, size="lg"),
+                    branded_progress_bar(
+                        100,
+                        progress_count_label(finished, terminal=True),
+                        str(finished["status"]).upper(),
+                        show_run_log_button=True,
+                    ),
+                ],
+            )
+            job_badge = format_finished_job_badge(finished)
+        else:
+            active_panel = dmc.Alert("No active job. Adjust settings and launch when ready.", color="green", radius="lg")
+            job_badge = "Idle"
     history_items = list_history()
     history_children = []
     for item in history_items:
@@ -2430,7 +3337,7 @@ def refresh_status(_: int, selected_detail: Dict[str, Any] | None):
                         dmc.Stack(
                             gap="xs",
                             children=[
-                                dmc.Text(item["title"], fw=700, size="lg"),
+                                history_title_component(item),
                                 dmc.Group(gap="xs", children=summary_badges),
                                 dmc.Text(compact_timestamp(item.get("created_at")), size="xs", c="dimmed"),
                             ],
@@ -2456,6 +3363,20 @@ DATA_TABLE_STYLE_CELL = {
     "whiteSpace": "normal",
 }
 DATA_TABLE_STYLE_HEADER = {"backgroundColor": "#eef7fc", "fontWeight": 800, "color": "#0055A6", "border": "1px solid #bfd2df"}
+DATA_TABLE_STYLE_FILTER = {"backgroundColor": "#ffffff", "color": "#17212b", "border": "1px solid #bfd2df", "fontWeight": 500}
+MEMORY_EXCEEDED_CELL_STYLE = {"color": "#c1121f", "fontWeight": 900}
+RUN_MEMORY_STYLE_DATA_CONDITIONAL = [
+    {
+        "if": {"filter_query": '{metric} = "Memory Exceeded" && {value} != "No"', "column_id": "value"},
+        **MEMORY_EXCEEDED_CELL_STYLE,
+    }
+]
+SWEEP_MEMORY_STYLE_DATA_CONDITIONAL = [
+    {
+        "if": {"filter_query": '{memory_exceeded} != "No"', "column_id": "memory_exceeded"},
+        **MEMORY_EXCEEDED_CELL_STYLE,
+    }
+]
 
 
 def sweep_rows_from_detail(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2466,17 +3387,21 @@ def sweep_rows_from_detail(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
         metrics = metrics_with_derived_flops(case.get("metrics", {}) or {})
         model_config = detail_model_config(detail, dimension_values)
         hardware_config = detail_hardware_config(detail, dimension_values)
+        generated_label = build_case_label(dimension_values, model_config, hardware_config)
+        raw_label = case.get("label")
+        case_label = generated_label if dimension_values and raw_label and "=" in str(raw_label) else (raw_label or generated_label)
         row = {
-            "case": f"{case['case_id']} - {config_display_name(model_config)}",
+            "case": f"{case['case_id']} - {case_label}",
             "case_id": case["case_id"],
-            "label": case.get("label") or case["case_id"],
+            "label": case_label,
             "status": case.get("status", "unknown"),
             "model_config": model_config,
             "hardware_config": hardware_config,
             "parallelism": parallelism_summary_from_payload(payload, case.get("chosen_candidate")),
         }
         row.update({key: value for key, value in dimension_values.items() if key not in {"model_config", "hardware_config"}})
-        row.update({key: value for key, value in metrics.items() if key != "memory_violation_gb"})
+        row["model.decode_len"] = detail_decode_length(detail, dimension_values)
+        row.update({key: value for key, value in metrics.items() if key != "memory_violation_gb" and key not in DETAIL_HIDDEN_METRIC_KEYS})
         if "memory_exceeded" in metrics or "memory_violation_gb" in metrics:
             row["memory_exceeded"] = memory_exceeded_display(metrics)
         rows.append(row)
@@ -2495,8 +3420,75 @@ def detail_axes(detail: Dict[str, Any], rows: List[Dict[str, Any]]) -> tuple[str
         x_axis = dimension_keys[0]
     else:
         x_axis = "case_id"
-    y_axis = preferred_metric if preferred_metric in rows[0] else ("training_time_s" if "training_time_s" in rows[0] else "prefill_time_s")
+    if preferred_metric in DETAIL_HIDDEN_METRIC_KEYS:
+        preferred_metric = None
+    y_axis = preferred_metric if preferred_metric and preferred_metric in rows[0] else ("training_time_s" if "training_time_s" in rows[0] else "prefill_time_s")
     return x_axis, y_axis, payload.get("series_axis")
+
+
+def sample_rows_evenly(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    if limit == 1:
+        return [rows[0]]
+    last = len(rows) - 1
+    indexes = sorted({round(index * last / (limit - 1)) for index in range(limit)})
+    return [rows[index] for index in indexes]
+
+
+def detail_case_counts(detail: Dict[str, Any], loaded_rows: int) -> tuple[int, int]:
+    loaded_cases = int(detail.get("_case_count_loaded") or loaded_rows)
+    total_cases = int(detail.get("_case_count_total") or len(detail.get("cases", []) or []) or loaded_cases)
+    return total_cases, loaded_cases
+
+
+def detail_termination_stats(detail: Dict[str, Any], rows: List[Dict[str, Any]] | None = None) -> tuple[int, int, float]:
+    summary = detail.get("summary_record") or detail.get("summary") or {}
+    if detail.get("kind") == "sweep":
+        total = summary.get("case_count")
+        completed = summary.get("completed_case_count")
+        if total is not None and completed is not None:
+            try:
+                total_i = max(0, int(total))
+                completed_i = max(0, int(completed))
+                early_i = max(0, total_i - completed_i)
+                pct = (early_i / total_i * 100.0) if total_i else 0.0
+                return total_i, early_i, pct
+            except (TypeError, ValueError):
+                pass
+        source_rows = rows if rows is not None else sweep_rows_from_detail(detail)
+        total_i = len(source_rows)
+        early_i = sum(1 for row in source_rows if str(row.get("status", "")).lower() != "completed")
+        pct = (early_i / total_i * 100.0) if total_i else 0.0
+        return total_i, early_i, pct
+    result = detail.get("result", {}) or {}
+    status = str(result.get("status", "unknown")).lower()
+    total_i = 1 if status else 0
+    early_i = 1 if status and status != "completed" else 0
+    pct = (early_i / total_i * 100.0) if total_i else 0.0
+    return total_i, early_i, pct
+
+
+def termination_summary_component(detail: Dict[str, Any], rows: List[Dict[str, Any]] | None = None):
+    total, early, percent = detail_termination_stats(detail, rows)
+    base_text = f"Early termination rate: {percent:.1f}% ({early:,}/{total:,} runs)."
+    if percent > EARLY_TERMINATION_BIG_THRESHOLD:
+        return dmc.Alert(
+            f"{base_text} Results are unreliable because most runs terminated before producing usable metrics. Increase the timeout and rerun for higher result fidelity.",
+            color="red",
+            radius="lg",
+            title="Results unreliable",
+            style={"fontStyle": "italic"},
+        )
+    if percent > EARLY_TERMINATION_MILD_THRESHOLD:
+        return dmc.Alert(
+            f"{base_text} Many runs terminated early; consider increasing the timeout for higher result fidelity.",
+            color="red",
+            radius="lg",
+            title="Early termination warning",
+            style={"fontStyle": "italic"},
+        )
+    return dmc.Text(base_text, size="sm", c="dimmed")
 
 
 def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, series_axis: str | None, plot_type: str | None):
@@ -2521,7 +3513,7 @@ def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, ser
         "hover_data": hover_fields,
         "color": color_axis,
         "template": "plotly_white",
-        "color_discrete_sequence": ["#0055A6", "#00A5E5", "#3284BF", "#FFC000", "#4F8F2F"],
+        "color_discrete_sequence": ["#0055A6", "#00A5E5", "#3284BF", "#7DD3F7", "#4F8F2F"],
     }
     if plot_kind == "bar":
         figure = px.bar(**common)
@@ -2544,6 +3536,154 @@ def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, ser
     return figure
 
 
+PLOT_EXPORT_COLORS = ["#0055A6", "#00A5E5", "#3284BF", "#7DD3F7", "#4F8F2F", "#6BAED6"]
+
+
+def _plot_color_axis(plot_rows: List[Dict[str, Any]], series_axis: str | None) -> str | None:
+    if series_axis and series_axis in plot_rows[0] and series_axis != "status":
+        return series_axis
+    for candidate in ["model_config", "hardware_config"]:
+        values = {row.get(candidate) for row in plot_rows}
+        if len(values) > 1:
+            return candidate
+    return None
+
+
+def _plot_number(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _plot_x_positions(plot_rows: List[Dict[str, Any]], x_axis: str) -> tuple[List[float], List[str] | None]:
+    raw_values = [row.get(x_axis) for row in plot_rows]
+    numeric_values: List[float] = []
+    for value in raw_values:
+        if isinstance(value, bool):
+            break
+        try:
+            numeric_values.append(float(value))
+        except (TypeError, ValueError):
+            break
+    else:
+        return numeric_values, None
+    labels = [str(value) for value in raw_values]
+    unique_labels = list(dict.fromkeys(labels))
+    positions = {label: float(idx) for idx, label in enumerate(unique_labels)}
+    return [positions[label] for label in labels], unique_labels
+
+
+def _format_plot_axis_tick(value: float, axis_key: str) -> str:
+    if axis_key in FIELD_TYPES:
+        return format_sweep_preview_value(value, axis_key)
+    if axis_key not in (FLOP_COUNT_KEYS | FLOP_RATE_KEYS | TOKEN_RATE_KEYS | TIME_KEYS) and not axis_key.endswith(("_flops", "_time_s", "_seconds", "_s")):
+        if abs(value - round(value)) < 1e-9:
+            return f"{int(round(value)):,}"
+    return format_metric_value(value, axis_key)
+
+
+def detail_plot_png_bytes(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, series_axis: str | None, plot_type: str | None, title: str) -> bytes:
+    plot_rows = [dict(row) for row in rows]
+    for row in plot_rows:
+        if row.get("status") != "completed":
+            row[y_axis] = 0
+    color_axis = _plot_color_axis(plot_rows, series_axis)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in plot_rows:
+        group_label = str(row.get(color_axis)) if color_axis else "Result"
+        grouped.setdefault(group_label, []).append(row)
+
+    fig, ax = plt.subplots(figsize=(12, 7), dpi=150)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+    plot_kind = plot_type or "line"
+    all_x_positions, category_labels = _plot_x_positions(plot_rows, x_axis)
+    x_lookup = {id(row): x for row, x in zip(plot_rows, all_x_positions)}
+
+    if plot_kind == "bar":
+        group_count = max(1, len(grouped))
+        bar_width = min(0.8 / group_count, 0.34)
+        for group_index, (group_label, group_rows) in enumerate(grouped.items()):
+            offset = (group_index - (group_count - 1) / 2) * bar_width
+            xs = [x_lookup[id(row)] + offset for row in group_rows]
+            ys = [_plot_number(row.get(y_axis)) for row in group_rows]
+            ax.bar(xs, ys, width=bar_width * 0.9, label=group_label if color_axis else None, color=PLOT_EXPORT_COLORS[group_index % len(PLOT_EXPORT_COLORS)])
+    else:
+        for group_index, (group_label, group_rows) in enumerate(grouped.items()):
+            xs = [x_lookup[id(row)] for row in group_rows]
+            ys = [_plot_number(row.get(y_axis)) for row in group_rows]
+            color = PLOT_EXPORT_COLORS[group_index % len(PLOT_EXPORT_COLORS)]
+            label = group_label if color_axis else None
+            if plot_kind == "scatter":
+                ax.scatter(xs, ys, s=48, label=label, color=color, edgecolors="#ffffff", linewidths=0.8, zorder=3)
+            else:
+                ax.plot(xs, ys, marker="o", markersize=5, linewidth=2.2, label=label, color=color, zorder=3)
+
+    ax.set_title(title, loc="left", fontsize=15, fontweight=800, color="#17212b", pad=16)
+    ax.set_xlabel(pretty_label(x_axis), fontsize=11, color="#17212b")
+    ax.set_ylabel(pretty_label(y_axis), fontsize=11, color="#17212b")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_metric_value(value, y_axis)))
+    if category_labels is not None:
+        ax.set_xticks(range(len(category_labels)))
+        ax.set_xticklabels(category_labels, rotation=25, ha="right")
+    else:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: _format_plot_axis_tick(value, x_axis)))
+    ax.grid(True, axis="y", color="#dce8f1", linewidth=1.0)
+    ax.grid(True, axis="x", color="#edf4f8", linewidth=0.7)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#bfd2df")
+    ax.spines["bottom"].set_color("#bfd2df")
+    ax.tick_params(colors="#17212b", labelsize=9)
+    if color_axis and len(grouped) > 1:
+        ax.legend(title=pretty_label(color_axis), frameon=False, loc="best", fontsize=9, title_fontsize=9)
+    fig.tight_layout()
+    output = BytesIO()
+    fig.savefig(output, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+    return output.getvalue()
+
+
+def detail_table_keys(rows: List[Dict[str, Any]], *, include_case_id: bool = False) -> List[str]:
+    if not rows:
+        return []
+    ordered = [key for key in DETAIL_TABLE_COLUMN_ORDER if key in rows[0] and (include_case_id or key != "case_id")]
+    ordered_set = set(ordered)
+    return ordered + [key for key in rows[0].keys() if key not in ordered_set and (include_case_id or key != "case_id")]
+
+
+def detail_display_rows(rows: List[Dict[str, Any]], keys: List[str]) -> List[Dict[str, Any]]:
+    display_rows = []
+    passthrough_keys = {"case", "case_id", "label", "status", "model_config", "hardware_config", "parallelism", "memory_exceeded"}
+    for row in rows:
+        display_row = {}
+        for key in keys:
+            value = row.get(key)
+            display_row[key] = value if key in passthrough_keys else format_metric_value(value, key)
+        display_rows.append(display_row)
+    return display_rows
+
+
+def _export_cell(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
+def detail_table_export_payload(detail: Dict[str, Any], fmt: str) -> tuple[str, int]:
+    rows = sweep_rows_from_detail(detail)
+    keys = detail_table_keys(rows, include_case_id=True)
+    export_rows = [{key: _export_cell(row.get(key)) for key in keys} for row in rows]
+    if fmt == "json":
+        return json.dumps(export_rows, indent=2), len(export_rows)
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=keys)
+    writer.writeheader()
+    writer.writerows(export_rows)
+    return output.getvalue(), len(export_rows)
+
+
 def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line"):
     if not detail:
         return dmc.Alert("Choose a run from Run log to inspect details.", color="gray", radius="lg")
@@ -2556,6 +3696,7 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
                 gap="lg",
                 children=[
                     dmc.Title(detail["title"], order=2),
+                    termination_summary_component(detail),
                     dmc.Alert(result.get("error", "The run failed."), color="red", radius="lg", title="Run failed"),
                 ],
             )
@@ -2587,6 +3728,8 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
             style_table={"overflowX": "auto"},
             style_cell=DATA_TABLE_STYLE_CELL,
             style_header=DATA_TABLE_STYLE_HEADER,
+            style_filter=DATA_TABLE_STYLE_FILTER,
+            style_data_conditional=RUN_MEMORY_STYLE_DATA_CONDITIONAL,
         )
         return dmc.Stack(
             gap="lg",
@@ -2598,6 +3741,7 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
                         dmc.Badge("Parallelism optimized" if optimizer_enabled else "Fixed parallelism", color="blue" if optimizer_enabled else "gray", variant="light", radius="xl"),
                     ],
                 ),
+                termination_summary_component(detail),
                 dmc.SimpleGrid(cols={"base": 1, "sm": 2, "lg": 4}, children=cards),
                 dmc.Paper(radius="xl", p="lg", withBorder=True, children=table),
             ],
@@ -2612,38 +3756,16 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
             row[y_axis] = 0
         if row.get("status") != "completed" and y_axis:
             row[y_axis] = 0
-    figure = detail_plot_figure(rows, x_axis, y_axis, series_axis, plot_type)
-    display_rows = []
-    for row in rows:
-        display_row = {}
-        for key, value in row.items():
-            if key in {"case", "case_id", "label", "status", "model_config", "hardware_config", "parallelism", "memory_exceeded"}:
-                display_row[key] = value
-            else:
-                display_row[key] = format_metric_value(value, key)
-        display_rows.append(display_row)
-    column_order = [
-        "case",
-        "label",
-        "memory_exceeded",
-        "training_time_s",
-        "prefill_time_s",
-        "decode_time_s",
-        "total_inference_time_s",
-        "ttft_s",
-        "num_gpus",
-        "approx_mfu",
-        "total_flops",
-        "achieved_flops",
-        "achieved_flops_per_gpu",
-        "peak_flops_per_gpu",
-        "peak_system_flops",
-        "status",
-        "model_config",
-        "hardware_config",
-        "parallelism",
-    ]
-    ordered_keys = [key for key in column_order if key in rows[0]] + [key for key in rows[0].keys() if key not in column_order and key != "case_id"]
+    display_mode = detail.get("_case_display_mode") or "full"
+    if display_mode == "full":
+        plot_rows = rows
+        table_rows = rows
+    else:
+        plot_rows = sample_rows_evenly(rows, DETAIL_PLOT_POINT_LIMIT)
+        table_rows = rows[:DETAIL_TABLE_ROW_LIMIT]
+    figure = detail_plot_figure(plot_rows, x_axis, y_axis, series_axis, plot_type)
+    ordered_keys = detail_table_keys(rows)
+    display_rows = detail_display_rows(table_rows, ordered_keys)
     table = dash_table.DataTable(
         data=[{key: row.get(key) for key in ordered_keys} for row in display_rows],
         columns=[{"name": pretty_label(key), "id": key} for key in ordered_keys],
@@ -2655,12 +3777,21 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
         style_table={"overflowX": "auto"},
         style_cell=DATA_TABLE_STYLE_CELL,
         style_header=DATA_TABLE_STYLE_HEADER,
+        style_filter=DATA_TABLE_STYLE_FILTER,
+        style_data_conditional=SWEEP_MEMORY_STYLE_DATA_CONDITIONAL if "memory_exceeded" in ordered_keys else [],
     )
-    detail_note = (
-        f"{len(rows):,} displayed case rows. Candidate trials from parallelism search are summarized, not listed individually."
-        if optimizer_enabled
-        else f"{len(rows):,} displayed case rows."
-    )
+    total_cases, loaded_cases = detail_case_counts(detail, len(rows))
+    detail_note_parts = [f"{total_cases:,} case rows total."]
+    if display_mode != "full" and loaded_cases < total_cases:
+        metric_label = pretty_label(detail.get("_case_sort_metric") or payload.get("metric") or y_axis)
+        detail_note_parts.append(f"Showing top {loaded_cases:,} loaded rows by {metric_label} for a faster view.")
+    if len(table_rows) < len(rows):
+        detail_note_parts.append(f"Table shows first {len(table_rows):,} loaded rows.")
+    if len(plot_rows) < len(rows):
+        detail_note_parts.append(f"Plot samples {len(plot_rows):,} loaded rows.")
+    if optimizer_enabled:
+        detail_note_parts.append("Candidate trials from parallelism search are summarized, not listed individually.")
+    detail_note = " ".join(detail_note_parts)
     return dmc.Stack(
         gap="lg",
         children=[
@@ -2678,6 +3809,7 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
                     ),
                 ],
             ),
+            termination_summary_component(detail, rows),
             dmc.Title("Graph", order=3),
             dcc.Graph(figure=figure, config={"displayModeBar": False}, style={"height": "420px"}),
             dmc.Paper(radius="xl", p="lg", withBorder=True, children=table),

@@ -1,0 +1,28 @@
+model_param:
+  mode: LLM
+  run_type: inference
+  tied_embeddings: false
+  model_type: gpt
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  decode_len: 1024
+  hidden_dim: 12288
+  attention:
+    attention_type: mha
+    num_heads: 96
+    kv_heads: 96
+    use_flashattention: true
+    attention_tile_size: 128
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 49152
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 96
+  intermediate_size: 49152
+  vocab_size: 51200
+  num_layers: 96
+metadata:
+  source_config: validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml

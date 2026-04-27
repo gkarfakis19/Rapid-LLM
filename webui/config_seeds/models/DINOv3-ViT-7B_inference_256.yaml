@@ -1,0 +1,29 @@
+model_param:
+  mode: ViT
+  model_type: vit_dinov3
+  run_type: inference
+  tied_embeddings: true
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  decode_len: 0
+  hidden_dim: 4096
+  vocab_size: 0
+  intermediate_size: 8192
+  num_layers: 40
+  vision:
+    image_size: 256
+    patch_size: 16
+  attention:
+    attention_type: mha
+    num_heads: 32
+    use_flashattention: false
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0
+  seq_len: 261
+metadata:
+  source_config: configs/model-config/vit_7b_patch16_dinov3_lvd1689m_inf.yaml
