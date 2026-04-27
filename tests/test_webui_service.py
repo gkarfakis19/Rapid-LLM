@@ -59,6 +59,10 @@ def test_default_launch_preview_is_valid(monkeypatch, tmp_path):
     assert preview["top_level_cases"][0]["case_id"] == "case-0001"
 
 
+def test_worker_python_path_preserves_virtualenv_symlink():
+    assert ".venv" in str(core.PYTHON_BIN)
+
+
 def test_workspace_configs_are_seeded_as_editable_defaults(monkeypatch, tmp_path):
     workspace = _isolate_workspace(monkeypatch, tmp_path)
 
@@ -198,6 +202,52 @@ def test_tensor_format_advanced_option_saves_and_validates_low_precision(monkeyp
         assert preview["top_level_cases"][0]["hardware"]["sw_param"]["precision"]["tensor_format"] == tensor_format
 
 
+def test_all_supported_precision_overrides_are_saved(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["advanced"] |= {
+        "tensor_format": "fp8",
+        "precision_kv_cache": "mxfp4",
+        "precision_parameters": "int4",
+        "precision_gradients": "fp16",
+        "precision_grad_communication": "as_tensor_format",
+        "precision_optimizer_states": "fp32",
+        "precision_stats": "bf16",
+        "precision_master_parameters": "0",
+    }
+
+    _, hardware, errors = core.save_config_edits_from_payload(payload)
+    preview = core.build_launch_preview(payload)
+
+    assert errors == []
+    assert hardware is not None
+    assert preview["ok"] is True
+    precision = core._yaml_load(workspace / "configs" / "hardware" / "H100_SXM5_80GB_base.yaml")["sw_param"]["precision"]
+    assert precision["tensor_format"] == "fp8"
+    assert precision["kv_cache"] == "mxfp4"
+    assert precision["parameters"] == "int4"
+    assert precision["gradients"] == "fp16"
+    assert precision["grad_communication"] == "as_tensor_format"
+    assert precision["optimizer_states"] == "fp32"
+    assert precision["stats"] == "bf16"
+    assert precision["master_parameters"] == 0.0
+
+
+def test_inference_forces_grad_accumulation_to_one(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["run_type"] = "inference"
+    payload["simple"]["grad_accum"] = 8
+
+    model, _, errors = core.save_config_edits_from_payload(payload)
+
+    assert errors == []
+    assert model is not None
+    model_yaml = core._yaml_load(workspace / "configs" / "models" / "Llama2-7B.yaml")
+    assert model_yaml["model_param"]["run_type"] == "inference"
+    assert model_yaml["model_param"]["gradient_accumulation_steps"] == 1
+
+
 def test_form_edits_are_saved_only_to_active_editor_configs(monkeypatch, tmp_path):
     workspace = _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
@@ -293,6 +343,27 @@ def test_total_gpu_sweep_scales_data_parallelism_when_not_optimizing(monkeypatch
     ] == [1, 2]
 
 
+def test_optimized_total_gpu_sweep_uses_sweep_values_not_simple_total(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["total_gpus"] = 999
+    payload["optimize_parallelism"] = True
+    payload["dimensions"] = [
+        {
+            "field_key": "hardware.total_gpus",
+            "mode": "list",
+            "list_text": "8, 16",
+        }
+    ]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["optimizer_enabled"] is True
+    assert [case["target_total_gpus"] for case in preview["top_level_cases"]] == [8, 16]
+    assert all(item["count"] > 0 for item in preview["candidate_breakdown"])
+
+
 def test_raw_parallelism_axis_sweeps_are_rejected(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
@@ -302,6 +373,25 @@ def test_raw_parallelism_axis_sweeps_are_rejected(monkeypatch, tmp_path):
 
     assert preview["ok"] is False
     assert "Unsupported sweep field: hardware.parallelism.tp" in preview["errors"]
+
+
+def test_vit_model_type_rejects_sequence_length_sweeps(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["advanced"]["model_type"] = "vit"
+    payload["advanced"]["model_mode"] = "VIT"
+    payload["dimensions"] = [
+        {
+            "field_key": "model.seq_len",
+            "mode": "list",
+            "list_text": "1024, 2048",
+        }
+    ]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is False
+    assert any("ViT model families derive sequence length" in error for error in preview["errors"])
 
 
 def test_numeric_range_sweep_expands_without_preset_values(monkeypatch, tmp_path):
@@ -324,6 +414,28 @@ def test_numeric_range_sweep_expands_without_preset_values(monkeypatch, tmp_path
     assert preview["ok"] is True
     assert preview["top_level_case_count"] == 3
     assert [case["dimension_values"]["model.global_batch_size"] for case in preview["top_level_cases"]] == [32, 64, 96]
+
+
+def test_worst_case_wall_clock_is_divided_by_workers(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["worker_count"] = 2
+    payload["timeout_seconds"] = 10
+    payload["dimensions"] = [
+        {
+            "field_key": "model.global_batch_size",
+            "mode": "range",
+            "start": 32,
+            "end": 96,
+            "step": 32,
+        }
+    ]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["total_invocations"] == 3
+    assert preview["worst_case_wall_clock_s"] == 20
 
 
 def test_single_run_mode_ignores_sweep_dimensions_and_optimizer(monkeypatch, tmp_path):
@@ -377,6 +489,20 @@ def test_stale_active_lock_is_removed(monkeypatch, tmp_path):
 
     assert manager._existing_active_lock() is None
     assert not core.ACTIVE_JOB_LOCK.exists()
+
+
+def test_saved_plot_paths_are_standardized_and_incremented(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    job_root = core.SWEEPS_ROOT / "sweep-test"
+    job_root.mkdir(parents=True)
+
+    first = Path(core.save_plot_html("sweep", "sweep-test", "Llama2-7B on H100 Sweep", "<html>one</html>"))
+    second = Path(core.save_plot_html("sweep", "sweep-test", "Llama2-7B on H100 Sweep", "<html>two</html>"))
+
+    assert first == workspace / "sweeps" / "sweep-test" / "plots" / "llama2-7b-on-h100-sweep-plot-001.html"
+    assert second == workspace / "sweeps" / "sweep-test" / "plots" / "llama2-7b-on-h100-sweep-plot-002.html"
+    assert first.read_text() == "<html>one</html>"
+    assert second.read_text() == "<html>two</html>"
 
 
 def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path):

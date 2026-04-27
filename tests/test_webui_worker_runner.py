@@ -115,3 +115,27 @@ def test_a100_peak_flops_is_per_gpu_tensor_peak_not_system_pflops():
     peak = gpu_peak_flops(hw_cfg)
 
     assert 2.0e14 < peak < 4.0e14
+
+
+def test_h100_peak_flops_and_system_peak_are_consistent_for_eight_gpus():
+    core.ensure_workspace()
+    hardware = core.load_preset("hardware", "H100_SXM5_80GB_base.yaml")
+    core_fields = hardware["tech_param"]["core"]
+    hw_cfg = SimpleNamespace(
+        tech_config=SimpleNamespace(
+            core=SimpleNamespace(
+                num_bundles=core_fields["num_bundles"],
+                nominal_flop_rate_per_mcu=core_fields["nominal_flop_rate_per_mcu"],
+                num_mcu_per_bundle=core_fields["num_mcu_per_bundle"],
+                operating_frequency=core_fields["operating_frequency"],
+                nominal_frequency=None,
+                util=core_fields["util"],
+            )
+        )
+    )
+
+    peak_per_gpu = gpu_peak_flops(hw_cfg)
+    peak_system = peak_per_gpu * 8
+
+    assert peak_per_gpu == pytest.approx(1.07053056e15)
+    assert peak_system == pytest.approx(8.56424448e15)

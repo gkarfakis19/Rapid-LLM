@@ -195,27 +195,51 @@ body {
 .config-editor-tab-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 0;
   width: 100%;
-  background: #eef7fc;
-  border: 1px solid #cfe4f3;
-  border-radius: 8px;
-  padding: 6px;
+  align-items: flex-end;
+  background: linear-gradient(180deg, #edf6fc, #dfeef7);
+  border: 1px solid #bdd6e7;
+  border-bottom: 2px solid var(--ucla-blue);
+  border-radius: 8px 8px 0 0;
+  padding: 7px 7px 0;
+  overflow: hidden;
 }
 
 .config-editor-tab {
-  flex: 1 1 145px;
+  flex: 1 1 150px;
   min-width: 0;
   max-width: 100%;
+  min-height: 38px;
   justify-content: center;
-  border: 1px solid rgba(0, 85, 166, 0.18);
+  border: 1px solid #b8d2e5;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0 !important;
+  background: #e8f2f8;
   color: var(--ucla-blue-dark);
+  margin-right: -1px;
+  box-shadow: inset 0 -7px 10px rgba(0, 65, 125, 0.04);
 }
 
 .config-editor-tab[data-active="true"] {
-  background: var(--ucla-blue) !important;
-  color: #ffffff !important;
+  position: relative;
+  z-index: 2;
+  min-height: 44px;
+  background: #ffffff !important;
+  color: var(--ucla-blue-dark) !important;
   border-color: var(--ucla-blue) !important;
+  box-shadow: 0 -6px 18px rgba(0, 85, 166, 0.12);
+}
+
+.config-editor-tab[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 3px;
+  background: var(--ucla-gold);
+  border-radius: 3px 3px 0 0;
 }
 
 .config-editor-tab .mantine-Tabs-tabLabel {
@@ -365,6 +389,22 @@ body {
   pointer-events: none;
 }
 
+.parallelism-axis-field.is-swept .mantine-NumberInput-input {
+  color: transparent !important;
+  caret-color: transparent !important;
+}
+
+.parallelism-axis-field.is-swept::after {
+  content: "Swept";
+  position: absolute;
+  left: 13px;
+  bottom: 8px;
+  z-index: 2;
+  color: var(--ucla-blue-dark);
+  font-weight: 800;
+  pointer-events: none;
+}
+
 .range-preview {
   background: #edf8fd;
   border: 1px solid #bfe5f5;
@@ -383,11 +423,29 @@ body {
   border-radius: 8px !important;
 }
 
+.launch-error-alert {
+  background: #fff1f0 !important;
+  border: 2px solid #d92d20 !important;
+  box-shadow: 0 14px 30px rgba(217, 45, 32, 0.14);
+}
+
+.launch-error-alert,
+.launch-error-alert * {
+  color: #7a1111 !important;
+  font-size: 1.02rem;
+  font-weight: 800;
+}
+
 .mantine-Alert-root,
 .mantine-Alert-root *,
 .mantine-Accordion-control,
 .mantine-Accordion-control * {
   color: var(--ink) !important;
+}
+
+.mantine-Alert-root.launch-error-alert,
+.mantine-Alert-root.launch-error-alert * {
+  color: #7a1111 !important;
 }
 
 .mantine-Accordion-root {

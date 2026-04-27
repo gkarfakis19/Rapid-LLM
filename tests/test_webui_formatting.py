@@ -6,6 +6,8 @@ from webui.service.core import FIELD_OPTIONS
 from webui.app.main import (
     MODEL_ARCH_TYPE_HELP,
     MODEL_ARCH_TYPE_OPTIONS,
+    MODEL_MODE_OPTIONS,
+    PRECISION_FORMAT_OPTIONS,
     TENSOR_FORMAT_OPTIONS,
     build_range_preview,
     config_dimensions_from_selection,
@@ -14,6 +16,7 @@ from webui.app.main import (
     help_for_key,
     metric_key_from_label,
     render_detail,
+    refresh_dimension_options,
     selected_active_value,
     sweep_control_visibility,
 )
@@ -53,15 +56,41 @@ def test_supported_model_types_have_explanations():
     assert all(len(MODEL_ARCH_TYPE_HELP[value]) > 40 for value in values)
 
 
+def test_gemm_mode_is_not_exposed_in_model_mode_picker():
+    values = [item["value"] for item in MODEL_MODE_OPTIONS]
+
+    assert values == ["LLM", "VIT"]
+
+
 def test_tensor_format_options_show_precision_widths():
     assert TENSOR_FORMAT_OPTIONS == [
-        {"value": "mxfp4", "label": "mxfp4 (4.25)"},
-        {"value": "int4", "label": "int4 (4)"},
-        {"value": "fp8", "label": "fp8 (8)"},
-        {"value": "fp16", "label": "fp16 (16)"},
-        {"value": "bf16", "label": "bf16 (16)"},
-        {"value": "fp32", "label": "fp32 (32)"},
+        {"value": "mxfp4", "label": "MXFP4 (4.25 bits)"},
+        {"value": "int4", "label": "INT4 (4 bits)"},
+        {"value": "fp8", "label": "FP8 (8 bits)"},
+        {"value": "fp16", "label": "FP16 (16 bits)"},
+        {"value": "bf16", "label": "BF16 (16 bits)"},
+        {"value": "fp32", "label": "FP32 (32 bits)"},
     ]
+
+
+def test_sub_precision_options_can_match_tensor_format():
+    assert PRECISION_FORMAT_OPTIONS[0] == {"value": "as_tensor_format", "label": "Match tensor format"}
+    assert {"value": "fp32", "label": "FP32 (32 bits)"} in PRECISION_FORMAT_OPTIONS
+
+
+def test_plot_grouping_defaults_to_last_active_sweep_dimension():
+    x_data, x_value, series_data, series_value, *_ = refresh_dimension_options(
+        "model.global_batch_size",
+        "hardware.total_gpus",
+        None,
+        None,
+        None,
+    )
+
+    assert [item["value"] for item in x_data] == ["model.global_batch_size", "hardware.total_gpus"]
+    assert x_value == "model.global_batch_size"
+    assert [item["value"] for item in series_data] == ["model.global_batch_size", "hardware.total_gpus"]
+    assert series_value == "hardware.total_gpus"
 
 
 def test_sweep_controls_mutate_by_field_kind():
@@ -189,6 +218,28 @@ def test_detail_tables_explain_metric_columns():
     assert any("Peak System FLOPS" == row["metric"] for row in tables[0].data)
 
 
+def test_detail_derives_missing_system_flops_from_per_gpu_peak():
+    detail = {
+        "kind": "run",
+        "title": "Old run",
+        "result": {
+            "status": "completed",
+            "metrics": {
+                "training_time_s": 1.0,
+                "achieved_flops": 1.0e15,
+                "peak_flops_per_gpu": 1.0e15,
+                "num_gpus": 8,
+            },
+            "primary_metric_value": 1.0,
+        },
+    }
+
+    table = _collect_datatables(render_detail(detail))[0]
+
+    assert any(row["metric"] == "Peak System FLOPS" and row["value"] == "8.00 PFLOPS" for row in table.data)
+    assert any(row["metric"] == "Achieved FLOPS / GPU" and row["value"] == "125 TFLOPS" for row in table.data)
+
+
 def test_detail_memory_fields_are_merged():
     detail = {
         "kind": "run",
@@ -233,7 +284,7 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
                 "status": "completed",
                 "dimension_values": {"model_config": "Llama2-7B.yaml"},
                 "chosen_candidate": {"tp": 2, "cp": 1, "pp": 1, "dp": 4, "ep": 1},
-                "metrics": {"training_time_s": 2.0, "memory_exceeded": False, "memory_violation_gb": 0.0},
+                "metrics": {"training_time_s": 2.0, "num_gpus": 8, "approx_mfu": 0.42, "total_flops": 1e15, "achieved_flops": 5e14, "memory_exceeded": False, "memory_violation_gb": 0.0},
             },
             {
                 "case_id": "case-0002",
@@ -253,4 +304,14 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     assert table.data[0]["case"] == "case-0001 - Llama2-7B"
     assert table.data[0]["parallelism"] == "TP 2 / CP 1 / PP 1 / DP 4 / EP 1"
     assert table.data[1]["training_time_s"] == "0.00 us"
+    assert [column["id"] for column in table.columns[:8]] == [
+        "case",
+        "label",
+        "memory_exceeded",
+        "training_time_s",
+        "num_gpus",
+        "approx_mfu",
+        "total_flops",
+        "achieved_flops",
+    ]
     assert all(trace.name not in {"completed", "failed", "timed_out"} for trace in graph.figure.data)

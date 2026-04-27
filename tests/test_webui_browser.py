@@ -131,7 +131,7 @@ def test_webui_layout_and_visual_health(tmp_path):
         **os.environ,
         "RAPID_WEBUI_PORT": str(port),
         "RAPID_WEBUI_WORKSPACE_ROOT": str(workspace),
-        "RAPID_WEBUI_PYTHON_BIN": str(Path(".venv/bin/python").resolve()),
+        "RAPID_WEBUI_PYTHON_BIN": ".venv/bin/python",
         "PYTHONUNBUFFERED": "1",
     }
     stdout = tmp_path / "webui.stdout.log"
@@ -330,9 +330,12 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("UI Detail Smoke").wait_for(timeout=5000)
             page.locator("button").filter(has_text="Details").first.click()
             page.get_by_role("dialog").wait_for(timeout=5000)
-            page.locator("#detail-plot-toolbar").get_by_text("Normal plot", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Line Plot", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Scatter", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Bar chart", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).click()
+            page.get_by_text("Saved plot:").wait_for(timeout=5000)
             page.get_by_text("Memory Exceeded").wait_for(timeout=5000)
             page.get_by_text("12.5 GB").wait_for(timeout=5000)
             page.get_by_text("case-0001 - Llama2-7B").wait_for(timeout=5000)
@@ -398,7 +401,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("glm4_moe").first.wait_for(timeout=5000)
             page.get_by_text("LLM").first.wait_for(timeout=5000)
             page.get_by_text("ViT").first.wait_for(timeout=5000)
-            page.get_by_text("GEMM").first.wait_for(timeout=5000)
+            assert not page.get_by_text("GEMM").first.is_visible()
             page.locator("#adv-model-type").hover()
             page.get_by_text("Select the architecture family written to model_param.model_type.").wait_for(timeout=5000)
             page.get_by_text("deepseek_v3").first.hover()
@@ -407,16 +410,16 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("Select the execution family written to model_param.mode.").wait_for(timeout=5000)
             page.locator("#adv-tensor-format").scroll_into_view_if_needed()
             page.locator("#adv-tensor-format").click(force=True)
-            page.get_by_role("option", name="mxfp4 (4.25)").wait_for(timeout=5000)
+            page.get_by_role("option", name="MXFP4 (4.25 bits)").wait_for(timeout=5000)
             tensor_option_text = page.evaluate(
                 """() => Array.from(document.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]'))
                     .map((el) => el.textContent || '')
                     .join('\\n')"""
             )
-            assert "mxfp4 (4.25)" in tensor_option_text
-            assert "int4 (4)" in tensor_option_text
-            assert "fp8 (8)" in tensor_option_text
-            assert "fp32 (32)" in tensor_option_text
+            assert "MXFP4 (4.25 bits)" in tensor_option_text
+            assert "INT4 (4 bits)" in tensor_option_text
+            assert "FP8 (8 bits)" in tensor_option_text
+            assert "FP32 (32 bits)" in tensor_option_text
             page.keyboard.press("Escape")
 
             page.locator("#dim-1-field").scroll_into_view_if_needed()

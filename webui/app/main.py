@@ -30,6 +30,7 @@ from webui.service.core import (
     load_job_detail,
     render_editable_config_texts,
     rename_config_file,
+    save_plot_html,
     save_config_edits_from_payload,
 )
 
@@ -58,6 +59,7 @@ DISPLAY_LABELS = {
     "peak_flops_per_gpu": "Peak FLOPS / GPU",
     "peak_system_flops": "Peak System FLOPS",
     "total_flops": "Total FLOPs",
+    "approx_mfu": "MFU",
     "total_inference_time_s": "Total Inference Time",
     "ttft_s": "Time To First Token",
 }
@@ -69,12 +71,10 @@ RANGE_PREVIEW_LIMIT = 12
 MODEL_MODE_OPTIONS = [
     {"value": "LLM", "label": "LLM"},
     {"value": "VIT", "label": "ViT"},
-    {"value": "GEMM", "label": "GEMM"},
 ]
 MODEL_MODE_HELP = {
     "LLM": "Transformer language-model path. Uses token sequence length, attention, MLP/MoE, training or inference timing, memory estimates, parallelism, and communication modeling.",
     "VIT": "Vision Transformer execution path. This should be paired with a ViT model_type and a model_param.vision block.",
-    "GEMM": "Standalone matrix multiply sanity path. Uses M, K, N and GEMM sharding fields instead of transformer layer fields; many LLM-specific controls do not apply.",
 }
 MODEL_ARCH_TYPE_OPTIONS = [
     {"value": "gpt", "label": "gpt"},
@@ -93,13 +93,15 @@ MODEL_ARCH_TYPE_HELP = {
     "vit_dinov3": "DINOv3 ViT family. Uses ViT handling with DINOv3 defaults, including five prefix tokens and SwiGLU MLP accounting.",
 }
 TENSOR_FORMAT_OPTIONS = [
-    {"value": "mxfp4", "label": "mxfp4 (4.25)"},
-    {"value": "int4", "label": "int4 (4)"},
-    {"value": "fp8", "label": "fp8 (8)"},
-    {"value": "fp16", "label": "fp16 (16)"},
-    {"value": "bf16", "label": "bf16 (16)"},
-    {"value": "fp32", "label": "fp32 (32)"},
+    {"value": "mxfp4", "label": "MXFP4 (4.25 bits)"},
+    {"value": "int4", "label": "INT4 (4 bits)"},
+    {"value": "fp8", "label": "FP8 (8 bits)"},
+    {"value": "fp16", "label": "FP16 (16 bits)"},
+    {"value": "bf16", "label": "BF16 (16 bits)"},
+    {"value": "fp32", "label": "FP32 (32 bits)"},
 ]
+PRECISION_FORMAT_OPTIONS = [{"value": "as_tensor_format", "label": "Match tensor format"}] + TENSOR_FORMAT_OPTIONS
+MASTER_PRECISION_OPTIONS = [{"value": "0", "label": "Disabled (0 bytes)"}] + PRECISION_FORMAT_OPTIONS
 HELP_TEXT = {
     "app_title": "RAPID-LLM local workbench for editing supported YAML fields, previewing launch size, running jobs, and loading saved details.",
     "app_flow": "Basic flow: configure in Launch, start the run, open Run log, then click Details. Hover controls, metrics, and table columns for explanations.",
@@ -117,15 +119,15 @@ HELP_TEXT = {
     "worker_count": "Number of local worker processes used inside a sweep. More workers consume more CPU and memory.",
     "timeout": "Maximum wall-clock time allowed for each simulator invocation.",
     "run_type": "Choose training or inference; this controls which fields and result metrics are active.",
-    "model_mode": "Select the execution family written to model_param.mode. This chooses the broad simulator path: LLM, VIT, or GEMM.",
+    "model_mode": "Select the execution family written to model_param.mode. This UI currently offers LLM and ViT flows.",
     "model_type": "Select the architecture family written to model_param.model_type. This controls modeling details such as MLP style, ViT handling, and GLM/DeepSeek special cases.",
     "seq_len": "Number of tokens processed in the input context.",
     "decode_len": "Number of generated tokens to model for inference runs.",
     "batch_size": "Global batch size across all participating devices.",
-    "grad_accum": "Number of microbatch accumulation steps before optimizer update.",
-    "optimize_parallelism": "Search TP, CP, PP, DP, and EP combinations for each Total GPUs target.",
-    "optimizer_preset": "Controls how many parallelism candidates the search evaluates.",
-    "total_gpus": "Target device count. With optimization on, this is the searched GPU count; with optimization off, it scales DP for training or replicas for inference when divisible by fixed TP*CP*PP*EP.",
+    "grad_accum": "Number of microbatch accumulation steps before optimizer update. Inference always uses 1 and disables this field.",
+    "optimize_parallelism": "Search TP, CP, PP, DP, and EP combinations for each Total GPUs target. If Total GPUs is swept, each sweep value becomes its own search target.",
+    "optimizer_preset": "Controls how many parallelism candidates the search evaluates for each target GPU count.",
+    "total_gpus": "Target device count. If Total GPUs is swept, this field is replaced by the sweep values and no longer affects the launch plan.",
     "tp": "Tensor parallel shards each layer's matrix work across devices.",
     "cp": "Context parallel shards long sequences across devices.",
     "pp": "Pipeline parallel splits model layers into pipeline stages.",
@@ -144,7 +146,14 @@ HELP_TEXT = {
     "network_util": "Utilization multiplier for this network dimension.",
     "full_recomp": "Enable full activation recomputation to trade compute for memory.",
     "zero_stage": "ZeRO sharding stage for optimizer, gradient, and parameter state.",
-    "tensor_format": "Numeric tensor format used for model compute.",
+    "tensor_format": "Default tensor precision used for activations and compute. Other precision fields can either match this value or override it.",
+    "precision_kv_cache": "Precision for inference KV cache storage. Match tensor format keeps it tied to the Tensor format field.",
+    "precision_parameters": "Precision for model parameter storage.",
+    "precision_gradients": "Precision for accumulated gradients.",
+    "precision_grad_communication": "Precision used for gradient communication payloads.",
+    "precision_optimizer_states": "Precision for optimizer state tensors.",
+    "precision_stats": "Precision for normalization and statistics tensors.",
+    "precision_master_parameters": "Precision for an optional master parameter copy. Disabled means no master copy is counted.",
     "tied_embeddings": "Share token embedding and output projection weights when supported.",
     "hidden_dim": "Transformer hidden dimension.",
     "intermediate_size": "Dense MLP intermediate dimension.",
@@ -159,8 +168,8 @@ HELP_TEXT = {
     "moe_intermediate_size": "MoE expert MLP intermediate dimension.",
     "expert_imbalance": "Worst-case expert load multiplier for imbalanced routing.",
     "metric": "Metric used for ranking sweep cases and picking the best result.",
-    "x_axis": "Sweep field used as the plot x-axis in Details.",
-    "series_axis": "Optional sweep field used to group plotted cases.",
+    "x_axis": "Sweep field used as the plot x-axis in Details. Defaults to the first active sweep dimension.",
+    "series_axis": "Optional sweep field used to color plot series. Defaults to the last active sweep dimension when there is more than one.",
     "sweep_dimensions": "Sweep workload size or hardware scaling. Use Total GPUs for GPU scaling; raw TP/CP/PP/DP/EP are edited once or found by Optimize parallelism, not swept independently.",
     "run_launch": "Start the live launch plan currently shown on the right.",
     "cancel_job": "Request cancellation for the currently active top-level job.",
@@ -392,10 +401,27 @@ def memory_exceeded_display(metrics: Dict[str, Any]) -> str:
     return ">0 GB"
 
 
+def metrics_with_derived_flops(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    derived = dict(metrics or {})
+    num_gpus = derived.get("num_gpus")
+    try:
+        gpu_count = float(num_gpus)
+    except (TypeError, ValueError):
+        gpu_count = 0.0
+    if gpu_count > 0:
+        if derived.get("peak_system_flops") is None and derived.get("peak_flops_per_gpu") is not None:
+            derived["peak_system_flops"] = float(derived["peak_flops_per_gpu"]) * gpu_count
+        if derived.get("achieved_flops_per_gpu") is None and derived.get("achieved_flops") is not None:
+            derived["achieved_flops_per_gpu"] = float(derived["achieved_flops"]) / gpu_count
+    if derived.get("approx_mfu") is None and derived.get("achieved_flops") is not None and derived.get("peak_system_flops") not in (None, 0):
+        derived["approx_mfu"] = float(derived["achieved_flops"]) / float(derived["peak_system_flops"])
+    return derived
+
+
 def detail_metric_rows(metrics: Dict[str, Any]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     inserted_memory = False
-    for key, value in metrics.items():
+    for key, value in metrics_with_derived_flops(metrics).items():
         if key == "memory_violation_gb":
             continue
         if key == "memory_exceeded":
@@ -564,9 +590,26 @@ def config_dimensions_from_selection(model_ids: List[str] | None, hardware_ids: 
     return dimensions
 
 
+def render_error_summary(errors: List[str]) -> dmc.Stack:
+    return dmc.Stack(
+        gap="sm",
+        children=[
+            dmc.Alert(
+                item,
+                title="Launch plan error",
+                color="red",
+                radius="lg",
+                className="launch-error-alert",
+                icon=DashIconify(icon="solar:danger-triangle-bold", width=22),
+            )
+            for item in errors
+        ],
+    )
+
+
 def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
     if not preview.get("ok"):
-        return dmc.Stack(children=[dmc.Alert(item, color="red", radius="lg") for item in preview.get("errors", [])])
+        return render_error_summary(preview.get("errors", []))
     telemetry = get_telemetry()
     return dmc.Stack(
         gap="md",
@@ -589,7 +632,11 @@ def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
                     dmc.Badge(f"Timeout: {format_metric_value(preview['timeout_seconds'], 'timeout_seconds')}", radius="xl", color="orange", variant="light"),
                 ],
             ),
-            dmc.Text("Worst-case wall clock assumes every invocation consumes the full timeout. Real runs are usually faster.", size="sm", c="dimmed"),
+            dmc.Text(
+                "Worst-case wall clock = ceil(simulator invocations / workers) x timeout per candidate, assuming every worker hits its own timeout. Expected runtime is typically 30-70% of worst-case wall clock and still scales with model size, GPU count, and backend choice.",
+                size="sm",
+                c="dimmed",
+            ),
             dmc.Stack(children=[dmc.Alert(w, color="yellow", radius="lg") for w in preview.get("warnings", [])]) if preview.get("warnings") else html.Div(),
         ],
     )
@@ -745,13 +792,26 @@ def create_layout() -> dmc.MantineProvider:
                                                     html.Div(
                                                         id="detail-plot-toolbar",
                                                         style={"display": "none"},
-                                                        children=dmc.SegmentedControl(
-                                                            id="detail-plot-type",
-                                                            value="line",
-                                                            data=[
-                                                                {"label": "Normal plot", "value": "line"},
-                                                                {"label": "Scatter", "value": "scatter"},
-                                                                {"label": "Bar chart", "value": "bar"},
+                                                        children=dmc.Stack(
+                                                            gap=2,
+                                                            children=[
+                                                                dmc.Group(
+                                                                    gap="sm",
+                                                                    align="center",
+                                                                    children=[
+                                                                        dmc.SegmentedControl(
+                                                                            id="detail-plot-type",
+                                                                            value="line",
+                                                                            data=[
+                                                                                {"label": "Line Plot", "value": "line"},
+                                                                                {"label": "Scatter", "value": "scatter"},
+                                                                                {"label": "Bar chart", "value": "bar"},
+                                                                            ],
+                                                                        ),
+                                                                        with_tip(dmc.Button("Save plot", id="save-plot-button", variant="light", leftSection=DashIconify(icon="solar:diskette-bold", width=18)), "Save the current plot as a standalone HTML file under this job's plots folder."),
+                                                                    ],
+                                                                ),
+                                                                dmc.Text(id="plot-save-status", size="xs", c="dimmed"),
                                                             ],
                                                         ),
                                                     ),
@@ -908,7 +968,7 @@ def right_column() -> dmc.Stack:
                             color="teal",
                             radius="lg",
                             title="Choose cases",
-                            children="Select one hardware target with any number of models, or compare hardware targets for the selected model set.",
+                            children="Pick model and hardware YAML files above. Each selected file appears as an editable tab, and the selected tabs define the launch cases.",
                         ),
                         dmc.Alert(
                             color="violet",
@@ -1111,7 +1171,7 @@ def basic_options_card() -> dmc.Paper:
                                                 cols={"base": 1, "sm": 2},
                                                 spacing="sm",
                                                 children=[
-                                                    with_tip(dmc.NumberInput(id="simple-total-gpus", label="Total GPUs", min=1, value=DEFAULTS["simple"]["total_gpus"]), HELP_TEXT["total_gpus"]),
+                                                    html.Div(id="simple-total-gpus-wrap", className="parallelism-axis-field", children=with_tip(dmc.NumberInput(id="simple-total-gpus", label="Total GPUs", min=1, value=DEFAULTS["simple"]["total_gpus"]), HELP_TEXT["total_gpus"])),
                                                     parallelism_axis_input("simple-tp", "TP", DEFAULTS["simple"]["tp"], HELP_TEXT["tp"]),
                                                     parallelism_axis_input("simple-cp", "CP", DEFAULTS["simple"]["cp"], HELP_TEXT["cp"]),
                                                     parallelism_axis_input("simple-pp", "PP", DEFAULTS["simple"]["pp"], HELP_TEXT["pp"]),
@@ -1176,7 +1236,7 @@ def dimensions_card() -> dmc.Paper:
                     spacing="sm",
                     children=[
                         with_tip(dmc.Select(id="x-axis-select", label="X-axis", data=[]), HELP_TEXT["x_axis"]),
-                        with_tip(dmc.Select(id="series-select", label="Grouping", data=[], clearable=True), HELP_TEXT["series_axis"]),
+                        with_tip(dmc.Select(id="series-select", label="Color grouping (optional)", data=[], clearable=True), HELP_TEXT["series_axis"]),
                     ],
                 ),
             ],
@@ -1237,7 +1297,7 @@ def advanced_options_card() -> dmc.Paper:
                                                 ],
                                             ),
                                             dmc.Group(gap="xs", children=[dmc.Text("Model type guide", size="xs", c="dimmed"), *[model_type_badge(item["value"]) for item in MODEL_ARCH_TYPE_OPTIONS]]),
-                                            dmc.Group(gap="xs", children=[dmc.Text("Execution family guide", size="xs", c="dimmed"), mode_badge("LLM"), mode_badge("VIT"), mode_badge("GEMM")]),
+                                            dmc.Group(gap="xs", children=[dmc.Text("Execution family guide", size="xs", c="dimmed"), mode_badge("LLM"), mode_badge("VIT")]),
                                             dmc.SimpleGrid(
                                                 cols={"base": 1, "sm": 2},
                                                 spacing="sm",
@@ -1273,6 +1333,13 @@ def advanced_options_card() -> dmc.Paper:
                                             with_tip(dmc.Switch(id="adv-full-recomp", checked=DEFAULTS["advanced"]["full_recomputation"], label="Full recomputation"), HELP_TEXT["full_recomp"]),
                                             with_tip(dmc.NumberInput(id="adv-dp-zero", label="ZeRO stage", min=0, max=3, value=DEFAULTS["advanced"]["dp_zero_stage"]), HELP_TEXT["zero_stage"]),
                                             with_tip(dmc.Select(id="adv-tensor-format", label="Tensor format", value=DEFAULTS["advanced"]["tensor_format"], data=TENSOR_FORMAT_OPTIONS), HELP_TEXT["tensor_format"]),
+                                            with_tip(dmc.Select(id="adv-precision-kv-cache", label="KV cache precision", value=DEFAULTS["advanced"]["precision_kv_cache"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_kv_cache"]),
+                                            with_tip(dmc.Select(id="adv-precision-parameters", label="Parameter precision", value=DEFAULTS["advanced"]["precision_parameters"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_parameters"]),
+                                            with_tip(dmc.Select(id="adv-precision-gradients", label="Gradient precision", value=DEFAULTS["advanced"]["precision_gradients"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_gradients"]),
+                                            with_tip(dmc.Select(id="adv-precision-grad-communication", label="Gradient comm precision", value=DEFAULTS["advanced"]["precision_grad_communication"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_grad_communication"]),
+                                            with_tip(dmc.Select(id="adv-precision-optimizer-states", label="Optimizer state precision", value=DEFAULTS["advanced"]["precision_optimizer_states"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_optimizer_states"]),
+                                            with_tip(dmc.Select(id="adv-precision-stats", label="Stats precision", value=DEFAULTS["advanced"]["precision_stats"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_stats"]),
+                                            with_tip(dmc.Select(id="adv-precision-master-parameters", label="Master parameter copy", value=str(DEFAULTS["advanced"]["precision_master_parameters"]), data=MASTER_PRECISION_OPTIONS), HELP_TEXT["precision_master_parameters"]),
                                         ],
                                     )
                                 ),
@@ -1337,6 +1404,13 @@ def collect_form_payload(
     adv_full_recomp: bool,
     adv_dp_zero: int,
     adv_tensor_format: str,
+    adv_precision_kv_cache: str,
+    adv_precision_parameters: str,
+    adv_precision_gradients: str,
+    adv_precision_grad_communication: str,
+    adv_precision_optimizer_states: str,
+    adv_precision_stats: str,
+    adv_precision_master_parameters: str,
     adv_tied_embeddings: bool,
     adv_hidden_dim: int,
     adv_intermediate_size: int,
@@ -1366,8 +1440,8 @@ def collect_form_payload(
         run_mode,
         optimize_parallelism,
         optimizer_preset,
-        {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
-        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": adv_dp_zero, "tensor_format": adv_tensor_format, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
+        {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
+        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": adv_dp_zero, "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
         _network_rows_from_callback(net_topologies, net_bandwidths, net_utils),
         dimensions,
         metric,
@@ -1495,6 +1569,13 @@ def handle_config_file_action(
     Output("adv-full-recomp", "checked"),
     Output("adv-dp-zero", "value"),
     Output("adv-tensor-format", "value"),
+    Output("adv-precision-kv-cache", "value"),
+    Output("adv-precision-parameters", "value"),
+    Output("adv-precision-gradients", "value"),
+    Output("adv-precision-grad-communication", "value"),
+    Output("adv-precision-optimizer-states", "value"),
+    Output("adv-precision-stats", "value"),
+    Output("adv-precision-master-parameters", "value"),
     Output("adv-tied-embeddings", "checked"),
     Output("adv-hidden-dim", "value"),
     Output("adv-intermediate-size", "value"),
@@ -1544,6 +1625,13 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
         defaults["advanced"]["full_recomputation"],
         defaults["advanced"]["dp_zero_stage"],
         defaults["advanced"]["tensor_format"],
+        defaults["advanced"]["precision_kv_cache"],
+        defaults["advanced"]["precision_parameters"],
+        defaults["advanced"]["precision_gradients"],
+        defaults["advanced"]["precision_grad_communication"],
+        defaults["advanced"]["precision_optimizer_states"],
+        defaults["advanced"]["precision_stats"],
+        defaults["advanced"]["precision_master_parameters"],
         defaults["advanced"]["tied_embeddings"],
         defaults["advanced"]["hidden_dim"],
         defaults["advanced"]["intermediate_size"],
@@ -1566,6 +1654,7 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
 @callback(
     Output("simple-decode-len", "disabled"),
     Output("simple-replica-count", "disabled"),
+    Output("simple-grad-accum", "disabled"),
     Output("simple-total-gpus", "disabled"),
     Output("simple-tp", "disabled"),
     Output("simple-cp", "disabled"),
@@ -1574,6 +1663,7 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
     Output("simple-ep", "disabled"),
     Output("optimizer-preset", "disabled"),
     Output("simple-tp-wrap", "className"),
+    Output("simple-total-gpus-wrap", "className"),
     Output("simple-cp-wrap", "className"),
     Output("simple-pp-wrap", "className"),
     Output("simple-dp-wrap", "className"),
@@ -1581,15 +1671,22 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
     Output("simple-replica-count-wrap", "className"),
     Input("simple-run-type", "value"),
     Input("optimize-switch", "checked"),
+    Input("run-mode", "value"),
+    Input("dim-1-field", "value"),
+    Input("dim-2-field", "value"),
+    Input("dim-3-field", "value"),
 )
-def toggle_inputs(run_type: str, optimize_parallelism: bool):
+def toggle_inputs(run_type: str, optimize_parallelism: bool, run_mode: str, dim1_field: str | None, dim2_field: str | None, dim3_field: str | None):
     inference = run_type == "inference"
     manual_disabled = bool(optimize_parallelism)
+    total_gpus_swept = run_mode == "sweep" and "hardware.total_gpus" in {dim1_field, dim2_field, dim3_field}
     axis_class = "parallelism-axis-field is-auto" if manual_disabled else "parallelism-axis-field"
+    total_gpus_class = "parallelism-axis-field is-swept" if total_gpus_swept else "parallelism-axis-field"
     return (
         not inference,
         not inference,
-        False if optimize_parallelism else True,
+        inference,
+        total_gpus_swept or not optimize_parallelism,
         manual_disabled,
         manual_disabled,
         manual_disabled,
@@ -1597,12 +1694,23 @@ def toggle_inputs(run_type: str, optimize_parallelism: bool):
         manual_disabled,
         not optimize_parallelism,
         axis_class,
+        total_gpus_class,
         axis_class,
         axis_class,
         axis_class,
         axis_class,
         axis_class,
     )
+
+
+@callback(
+    Output("simple-grad-accum", "value", allow_duplicate=True),
+    Input("simple-run-type", "value"),
+    State("simple-grad-accum", "value"),
+    prevent_initial_call=True,
+)
+def enforce_inference_grad_accum(run_type: str, current_value: int | None):
+    return 1 if run_type == "inference" else current_value
 
 
 @callback(Output("sweep-dimensions-section", "style"), Input("run-mode", "value"))
@@ -1612,22 +1720,31 @@ def toggle_sweep_dimensions_section(run_mode: str):
 
 @callback(
     Output("x-axis-select", "data"),
+    Output("x-axis-select", "value"),
     Output("series-select", "data"),
+    Output("series-select", "value"),
     Output("dim-1-configs", "data"),
     Output("dim-2-configs", "data"),
     Output("dim-3-configs", "data"),
     Input("dim-1-field", "value"),
     Input("dim-2-field", "value"),
     Input("dim-3-field", "value"),
+    State("x-axis-select", "value"),
+    State("series-select", "value"),
 )
-def refresh_dimension_options(field1: str | None, field2: str | None, field3: str | None):
+def refresh_dimension_options(field1: str | None, field2: str | None, field3: str | None, current_x_axis: str | None, current_series_axis: str | None):
     active_fields = [field for field in [field1, field2, field3] if field]
     options = [{"value": field, "label": dimension_label(field)} for field in active_fields]
+    x_value = current_x_axis if current_x_axis in active_fields else (active_fields[0] if active_fields else None)
+    series_default = active_fields[-1] if len(active_fields) > 1 else None
+    series_value = current_series_axis if current_series_axis in active_fields else series_default
+    if series_value == x_value and len(active_fields) > 1:
+        series_value = active_fields[-1] if active_fields[-1] != x_value else active_fields[0]
     config_data = {"model_config": preset_options("models"), "hardware_config": preset_options("hardware")}
     rows = []
     for field in [field1, field2, field3]:
         rows.append(config_data.get(field, []))
-    return options, options, rows[0], rows[1], rows[2]
+    return options, x_value, options, series_value, rows[0], rows[1], rows[2]
 
 
 def sweep_control_visibility(field_key: str | None, mode: str | None) -> Dict[str, Any]:
@@ -1761,6 +1878,13 @@ def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     Input("adv-full-recomp", "checked"),
     Input("adv-dp-zero", "value"),
     Input("adv-tensor-format", "value"),
+    Input("adv-precision-kv-cache", "value"),
+    Input("adv-precision-parameters", "value"),
+    Input("adv-precision-gradients", "value"),
+    Input("adv-precision-grad-communication", "value"),
+    Input("adv-precision-optimizer-states", "value"),
+    Input("adv-precision-stats", "value"),
+    Input("adv-precision-master-parameters", "value"),
     Input("adv-tied-embeddings", "checked"),
     Input("adv-hidden-dim", "value"),
     Input("adv-intermediate-size", "value"),
@@ -1816,6 +1940,13 @@ def sync_config_files(
     adv_full_recomp: bool,
     adv_dp_zero: int,
     adv_tensor_format: str,
+    adv_precision_kv_cache: str,
+    adv_precision_parameters: str,
+    adv_precision_gradients: str,
+    adv_precision_grad_communication: str,
+    adv_precision_optimizer_states: str,
+    adv_precision_stats: str,
+    adv_precision_master_parameters: str,
     adv_tied_embeddings: bool,
     adv_hidden_dim: int,
     adv_intermediate_size: int,
@@ -1875,6 +2006,13 @@ def sync_config_files(
         adv_full_recomp,
         adv_dp_zero,
         adv_tensor_format,
+        adv_precision_kv_cache,
+        adv_precision_parameters,
+        adv_precision_gradients,
+        adv_precision_grad_communication,
+        adv_precision_optimizer_states,
+        adv_precision_stats,
+        adv_precision_master_parameters,
         adv_tied_embeddings,
         adv_hidden_dim,
         adv_intermediate_size,
@@ -1943,6 +2081,13 @@ def sync_config_files(
     Input("adv-full-recomp", "checked"),
     Input("adv-dp-zero", "value"),
     Input("adv-tensor-format", "value"),
+    Input("adv-precision-kv-cache", "value"),
+    Input("adv-precision-parameters", "value"),
+    Input("adv-precision-gradients", "value"),
+    Input("adv-precision-grad-communication", "value"),
+    Input("adv-precision-optimizer-states", "value"),
+    Input("adv-precision-stats", "value"),
+    Input("adv-precision-master-parameters", "value"),
     Input("adv-tied-embeddings", "checked"),
     Input("adv-hidden-dim", "value"),
     Input("adv-intermediate-size", "value"),
@@ -2018,6 +2163,13 @@ def build_preview(
     adv_full_recomp: bool,
     adv_dp_zero: int,
     adv_tensor_format: str,
+    adv_precision_kv_cache: str,
+    adv_precision_parameters: str,
+    adv_precision_gradients: str,
+    adv_precision_grad_communication: str,
+    adv_precision_optimizer_states: str,
+    adv_precision_stats: str,
+    adv_precision_master_parameters: str,
     adv_tied_embeddings: bool,
     adv_hidden_dim: int,
     adv_intermediate_size: int,
@@ -2093,6 +2245,13 @@ def build_preview(
         adv_full_recomp,
         adv_dp_zero,
         adv_tensor_format,
+        adv_precision_kv_cache,
+        adv_precision_parameters,
+        adv_precision_gradients,
+        adv_precision_grad_communication,
+        adv_precision_optimizer_states,
+        adv_precision_stats,
+        adv_precision_master_parameters,
         adv_tied_embeddings,
         adv_hidden_dim,
         adv_intermediate_size,
@@ -2118,7 +2277,7 @@ def build_preview(
     )
     preview = build_launch_preview(payload)
     if not preview.get("ok"):
-        return {"payload": payload, "preview": preview}, dmc.Stack(children=[dmc.Alert(item, color="red", radius="lg") for item in preview.get("errors", [])]), launch_button_label(preview)
+        return {"payload": payload, "preview": preview}, render_error_summary(preview.get("errors", [])), launch_button_label(preview)
     return {"payload": payload, "preview": preview}, render_preview_summary(preview, metric), launch_button_label(preview)
 
 
@@ -2175,6 +2334,33 @@ def render_detail_modal(selected_detail: Dict[str, Any] | None, plot_type: str |
     detail = load_job_detail(selected_detail["kind"], selected_detail["id"])
     plot_toolbar_style = {"display": "block"} if detail.get("kind") == "sweep" else {"display": "none"}
     return {"display": "flex"}, plot_toolbar_style, dmc.Text("Details", fw=800), render_detail(detail, plot_type or "line")
+
+
+@callback(
+    Output("plot-save-status", "children"),
+    Input("save-plot-button", "n_clicks"),
+    State("selected-detail-store", "data"),
+    State("detail-plot-type", "value"),
+    prevent_initial_call=True,
+)
+def save_current_detail_plot(n_clicks: int | None, selected_detail: Dict[str, Any] | None, plot_type: str | None):
+    if not n_clicks or not selected_detail:
+        return no_update
+    detail = load_job_detail(selected_detail["kind"], selected_detail["id"])
+    if detail.get("kind") != "sweep":
+        return "This job does not have a sweep plot to save."
+    rows = sweep_rows_from_detail(detail)
+    if not rows:
+        return "No case rows are available to plot."
+    x_axis, y_axis, series_axis = detail_axes(detail, rows)
+    for row in rows:
+        if y_axis not in row:
+            row[y_axis] = 0
+        if row.get("status") != "completed" and y_axis:
+            row[y_axis] = 0
+    figure = detail_plot_figure(rows, x_axis, y_axis, series_axis, plot_type or "line")
+    path = save_plot_html(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], figure.to_html(full_html=True, include_plotlyjs="cdn"))
+    return f"Saved plot: {path}"
 
 
 @callback(
@@ -2270,6 +2456,47 @@ DATA_TABLE_STYLE_CELL = {
     "whiteSpace": "normal",
 }
 DATA_TABLE_STYLE_HEADER = {"backgroundColor": "#eef7fc", "fontWeight": 800, "color": "#0055A6", "border": "1px solid #bfd2df"}
+
+
+def sweep_rows_from_detail(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payload = detail_payload(detail)
+    rows = []
+    for case in detail.get("cases", []) or []:
+        dimension_values = case.get("dimension_values", {}) or {}
+        metrics = metrics_with_derived_flops(case.get("metrics", {}) or {})
+        model_config = detail_model_config(detail, dimension_values)
+        hardware_config = detail_hardware_config(detail, dimension_values)
+        row = {
+            "case": f"{case['case_id']} - {config_display_name(model_config)}",
+            "case_id": case["case_id"],
+            "label": case.get("label") or case["case_id"],
+            "status": case.get("status", "unknown"),
+            "model_config": model_config,
+            "hardware_config": hardware_config,
+            "parallelism": parallelism_summary_from_payload(payload, case.get("chosen_candidate")),
+        }
+        row.update({key: value for key, value in dimension_values.items() if key not in {"model_config", "hardware_config"}})
+        row.update({key: value for key, value in metrics.items() if key != "memory_violation_gb"})
+        if "memory_exceeded" in metrics or "memory_violation_gb" in metrics:
+            row["memory_exceeded"] = memory_exceeded_display(metrics)
+        rows.append(row)
+    return rows
+
+
+def detail_axes(detail: Dict[str, Any], rows: List[Dict[str, Any]]) -> tuple[str, str, str | None]:
+    payload = detail_payload(detail)
+    cases = detail.get("cases", []) or []
+    preferred_x = payload.get("x_axis")
+    preferred_metric = payload.get("metric") or "training_time_s"
+    dimension_keys = list((cases[0].get("dimension_values") or {}).keys()) if cases else []
+    if preferred_x in rows[0]:
+        x_axis = preferred_x
+    elif len(dimension_keys) == 1 and dimension_keys[0] in rows[0]:
+        x_axis = dimension_keys[0]
+    else:
+        x_axis = "case_id"
+    y_axis = preferred_metric if preferred_metric in rows[0] else ("training_time_s" if "training_time_s" in rows[0] else "prefill_time_s")
+    return x_axis, y_axis, payload.get("series_axis")
 
 
 def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, series_axis: str | None, plot_type: str | None):
@@ -2378,42 +2605,13 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
     cases = detail.get("cases", [])
     if not cases:
         return dmc.Alert("This sweep has no completed case records yet.", color="gray", radius="lg")
-    rows = []
-    for case in cases:
-        dimension_values = case.get("dimension_values", {}) or {}
-        metrics = dict(case.get("metrics", {}) or {})
-        model_config = detail_model_config(detail, dimension_values)
-        hardware_config = detail_hardware_config(detail, dimension_values)
-        row = {
-            "case": f"{case['case_id']} - {config_display_name(model_config)}",
-            "case_id": case["case_id"],
-            "label": case.get("label") or case["case_id"],
-            "status": case.get("status", "unknown"),
-            "model_config": model_config,
-            "hardware_config": hardware_config,
-            "parallelism": parallelism_summary_from_payload(payload, case.get("chosen_candidate")),
-        }
-        row.update({key: value for key, value in dimension_values.items() if key not in {"model_config", "hardware_config"}})
-        row.update({key: value for key, value in metrics.items() if key != "memory_violation_gb"})
-        if "memory_exceeded" in metrics or "memory_violation_gb" in metrics:
-            row["memory_exceeded"] = memory_exceeded_display(metrics)
-        rows.append(row)
-    preferred_x = payload.get("x_axis")
-    preferred_metric = payload.get("metric") or "training_time_s"
-    dimension_keys = list((cases[0].get("dimension_values") or {}).keys())
-    if preferred_x in rows[0]:
-        x_axis = preferred_x
-    elif len(dimension_keys) == 1 and dimension_keys[0] in rows[0]:
-        x_axis = dimension_keys[0]
-    else:
-        x_axis = "case_id"
-    y_axis = preferred_metric if preferred_metric in rows[0] else ("training_time_s" if "training_time_s" in rows[0] else "prefill_time_s")
+    rows = sweep_rows_from_detail(detail)
+    x_axis, y_axis, series_axis = detail_axes(detail, rows)
     for row in rows:
         if y_axis not in row:
             row[y_axis] = 0
         if row.get("status") != "completed" and y_axis:
             row[y_axis] = 0
-    series_axis = payload.get("series_axis")
     figure = detail_plot_figure(rows, x_axis, y_axis, series_axis, plot_type)
     display_rows = []
     for row in rows:
@@ -2426,11 +2624,24 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
         display_rows.append(display_row)
     column_order = [
         "case",
+        "label",
+        "memory_exceeded",
+        "training_time_s",
+        "prefill_time_s",
+        "decode_time_s",
+        "total_inference_time_s",
+        "ttft_s",
+        "num_gpus",
+        "approx_mfu",
+        "total_flops",
+        "achieved_flops",
+        "achieved_flops_per_gpu",
+        "peak_flops_per_gpu",
+        "peak_system_flops",
         "status",
         "model_config",
         "hardware_config",
         "parallelism",
-        "label",
     ]
     ordered_keys = [key for key in column_order if key in rows[0]] + [key for key in rows[0].keys() if key not in column_order and key != "case_id"]
     table = dash_table.DataTable(

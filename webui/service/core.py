@@ -32,7 +32,7 @@ LOCKS_ROOT = WORKSPACE_ROOT / "locks"
 LOGS_ROOT = WORKSPACE_ROOT / "logs"
 DB_ROOT = WORKSPACE_ROOT / "db"
 ARTIFACTS_ROOT = WORKSPACE_ROOT / "artifacts"
-PYTHON_BIN = Path(os.environ.get("RAPID_WEBUI_PYTHON_BIN", ROOT / ".venv" / "bin" / "python")).expanduser().resolve()
+PYTHON_BIN = Path(os.environ.get("RAPID_WEBUI_PYTHON_BIN", ROOT / ".venv" / "bin" / "python")).expanduser()
 ACTIVE_JOB_LOCK = LOCKS_ROOT / "active_job.lock"
 SCHEMA_VERSION_PATH = WORKSPACE_ROOT / "schema_version.json"
 WORKER_MODULE = "webui.service.worker_runner"
@@ -94,6 +94,16 @@ METRIC_LABELS = {
     "decode_throughput_tok_s": "Decode Throughput",
 }
 SUPPORTED_MODEL_TYPES = {"gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"}
+VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
+PRECISION_OVERRIDE_FIELDS = [
+    "kv_cache",
+    "parameters",
+    "gradients",
+    "grad_communication",
+    "optimizer_states",
+    "stats",
+    "master_parameters",
+]
 
 OPTIMIZER_PRESETS = {
     "Fast": {
@@ -356,6 +366,10 @@ def get_model_type(model_dict: Dict[str, Any]) -> str:
     return "glm4_moe" if raw in {"glm", "glm4"} else raw
 
 
+def is_vit_model(model_dict: Dict[str, Any]) -> bool:
+    return get_model_type(model_dict) in VIT_MODEL_TYPES
+
+
 def get_total_gpu_count(hw_dict: Dict[str, Any], run_type: str) -> int:
     parallelism = hw_dict.get("parallelism", {})
     tp = int(parallelism.get("tp", 1) or 1)
@@ -424,6 +438,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
                 "util": float(topology.get("util", 1.0) or 1.0),
             }
         )
+    precision = hardware.get("sw_param", {}).get("precision", {}) or {}
     return {
         "run_type": run_type,
         "model_yaml": _yaml_dump(model),
@@ -432,7 +447,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "seq_len": int(model.get("model_param", {}).get("seq_len", 0) or 0),
             "decode_len": int(model.get("model_param", {}).get("decode_len", 0) or 0),
             "batch_size": int(model.get("model_param", {}).get("global_batch_size", 1) or 1),
-            "grad_accum": int(model.get("model_param", {}).get("gradient_accumulation_steps", 1) or 1),
+            "grad_accum": 1 if run_type == "inference" else int(model.get("model_param", {}).get("gradient_accumulation_steps", 1) or 1),
             "total_gpus": get_total_gpu_count(hardware, run_type),
             "tp": int(parallelism.get("tp", 1) or 1),
             "cp": int(parallelism.get("cp", 1) or 1),
@@ -453,7 +468,14 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "model_type": get_model_type(model),
             "full_recomputation": bool(hardware.get("sw_param", {}).get("full_recomputation", False)),
             "dp_zero_stage": int(hardware.get("sw_param", {}).get("dp_zero_stage", 0) or 0),
-            "tensor_format": str(hardware.get("sw_param", {}).get("precision", {}).get("tensor_format", "bf16")),
+            "tensor_format": str(precision.get("tensor_format", "bf16")),
+            "precision_kv_cache": str(precision.get("kv_cache", "as_tensor_format")),
+            "precision_parameters": str(precision.get("parameters", "as_tensor_format")),
+            "precision_gradients": str(precision.get("gradients", "fp32")),
+            "precision_grad_communication": str(precision.get("grad_communication", "as_tensor_format")),
+            "precision_optimizer_states": str(precision.get("optimizer_states", "fp32")),
+            "precision_stats": str(precision.get("stats", "fp32")),
+            "precision_master_parameters": "0" if str(precision.get("master_parameters", 0.0)).strip().lower() in {"0", "0.0"} else str(precision.get("master_parameters", 0.0)),
             "execution_backend": str(hardware.get("execution_backend", {}).get("model", "analytical")),
             "execution_mode": str(hardware.get("execution_backend", {}).get("astra", {}).get("mode", "full_astrasim_hierarchical")),
             "tied_embeddings": bool(model.get("model_param", {}).get("tied_embeddings", False)),
@@ -520,7 +542,7 @@ def _apply_model_overrides(model: Dict[str, Any], payload: Dict[str, Any]) -> No
     else:
         model_param.pop("decode_len", None)
     model_param["global_batch_size"] = _safe_int(simple.get("batch_size"), _safe_int(model_param.get("global_batch_size"), 1))
-    model_param["gradient_accumulation_steps"] = _safe_int(simple.get("grad_accum"), _safe_int(model_param.get("gradient_accumulation_steps"), 1))
+    model_param["gradient_accumulation_steps"] = 1 if run_type == "inference" else _safe_int(simple.get("grad_accum"), _safe_int(model_param.get("gradient_accumulation_steps"), 1))
     model_param["tied_embeddings"] = bool(advanced.get("tied_embeddings", model_param.get("tied_embeddings", False)))
     if _safe_int(advanced.get("hidden_dim"), 0) > 0:
         model_param["hidden_dim"] = _safe_int(advanced.get("hidden_dim"), _safe_int(model_param.get("hidden_dim"), 0))
@@ -554,6 +576,14 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
     sw_param["dp_zero_stage"] = _safe_int(advanced.get("dp_zero_stage"), _safe_int(sw_param.get("dp_zero_stage"), 0))
     if advanced.get("tensor_format"):
         precision["tensor_format"] = advanced["tensor_format"]
+    for field in PRECISION_OVERRIDE_FIELDS:
+        advanced_key = f"precision_{field}"
+        if advanced.get(advanced_key) not in (None, ""):
+            raw_value = advanced[advanced_key]
+            if field == "master_parameters" and str(raw_value).strip().lower() in {"0", "0.0", "disabled"}:
+                precision[field] = 0.0
+            else:
+                precision[field] = raw_value
     tech = hardware.setdefault("tech_param", {})
     core = tech.setdefault("core", {})
     dram = tech.setdefault("DRAM", {})
@@ -787,6 +817,24 @@ def build_case_label(values: Dict[str, Any]) -> str:
     return " | ".join(f"{dimension_label(key)}={value}" for key, value in values.items())
 
 
+def _has_dimension(dimensions: List[Dict[str, Any]], field_key: str) -> bool:
+    return any(dim.get("field_key") == field_key for dim in dimensions)
+
+
+def _selected_models_for_dimensions(base_model: Dict[str, Any], dimensions: List[Dict[str, Any]], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    model_dimensions = [dim for dim in dimensions if dim.get("field_key") == "model_config"]
+    if not model_dimensions:
+        return [base_model]
+    selected: List[Dict[str, Any]] = []
+    for dim in model_dimensions:
+        for preset_name in dim.get("values", []) or []:
+            model = load_preset("models", preset_name)
+            if preset_name == payload.get("model_preset_id"):
+                _apply_model_overrides(model, payload)
+            selected.append(model)
+    return selected or [base_model]
+
+
 def default_worker_count() -> int:
     cpu_count = os.cpu_count() or 1
     return max(1, min(cpu_count, 8))
@@ -853,6 +901,8 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     warnings: List[str] = []
     if single_run_mode and (payload.get("dimensions") or payload.get("optimize_parallelism")):
         warnings.append("Single launch mode ignores sweep dimensions and parallelism optimization.")
+    if get_model_mode(model) == "GEMM":
+        errors.append("GEMM mode is not supported in the Web UI yet. Choose LLM or ViT model families.")
     if any(dim.get("field_key") == "model_config" for dim in dimensions):
         run_types = []
         for dim in dimensions:
@@ -864,6 +914,10 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"ok": False, "errors": errors, "warnings": warnings, "top_level_cases": []}
         if run_types:
             run_type = run_types[0]
+    if _has_dimension(dimensions, "model.seq_len") and any(is_vit_model(item) for item in _selected_models_for_dimensions(model, dimensions, payload)):
+        errors.append("ViT model families derive sequence length from vision.image_size and vision.patch_size. Sequence-length sweeps for ViT are not supported in the Web UI right now.")
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings, "top_level_cases": []}
 
     base_model = copy.deepcopy(model)
     base_hw = copy.deepcopy(hardware)
@@ -984,6 +1038,27 @@ def load_job_detail(job_kind: str, job_id: str) -> Dict[str, Any]:
     else:
         detail["result"] = _json_load(path / "result.json") if (path / "result.json").exists() else {}
     return detail
+
+
+def _slugify_artifact_name(raw: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
+    return slug or "plot"
+
+
+def save_plot_html(job_kind: str, job_id: str, title: str, html_text: str) -> str:
+    job_root = _detail_root(job_kind) / job_id
+    if not job_root.exists():
+        raise FileNotFoundError(f"Unknown job: {job_id}")
+    plot_dir = job_root / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    slug = _slugify_artifact_name(title or job_id)
+    index = 1
+    while True:
+        path = plot_dir / f"{slug}-plot-{index:03d}.html"
+        if not path.exists():
+            path.write_text(html_text)
+            return str(path)
+        index += 1
 
 
 def build_job_title(payload: Dict[str, Any], preview: Dict[str, Any]) -> str:
