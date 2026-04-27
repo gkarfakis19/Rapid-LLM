@@ -20,6 +20,10 @@ tools/parallelism_results/
 !MOE_ONE_HOT_EXPERT_MODEL.md
 !MLA_FIX_PLAN.md
 !MLA_CODE_VALIDATION.md
+!webui/
+!webui/*.md
+!webui/**/*.md
+webui/workspace/
 *.et
 tools/comp/wrapper_outputs/*
 memory-summary/
@@ -27,3 +31,4 @@ validation_scripts/validation_configs/hardware-config/a100_80GB_uci_*
 tools/parallelism_best_runtimes_*
 tools/scan_configs.py
 tools/add_interm_dim_from_configs.py
+stochastic_test

@@ -6,11 +6,18 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "click==8.1.8",
+    "dash>=4.1.0",
+    "dash-ag-grid>=35.2.0",
+    "dash-iconify>=0.1.2",
+    "dash-mantine-components>=2.6.1",
     "graphviz>=0.21",
     "joblib>=1.5.2",
     "numpy==2.3.3",
     "pandas==2.3.1",
+    "playwright>=1.58.0",
     "protobuf==5.28.2",
+    "psutil>=7.2.2",
+    "pydantic>=2.12.5",
     "pydot>=3.0.0",
     "pytest>=9.0.0",
     "python-dateutil==2.9.0.post0",
@@ -26,4 +33,7 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = [
     "tests",
+]
+markers = [
+    "webui_browser: launches the Dash web UI and checks browser layout/aesthetic health",
 ]

@@ -1,0 +1,300 @@
+:root {
+  --bg: #0b1116;
+  --panel: rgba(18, 27, 34, 0.94);
+  --panel-soft: rgba(13, 21, 27, 0.72);
+  --panel-border: rgba(137, 164, 174, 0.22);
+  --teal: #70d6cf;
+  --amber: #d8b46a;
+  --blue: #77a9db;
+  --ink: #ecf4f6;
+  --muted: #9fb0b8;
+}
+
+html, body, #react-entry-point {
+  min-height: 100%;
+  background: linear-gradient(180deg, #0b1116 0%, #0f171d 48%, #0b1116 100%);
+  color: var(--ink);
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-header-shell {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(9, 15, 20, 0.94);
+  border-bottom: 1px solid rgba(137, 164, 174, 0.18);
+  backdrop-filter: blur(14px);
+}
+
+.app-main {
+  background: transparent;
+}
+
+.topbar {
+  min-height: 82px;
+  backdrop-filter: blur(18px);
+  padding: 14px 0;
+}
+
+.right-rail {
+  position: sticky;
+  top: 108px;
+}
+
+.brand-orb {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, transparent 46%, rgba(255, 255, 255, 0.2) 46%, rgba(255, 255, 255, 0.2) 54%, transparent 54%),
+    linear-gradient(180deg, #70d6cf 0%, #2f8f97 100%);
+  border: 1px solid rgba(236, 244, 246, 0.18);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.26);
+}
+
+.hero-card,
+.preview-card,
+.dimension-card,
+.network-row,
+.history-card,
+.stat-card,
+.mantine-Paper-root {
+  background: var(--panel);
+  border-color: var(--panel-border);
+  border-radius: 8px !important;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.18);
+}
+
+.hero-card {
+  background:
+    linear-gradient(90deg, rgba(112, 214, 207, 0.12), rgba(216, 180, 106, 0.08)),
+    var(--panel);
+}
+
+.dimension-card,
+.network-row {
+  background: var(--panel-soft);
+  border: 1px solid rgba(137, 164, 174, 0.16);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: none;
+}
+
+.config-editor-switchboard {
+  background: rgba(5, 13, 18, 0.9);
+  border: 1px solid rgba(112, 214, 207, 0.32);
+  border-left: 3px solid var(--teal);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: inset 0 1px 0 rgba(236, 244, 246, 0.04);
+}
+
+.config-editor-tabs .mantine-Tabs-list,
+.config-editor-tab-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  background: rgba(10, 20, 26, 0.92);
+  border: 1px solid rgba(137, 164, 174, 0.2);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.config-editor-tab {
+  flex: 1 1 145px;
+  min-width: 0;
+  max-width: 100%;
+  justify-content: center;
+  border: 1px solid rgba(137, 164, 174, 0.16);
+}
+
+.config-editor-tab .mantine-Tabs-tabLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-card {
+  min-height: 106px;
+}
+
+.mantine-Tabs-list {
+  background: rgba(12, 21, 28, 0.84);
+  border: 1px solid rgba(137, 164, 174, 0.18);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.mantine-Tabs-tab {
+  border-radius: 6px;
+  font-weight: 700;
+}
+
+.mantine-Tabs-tab[data-active="true"] {
+  background: rgba(112, 214, 207, 0.16);
+  color: #e9fbfb;
+}
+
+.mantine-Input-input,
+.mantine-Input-wrapper textarea,
+.mantine-Select-input,
+.mantine-NumberInput-input {
+  background: rgba(8, 18, 24, 0.88);
+  border-color: rgba(137, 164, 174, 0.22);
+  color: var(--ink);
+}
+
+.mantine-Combobox-dropdown,
+.mantine-Select-dropdown,
+.mantine-MultiSelect-dropdown,
+.mantine-Popover-dropdown {
+  background: #0b151b !important;
+  border: 1px solid rgba(137, 164, 174, 0.28) !important;
+  color: var(--ink) !important;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
+.mantine-Combobox-option,
+.mantine-Select-option,
+.mantine-MultiSelect-option {
+  color: var(--ink) !important;
+  background: transparent;
+}
+
+.mantine-Combobox-option:hover,
+.mantine-Combobox-option[data-combobox-selected],
+.mantine-Combobox-option[data-checked],
+.mantine-Select-option:hover,
+.mantine-MultiSelect-option:hover {
+  background: rgba(112, 214, 207, 0.16) !important;
+  color: #ffffff !important;
+}
+
+.mantine-Combobox-empty,
+.mantine-Select-options,
+.mantine-MultiSelect-options {
+  color: var(--muted) !important;
+}
+
+.mantine-Input-input:focus,
+.mantine-Input-wrapper textarea:focus,
+.mantine-Select-input:focus,
+.mantine-NumberInput-input:focus {
+  border-color: rgba(112, 214, 207, 0.56);
+  box-shadow: 0 0 0 1px rgba(112, 214, 207, 0.28);
+}
+
+.mantine-Input-input:disabled,
+.mantine-Input-wrapper textarea:disabled,
+.mantine-Select-input:disabled,
+.mantine-NumberInput-input:disabled,
+.mantine-Input-input[data-disabled],
+.mantine-Select-input[data-disabled],
+.mantine-NumberInput-input[data-disabled] {
+  background: rgba(31, 45, 53, 0.86) !important;
+  border-color: rgba(137, 164, 174, 0.16) !important;
+  color: #b7c6cc !important;
+  opacity: 1 !important;
+}
+
+.mantine-Input-section,
+.mantine-Select-section,
+.mantine-MultiSelect-section,
+.mantine-NumberInput-section,
+.mantine-NumberInput-controls,
+.mantine-NumberInput-control {
+  color: var(--muted) !important;
+  border-color: rgba(137, 164, 174, 0.18) !important;
+}
+
+.mantine-Input-section svg,
+.mantine-Select-section svg,
+.mantine-MultiSelect-section svg,
+.mantine-NumberInput-section svg,
+.mantine-NumberInput-controls svg,
+.mantine-NumberInput-control svg {
+  color: var(--muted) !important;
+  stroke: var(--muted) !important;
+}
+
+.mantine-NumberInput-control {
+  background: rgba(11, 23, 30, 0.76) !important;
+}
+
+.mantine-NumberInput-control:hover {
+  background: rgba(112, 214, 207, 0.12) !important;
+}
+
+.range-preview {
+  background: rgba(112, 214, 207, 0.08);
+  border: 1px solid rgba(112, 214, 207, 0.18);
+  border-radius: 7px;
+  color: #c8eef0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  padding: 9px 10px;
+  overflow-wrap: anywhere;
+}
+
+.mantine-Alert-root {
+  background: rgba(11, 23, 30, 0.92);
+  border-radius: 8px !important;
+}
+
+.mantine-Alert-root,
+.mantine-Alert-root *,
+.mantine-Accordion-control,
+.mantine-Accordion-control * {
+  color: var(--ink) !important;
+}
+
+.mantine-Accordion-control:hover {
+  background: rgba(137, 164, 174, 0.08);
+}
+
+.mantine-Accordion-chevron {
+  color: var(--muted) !important;
+}
+
+.mantine-Button-root {
+  border-radius: 7px !important;
+}
+
+.mantine-Badge-root {
+  max-width: 100%;
+}
+
+.history-card {
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.history-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(112, 214, 207, 0.28);
+  box-shadow: 0 26px 56px rgba(0, 0, 0, 0.22);
+}
+
+@media (max-width: 48em) {
+  .topbar {
+    min-height: auto;
+  }
+
+  .app-header-shell .mantine-Group-root {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 75em) {
+  .right-rail {
+    position: static;
+  }
+}
