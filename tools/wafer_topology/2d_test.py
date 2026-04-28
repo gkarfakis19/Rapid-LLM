@@ -1,24 +1,48 @@
-#!/usr/bin/env python3
-# Copyright 2026 NanoCad lab, UCLA
-# https://nanocad.ee.ucla.edu/
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """
 2D topology test harness for RAPID-LLM (training + inference).
 
-Runs 2D topology comparisons, prints tabular results, and emits merged speedup
-plots. The current checked-in comparison set is Mesh2D vs Torus2D and FullyConnected.
+Currently uses:
+
+- Hardware config for both training and inference:
+  - `validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB_2d.yaml`
+- Derates:
+  - `validation_scripts/validation_configs/harness_derates.yaml`
+  - device type `H100_SXM5`
+- Training model configs:
+  - `validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml`
+  - `configs/model-config/GLM_4.5_AIR_106B.yaml`
+  - `configs/model-config/vit_7b_patch16_dinov3_lvd1689m_train.yaml`
+- Inference model configs:
+  - `validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_inf.yaml`
+  - `configs/model-config/GLM_4.5_AIR_106B_inf.yaml`
+  - `configs/model-config/vit_7b_patch16_dinov3_lvd1689m_inf.yaml`
+- Shapes:
+  - `4x5`, `4x6`, `4x8`, `6x6`
+- Topologies:
+  - `Mesh2D`
+  - `Torus2D`
+  - `FullyConnected`
+- Default bandwidth sweep:
+  - `750 GB/s`
+
+For the default `--bandwidths 750` run, the script produces:
+
+- `tools/wafer_topology/artifacts/2d_test_cache.json`
+- `tools/wafer_topology/artifacts/2d_test_train_bw750.tsv`
+- `tools/wafer_topology/artifacts/2d_test_inf_bw750.tsv`
+- `tools/wafer_topology/artifacts/2d_test_super_merged_bw750.png`
+- `tools/wafer_topology/artifacts/2d_test_super_merged_fullyconnected_bw750.png`
+- `tools/wafer_topology/artifacts/2d_test_super_merged_torus_fullyconnected_bw750.png`
+
+It also creates per-case working directories under:
+
+- `tools/wafer_topology/artifacts/train/`
+- `tools/wafer_topology/artifacts/inference/`
+- `tools/wafer_topology/artifacts/tmp_runs/`
+
+The most compact combined plot is:
+
+- `tools/wafer_topology/artifacts/2d_test_super_merged_torus_fullyconnected_bw750.png`
 """
 
 import copy
