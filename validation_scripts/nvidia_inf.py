@@ -29,6 +29,25 @@ import seaborn as sns
 
 sns.set()
 
+try:
+    from .plot_style import (
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
+except ImportError:
+    from plot_style import (  # type: ignore
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
+
 COMPARE_LLMCOMPASS = True
 COMPARE_VIDUR = True
 COMPARE_GENZ = True
@@ -1202,86 +1221,88 @@ def plot_device(
         model_bounds.append((cluster_start, cluster_end))
         current_x += model_gap  # gap after cluster
 
-    # Dynamic figure width
-    fig_w = max(8.0, 0.12 * len(tp_midpoints) + 2.5)
-    fig, ax = plt.subplots(figsize=(fig_w, 5))
+    fig_h = max(3.2, 2.4 + 0.04 * len(tp_midpoints))
+    with plt.rc_context(ieee_rc_params()):
+        fig, ax = plt.subplots(figsize=(IEEE_HALF_COLUMN_WIDTH_IN, fig_h))
 
-    bars_seconds = ax.bar(
-        x_seconds,
-        seconds_vals,
-        bar_width,
-        label=RAPID_HIER_LABEL,
-        color=TOOL_COLORS[RAPID_HIER_LABEL],
-    )
-    bars_actual = ax.bar(
-        x_actual,
-        actual_vals,
-        bar_width,
-        label="Actual",
-        color=TOOL_COLORS["Actual"],
-    )
-    if flattened_vals:
-        ax.bar(
-            x_flattened,
-            flattened_vals,
+        bars_seconds = ax.bar(
+            x_seconds,
+            seconds_vals,
             bar_width,
-            label=RAPID_FLAT_LABEL,
-            color=TOOL_COLORS[RAPID_FLAT_LABEL],
+            label=RAPID_HIER_LABEL,
+            color=TOOL_COLORS[RAPID_HIER_LABEL],
         )
-    if llmcompass_vals:
-        ax.bar(
-            x_llmcompass,
-            llmcompass_vals,
+        bars_actual = ax.bar(
+            x_actual,
+            actual_vals,
             bar_width,
-            label="LLMCompass",
-            color=TOOL_COLORS["LLMCompass"],
+            label="Actual",
+            color=TOOL_COLORS["Actual"],
         )
-    if vidur_vals:
-        ax.bar(x_vidur, vidur_vals, bar_width, label="Vidur", color=TOOL_COLORS["Vidur"])
-    if genz_vals:
-        ax.bar(x_genz, genz_vals, bar_width, label="GenZ", color=TOOL_COLORS["GenZ"])
+        if flattened_vals:
+            ax.bar(
+                x_flattened,
+                flattened_vals,
+                bar_width,
+                label=RAPID_FLAT_LABEL,
+                color=TOOL_COLORS[RAPID_FLAT_LABEL],
+            )
+        if llmcompass_vals:
+            ax.bar(
+                x_llmcompass,
+                llmcompass_vals,
+                bar_width,
+                label="LLMCompass",
+                color=TOOL_COLORS["LLMCompass"],
+            )
+        if vidur_vals:
+            ax.bar(x_vidur, vidur_vals, bar_width, label="Vidur", color=TOOL_COLORS["Vidur"])
+        if genz_vals:
+            ax.bar(x_genz, genz_vals, bar_width, label="GenZ", color=TOOL_COLORS["GenZ"])
 
-    # Primary ticks: model names at cluster centers
-    ax.set_xticks(model_centers)
-    ax.set_xticklabels(display_models, fontsize=11)
-    ax.set_ylabel("Inference Latency (s)")
-    ax.set_title(
-        f"Validation of Inference Latency on Systems of {device} (network ignored)"
-    )
-
-    # Secondary TP labels ABOVE bars (centered over subgroup)
-    ymin, ymax = ax.get_ylim()
-    pad = 0.02 * (ymax - ymin)
-    subgroup_max = [max(s, a) for s, a in zip(seconds_vals, actual_vals)]
-    if llmcompass_vals:
-        subgroup_max = [max(v, l) for v, l in zip(subgroup_max, llmcompass_vals)]
-    if flattened_vals:
-        subgroup_max = [max(v, f) for v, f in zip(subgroup_max, flattened_vals)]
-    if vidur_vals:
-        subgroup_max = [max(v, l) for v, l in zip(subgroup_max, vidur_vals)]
-    if genz_vals:
-        subgroup_max = [max(v, l) for v, l in zip(subgroup_max, genz_vals)]
-    new_ymax = max(ymax, max(subgroup_max) + 3 * pad)
-    ax.set_ylim(ymin, new_ymax)
-    for mid, lbl, v in zip(tp_midpoints, tp_labels, subgroup_max):
-        ax.text(mid, v + pad, lbl, ha="center", va="bottom", fontsize=8)
-
-    # Draw light separators between model clusters
-    for start, end in model_bounds:
-        ax.axvspan(
-            start - bar_width * 0.5,
-            end - bar_width * 0.5,
-            facecolor="#000000",
-            alpha=0.02,
+        # Primary ticks: model names at cluster centers
+        ax.set_xticks(model_centers)
+        ax.set_xticklabels(display_models, fontsize=IEEE_FONT_SIZE_PT)
+        ax.set_ylabel("Inference Latency (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        ax.set_title(
+            f"Validation of Inference Latency on Systems of {device} (network ignored)",
+            fontsize=IEEE_TITLE_SIZE_PT,
         )
 
-    # Custom legend
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    ax.margins(x=0.02, y=0.1)
+        # Secondary TP labels ABOVE bars (centered over subgroup)
+        ymin, ymax = ax.get_ylim()
+        pad = 0.02 * (ymax - ymin)
+        subgroup_max = [max(s, a) for s, a in zip(seconds_vals, actual_vals)]
+        if llmcompass_vals:
+            subgroup_max = [max(v, l) for v, l in zip(subgroup_max, llmcompass_vals)]
+        if flattened_vals:
+            subgroup_max = [max(v, f) for v, f in zip(subgroup_max, flattened_vals)]
+        if vidur_vals:
+            subgroup_max = [max(v, l) for v, l in zip(subgroup_max, vidur_vals)]
+        if genz_vals:
+            subgroup_max = [max(v, l) for v, l in zip(subgroup_max, genz_vals)]
+        new_ymax = max(ymax, max(subgroup_max) + 3 * pad)
+        ax.set_ylim(ymin, new_ymax)
+        for mid, lbl, v in zip(tp_midpoints, tp_labels, subgroup_max):
+            ax.text(mid, v + pad, lbl, ha="center", va="bottom", fontsize=IEEE_FONT_SIZE_PT)
+
+        # Draw light separators between model clusters
+        for start, end in model_bounds:
+            ax.axvspan(
+                start - bar_width * 0.5,
+                end - bar_width * 0.5,
+                facecolor="#000000",
+                alpha=0.02,
+            )
+
+        # Custom legend
+        ax.legend()
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        ax.margins(x=0.02, y=0.1)
+        fig.tight_layout()
 
     outpath = outdir / f"inf_{device}.png"
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 
@@ -1406,20 +1427,21 @@ def plot_nvidia_device(
         bar_width = 0.28
     else:
         bar_width = 0.22
-    fig_w = max(8.0, 0.4 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 5))
-    offsets = [(idx - (num_series - 1) / 2) * bar_width for idx in range(num_series)]
-    for idx, (label, vals, color) in enumerate(series):
-        ax.bar([i + offsets[idx] for i in x], vals, bar_width, label=label, color=color)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
-    ax.set_ylabel("Inference Latency (s)")
-    ax.set_title(f"NVIDIA inference validation on {device}")
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    fig.tight_layout()
+    fig_h = max(3.0, 2.2 + 0.07 * len(labels))
+    with plt.rc_context(ieee_rc_params()):
+        fig, ax = plt.subplots(figsize=(IEEE_HALF_COLUMN_WIDTH_IN, fig_h))
+        offsets = [(idx - (num_series - 1) / 2) * bar_width for idx in range(num_series)]
+        for idx, (label, vals, color) in enumerate(series):
+            ax.bar([i + offsets[idx] for i in x], vals, bar_width, label=label, color=color)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=IEEE_FONT_SIZE_PT)
+        ax.set_ylabel("Inference Latency (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        ax.set_title(f"NVIDIA inference validation on {device}", fontsize=IEEE_TITLE_SIZE_PT)
+        ax.legend()
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        fig.tight_layout()
     outpath = outdir / f"nvidia_inf_{device}.png"
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 
@@ -1520,197 +1542,198 @@ def plot_validation_parity_combined(
             model_to_marker[size] = fallback_markers[fallback_idx % len(fallback_markers)]
             fallback_idx += 1
 
-    fig, axes = plt.subplots(1, 2, figsize=(12.8, 5.6))
-    ax_imec, ax_nvidia = axes
+    with plt.rc_context(ieee_rc_params()):
+        fig, axes = plt.subplots(2, 1, figsize=(IEEE_HALF_COLUMN_WIDTH_IN, 6.2))
+        ax_imec, ax_nvidia = axes
 
-    # Left: IMEC 200/200 rows (bs=1).
-    ax_imec.set_title("Input/Output = 200/200, Batch Size = 1")
-    if imec_sub.empty:
-        ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
-        ax_imec.axis("off")
-    else:
-        imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
-        imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
-        gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
-        gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
-        gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
-
-        for size in model_sizes:
-            rows_by_size = imec_sub[imec_sub["model_size"] == size]
-            if rows_by_size.empty:
-                continue
-            for gpu in gpu_levels:
-                group = rows_by_size[rows_by_size["TP"] == gpu]
-                if group.empty:
-                    continue
-                ax_imec.scatter(
-                    group["actual"],
-                    group["seconds"],
-                    marker=model_to_marker[size],
-                    color=gpu_to_color[gpu],
-                    s=64,
-                    edgecolors="black",
-                    linewidths=0.35,
-                    alpha=0.9,
-                )
-        _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
-        gpu_handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="None",
-                markerfacecolor=gpu_to_color[gpu],
-                markeredgecolor="black",
-                markersize=7,
-                label=str(gpu),
-            )
-            for gpu in gpu_levels
-        ]
-        ax_imec.legend(
-            handles=gpu_handles,
-            loc="best",
-            fontsize=8,
-            framealpha=0.9,
-            title="# GPUs",
-            title_fontsize=9,
-        )
-
-    # Right: NVIDIA rows at selected TP.
-    ax_nvidia.set_title(f"{int(nvidia_tp)} GPUs")
-    if nvidia_sub.empty:
-        ax_nvidia.text(
-            0.5,
-            0.5,
-            f"No data for TP={int(nvidia_tp)}",
-            transform=ax_nvidia.transAxes,
-            ha="center",
-            va="center",
-        )
-        ax_nvidia.axis("off")
-    else:
-        for col in ("input_tokens", "output_tokens", "concurrency"):
-            nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
-        nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
-        nvidia_sub = nvidia_sub[
-            nvidia_sub["input_tokens"].notna()
-            & nvidia_sub["output_tokens"].notna()
-        ].copy()
-        token_pairs = sorted(
-            {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
-        )
-        pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
-        pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
-        batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
-        if len(batch_sizes) <= 1:
-            bs_to_scatter_size = {batch_sizes[0]: 90.0} if batch_sizes else {}
+        # Top: IMEC 200/200 rows (bs=1).
+        ax_imec.set_title("Input/Output = 200/200, Batch Size = 1", fontsize=IEEE_TITLE_SIZE_PT)
+        if imec_sub.empty:
+            ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
+            ax_imec.axis("off")
         else:
-            min_size = 45.0
-            max_size = 210.0
+            imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
+            imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
+            gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
+            gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
+            gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
+
+            for size in model_sizes:
+                rows_by_size = imec_sub[imec_sub["model_size"] == size]
+                if rows_by_size.empty:
+                    continue
+                for gpu in gpu_levels:
+                    group = rows_by_size[rows_by_size["TP"] == gpu]
+                    if group.empty:
+                        continue
+                    ax_imec.scatter(
+                        group["actual"],
+                        group["seconds"],
+                        marker=model_to_marker[size],
+                        color=gpu_to_color[gpu],
+                        s=64,
+                        edgecolors="black",
+                        linewidths=0.35,
+                        alpha=0.9,
+                    )
+            _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
+            gpu_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor=gpu_to_color[gpu],
+                    markeredgecolor="black",
+                    markersize=7,
+                    label=str(gpu),
+                )
+                for gpu in gpu_levels
+            ]
+            ax_imec.legend(
+                handles=gpu_handles,
+                loc="best",
+                fontsize=IEEE_FONT_SIZE_PT,
+                framealpha=0.9,
+                title="# GPUs",
+                title_fontsize=IEEE_FONT_SIZE_PT,
+            )
+
+        # Bottom: NVIDIA rows at selected TP.
+        ax_nvidia.set_title(f"{int(nvidia_tp)} GPUs", fontsize=IEEE_TITLE_SIZE_PT)
+        if nvidia_sub.empty:
+            ax_nvidia.text(
+                0.5,
+                0.5,
+                f"No data for TP={int(nvidia_tp)}",
+                transform=ax_nvidia.transAxes,
+                ha="center",
+                va="center",
+            )
+            ax_nvidia.axis("off")
+        else:
+            for col in ("input_tokens", "output_tokens", "concurrency"):
+                nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
+            nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
+            nvidia_sub = nvidia_sub[
+                nvidia_sub["input_tokens"].notna()
+                & nvidia_sub["output_tokens"].notna()
+            ].copy()
+            token_pairs = sorted(
+                {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
+            )
+            pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
+            pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
+            batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
+        if len(batch_sizes) <= 1:
+            bs_to_scatter_size = {batch_sizes[0]: 64.0} if batch_sizes else {}
+        else:
+            min_size = 28.0
+            max_size = 120.0
             bs_to_scatter_size = {
                 bs: min_size + (max_size - min_size) * idx / max(1, len(batch_sizes) - 1)
                 for idx, bs in enumerate(batch_sizes)
             }
 
-        for size in model_sizes:
-            rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
-            if rows_by_size.empty:
-                continue
-            for pair in token_pairs:
-                pair_rows = rows_by_size[
-                    (rows_by_size["input_tokens"] == pair[0])
-                    & (rows_by_size["output_tokens"] == pair[1])
-                ]
-                if pair_rows.empty:
+            for size in model_sizes:
+                rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
+                if rows_by_size.empty:
                     continue
-                for bs in batch_sizes:
-                    group = pair_rows[pair_rows["concurrency"] == bs]
-                    if group.empty:
+                for pair in token_pairs:
+                    pair_rows = rows_by_size[
+                        (rows_by_size["input_tokens"] == pair[0])
+                        & (rows_by_size["output_tokens"] == pair[1])
+                    ]
+                    if pair_rows.empty:
                         continue
-                    ax_nvidia.scatter(
-                        group["actual"],
-                        group["seconds"],
-                        marker=model_to_marker[size],
-                        color=pair_to_color[pair],
-                        s=bs_to_scatter_size[bs],
-                        edgecolors="black",
-                        linewidths=0.35,
-                        alpha=0.85,
-                    )
-        _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
-        pair_handles = [
+                    for bs in batch_sizes:
+                        group = pair_rows[pair_rows["concurrency"] == bs]
+                        if group.empty:
+                            continue
+                        ax_nvidia.scatter(
+                            group["actual"],
+                            group["seconds"],
+                            marker=model_to_marker[size],
+                            color=pair_to_color[pair],
+                            s=bs_to_scatter_size[bs],
+                            edgecolors="black",
+                            linewidths=0.35,
+                            alpha=0.85,
+                        )
+            _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
+            pair_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor=pair_to_color[pair],
+                    markeredgecolor="black",
+                    markersize=7,
+                    label=f"{pair[0]}/{pair[1]}",
+                )
+                for pair in token_pairs
+            ]
+            bs_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor="#c8c8c8",
+                    markeredgecolor="black",
+                    markersize=max(3.5, math.sqrt(bs_to_scatter_size[bs]) * 0.8),
+                    label=str(bs),
+                )
+                for bs in batch_sizes
+            ]
+            bs_legend = ax_nvidia.legend(
+                handles=bs_handles,
+                loc="upper left",
+                fontsize=IEEE_FONT_SIZE_PT,
+                framealpha=0.9,
+                title="Batch Size",
+                title_fontsize=IEEE_FONT_SIZE_PT,
+            )
+            ax_nvidia.add_artist(bs_legend)
+            pair_legend = ax_nvidia.legend(
+                handles=pair_handles,
+                loc="lower right",
+                fontsize=IEEE_FONT_SIZE_PT,
+                framealpha=0.9,
+                title="Input/Output",
+                title_fontsize=IEEE_FONT_SIZE_PT,
+            )
+            ax_nvidia.add_artist(pair_legend)
+
+        model_handles = [
             Line2D(
                 [0],
                 [0],
-                marker="o",
+                marker=model_to_marker[size],
                 linestyle="None",
-                markerfacecolor=pair_to_color[pair],
+                markerfacecolor="white",
                 markeredgecolor="black",
                 markersize=7,
-                label=f"{pair[0]}/{pair[1]}",
+                label=str(size),
             )
-            for pair in token_pairs
+            for size in model_sizes
         ]
-        bs_handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="None",
-                markerfacecolor="#c8c8c8",
-                markeredgecolor="black",
-                markersize=max(4.5, math.sqrt(bs_to_scatter_size[bs])),
-                label=str(bs),
-            )
-            for bs in batch_sizes
-        ]
-        pair_legend = ax_nvidia.legend(
-            handles=pair_handles,
-            loc="upper left",
-            fontsize=8,
+        fig.legend(
+            handles=model_handles,
+            loc="upper center",
+            ncol=max(1, min(5, len(model_handles))),
+            bbox_to_anchor=(0.5, 0.935),
+            fontsize=IEEE_FONT_SIZE_PT,
             framealpha=0.9,
-            title="Input/Output",
-            title_fontsize=9,
         )
-        ax_nvidia.add_artist(pair_legend)
-        ax_nvidia.legend(
-            handles=bs_handles,
-            loc="lower right",
-            fontsize=8,
-            framealpha=0.9,
-            title="Batch Size",
-            title_fontsize=9,
-        )
-
-    model_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=model_to_marker[size],
-            linestyle="None",
-            markerfacecolor="white",
-            markeredgecolor="black",
-            markersize=7,
-            label=str(size),
-        )
-        for size in model_sizes
-    ]
-    fig.legend(
-        handles=model_handles,
-        loc="upper center",
-        ncol=max(1, min(5, len(model_handles))),
-        bbox_to_anchor=(0.5, 0.93),
-        fontsize=8,
-        framealpha=0.9,
-        title="Model Size",
-        title_fontsize=9,
-    )
-
-    fig.suptitle(f"Llama2 Inference Latency ({str(device).upper()} 80GB BF16)", fontsize=13)
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+        fig.supxlabel("Actual (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.supylabel("Predicted (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.suptitle(f"Llama2 Inference Latency ({str(device).upper()} 80GB BF16)", fontsize=IEEE_TITLE_SIZE_PT)
+        fig.tight_layout(rect=(0.02, 0.02, 1.0, 0.90))
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / f"inf_parity_combined_{str(device).lower()}.png"
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 
@@ -1820,207 +1843,212 @@ def plot_validation_parity_combined_devices(
         }
     )
     if len(global_batch_sizes) <= 1:
-        bs_to_scatter_size_global = {global_batch_sizes[0]: 90.0} if global_batch_sizes else {}
+        bs_to_scatter_size_global = {global_batch_sizes[0]: 64.0} if global_batch_sizes else {}
     else:
-        min_size = 45.0
-        max_size = 210.0
+        min_size = 28.0
+        max_size = 120.0
         bs_to_scatter_size_global = {
             bs: min_size + (max_size - min_size) * idx / max(1, len(global_batch_sizes) - 1)
             for idx, bs in enumerate(global_batch_sizes)
         }
 
-    stacked_width = 10.0
-    stacked_height = stacked_width * ((4.9 * len(prepared)) / 12.8)
-    fig, axes = plt.subplots(len(prepared), 2, figsize=(stacked_width, stacked_height))
-    if len(prepared) == 1:
-        axes = np.array([axes])
+    stacked_height = max(4.8, 2.8 * len(prepared))
+    with plt.rc_context(ieee_rc_params()):
+        fig, axes = plt.subplots(
+            len(prepared),
+            2,
+            figsize=(IEEE_HALF_COLUMN_WIDTH_IN, stacked_height),
+        )
+        if len(prepared) == 1:
+            axes = np.array([axes])
 
-    for row_idx, (device, nvidia_tp, imec_sub, nvidia_sub) in enumerate(prepared):
-        ax_imec = axes[row_idx, 0]
-        ax_nvidia = axes[row_idx, 1]
+        for row_idx, (device, nvidia_tp, imec_sub, nvidia_sub) in enumerate(prepared):
+            ax_imec = axes[row_idx, 0]
+            ax_nvidia = axes[row_idx, 1]
 
-        ax_imec.set_title(f"{device}: Input/Output = 200/200, Batch Size = 1")
-        if imec_sub.empty:
-            ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
-            ax_imec.axis("off")
-        else:
-            imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
-            imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
-            gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
-            gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
-            gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
+            ax_imec.set_title(
+                f"{device}: Input/Output = 200/200, Batch Size = 1",
+                fontsize=IEEE_TITLE_SIZE_PT,
+            )
+            if imec_sub.empty:
+                ax_imec.text(0.5, 0.5, "No data", transform=ax_imec.transAxes, ha="center", va="center")
+                ax_imec.axis("off")
+            else:
+                imec_sub["TP"] = pd.to_numeric(imec_sub.get("TP"), errors="coerce")
+                imec_sub = imec_sub[imec_sub["TP"].notna()].copy()
+                gpu_levels = sorted({int(v) for v in imec_sub["TP"].dropna().tolist()})
+                gpu_cmap = plt.get_cmap("viridis", max(1, len(gpu_levels)))
+                gpu_to_color = {gpu: gpu_cmap(idx) for idx, gpu in enumerate(gpu_levels)}
 
-            for size in model_sizes:
-                rows_by_size = imec_sub[imec_sub["model_size"] == size]
-                if rows_by_size.empty:
-                    continue
-                for gpu in gpu_levels:
-                    group = rows_by_size[rows_by_size["TP"] == gpu]
-                    if group.empty:
+                for size in model_sizes:
+                    rows_by_size = imec_sub[imec_sub["model_size"] == size]
+                    if rows_by_size.empty:
                         continue
-                    ax_imec.scatter(
-                        group["actual"],
-                        group["seconds"],
-                        marker=model_to_marker[size],
-                        color=gpu_to_color[gpu],
-                        s=64,
-                        edgecolors="black",
-                        linewidths=0.35,
-                        alpha=0.9,
-                    )
-            _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
-            gpu_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="None",
-                    markerfacecolor=gpu_to_color[gpu],
-                    markeredgecolor="black",
-                    markersize=7,
-                    label=str(gpu),
-                )
-                for gpu in gpu_levels
-            ]
-            ax_imec.legend(
-                handles=gpu_handles,
-                loc="best",
-                fontsize=8,
-                framealpha=0.9,
-                title="# GPUs",
-                title_fontsize=9,
-            )
-
-        ax_nvidia.set_title(f"{device}: {int(nvidia_tp)} GPUs")
-        if nvidia_sub.empty:
-            ax_nvidia.text(
-                0.5,
-                0.5,
-                f"No data for TP={int(nvidia_tp)}",
-                transform=ax_nvidia.transAxes,
-                ha="center",
-                va="center",
-            )
-            ax_nvidia.axis("off")
-        else:
-            for col in ("input_tokens", "output_tokens", "concurrency"):
-                nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
-            nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
-            nvidia_sub = nvidia_sub[
-                nvidia_sub["input_tokens"].notna()
-                & nvidia_sub["output_tokens"].notna()
-            ].copy()
-            token_pairs = sorted(
-                {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
-            )
-            pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
-            pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
-            batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
-
-            for size in model_sizes:
-                rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
-                if rows_by_size.empty:
-                    continue
-                for pair in token_pairs:
-                    pair_rows = rows_by_size[
-                        (rows_by_size["input_tokens"] == pair[0])
-                        & (rows_by_size["output_tokens"] == pair[1])
-                    ]
-                    if pair_rows.empty:
-                        continue
-                    for bs in batch_sizes:
-                        group = pair_rows[pair_rows["concurrency"] == bs]
+                    for gpu in gpu_levels:
+                        group = rows_by_size[rows_by_size["TP"] == gpu]
                         if group.empty:
                             continue
-                        ax_nvidia.scatter(
+                        ax_imec.scatter(
                             group["actual"],
                             group["seconds"],
                             marker=model_to_marker[size],
-                            color=pair_to_color[pair],
-                            s=bs_to_scatter_size_global.get(bs, 90.0),
+                            color=gpu_to_color[gpu],
+                            s=64,
                             edgecolors="black",
                             linewidths=0.35,
-                            alpha=0.85,
+                            alpha=0.9,
                         )
-            _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
-            pair_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="None",
-                    markerfacecolor=pair_to_color[pair],
-                    markeredgecolor="black",
-                    markersize=7,
-                    label=f"{pair[0]}/{pair[1]}",
+                _set_parity_axes(ax_imec, imec_sub["actual"], imec_sub["seconds"])
+                gpu_handles = [
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        markerfacecolor=gpu_to_color[gpu],
+                        markeredgecolor="black",
+                        markersize=7,
+                        label=str(gpu),
+                    )
+                    for gpu in gpu_levels
+                ]
+                ax_imec.legend(
+                    handles=gpu_handles,
+                    loc="best",
+                    fontsize=IEEE_FONT_SIZE_PT,
+                    framealpha=0.9,
+                    title="# GPUs",
+                    title_fontsize=IEEE_FONT_SIZE_PT,
                 )
-                for pair in token_pairs
-            ]
-            pair_legend = ax_nvidia.legend(
-                handles=pair_handles,
-                loc="upper left",
-                fontsize=8,
-                framealpha=0.9,
-                title="Input/Output",
-                title_fontsize=9,
-            )
-            ax_nvidia.add_artist(pair_legend)
+                ax_imec.tick_params(labelsize=IEEE_FONT_SIZE_PT)
 
-    model_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=model_to_marker[size],
-            linestyle="None",
-            markerfacecolor="white",
-            markeredgecolor="black",
-            markersize=7,
-            label=str(size),
-        )
-        for size in model_sizes
-    ]
-    model_legend = fig.legend(
-        handles=model_handles,
-        loc="upper center",
-        ncol=max(1, min(4, len(model_handles))),
-        bbox_to_anchor=(0.32, 0.95),
-        fontsize=8,
-        framealpha=0.9,
-        title="Model Size",
-        title_fontsize=9,
-    )
-    fig.add_artist(model_legend)
-    if global_batch_sizes:
-        bs_handles = [
+            ax_nvidia.set_title(f"{device}: {int(nvidia_tp)} GPUs", fontsize=IEEE_TITLE_SIZE_PT)
+            if nvidia_sub.empty:
+                ax_nvidia.text(
+                    0.5,
+                    0.5,
+                    f"No data for TP={int(nvidia_tp)}",
+                    transform=ax_nvidia.transAxes,
+                    ha="center",
+                    va="center",
+                )
+                ax_nvidia.axis("off")
+            else:
+                for col in ("input_tokens", "output_tokens", "concurrency"):
+                    nvidia_sub[col] = pd.to_numeric(nvidia_sub.get(col), errors="coerce")
+                nvidia_sub = nvidia_sub[nvidia_sub["concurrency"].notna()].copy()
+                nvidia_sub = nvidia_sub[
+                    nvidia_sub["input_tokens"].notna()
+                    & nvidia_sub["output_tokens"].notna()
+                ].copy()
+                token_pairs = sorted(
+                    {(int(row["input_tokens"]), int(row["output_tokens"])) for _, row in nvidia_sub.iterrows()}
+                )
+                pair_cmap = plt.get_cmap("tab10", max(1, len(token_pairs)))
+                pair_to_color = {pair: pair_cmap(idx) for idx, pair in enumerate(token_pairs)}
+                batch_sizes = sorted({int(v) for v in nvidia_sub["concurrency"].dropna().tolist()})
+
+                for size in model_sizes:
+                    rows_by_size = nvidia_sub[nvidia_sub["model_size"] == size]
+                    if rows_by_size.empty:
+                        continue
+                    for pair in token_pairs:
+                        pair_rows = rows_by_size[
+                            (rows_by_size["input_tokens"] == pair[0])
+                            & (rows_by_size["output_tokens"] == pair[1])
+                        ]
+                        if pair_rows.empty:
+                            continue
+                        for bs in batch_sizes:
+                            group = pair_rows[pair_rows["concurrency"] == bs]
+                            if group.empty:
+                                continue
+                            ax_nvidia.scatter(
+                                group["actual"],
+                                group["seconds"],
+                                marker=model_to_marker[size],
+                                color=pair_to_color[pair],
+                                s=bs_to_scatter_size_global.get(bs, 64.0),
+                                edgecolors="black",
+                                linewidths=0.35,
+                                alpha=0.85,
+                            )
+                _set_parity_axes(ax_nvidia, nvidia_sub["actual"], nvidia_sub["seconds"])
+                pair_handles = [
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        markerfacecolor=pair_to_color[pair],
+                        markeredgecolor="black",
+                        markersize=7,
+                        label=f"{pair[0]}/{pair[1]}",
+                    )
+                    for pair in token_pairs
+                ]
+                pair_legend = ax_nvidia.legend(
+                    handles=pair_handles,
+                    loc="lower right",
+                    fontsize=IEEE_FONT_SIZE_PT,
+                    framealpha=0.9,
+                    title="Input/Output",
+                    title_fontsize=IEEE_FONT_SIZE_PT,
+                )
+                ax_nvidia.add_artist(pair_legend)
+                if batch_sizes:
+                    bs_handles = [
+                        Line2D(
+                            [0],
+                            [0],
+                            marker="o",
+                            linestyle="None",
+                            markerfacecolor="#c8c8c8",
+                            markeredgecolor="black",
+                            markersize=max(3.5, math.sqrt(bs_to_scatter_size_global.get(bs, 64.0)) * 0.8),
+                            label=str(bs),
+                        )
+                        for bs in batch_sizes
+                    ]
+                    ax_nvidia.legend(
+                        handles=bs_handles,
+                        loc="upper left",
+                        fontsize=IEEE_FONT_SIZE_PT,
+                        framealpha=0.9,
+                        title="Batch Size",
+                        title_fontsize=IEEE_FONT_SIZE_PT,
+                    )
+                ax_nvidia.tick_params(labelsize=IEEE_FONT_SIZE_PT)
+
+        model_handles = [
             Line2D(
                 [0],
                 [0],
-                marker="o",
+                marker=model_to_marker[size],
                 linestyle="None",
-                markerfacecolor="#c8c8c8",
+                markerfacecolor="white",
                 markeredgecolor="black",
-                markersize=max(4.5, math.sqrt(bs_to_scatter_size_global[bs])),
-                label=str(bs),
+                markersize=7,
+                label=str(size),
             )
-            for bs in global_batch_sizes
+            for size in model_sizes
         ]
-        fig.legend(
-            handles=bs_handles,
+        model_legend = fig.legend(
+            handles=model_handles,
             loc="upper center",
-            ncol=max(1, min(5, len(bs_handles))),
-            bbox_to_anchor=(0.76, 0.95),
-            fontsize=8,
+            ncol=max(1, min(4, len(model_handles))),
+            bbox_to_anchor=(0.32, 0.94),
+            fontsize=IEEE_FONT_SIZE_PT,
             framealpha=0.9,
-            title="Batch Size",
-            title_fontsize=9,
         )
-    fig.suptitle("Llama2 Inference Latency", fontsize=14)
-    fig.supxlabel("Actual (s)")
-    fig.supylabel("Predicted (s)")
-    fig.tight_layout(rect=(0.03, 0.03, 1.0, 0.89))
+        fig.add_artist(model_legend)
+        fig.suptitle("Llama2 Inference Latency", fontsize=IEEE_TITLE_SIZE_PT)
+        fig.supxlabel("Actual (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.supylabel("Predicted (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.tight_layout(rect=(0.03, 0.03, 1.0, 0.93))
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / "inf_parity_combined_a100_h100.png"
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 
@@ -3688,15 +3716,6 @@ def _plot_combined_a100_error_bars(
         if model
     }
 
-    font_params = {
-        "font.size": plt.rcParams.get("font.size", 10.0) * 1.3,
-        "axes.titlesize": plt.rcParams.get("axes.titlesize", 12.0) * 1.3,
-        "axes.labelsize": plt.rcParams.get("axes.labelsize", 11.0) * 1.3,
-        "xtick.labelsize": plt.rcParams.get("xtick.labelsize", 10.0) * 1.3,
-        "ytick.labelsize": plt.rcParams.get("ytick.labelsize", 10.0) * 1.3,
-        "legend.fontsize": plt.rcParams.get("legend.fontsize", 10.0) * 1.3,
-    }
-
     # Top: IMEC (prefill/decode 200/200).
     imec_tps = sorted({int(row.get("tp")) for row in imec_rows if row.get("tp") is not None})
     imec_vals: Dict[Tuple[str, int], float] = {}
@@ -3935,13 +3954,13 @@ def _plot_combined_a100_error_bars(
         bottom_labels.append(f"({input_tokens}/{output_tokens}) TP{tp}")
         current_x += bs_count * bottom_bar_width * len(bottom_methods) + group_gap
 
-    with plt.rc_context(font_params):
+    with plt.rc_context(ieee_rc_params()):
         fig, axes = plt.subplots(
             2,
             1,
-            figsize=(12, 7),
+            figsize=(IEEE_HALF_COLUMN_WIDTH_IN, 5.2),
             sharex=False,
-            gridspec_kw={"hspace": 0.3},
+            gridspec_kw={"hspace": 0.45},
         )
         bars = axes[0].bar(
             top_x,
@@ -3953,7 +3972,7 @@ def _plot_combined_a100_error_bars(
         )
         for rect, hatch in zip(bars, top_hatches):
             rect.set_hatch(hatch)
-        axes[0].set_title("NVIDIA Llama2 (bs=1)")
+        axes[0].set_title("NVIDIA Llama2 (bs=1)", fontsize=IEEE_TITLE_SIZE_PT)
         axes[0].set_ylabel("")
         axes[0].set_xticks(top_positions)
         axes[0].set_xticklabels(top_labels, fontstyle="italic")
@@ -3967,14 +3986,19 @@ def _plot_combined_a100_error_bars(
             for model in imec_models
         ]
         model_labels = [MODEL_DISPLAY.get(model, model) for model in imec_models]
-        model_legend = axes[0].legend(model_handles, model_labels, loc="upper left")
+        model_legend = axes[0].legend(
+            model_handles,
+            model_labels,
+            loc="upper left",
+            fontsize=IEEE_FONT_SIZE_PT,
+        )
         if len(methods) > 1:
             axes[0].add_artist(model_legend)
             method_handles = [
                 plt.Rectangle((0, 0), 1, 1, facecolor=method_colors[method], edgecolor="black")
                 for method in methods
             ]
-            axes[0].legend(method_handles, methods, loc="upper right")
+            axes[0].legend(method_handles, methods, loc="upper right", fontsize=IEEE_FONT_SIZE_PT)
 
         bars = axes[1].bar(
             bottom_x,
@@ -3986,7 +4010,7 @@ def _plot_combined_a100_error_bars(
         )
         for rect, hatch in zip(bars, bottom_hatches):
             rect.set_hatch(hatch)
-        axes[1].set_title("NVIDIA NIM Llama3-70B")
+        axes[1].set_title("NVIDIA NIM Llama3-70B", fontsize=IEEE_TITLE_SIZE_PT)
         axes[1].set_ylabel("")
         axes[1].set_xticks(bottom_positions)
         axes[1].set_xticklabels(bottom_labels, fontstyle="italic")
@@ -4000,14 +4024,24 @@ def _plot_combined_a100_error_bars(
             for bs in bs_levels
         ]
         bs_labels = [f"bs={bs}" for bs in bs_levels]
-        bs_legend = axes[1].legend(bs_handles, bs_labels, loc="upper right")
+        bs_legend = axes[1].legend(
+            bs_handles,
+            bs_labels,
+            loc="upper right",
+            fontsize=IEEE_FONT_SIZE_PT,
+        )
         if len(bottom_methods) > 1:
             axes[1].add_artist(bs_legend)
             method_handles = [
                 plt.Rectangle((0, 0), 1, 1, facecolor=bottom_method_colors[method], edgecolor="black")
                 for method in bottom_methods
             ]
-            axes[1].legend(method_handles, bottom_methods, loc="upper left")
+            axes[1].legend(
+                method_handles,
+                bottom_methods,
+                loc="upper left",
+                fontsize=IEEE_FONT_SIZE_PT,
+            )
 
         pad = max(top_bar_width, bottom_bar_width) * 0.7
         if top_x:
@@ -4017,14 +4051,18 @@ def _plot_combined_a100_error_bars(
             axes[1].set_xlim(min(bottom_x) - pad, max(bottom_x) + pad)
             axes[1].margins(x=0)
 
-        fig.suptitle(f"Inference Validation ({device} 80 GB)", y=0.975)
-        fig.supylabel("Total runtime estimation error (%)")
-        fig.supxlabel("(Input tokens/Output tokens) and TP degree")
-        fig.subplots_adjust(top=0.88, bottom=0.12, left=0.09, right=0.98)
+        fig.suptitle(
+            f"Inference Validation ({device} 80 GB)",
+            y=0.985,
+            fontsize=IEEE_TITLE_SIZE_PT,
+        )
+        fig.supylabel("Total runtime estimation error (%)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.supxlabel("(Input tokens/Output tokens) and TP degree", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        fig.subplots_adjust(top=0.9, bottom=0.15, left=0.16, right=0.98)
 
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / f"inf_errors_bar_combined_{device.lower()}.png"
-    fig.savefig(outpath, dpi=200)
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 
@@ -4043,6 +4081,12 @@ def _plot_combined_ratio_grids(
     flattened_rows: Optional[List[Dict[str, object]]] = None,
     flattened_nvidia_rows: Optional[List[Dict[str, object]]] = None,
 ) -> Optional[Path]:
+    font_delta_pt = 2
+    title_fs = max(1, (IEEE_TITLE_SIZE_PT - 2) + font_delta_pt)
+    label_fs = max(1, (IEEE_FONT_SIZE_PT - 2) + font_delta_pt)
+    y_tick_fs = 6 + font_delta_pt
+    marker_fs = 8 + font_delta_pt
+
     imec_rows = [row for row in imec_rows if row.get("device") == device]
     nvidia_rows = [row for row in nvidia_rows if row.get("device") == device]
     if vidur_rows:
@@ -4079,6 +4123,8 @@ def _plot_combined_ratio_grids(
     )
     if not models or not tps or not token_pairs or not concurrencies:
         return None
+
+    left_tps = [1, 2, 4, 8]
 
     imec_actual: Dict[Tuple[object, object], float] = {}
     imec_rapid: Dict[Tuple[object, object], float] = {}
@@ -4224,21 +4270,6 @@ def _plot_combined_ratio_grids(
     imec_values = {name: imec_series.get(name, {}) for name in tool_names}
     nvidia_values = {name: nvidia_series.get(name, {}) for name in tool_names}
 
-    top_h = 3.4
-    bottom_rows = math.ceil(len(concurrencies) / min(3, len(concurrencies)))
-    bottom_h = 3.0 * bottom_rows
-    tool_scale = 0.8 + 0.2 * len(tool_names)
-    subplot_w = 3.2 * tool_scale
-    fig_w = max(8.0, subplot_w * max(len(models), min(3, len(concurrencies))))
-    fig_h = 5
-    fig = plt.figure(figsize=(fig_w, fig_h))
-    gs = fig.add_gridspec(2, 1, height_ratios=[top_h, bottom_h], hspace=0.7)
-
-    top_gs = gs[0].subgridspec(1, len(models), wspace=0.25)
-    bottom_ncols = min(3, max(1, len(concurrencies)))
-    bottom_nrows = math.ceil(len(concurrencies) / bottom_ncols) if concurrencies else 1
-    bottom_gs = gs[1].subgridspec(bottom_nrows, bottom_ncols, wspace=0.25, hspace=0.35)
-
     bar_width = 0.6 if len(tool_names) == 1 else (0.35 if len(tool_names) == 2 else 0.25)
     offsets = [(idx - (len(tool_names) - 1) / 2) * bar_width for idx in range(len(tool_names))]
 
@@ -4251,53 +4282,6 @@ def _plot_combined_ratio_grids(
     top_pad = 0.05 * top_span
     top_limits = (min(top_all_vals) - top_pad, max(top_all_vals) + top_pad) if top_all_vals else None
 
-    for col_idx, model in enumerate(models):
-        ax = fig.add_subplot(top_gs[0, col_idx])
-        display_model = MODEL_DISPLAY.get(str(model), str(model))
-        has_any = False
-        model_tps = [tp for tp in tps if not (str(model) == "Llama 2-70B" and tp == 1)]
-        group_gap = 1.3
-        x_positions = [idx * group_gap for idx in range(len(model_tps))]
-        for tool_idx, name in enumerate(tool_names):
-            heights = [imec_values.get(name, {}).get((model, tp), float("nan")) for tp in model_tps]
-            if any(isinstance(v, (int, float)) and math.isfinite(v) for v in heights):
-                has_any = True
-            positions = [i + offsets[tool_idx] for i in x_positions]
-            ax.bar(positions, heights, bar_width, color=tool_colors[name])
-            if name == "Vidur":
-                for pos, height in zip(positions, heights):
-                    if not (isinstance(height, (int, float)) and math.isfinite(height)):
-                        ax.bar(
-                            pos,
-                            1.0,
-                            bar_width,
-                            color="#c9c9c9",
-                            alpha=0.4,
-                            edgecolor="#8a8a8a",
-                            hatch="//",
-                        )
-                        ax.text(
-                            pos,
-                            0.5,
-                            "x",
-                            ha="center",
-                            va="center",
-                            fontsize=10,
-                            color="#555555",
-                        )
-        if not has_any:
-            ax.axis("off")
-            continue
-        ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
-        if top_limits is not None:
-            ax.set_ylim(*top_limits)
-        ax.set_title(display_model)
-        ax.set_xticks(x_positions)
-        ax.set_xticklabels([f"TP{tp}" for tp in model_tps], fontsize=8)
-        ax.grid(axis="y", linestyle="--", alpha=0.3)
-        if col_idx == 0:
-            ax.set_ylabel("Pred / Actual")
-
     bottom_all_vals = [1.0]
     for name in tool_names:
         bottom_all_vals.extend(
@@ -4308,50 +4292,164 @@ def _plot_combined_ratio_grids(
     bottom_limits = (min(bottom_all_vals) - bottom_pad, max(bottom_all_vals) + bottom_pad) if bottom_all_vals else None
 
     group_gap = 1.3
-    x = [idx * group_gap for idx in range(len(token_pairs))]
-    x_labels = [f"{inp}/{out}" for inp, out in token_pairs]
-    axes_list = []
-    for idx, concurrency in enumerate(concurrencies):
-        row_idx = idx // bottom_ncols
-        col_idx = idx % bottom_ncols
-        ax = fig.add_subplot(bottom_gs[row_idx, col_idx])
-        axes_list.append(ax)
-        for tool_idx, name in enumerate(tool_names):
-            heights = [
-                nvidia_values.get(name, {}).get((inp, out, concurrency), float("nan"))
-                for inp, out in token_pairs
-            ]
-            ax.bar([i + offsets[tool_idx] for i in x], heights, bar_width, color=tool_colors[name])
-        ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
-        if bottom_limits is not None:
-            ax.set_ylim(*bottom_limits)
-        ax.set_title(f"batch size = {concurrency}")
-        ax.set_xticks(x)
-        ax.set_xticklabels(x_labels, rotation=20, ha="right", fontsize=8)
-        ax.grid(axis="y", linestyle="--", alpha=0.3)
-        if col_idx == 0:
-            ax.set_ylabel("Pred / Actual")
-
-    for j in range(len(concurrencies), bottom_nrows * bottom_ncols):
-        row_idx = j // bottom_ncols
-        col_idx = j % bottom_ncols
-        fig.add_subplot(bottom_gs[row_idx, col_idx]).axis("off")
-
-    fig.suptitle(f"Normalized Inference Validation ({device} Systems)", y=0.995)
-    handles = [plt.Rectangle((0, 0), 1, 1, color=tool_colors[name]) for name in tool_names]
-    fig.legend(
-        handles,
-        tool_names,
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.03),
-        ncol=len(tool_names),
+    x_left = [idx * group_gap for idx in range(len(left_tps))]
+    x_right = [idx * group_gap for idx in range(len(token_pairs))]
+    right_x_labels = [f"{inp}/{out}" for inp, out in token_pairs]
+    device_upper = str(device).upper()
+    missing_left_markers = set()
+    missing_right_markers = set()
+    if device_upper == "H100":
+        # Explicitly show known missing benchmark points as grey 1.0 placeholders.
+        missing_left_markers.add(("Llama 2-70B", 1))
+        missing_right_markers.add((2000, 2000, 25))
+    models_plot = list(models[:3])
+    concurrencies_plot = list(concurrencies[:3])
+    fig_h = 4.0
+    fig_w = IEEE_HALF_COLUMN_WIDTH_IN * 1.30
+    fig, axes = plt.subplots(
+        3,
+        2,
+        figsize=(fig_w, fig_h),
+        squeeze=False,
+        sharex="col",
     )
-    fig.text(0.5, 0.48, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
-    fig.subplots_adjust(bottom=0.2, top=0.85)
+
+    for row_idx in range(3):
+        ax_left = axes[row_idx][0]
+        if row_idx >= len(models_plot):
+            ax_left.axis("off")
+        else:
+            model = models_plot[row_idx]
+            display_model = MODEL_DISPLAY.get(str(model), str(model))
+            has_any = False
+            for tool_idx, name in enumerate(tool_names):
+                heights = [imec_values.get(name, {}).get((model, tp), float("nan")) for tp in left_tps]
+                if any(isinstance(v, (int, float)) and math.isfinite(v) for v in heights):
+                    has_any = True
+                positions = [i + offsets[tool_idx] for i in x_left]
+                ax_left.bar(positions, heights, bar_width, color=tool_colors[name])
+                if name == "Vidur":
+                    for pos, height in zip(positions, heights):
+                        if not (isinstance(height, (int, float)) and math.isfinite(height)):
+                            ax_left.bar(
+                                pos,
+                                1.0,
+                                bar_width,
+                                color="#c9c9c9",
+                                alpha=0.4,
+                                edgecolor="#8a8a8a",
+                                hatch="//",
+                            )
+                            ax_left.text(
+                                pos,
+                                0.5,
+                                "x",
+                                ha="center",
+                                va="center",
+                                fontsize=marker_fs,
+                                color="#555555",
+                            )
+            for missing_model, missing_tp in missing_left_markers:
+                if str(model) != str(missing_model) or missing_tp not in left_tps:
+                    continue
+                missing_key = (model, missing_tp)
+                has_real = any(
+                    math.isfinite(imec_values.get(name, {}).get(missing_key, float("nan")))
+                    for name in tool_names
+                )
+                if not has_real:
+                    slot_idx = left_tps.index(missing_tp)
+                    ax_left.bar(
+                        x_left[slot_idx],
+                        1.0,
+                        bar_width * 0.9,
+                        color="#c9c9c9",
+                        alpha=0.55,
+                        edgecolor="#8a8a8a",
+                        hatch="//",
+                        zorder=0.5,
+                    )
+                    has_any = True
+            if not has_any:
+                ax_left.axis("off")
+            else:
+                ax_left.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
+                if top_limits is not None:
+                    ax_left.set_ylim(*top_limits)
+                ax_left.set_title(display_model, fontsize=title_fs)
+                ax_left.set_xticks(x_left)
+                ax_left.set_xticklabels([f"TP{tp}" for tp in left_tps], fontsize=label_fs)
+                ax_left.grid(axis="y", linestyle="--", alpha=0.3)
+                ax_left.tick_params(axis="x", pad=-1)
+                ax_left.tick_params(axis="y", labelsize=y_tick_fs, pad=-2)
+
+        ax_right = axes[row_idx][1]
+        if row_idx >= len(concurrencies_plot):
+            ax_right.axis("off")
+        else:
+            concurrency = concurrencies_plot[row_idx]
+            for tool_idx, name in enumerate(tool_names):
+                heights = [
+                    nvidia_values.get(name, {}).get((inp, out, concurrency), float("nan"))
+                    for inp, out in token_pairs
+                ]
+                ax_right.bar([i + offsets[tool_idx] for i in x_right], heights, bar_width, color=tool_colors[name])
+            for missing_in, missing_out, missing_concurrency in missing_right_markers:
+                if int(concurrency) != int(missing_concurrency):
+                    continue
+                missing_pair = (int(missing_in), int(missing_out))
+                if missing_pair not in token_pairs:
+                    continue
+                missing_key = (int(missing_in), int(missing_out), int(missing_concurrency))
+                has_real = any(
+                    math.isfinite(nvidia_values.get(name, {}).get(missing_key, float("nan")))
+                    for name in tool_names
+                )
+                if not has_real:
+                    slot_idx = token_pairs.index(missing_pair)
+                    ax_right.bar(
+                        x_right[slot_idx],
+                        1.0,
+                        bar_width * 0.9,
+                        color="#c9c9c9",
+                        alpha=0.55,
+                        edgecolor="#8a8a8a",
+                        hatch="//",
+                        zorder=0.5,
+                    )
+            ax_right.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
+            if bottom_limits is not None:
+                ax_right.set_ylim(*bottom_limits)
+            ax_right.set_title(f"batch size = {concurrency}", fontsize=title_fs)
+            ax_right.set_xticks(x_right)
+            ax_right.set_xticklabels(right_x_labels, rotation=45, ha="right", fontsize=label_fs)
+            ax_right.grid(axis="y", linestyle="--", alpha=0.3)
+            ax_right.tick_params(axis="x", pad=-1)
+            ax_right.tick_params(axis="y", labelsize=y_tick_fs, pad=-2)
+
+    fig.suptitle(
+        f"{device} SXM Systems",
+        y=0.965,
+        fontsize=title_fs,
+    )
+    if device_upper != "H100":
+        handles = [plt.Rectangle((0, 0), 1, 1, color=tool_colors[name]) for name in tool_names]
+        fig.legend(
+            handles,
+            tool_names,
+            loc="lower center",
+            bbox_to_anchor=(0.5, -0.01),
+            ncol=len(tool_names),
+            fontsize=label_fs,
+        )
+        bottom_margin = 0.24
+    else:
+        bottom_margin = 0.18
+    fig.subplots_adjust(left=0.085, right=0.99, top=0.84, bottom=bottom_margin, hspace=0.40, wspace=0.18)
 
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / f"inf_ratio_grid_combined_{device.lower()}.png"
-    fig.savefig(outpath, dpi=200)
+    fig.savefig(outpath, dpi=IEEE_DPI)
     plt.close(fig)
     return outpath
 

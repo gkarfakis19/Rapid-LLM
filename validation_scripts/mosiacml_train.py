@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
+from matplotlib.ticker import ScalarFormatter
 
 try:
     from .validation_helpers import ValidationSpec, parse_training_time, run_validation_suite
@@ -30,6 +31,24 @@ except ImportError:
         ValidationSpec,
         parse_training_time,
         run_validation_suite,
+    )
+try:
+    from .plot_style import (
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
+except ImportError:
+    from plot_style import (  # type: ignore
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
     )
 
 
@@ -76,6 +95,8 @@ REQUIRED_COLUMNS = (
     "inferred_total_latency_s",
 )
 
+MAX_ACTUAL_TPS_FOR_PLOTS = 1e6
+
 
 @dataclass
 class MosaicCase:
@@ -106,16 +127,6 @@ def _parse_bool(value: object) -> bool:
     if text in {"0", "false", "no", "n", "f"}:
         return False
     raise ValueError(f"Invalid boolean value: {value!r}")
-
-
-def _normalize_activation_checkpointing_true_mode(value: object) -> str:
-    mode = str(value).strip().lower()
-    if mode not in {"full", "selective"}:
-        raise ValueError(
-            "activation_checkpointing_true_mode must be one of: full, selective "
-            f"(got {value!r})"
-        )
-    return mode
 
 
 def _normalize_model_size(value: str) -> str:
@@ -229,14 +240,8 @@ def _build_spec(
     *,
     use_flashattention: bool,
     attention_tile_size: Optional[int],
-    activation_checkpointing_true_mode: str,
 ) -> ValidationSpec:
     effective_grad_accum = int(case.gradient_accumulation_steps) # * int(case.micro_batch_size)
-    activation_checkpointing_mode = (
-        str(activation_checkpointing_true_mode).strip().lower()
-        if bool(case.activation_checkpointing)
-        else "none"
-    )
     model_overrides = {
         "model_param": {
             "run_type": "training",
@@ -262,8 +267,7 @@ def _build_spec(
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
         "sw_param": {
-            "activation_checkpointing": activation_checkpointing_mode,
-            "full_recomputation": activation_checkpointing_mode == "full",
+            "full_recomputation": bool(case.activation_checkpointing),
             "dp_zero_stage": 3,
         },
     }
@@ -288,7 +292,6 @@ def _build_spec(
             "effective_gradient_accumulation_steps": effective_grad_accum,
             "global_batch_size": int(case.global_batch_size),
             "activation_checkpointing": bool(case.activation_checkpointing),
-            "activation_checkpointing_mode": activation_checkpointing_mode,
         },
         order=idx,
     )
@@ -303,7 +306,6 @@ def build_specs(
     *,
     use_flashattention: bool,
     attention_tile_size: Optional[int],
-    activation_checkpointing_true_mode: str = "full",
 ) -> Tuple[List[ValidationSpec], Dict[int, float]]:
     specs: List[ValidationSpec] = []
     actual_lookup: Dict[int, float] = {}
@@ -322,7 +324,6 @@ def build_specs(
                 hardware_config_path,
                 use_flashattention=use_flashattention,
                 attention_tile_size=attention_tile_size,
-                activation_checkpointing_true_mode=activation_checkpointing_true_mode,
             )
         )
         actual_lookup[int(case.case_index)] = float(case.inferred_total_latency_s)
@@ -361,7 +362,6 @@ def compute_rows(results, actual_lookup: Dict[int, float]) -> List[Dict[str, obj
                 ),
                 "global_batch_size": int(meta.get("global_batch_size", 0)),
                 "activation_checkpointing": bool(meta.get("activation_checkpointing", False)),
-                "activation_checkpointing_mode": str(meta.get("activation_checkpointing_mode", "none")),
                 "pred_training_time_s": pred,
                 "actual_inferred_total_latency_s": actual,
                 "signed_pct_error": signed_pct_error,
@@ -375,6 +375,7 @@ def compute_rows(results, actual_lookup: Dict[int, float]) -> List[Dict[str, obj
 
 
 def _plot_error_facet_heatmap(rows: List[Dict[str, object]], title: str, output: Path) -> Optional[Path]:
+    rows = _filter_rows_by_actual_throughput(rows)
     if not rows:
         return None
 
@@ -408,93 +409,130 @@ def _plot_error_facet_heatmap(rows: List[Dict[str, object]], title: str, output:
         vbound = 1.0
 
     n_models = len(ordered_models)
-    ncols = min(3, n_models)
+    ncols = 1
     nrows = int(math.ceil(n_models / float(ncols)))
 
-    fig_w = max(8.0, 4.8 * ncols)
-    fig_h = max(4.5, 3.9 * nrows)
-    fig, axes = plt.subplots(
-        nrows=nrows,
-        ncols=ncols,
-        figsize=(fig_w, fig_h),
-        squeeze=False,
-        constrained_layout=True,
-    )
-    fig.suptitle(title, fontsize=13)
-
-    cmap = plt.cm.coolwarm.copy()
-    cmap.set_bad(color="#efefef")
-    image = None
-
-    for idx, model in enumerate(ordered_models):
-        ax = axes[idx // ncols][idx % ncols]
-        model_df = df[df["model_size"].astype(str).str.lower() == model]
-
-        pivot_signed = (
-            model_df.pivot_table(
-                index="num_gpus",
-                columns="seq_len",
-                values="signed_pct_error",
-                aggfunc="mean",
-            )
-            .reindex(index=gpu_values, columns=seq_values)
+    fig_h = max(3.0, 2.6 * nrows + 0.6)
+    with plt.rc_context(ieee_rc_params()):
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=ncols,
+            figsize=(IEEE_HALF_COLUMN_WIDTH_IN, fig_h),
+            squeeze=False,
+            constrained_layout=True,
         )
+        fig.suptitle(title, fontsize=IEEE_TITLE_SIZE_PT)
 
-        heat = pivot_signed.to_numpy(dtype=float)
-        heat_masked = np.ma.masked_invalid(heat)
-        image = ax.imshow(
-            heat_masked,
-            cmap=cmap,
-            vmin=-vbound,
-            vmax=vbound,
-            aspect="auto",
-            origin="lower",
-        )
+        cmap = plt.cm.coolwarm.copy()
+        cmap.set_bad(color="#efefef")
+        image = None
 
-        ax.set_title("Model {}".format(model), fontsize=10)
-        ax.set_xlabel("seq_len")
-        ax.set_ylabel("num_gpus")
-        ax.set_xticks(range(len(seq_values)))
-        ax.set_xticklabels([str(v) for v in seq_values], rotation=35, ha="right", fontsize=8)
-        ax.set_yticks(range(len(gpu_values)))
-        ax.set_yticklabels([str(v) for v in gpu_values], fontsize=8)
-        ax.set_xticks(np.arange(-0.5, len(seq_values), 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, len(gpu_values), 1), minor=True)
-        ax.grid(which="minor", color="white", linewidth=0.6)
-        ax.tick_params(which="minor", bottom=False, left=False)
+        for idx, model in enumerate(ordered_models):
+            ax = axes[idx // ncols][idx % ncols]
+            model_df = df[df["model_size"].astype(str).str.lower() == model]
 
-        signed_vals = pivot_signed.to_numpy(dtype=float)
-        for y in range(signed_vals.shape[0]):
-            for x in range(signed_vals.shape[1]):
-                signed = signed_vals[y, x]
-                if math.isnan(signed):
-                    continue
-                text_color = "white" if abs(signed) > (0.45 * vbound) else "black"
-                ax.text(
-                    x,
-                    y,
-                    "{:+.1f}%".format(float(signed)),
-                    ha="center",
-                    va="center",
-                    fontsize=7,
-                    color=text_color,
+            pivot_signed = (
+                model_df.pivot_table(
+                    index="num_gpus",
+                    columns="seq_len",
+                    values="signed_pct_error",
+                    aggfunc="mean",
                 )
+                .reindex(index=gpu_values, columns=seq_values)
+            )
+            heat = pivot_signed.to_numpy(dtype=float)
+            heat_masked = np.ma.masked_invalid(heat)
+            image = ax.imshow(
+                heat_masked,
+                cmap=cmap,
+                vmin=-vbound,
+                vmax=vbound,
+                aspect="auto",
+                origin="lower",
+            )
 
-    for idx in range(n_models, nrows * ncols):
-        axes[idx // ncols][idx % ncols].axis("off")
+            ax.set_title("Model {}".format(model), fontsize=IEEE_TITLE_SIZE_PT)
+            ax.set_xlabel("seq_len", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+            ax.set_ylabel("num_gpus", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+            ax.set_xticks(range(len(seq_values)))
+            ax.set_xticklabels([str(v) for v in seq_values], rotation=35, ha="right", fontsize=IEEE_FONT_SIZE_PT)
+            ax.set_yticks(range(len(gpu_values)))
+            ax.set_yticklabels([str(v) for v in gpu_values], fontsize=IEEE_FONT_SIZE_PT)
+            ax.set_xticks(np.arange(-0.5, len(seq_values), 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, len(gpu_values), 1), minor=True)
+            ax.grid(which="minor", color="white", linewidth=0.6)
+            ax.tick_params(which="minor", bottom=False, left=False)
 
-    if image is not None:
-        cbar = fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.9, pad=0.02)
-        cbar.set_label("Signed Percent Error")
+            signed_vals = pivot_signed.to_numpy(dtype=float)
+            for y in range(signed_vals.shape[0]):
+                for x in range(signed_vals.shape[1]):
+                    signed = signed_vals[y, x]
+                    if math.isnan(signed):
+                        continue
+                    text_color = "white" if abs(signed) > (0.45 * vbound) else "black"
+                    ax.text(
+                        x,
+                        y,
+                        "{:+.1f}%".format(float(signed)),
+                        ha="center",
+                        va="center",
+                        fontsize=IEEE_FONT_SIZE_PT,
+                        color=text_color,
+                    )
+
+        for idx in range(n_models, nrows * ncols):
+            axes[idx // ncols][idx % ncols].axis("off")
+
+        if image is not None:
+            cbar = fig.colorbar(image, ax=axes.ravel().tolist(), shrink=0.9, pad=0.02)
+            cbar.set_label("Signed Percent Error", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+            cbar.ax.tick_params(labelsize=IEEE_FONT_SIZE_PT)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=200)
+    fig.savefig(output, dpi=IEEE_DPI)
     plt.close(fig)
     return output
 
 
 def _default_parity_plot_path(plot_output: Path) -> Path:
     return plot_output.with_name("{}_parity{}".format(plot_output.stem, plot_output.suffix))
+
+
+def _default_parity_combined_plot_path(parity_plot_output: Path) -> Path:
+    return parity_plot_output.with_name("{}_combined{}".format(parity_plot_output.stem, parity_plot_output.suffix))
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _actual_tps_from_row(row: Dict[str, object]) -> float:
+    actual_s = _safe_float(row.get("actual_inferred_total_latency_s"))
+    seq_len = _safe_float(row.get("seq_len"))
+    global_batch_size = _safe_float(row.get("global_batch_size"))
+    if (
+        not np.isfinite(actual_s)
+        or not np.isfinite(seq_len)
+        or not np.isfinite(global_batch_size)
+        or actual_s <= 0
+        or seq_len <= 0
+        or global_batch_size <= 0
+    ):
+        return float("nan")
+    return (seq_len * global_batch_size) / actual_s
+
+
+def _filter_rows_by_actual_throughput(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    filtered: List[Dict[str, object]] = []
+    for row in rows:
+        actual_tps = _actual_tps_from_row(row)
+        if np.isfinite(actual_tps) and actual_tps > MAX_ACTUAL_TPS_FOR_PLOTS:
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def _prepare_parity_df(rows: List[Dict[str, object]]) -> pd.DataFrame:
@@ -559,42 +597,22 @@ def _draw_parity_plot(
         ax.axis("off")
         return False
 
-    seq_lens = sorted({int(v) for v in df["seq_len"].dropna().tolist()})
-    gpu_counts = sorted({int(v) for v in df["num_gpus"].dropna().tolist()})
-    if not seq_lens or not gpu_counts:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
-        ax.axis("off")
-        return False
-
-    seq_cmap = plt.get_cmap("tab10")
-    gpu_cmap = plt.get_cmap("Dark2")
-    seq_to_color = {value: seq_cmap(idx % seq_cmap.N) for idx, value in enumerate(seq_lens)}
-    gpu_to_edge = {value: gpu_cmap(idx % gpu_cmap.N) for idx, value in enumerate(gpu_counts)}
-
     plotted_any = False
     for model, marker in model_to_marker.items():
         model_df = df[df["model_size"] == model]
         if model_df.empty:
             continue
-        for seq_len in seq_lens:
-            seq_df = model_df[model_df["seq_len"] == seq_len]
-            if seq_df.empty:
-                continue
-            for num_gpus in gpu_counts:
-                group = seq_df[seq_df["num_gpus"] == num_gpus]
-                if group.empty:
-                    continue
-                plotted_any = True
-                ax.scatter(
-                    group["actual_throughput_tps"],
-                    group["pred_throughput_tps"],
-                    marker=marker,
-                    s=42,
-                    alpha=0.92,
-                    facecolors=[seq_to_color[seq_len]],
-                    edgecolors=[gpu_to_edge[num_gpus]],
-                    linewidths=1.2,
-                )
+        plotted_any = True
+        ax.scatter(
+            model_df["actual_throughput_tps"],
+            model_df["pred_throughput_tps"],
+            marker=marker,
+            s=30,
+            alpha=0.92,
+            c="#1f77b4",
+            edgecolors="none",
+            linewidths=0.0,
+        )
 
     if not plotted_any:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
@@ -621,102 +639,19 @@ def _draw_parity_plot(
         linewidth=1.1,
     )
     ax.add_line(diag_handle)
-    error_handle = Line2D(
-        [lower_lim, upper_lim],
-        [lower_lim * 1.2, upper_lim * 1.2],
-        linestyle=":",
-        color="gray",
-        linewidth=1.1,
-    )
-    ax.add_line(error_handle)
     ax.set_xlim(lower_lim, upper_lim)
     ax.set_ylim(lower_lim, upper_lim)
-    ax.set_xlabel("Actual (tokens/sec)")
-    ax.set_ylabel("Predicted (tokens/sec)")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    sci_x = ScalarFormatter(useMathText=True)
+    sci_x.set_scientific(True)
+    sci_x.set_powerlimits((0, 0))
+    sci_y = ScalarFormatter(useMathText=True)
+    sci_y.set_scientific(True)
+    sci_y.set_powerlimits((0, 0))
+    ax.xaxis.set_major_formatter(sci_x)
+    ax.yaxis.set_major_formatter(sci_y)
     ax.grid(True, which="both", linestyle="--", alpha=0.3)
-
-    seq_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            linestyle="None",
-            markerfacecolor=seq_to_color[value],
-            markeredgecolor="#333333",
-            markeredgewidth=0.8,
-            markersize=7,
-            label=str(value),
-        )
-        for value in seq_lens
-    ]
-    gpu_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            linestyle="None",
-            markerfacecolor="white",
-            markeredgecolor=gpu_to_edge[value],
-            markeredgewidth=1.6,
-            markersize=7,
-            label=str(value),
-        )
-        for value in gpu_counts
-    ]
-    model_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=model_to_marker[model],
-            linestyle="None",
-            markerfacecolor="white",
-            markeredgecolor="black",
-            markeredgewidth=0.9,
-            markersize=7,
-            label="MPT-{}".format(str(model).upper()),
-        )
-        for model in model_to_marker
-    ]
-
-    model_legend = ax.legend(
-        handles=model_handles,
-        loc="upper left",
-        fontsize=8,
-        framealpha=0.9,
-        title="Model",
-        title_fontsize=9,
-    )
-    ax.add_artist(model_legend)
-    legend_rows = max(len(seq_handles), len(gpu_handles))
-    blank_handles = [
-        Line2D([0], [0], linestyle="None", marker="", alpha=0.0, label="")
-        for _ in range(legend_rows)
-    ]
-    seq_column = seq_handles + blank_handles[: max(0, legend_rows - len(seq_handles))]
-    gpu_column = gpu_handles + blank_handles[: max(0, legend_rows - len(gpu_handles))]
-    metadata_legend = ax.legend(
-        handles=seq_column + gpu_column,
-        loc="lower right",
-        ncol=2,
-        fontsize=8,
-        framealpha=0.9,
-        title="SeqLen / # GPUs",
-        title_fontsize=9,
-        columnspacing=1.6,
-    )
-    ax.add_artist(metadata_legend)
-    line_legend = ax.legend(
-        handles=[
-            Line2D([0], [0], linestyle="--", color="#b04a4a", linewidth=1.1, label="y = x"),
-            Line2D([0], [0], linestyle=":", color="gray", linewidth=1.1, label="20% error"),
-        ],
-        loc="lower center",
-        ncol=2,
-        fontsize=8,
-        framealpha=0.9,
-        bbox_to_anchor=(0.5, 0.02),
-    )
-    ax.add_artist(line_legend)
     return True
 
 
@@ -737,22 +672,214 @@ def _plot_parity_subsets(
     markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">"]
     model_to_marker = {model: markers[idx % len(markers)] for idx, model in enumerate(ordered_models)}
 
-    parity_width = 8.0
-    parity_height = parity_width * 0.5
-    fig, ax = plt.subplots(figsize=(parity_width, parity_height))
-    ax.set_title("MPT Training Throughput (H100 80GB BF16)", fontsize=14, pad=0)
-    ok = _draw_parity_plot(
-        ax,
-        df,
-        model_to_marker=model_to_marker,
-    )
-    if not ok:
-        plt.close(fig)
+    seq_lens = sorted({int(v) for v in df["seq_len"].dropna().tolist()})
+    if not seq_lens:
+        return None
+    subplot_seq_lens = seq_lens[:8]
+
+    parity_width = 7.16
+    parity_height = 4.8
+    with plt.rc_context(ieee_rc_params()):
+        fig, axes = plt.subplots(
+            2,
+            4,
+            figsize=(parity_width, parity_height),
+            squeeze=False,
+        )
+        fig.suptitle(
+            "MPT Training Throughput (H100 80GB BF16)",
+            fontsize=IEEE_TITLE_SIZE_PT,
+            y=0.955,
+        )
+
+        axes_flat = axes.ravel()
+        for idx, ax in enumerate(axes_flat):
+            if idx >= len(subplot_seq_lens):
+                ax.axis("off")
+                continue
+            seq_len = subplot_seq_lens[idx]
+            seq_df = df[df["seq_len"] == seq_len]
+            ok = _draw_parity_plot(
+                ax,
+                seq_df,
+                model_to_marker=model_to_marker,
+            )
+            if not ok:
+                ax.axis("off")
+                continue
+
+            ax.set_title(f"seq_len={seq_len}", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+            row_idx = idx // 4
+            col_idx = idx % 4
+            if row_idx != 1:
+                ax.set_xlabel("")
+            if col_idx != 0:
+                ax.set_ylabel("")
+
+        model_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker=model_to_marker[model],
+                linestyle="None",
+                markerfacecolor="white",
+                markeredgecolor="black",
+                markeredgewidth=0.9,
+                markersize=6.5,
+                label=str(model).upper(),
+            )
+            for model in model_to_marker
+        ]
+        fig.legend(
+            handles=model_handles,
+            loc="upper center",
+            ncol=max(1, len(model_handles)),
+            bbox_to_anchor=(0.5, 0.915),
+            fontsize=IEEE_FONT_SIZE_PT,
+            framealpha=0.9,
+        )
+    fig.tight_layout(rect=(0.02, 0.09, 0.98, 0.91))
+    parity_plot_output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(parity_plot_output, dpi=IEEE_DPI, bbox_inches="tight", pad_inches=0.06)
+    plt.close(fig)
+    return parity_plot_output
+
+
+def _plot_parity_combined_seq_len(
+    rows: List[Dict[str, object]],
+    title: str,
+    parity_plot_output: Path,
+) -> Optional[Path]:
+    del title  # fixed title per request
+    filtered_rows = _filter_rows_by_actual_throughput(rows)
+    df = _prepare_parity_df(filtered_rows)
+    if df.empty:
         return None
 
-    fig.tight_layout()
+    ordered_models = _ordered_model_sizes(df)
+    if not ordered_models:
+        return None
+
+    seq_lens = sorted({int(v) for v in df["seq_len"].dropna().tolist()})
+    if not seq_lens:
+        return None
+
+    markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">"]
+    model_to_marker = {model: markers[idx % len(markers)] for idx, model in enumerate(ordered_models)}
+    colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(1, len(seq_lens))))
+    seq_to_color = {seq_len: colors[idx] for idx, seq_len in enumerate(seq_lens)}
+    with plt.rc_context(ieee_rc_params()):
+        fig, ax = plt.subplots(
+            figsize=(IEEE_HALF_COLUMN_WIDTH_IN * 1.2, 3.0),
+        )
+        for model in ordered_models:
+            for seq_len in seq_lens:
+                sub = df[(df["model_size"] == model) & (df["seq_len"] == seq_len)]
+                if sub.empty:
+                    continue
+                ax.scatter(
+                    sub["actual_throughput_tps"],
+                    sub["pred_throughput_tps"],
+                    marker=model_to_marker[model],
+                    s=26,
+                    alpha=0.9,
+                    c=[seq_to_color[seq_len]],
+                    edgecolors="none",
+                    linewidths=0.0,
+                )
+
+        x_values = df["actual_throughput_tps"].to_numpy(dtype=float)
+        y_values = df["pred_throughput_tps"].to_numpy(dtype=float)
+        lower = min(float(np.nanmin(x_values)), float(np.nanmin(y_values)))
+        upper = max(float(np.nanmax(x_values)), float(np.nanmax(y_values)))
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            plt.close(fig)
+            return None
+        if upper <= lower:
+            upper = lower + 1.0
+
+        pad = max((upper - lower) * 0.08, upper * 0.03)
+        lower_lim = max(0.0, lower - pad)
+        upper_lim = upper + pad
+        ax.plot(
+            [lower_lim, upper_lim],
+            [lower_lim, upper_lim],
+            linestyle="--",
+            color="#b04a4a",
+            linewidth=1.1,
+        )
+        ax.set_xlim(lower_lim, upper_lim)
+        ax.set_ylim(lower_lim, upper_lim)
+        ax.set_title("MPT Training Throughput (tokens/s) w/ H100 BF16", fontsize=IEEE_TITLE_SIZE_PT)
+        ax.set_xlabel("Actual", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        ax.set_ylabel("Predicted", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        sci_x = ScalarFormatter(useMathText=True)
+        sci_x.set_scientific(True)
+        sci_x.set_powerlimits((0, 0))
+        sci_y = ScalarFormatter(useMathText=True)
+        sci_y.set_scientific(True)
+        sci_y.set_powerlimits((0, 0))
+        ax.xaxis.set_major_formatter(sci_x)
+        ax.yaxis.set_major_formatter(sci_y)
+        ax.grid(True, which="both", linestyle="--", alpha=0.3)
+
+        def _model_param_label(model_size: str) -> str:
+            text = str(model_size).strip().lower()
+            if text.endswith("m") and len(text) > 1:
+                return f"{text[:-1]}M"
+            if text.endswith("b") and len(text) > 1:
+                return f"{text[:-1]}B"
+            return text.upper()
+
+        model_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker=model_to_marker[model],
+                linestyle="None",
+                markerfacecolor="white",
+                markeredgecolor="black",
+                markeredgewidth=0.9,
+                markersize=6.5,
+                label=_model_param_label(model),
+            )
+            for model in ordered_models
+        ]
+        seq_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor=seq_to_color[seq_len],
+                markeredgecolor="none",
+                markersize=6.5,
+                label=str(seq_len),
+            )
+            for seq_len in seq_lens
+        ]
+
+        model_legend = ax.legend(
+            handles=model_handles,
+            loc="upper left",
+            title="MPT Size",
+            fontsize=IEEE_FONT_SIZE_PT,
+            title_fontsize=IEEE_FONT_SIZE_PT,
+            framealpha=0.9,
+        )
+        ax.add_artist(model_legend)
+        ax.legend(
+            handles=seq_handles,
+            loc="lower right",
+            title="SeqLen",
+            fontsize=IEEE_FONT_SIZE_PT,
+            title_fontsize=IEEE_FONT_SIZE_PT,
+            framealpha=0.9,
+        )
+        fig.tight_layout()
+
     parity_plot_output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(parity_plot_output, dpi=200)
+    fig.savefig(parity_plot_output, dpi=IEEE_DPI, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
     return parity_plot_output
 
@@ -774,7 +901,6 @@ def _write_rows_csv(rows: List[Dict[str, object]], output_csv: Path) -> None:
             "effective_gradient_accumulation_steps",
             "global_batch_size",
             "activation_checkpointing",
-            "activation_checkpointing_mode",
             "pred_training_time_s",
             "actual_inferred_total_latency_s",
             "signed_pct_error",
@@ -807,7 +933,6 @@ def run(
     emit_logs: bool = True,
     use_flashattention: bool = True,
     attention_tile_size: Optional[int] = None,
-    activation_checkpointing_true_mode: str = "full",
 ) -> List[Dict[str, object]]:
     input_path = Path(input_csv) if input_csv else DEFAULT_INPUT_CSV
     model_cfg = str(model_config) if model_config else None
@@ -816,7 +941,6 @@ def run(
     output_path = Path(output_csv) if output_csv else DEFAULT_OUTPUT_CSV
     plot_path = Path(plot_output) if plot_output else DEFAULT_PLOT_OUTPUT
     parity_plot_path = Path(parity_plot_output) if parity_plot_output else _default_parity_plot_path(plot_path)
-    ckpt_true_mode = _normalize_activation_checkpointing_true_mode(activation_checkpointing_true_mode)
 
     if use_flashattention and attention_tile_size is not None and int(attention_tile_size) <= 0:
         raise ValueError(
@@ -835,7 +959,6 @@ def run(
         hardware_config_path=hw_cfg,
         use_flashattention=bool(use_flashattention),
         attention_tile_size=None if attention_tile_size is None else int(attention_tile_size),
-        activation_checkpointing_true_mode=ckpt_true_mode,
     )
     base_model_cfg = specs[0].model_config_path if specs and specs[0].model_config_path else str(DEFAULT_MODEL_CONFIG)
 
@@ -858,8 +981,7 @@ def run(
             block = [
                 (
                     "\n=== Result (case={case}, model={model}, seq={seq}, gpus={gpus}, "
-                    "tp={tp}, dp={dp}, mb={mb}, ga={ga}, gbs={gbs}, "
-                    "ckpt={ckpt}, ckpt_mode={ckpt_mode}) ==="
+                    "tp={tp}, dp={dp}, mb={mb}, ga={ga}, gbs={gbs}, ckpt={ckpt}) ==="
                 ).format(
                     case=row["case_index"],
                     model=row["model_size"],
@@ -871,7 +993,6 @@ def run(
                     ga=row["gradient_accumulation_steps"],
                     gbs=row["global_batch_size"],
                     ckpt=row["activation_checkpointing"],
-                    ckpt_mode=row.get("activation_checkpointing_mode", "none"),
                 )
             ]
             if row["success"] and not math.isnan(float(row["abs_pct_error"])):
@@ -899,10 +1020,18 @@ def run(
             "MosaicML H100 BF16 {}: parity (predicted vs actual)".format(model_size_label),
             parity_plot_path,
         )
+        parity_combined_path = _default_parity_combined_plot_path(parity_plot_path)
+        parity_combined_created = _plot_parity_combined_seq_len(
+            rows,
+            "MosaicML H100 BF16 {}: parity (all seq_len)".format(model_size_label),
+            parity_combined_path,
+        )
         if emit_logs and heatmap_created:
             print("Wrote heatmap plot: {}".format(heatmap_created))
         if emit_logs and parity_created:
             print("Wrote parity plot: {}".format(parity_created))
+        if emit_logs and parity_combined_created:
+            print("Wrote parity combined plot: {}".format(parity_combined_created))
 
     pct_errors = [float(r["abs_pct_error"]) for r in rows if not math.isnan(float(r["abs_pct_error"]))]
     avg_abs_error = sum(pct_errors) / len(pct_errors) if pct_errors else float("nan")
@@ -978,15 +1107,6 @@ def _parse_args() -> argparse.Namespace:
             "Default: leave unchanged from model config."
         ),
     )
-    parser.add_argument(
-        "--activation-checkpointing-true-mode",
-        choices=("full", "selective"),
-        default="full",
-        help=(
-            "Interpretation of CSV activation_checkpointing=True. "
-            "'full' maps to full recomputation; 'selective' maps to selective checkpointing."
-        ),
-    )
     return parser.parse_args()
 
 
@@ -1005,5 +1125,4 @@ if __name__ == "__main__":
         show_progress=args.show_progress,
         use_flashattention=(not bool(args.disable_flashattention)),
         attention_tile_size=args.attention_tile_size,
-        activation_checkpointing_true_mode=args.activation_checkpointing_true_mode,
     )

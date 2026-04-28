@@ -27,6 +27,22 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+try:
+    from .plot_style import (
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
+except ImportError:
+    from plot_style import (  # type: ignore
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_PERF = REPO_ROOT / "run_perf.py"
@@ -431,13 +447,30 @@ def _run_case(
 
 
 def _format_label(row: Mapping[str, str]) -> str:
-    model = row.get("model", "")
-    recomputation = row.get("recomputation", "")
-    return (
-        f"{model} "
-        f"tp{row.get('tp', '')}-cp{row.get('cp', '')}-pp{row.get('pp', '')}-dp{row.get('dp', '')}"
-        f"-recompute-{recomputation}"
-    )
+    model_size = _model_size_shorthand(row.get("model", ""))
+    recompute = _recompute_shorthand(row.get("recomputation", ""))
+    tp = row.get("tp", "")
+    pp = row.get("pp", "")
+    dp = row.get("dp", "")
+    return f"{model_size}, [{tp},{pp},{dp}], {recompute}"
+
+
+def _model_size_shorthand(model: str) -> str:
+    matches = re.findall(r"(\d+(?:\.\d+)?\s*[KMBT])", str(model).upper())
+    if matches:
+        return matches[-1].replace(" ", "")
+    return str(model).strip() or "model"
+
+
+def _recompute_shorthand(value: object) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"full", "true", "yes", "on", "1"}:
+        return "F"
+    if mode in {"selective", "partial", "false", "no", "off", "0"}:
+        return "P"
+    if not mode:
+        return "?"
+    return f"{mode[:1].upper()}{mode}"
 
 
 def _build_series(
@@ -483,29 +516,29 @@ def _plot_results(
     width = 0.2
     x = list(range(len(labels)))
 
-    fig_w = max(8.0, 0.8 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 5))
-    for idx, name in enumerate(tool_list):
-        offsets = [pos + (idx - (len(tool_list) - 1) / 2) * width for pos in x]
-        label = DISPLAY_LABELS.get(name, name)
-        values = series.get(name, [])
-        ax.bar(
-            offsets,
-            values,
-            width=width,
-            label=label,
-            color=COLOR_MAP.get(name, None),
-        )
+    fig_h = max(2.1, max(3.0, 1.8 + 0.06 * len(labels)) * 0.7) * 1.1
+    with plt.rc_context(ieee_rc_params()):
+        fig, ax = plt.subplots(figsize=(IEEE_HALF_COLUMN_WIDTH_IN, fig_h))
+        for idx, name in enumerate(tool_list):
+            offsets = [pos + (idx - (len(tool_list) - 1) / 2) * width for pos in x]
+            label = DISPLAY_LABELS.get(name, name)
+            values = series.get(name, [])
+            ax.bar(
+                offsets,
+                values,
+                width=width,
+                label=label,
+                color=COLOR_MAP.get(name, None),
+            )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
-    ax.set_ylabel("Training time (s)")
-    ax.set_title(title)
-    ax.legend(loc="upper right")
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    fig.tight_layout()
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_ylabel("Training time (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        ax.legend(loc="upper right")
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        fig.tight_layout(rect=(0.0, 0.0, 0.98, 1.0))
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=200)
+    fig.savefig(output, dpi=IEEE_DPI, bbox_inches="tight")
     plt.close(fig)
     return output
 

@@ -1001,12 +1001,8 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
     for mode in normalized_modes:
         for idx, case in enumerate(cases):
             label = f"{case.variant.upper()} TP={case.tp} PP={case.pp} CP={case.cp} DP={case.dp}"
-            local_step_batch = (
-                uci_train_validation.GLOBAL_BATCH_SIZE
-                // (uci_train_validation.MICRO_BATCH_SIZE * case.dp)
-            )
-            grad_acc_steps = 1 if int(case.pp) > 1 else int(local_step_batch)
-            eff_mb = int(local_step_batch) if int(case.pp) > 1 else 1
+            mb = uci_train_validation.GLOBAL_BATCH_SIZE // (uci_train_validation.MICRO_BATCH_SIZE * case.dp)
+            eff_mb = mb if int(case.pp) > 1 else 1
             network_override, mapping_desc = uci_train_validation._build_network_override(
                 case.tp,
                 case.pp,
@@ -1016,9 +1012,6 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
             )
             model_overrides = {
                 "model_param": {
-                    "global_batch_size": uci_train_validation.GLOBAL_BATCH_SIZE,
-                    "gradient_accumulation_steps": int(grad_acc_steps),
-                    "micro_batch_size": uci_train_validation.MICRO_BATCH_SIZE,
                     "seq_len": 4096,
                     "run_type": "training",
                 }
@@ -1034,8 +1027,7 @@ def _build_uci_train_bundle(args: argparse.Namespace) -> SuiteBundle:
                     "inference": {"replica_count": 1, "moe_dp": 1},
                 },
                 "sw_param": {
-                    "dp_zero_stage": 1 if case.variant.upper() == "DDP" else 3,
-                    "activation_checkpointing": "selective",
+                    "dp_zero_stage": 0 if case.variant.upper() == "DDP" else 3,
                 },
             }
             hw_overrides.update(network_override)
@@ -1216,10 +1208,18 @@ def _build_mosaic_train_bundle(args: argparse.Namespace) -> SuiteBundle:
                 "MosaicML H100 BF16 {}: parity (predicted vs actual)".format(model_size_label),
                 parity_path,
             )
+            parity_combined_path = mosaic_train._default_parity_combined_plot_path(parity_path)
+            parity_combined = mosaic_train._plot_parity_combined_seq_len(
+                rows,
+                "MosaicML H100 BF16 {}: parity (all seq_len)".format(model_size_label),
+                parity_combined_path,
+            )
             if heatmap is not None:
                 plot_paths.append(str(heatmap))
             if parity is not None:
                 plot_paths.append(str(parity))
+            if parity_combined is not None:
+                plot_paths.append(str(parity_combined))
 
         pct_values = [
             float(row["abs_pct_error"])

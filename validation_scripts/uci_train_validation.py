@@ -36,6 +36,24 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import yaml
+try:
+    from .plot_style import (
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
+except ImportError:
+    from plot_style import (  # type: ignore
+        IEEE_AXIS_TITLE_SIZE_PT,
+        IEEE_DPI,
+        IEEE_FONT_SIZE_PT,
+        IEEE_HALF_COLUMN_WIDTH_IN,
+        IEEE_TITLE_SIZE_PT,
+        ieee_rc_params,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -342,16 +360,12 @@ def _run_case(
     log_path = spec_root / "worker.log"
     spec_root.mkdir(parents=True, exist_ok=True)
 
-    local_step_batch = GLOBAL_BATCH_SIZE // (MICRO_BATCH_SIZE * case.dp)
-    grad_acc_steps = 1 if int(case.pp) > 1 else int(local_step_batch)
-    eff_mb = int(local_step_batch) if int(case.pp) > 1 else 1
+    mb = GLOBAL_BATCH_SIZE // (MICRO_BATCH_SIZE * case.dp)
+    eff_mb = mb if int(case.pp) > 1 else 1
     network_override, mapping_desc = _build_network_override(case.tp, case.pp, case.cp, case.dp, astra_mode)
 
     model_overrides = {
         "model_param": {
-            "global_batch_size": GLOBAL_BATCH_SIZE,
-            "gradient_accumulation_steps": int(grad_acc_steps),
-            "micro_batch_size": MICRO_BATCH_SIZE,
             "seq_len": 4096,
             "run_type": "training",
         }
@@ -367,8 +381,7 @@ def _run_case(
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
         "sw_param": {
-            "dp_zero_stage": 1 if case.variant.upper() == "DDP" else 3,
-            "activation_checkpointing": "selective",
+            "dp_zero_stage": 0 if case.variant.upper() == "DDP" else 3,
         },
     }
     hw_overrides.update(network_override)
@@ -524,29 +537,51 @@ def _plot_compare_results(
     width = 0.15
     x = list(range(len(labels)))
 
-    fig_w = max(8.0, 0.8 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 5))
-    for idx, name in enumerate(tool_list):
-        offsets = [pos + (idx - (len(tool_list) - 1) / 2) * width for pos in x]
-        label = COMPARE_LABELS.get(name, name)
-        values = series.get(name, [])
-        ax.bar(
-            offsets,
-            values,
-            width=width,
-            label=label,
-            color=COMPARE_COLOR_MAP.get(name, None),
-        )
+    fig_h = max(3.0, 1.8 + 0.06 * len(labels)) * 0.9
+    fig_w = IEEE_HALF_COLUMN_WIDTH_IN
+    legend_fs = max(5, IEEE_FONT_SIZE_PT - 2)
+    with plt.rc_context(ieee_rc_params()):
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        for idx, name in enumerate(tool_list):
+            offsets = [pos + (idx - (len(tool_list) - 1) / 2) * width for pos in x]
+            label = COMPARE_LABELS.get(name, name)
+            values = series.get(name, [])
+            ax.bar(
+                offsets,
+                values,
+                width=width,
+                label=label,
+                color=COMPARE_COLOR_MAP.get(name, None),
+            )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
-    ax.set_ylabel("Training time (s)")
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    fig.tight_layout()
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=25, ha="right")
+        ax.set_ylabel("Training time (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
+        y_min, y_max = ax.get_ylim()
+        if math.isfinite(y_min) and math.isfinite(y_max):
+            upper = y_max * 1.2 if y_max >= 0 else y_max / 1.2
+            ax.set_ylim(y_min, upper)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.99),
+            ncol=len(tool_list),
+            fontsize=legend_fs,
+            frameon=True,
+            fancybox=False,
+            framealpha=1.0,
+            edgecolor="black",
+            facecolor="white",
+            borderpad=0.2,
+            handlelength=1.1,
+            handletextpad=0.3,
+            columnspacing=0.5,
+            labelspacing=0.2,
+            borderaxespad=0.2,
+        )
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=200)
+    fig.savefig(output, dpi=IEEE_DPI)
     plt.close(fig)
     return output
 
