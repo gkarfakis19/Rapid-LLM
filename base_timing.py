@@ -115,7 +115,6 @@ class model_LLM:
     def __init__(self, exp_config):
         self.global_batch_size = exp_config.model_config.global_batch_size
         self.gradient_accumulation_steps = exp_config.model_config.gradient_accumulation_steps
-        self.micro_batch_size = getattr(exp_config.model_config, "micro_batch_size", None)
         self.vocab_size = exp_config.model_config.vocab_size
         self.num_layers = exp_config.model_config.num_layers
         self.hidden_dim = exp_config.model_config.hidden_dim
@@ -374,33 +373,9 @@ class TimeCalculation:
         self.precision_bytes = self.precision.activations
         self.h2d_bandwidth = getattr(hw_config.sw_config, "h2d_bandwidth", -1)
         self.zero_stage = getattr(hw_config.sw_config, "dp_zero_stage", 0)
-        raw_activation_checkpointing = str(
-            getattr(hw_config.sw_config, "activation_checkpointing", "none") or "none"
-        ).lower()
-        raw_full_recomputation = bool(getattr(hw_config.sw_config, "full_recomputation", False))
-        if raw_full_recomputation:
-            self.activation_checkpointing = "full"
-        else:
-            self.activation_checkpointing = "none" if raw_activation_checkpointing == "full" else raw_activation_checkpointing
-        self.selective_checkpointing = bool(
-            getattr(
-                hw_config.sw_config,
-                "selective_checkpointing",
-                self.activation_checkpointing == "selective",
-            )
-        )
-        self.full_recomputation = self.activation_checkpointing == "full"
+        self.full_recomputation = getattr(hw_config.sw_config, "full_recomputation", False)
         self.dp_microbatch = getattr(hw_config.sw_config, "dp_microbatch", "every_mb")
         self.grad_acc_overhead = float(getattr(hw_config.sw_config, "grad_acc_overhead", 0.0) or 0.0)
-        self.zero3_embedding_gather_local_comp_time = float(
-            getattr(hw_config.sw_config, "zero3_embedding_gather_local_comp_time", 0.0) or 0.0
-        )
-        self.zero3_transformer_gather_local_comp_time = float(
-            getattr(hw_config.sw_config, "zero3_transformer_gather_local_comp_time", 0.0) or 0.0
-        )
-        self.zero3_softmax_gather_local_comp_time = float(
-            getattr(hw_config.sw_config, "zero3_softmax_gather_local_comp_time", 0.0) or 0.0
-        )
         self.attached = True
 
         run_type = "training"
@@ -512,30 +487,7 @@ class TimeCalculation:
             else:
                 dp_dense = self.dp * self.ep if bool(getattr(self.model, "use_moe", False)) else self.dp
             self.mini_batch = math.ceil(self.batch_size / dp_dense)  # mini-batch size for each data parallel node
-            explicit_micro_batch = getattr(self.model, "micro_batch_size", None)
-            if explicit_micro_batch is not None and str(self.run_type).lower() == "training":
-                explicit_micro_batch = int(explicit_micro_batch)
-                if self.pp > 1:
-                    if self.mini_batch % self.mb != 0:
-                        raise ValueError(
-                            f"Batch size must be divisible by pipeline micro-batches in explicit micro-batch mode: "
-                            f"{self.mini_batch} % {self.mb} != 0"
-                        )
-                    derived_micro_batch = self.mini_batch // self.mb
-                else:
-                    if int(self.mb) != 1:
-                        raise ValueError(
-                            "parallelism.mb must be 1 when model_param.micro_batch_size is set and parallelism.pp == 1"
-                        )
-                    derived_micro_batch = self.mini_batch
-                if derived_micro_batch != explicit_micro_batch:
-                    raise ValueError(
-                        "model_param.micro_batch_size does not match the derived training micro-batch size "
-                        f"(expected {derived_micro_batch}, got {explicit_micro_batch})"
-                    )
-                self.micro_batch = explicit_micro_batch
-            else:
-                self.micro_batch = math.ceil(self.mini_batch / self.mb) if self.pp > 1 else self.mini_batch
+            self.micro_batch = math.ceil(self.mini_batch / self.mb) if self.pp > 1 else self.mini_batch
             self.attention_type = self.model.attention_type
             self.flash_attention = getattr(self.model, "use_flashattention", False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, "kv_heads") else self.num_heads

@@ -162,14 +162,7 @@ class Graph:
         self.comp_times = comp_times or {}
         self.comm_metadata = comm_metadata or {}
         self.misc_metadata = misc_metadata or {}
-        raw_activation_checkpointing = str(self.misc_metadata.get("activation_checkpointing", "none") or "none").lower()
-        raw_full_recomputation = bool(self.misc_metadata.get("full_recomputation", False))
-        if raw_full_recomputation:
-            self.activation_checkpointing = "full"
-        else:
-            self.activation_checkpointing = "none" if raw_activation_checkpointing == "full" else raw_activation_checkpointing
-        self.selective_checkpointing = self.activation_checkpointing == "selective"
-        self.full_recomputation = self.activation_checkpointing == "full"
+        self.full_recomputation = bool(self.misc_metadata.get("full_recomputation", False))
         self.flattened_mode = bool(self.misc_metadata.get("flattened_mode", False))
         self.pipeline_style_recompute = bool(self.misc_metadata.get("pipeline_style_recompute", False))
         self.model_type = str(self.misc_metadata.get("model_type", "") or "").lower()
@@ -698,14 +691,12 @@ class Graph:
         transformer_b_time = self._time("transformer_b")
         transformer_f_dense = self._time("transformer_f_dense", transformer_f_time)
         transformer_f_moe = self._time("transformer_f_moe", transformer_f_time)
-        transformer_recompute_dense = self._time("transformer_recompute_dense", transformer_f_dense)
-        transformer_recompute_moe = self._time("transformer_recompute_moe", transformer_f_moe)
         transformer_b_dense = self._time("transformer_b_dense", transformer_b_time)
         transformer_b_moe = self._time("transformer_b_moe", transformer_b_time)
         embedding_f_time = self._time("embedding_f")
         embedding_b_time = self._time("embedding_b")
         cross_layer_time = self._time("cross_layer_f")
-        recompute_enabled = include_backward and self.activation_checkpointing in {"selective", "full"} and (
+        recompute_enabled = include_backward and self.full_recomputation and (
             self.flattened_mode or self.pipeline_style_recompute
         )
         block_prefix = "vit_block" if str(self.model_type).lower().startswith("vit") else "transformer_layer"
@@ -900,14 +891,11 @@ class Graph:
                 hw_id = self._stage_for_layer(l)
                 recompute_node = None
                 if recompute_enabled and recompute_nodes_b is not None:
-                    recompute_duration = (
-                        transformer_recompute_moe if self._is_moe_layer(l) else transformer_recompute_dense
-                    )
                     recompute_node = Node(
                         f"{block_prefix}{l}_recompute",
                         op_id,
                         hw_id,
-                        recompute_duration,
+                        transformer_f_moe if self._is_moe_layer(l) else transformer_f_dense,
                         fwd=True,
                         mem_kind=MemKind.TRANSFORMER,
                         recompute=True,
@@ -1989,17 +1977,10 @@ class Graph:
 
         persistent_by_kind = memory_data.get("persistent_bytes_by_kind", {}) or {}
         transient_by_kind = memory_data.get("transient_bytes_by_kind", {}) or {}
-        recompute_transient_by_kind = memory_data.get("recompute_transient_bytes_by_kind", transient_by_kind) or {}
         persistent_by_kind_dense = memory_data.get("persistent_bytes_by_kind_dense", persistent_by_kind) or {}
         persistent_by_kind_moe = memory_data.get("persistent_bytes_by_kind_moe", persistent_by_kind_dense) or {}
         transient_by_kind_dense = memory_data.get("transient_bytes_by_kind_dense", transient_by_kind) or {}
         transient_by_kind_moe = memory_data.get("transient_bytes_by_kind_moe", transient_by_kind_dense) or {}
-        recompute_transient_by_kind_dense = (
-            memory_data.get("recompute_transient_bytes_by_kind_dense", recompute_transient_by_kind) or {}
-        )
-        recompute_transient_by_kind_moe = (
-            memory_data.get("recompute_transient_bytes_by_kind_moe", recompute_transient_by_kind_dense) or {}
-        )
         valid_kinds = set(persistent_by_kind) | set(transient_by_kind)
         param_gather_bytes = float(memory_data.get("param_gather_bytes", 0.0) or 0.0)
 
@@ -2026,26 +2007,13 @@ class Graph:
             return float(mapping[kind] or 0.0)
 
         def _persistent_bytes_for_node(node: Any) -> float:
-            if getattr(node, "recompute", False):
-                return 0.0
             mem_kind = _node_mem_kind(node)
             mapping = persistent_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else persistent_by_kind_dense
             return _bytes_for_kind(mem_kind, mapping, "persistent")
 
         def _transient_bytes_for_node(node: Any) -> float:
             mem_kind = _node_mem_kind(node)
-            if getattr(node, "recompute", False):
-                mapping = (
-                    recompute_transient_by_kind_moe
-                    if getattr(node, "is_moe_layer", False) and _is_transformer_block(node)
-                    else recompute_transient_by_kind_dense
-                )
-            else:
-                mapping = (
-                    transient_by_kind_moe
-                    if getattr(node, "is_moe_layer", False) and _is_transformer_block(node)
-                    else transient_by_kind_dense
-                )
+            mapping = transient_by_kind_moe if getattr(node, "is_moe_layer", False) and _is_transformer_block(node) else transient_by_kind_dense
             return _bytes_for_kind(mem_kind, mapping, "transient")
 
         def _count_transformer_layers_per_device(root_obj: Any, num_devices: int) -> Tuple[List[int], List[int]]:
