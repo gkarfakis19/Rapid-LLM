@@ -89,7 +89,7 @@ except ImportError:
 # no longer available now, found via paper. "Performance Modeling and Workload Analysis of Distributed Large Language Model Training and Inference" by J. Kundu et al.
 
 HW_CONFIGS = {
-    "A100": "a100_80GB_inf.yaml",
+    "A100": "A100_SXM4_80GB_inf.yaml",
     "H100": "H100_SXM5_80GB.yaml",
 }
 
@@ -120,7 +120,6 @@ HARDWARE_CONFIG_PATH = os.path.join(VALIDATION_CONFIG_ROOT, "hardware-config")
 MODEL_CONFIG_PATH = os.path.join(VALIDATION_CONFIG_ROOT, "model-config")
 NVIDIA_MODEL_CONFIG_PATH = MODEL_CONFIG_PATH
 
-FITTED_HW_SUFFIX = ".fitted.yaml"
 IMEC_DATA_DIR = Path(__file__).parent / "imec_data"
 NVIDIA_DATA_DIR = Path(__file__).parent / "nvidia_data"
 
@@ -149,6 +148,67 @@ NVIDIA_DATASETS = {
     },
 }
 
+FIT_MODEL_HW_OVERRIDES: Dict[str, Dict[str, object]] = {
+    "A100": {
+        "sw_param": {
+            "kernel_launch_overhead": 6.0e-6,
+        },
+        "tech_param": {
+            "core": {
+                "operating_frequency": "1.065e9",
+            },
+        },
+        "network": {
+            "dimensions": [
+                {
+                    "id": "dim0",
+                    "topology": {
+                        "bandwidth": "50 GB",
+                    },
+                }
+            ],
+            "overlap": {
+                "tp_sp_overlap": 0.0,
+            },
+        },
+    },
+    "H100": {
+        "sw_param": {
+            "kernel_launch_overhead": "6e-06",
+        },
+        "tech_param": {
+            "core": {
+                "operating_frequency": "1.59e9",
+            },
+            "DRAM": {
+                "bandwidth": "3.36e12",
+            },
+        },
+        "network": {
+            "dimensions": [
+                {
+                    "id": "dim0",
+                    "topology": {
+                        "bandwidth": "50 GB",
+                    },
+                },
+                {
+                    "id": "dim1",
+                    "parallelisms": ["pp", "dp"],
+                    "topology": {
+                        "type": "Ring",
+                        "bandwidth": "25 GB",
+                        "util": 1.0,
+                    },
+                },
+            ],
+            "overlap": {
+                "tp_sp_overlap": 0.0,
+            },
+        },
+    },
+}
+
 VIDUR_MODEL_MAP = {
     "meta-llama/llama-2-7b-hf": "Llama 2-7B",
     "meta-llama/llama-2-13b-hf": "Llama 2-13B",
@@ -160,13 +220,13 @@ def _resolve_hw_config_path(device: str, fit_model: bool = True) -> str:
     base_name = HW_CONFIGS.get(device)
     if base_name is None:
         raise ValueError(f"No hardware config mapping for device {device}")
-    base_path = os.path.join(HARDWARE_CONFIG_PATH, base_name)
-    if fit_model:
-        fitted_name = base_name.replace(".yaml", FITTED_HW_SUFFIX)
-        fitted_path = os.path.join(HARDWARE_CONFIG_PATH, fitted_name)
-        return fitted_path if os.path.exists(fitted_path) else base_path
-    else:
-        return base_path
+    return os.path.join(HARDWARE_CONFIG_PATH, base_name)
+
+
+def _fit_hw_overrides(device: str, fit_model: bool = True) -> Dict[str, object]:
+    if not fit_model:
+        return {}
+    return copy.deepcopy(FIT_MODEL_HW_OVERRIDES.get(device, {}))
 
 
 def _apply_compare_args(args: argparse.Namespace) -> None:
@@ -673,6 +733,7 @@ def _build_spec(device: str, model: str, tp: int, idx: int, network_ignored: boo
             "inference": {"replica_count": 1, "moe_dp": 1},
         }
     }
+    hw_overrides = _deep_merge_dict(hw_overrides, _fit_hw_overrides(device, fit_model))
     if network_ignored:
         override_bw = {
             "network": {
@@ -684,7 +745,7 @@ def _build_spec(device: str, model: str, tp: int, idx: int, network_ignored: boo
                 ]
             },
         }
-        hw_overrides.update(override_bw)
+        hw_overrides = _deep_merge_dict(hw_overrides, override_bw)
 
     spec = ValidationSpec(
         label=label,
@@ -709,6 +770,7 @@ def _build_nvidia_spec(
     concurrency: int,
     idx: int,
     network_ignored: bool,
+    fit_model: bool = True,
 ) -> Tuple[ValidationSpec, str, str]:
     label = (
         f"NVIDIA {device} {model} TP={tp} "
@@ -734,6 +796,7 @@ def _build_nvidia_spec(
             "inference": {"replica_count": 1, "moe_dp": 1},
         }
     }
+    hw_overrides = _deep_merge_dict(hw_overrides, _fit_hw_overrides(device, fit_model))
     if network_ignored:
         override_bw = {
             "network": {
@@ -745,7 +808,7 @@ def _build_nvidia_spec(
                 ]
             },
         }
-        hw_overrides.update(override_bw)
+        hw_overrides = _deep_merge_dict(hw_overrides, override_bw)
 
     model_cfg = NVIDIA_MODEL_CONFIGS.get(model)
     if model_cfg is None:
@@ -901,6 +964,7 @@ def build_nvidia_specs_for_device(
     *,
     network_ignored: bool = True,
     models: Optional[Iterable[str]] = None,
+    fit_model: bool = True,
 ) -> Tuple[List[ValidationSpec], Dict[Tuple[str, int, int, int, int], float], str, str]:
     data = _load_nvidia_device_data(device)
     model_filter = set(models) if models is not None else None
@@ -921,6 +985,7 @@ def build_nvidia_specs_for_device(
             int(concurrency),
             idx,
             network_ignored,
+            fit_model,
         )
         specs.append(spec)
         actual_lookup[(model, int(tp), int(input_tokens), int(output_tokens), int(concurrency))] = (

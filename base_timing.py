@@ -373,7 +373,24 @@ class TimeCalculation:
         self.precision_bytes = self.precision.activations
         self.h2d_bandwidth = getattr(hw_config.sw_config, "h2d_bandwidth", -1)
         self.zero_stage = getattr(hw_config.sw_config, "dp_zero_stage", 0)
-        self.full_recomputation = getattr(hw_config.sw_config, "full_recomputation", False)
+        raw_activation_checkpointing = str(
+            getattr(hw_config.sw_config, "activation_checkpointing", "none") or "none"
+        ).lower()
+        raw_full_recomputation = bool(getattr(hw_config.sw_config, "full_recomputation", False))
+        if raw_full_recomputation:
+            self.activation_checkpointing = "full"
+        else:
+            self.activation_checkpointing = (
+                "none" if raw_activation_checkpointing == "full" else raw_activation_checkpointing
+            )
+        self.selective_checkpointing = bool(
+            getattr(
+                hw_config.sw_config,
+                "selective_checkpointing",
+                self.activation_checkpointing == "selective",
+            )
+        )
+        self.full_recomputation = self.activation_checkpointing == "full"
         self.dp_microbatch = getattr(hw_config.sw_config, "dp_microbatch", "every_mb")
         self.grad_acc_overhead = float(getattr(hw_config.sw_config, "grad_acc_overhead", 0.0) or 0.0)
         self.attached = True

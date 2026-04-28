@@ -63,7 +63,7 @@ DEFAULT_MODEL_CONFIG_DIR = (
     PROJECT_ROOT / "validation_scripts" / "validation_configs" / "model-config"
 )
 DEFAULT_HW_CONFIG = (
-    PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB.mosaic_train.numgpus8.best.yaml"
+    PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB.yaml"
 )
 DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "validation" / "train" / "mosiacml_h100_bf16_all.csv"
 DEFAULT_PLOT_OUTPUT = PROJECT_ROOT / "output" / "validation" / "train" / "mosiacml_h100_bf16_all.png"
@@ -127,6 +127,16 @@ def _parse_bool(value: object) -> bool:
     if text in {"0", "false", "no", "n", "f"}:
         return False
     raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _normalize_activation_checkpointing_true_mode(value: object) -> str:
+    mode = str(value).strip().lower()
+    if mode not in {"full", "selective"}:
+        raise ValueError(
+            "activation_checkpointing_true_mode must be one of: full, selective "
+            f"(got {value!r})"
+        )
+    return mode
 
 
 def _normalize_model_size(value: str) -> str:
@@ -232,6 +242,31 @@ def _resolve_model_config_for_case(
     return str(resolved)
 
 
+def _mosaic_hardware_overrides() -> Dict[str, object]:
+    return {
+        "network": {
+            "dimensions": [
+                {
+                    "id": "dim0",
+                    "topology": {
+                        "type": "FullyConnected",
+                        "bandwidth": "50 GB",
+                        "latency": "5e-6",
+                        "energy_per_bit": "8e-12",
+                        "util": 0.8453452918110231,
+                        "optimize_2dmap": False,
+                    },
+                    "parallelisms": ["dp"],
+                },
+                {
+                    "id": "dim1",
+                    "parallelisms": [],
+                },
+            ]
+        }
+    }
+
+
 def _build_spec(
     case: MosaicCase,
     idx: int,
@@ -240,8 +275,14 @@ def _build_spec(
     *,
     use_flashattention: bool,
     attention_tile_size: Optional[int],
+    activation_checkpointing_true_mode: str,
 ) -> ValidationSpec:
     effective_grad_accum = int(case.gradient_accumulation_steps) # * int(case.micro_batch_size)
+    activation_checkpointing_mode = (
+        str(activation_checkpointing_true_mode).strip().lower()
+        if bool(case.activation_checkpointing)
+        else "none"
+    )
     model_overrides = {
         "model_param": {
             "run_type": "training",
@@ -267,10 +308,12 @@ def _build_spec(
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
         "sw_param": {
-            "full_recomputation": bool(case.activation_checkpointing),
+            "activation_checkpointing": activation_checkpointing_mode,
+            "full_recomputation": activation_checkpointing_mode == "full",
             "dp_zero_stage": 3,
         },
     }
+    hardware_overrides.update(_mosaic_hardware_overrides())
 
     return ValidationSpec(
         label=case.label,
@@ -292,6 +335,7 @@ def _build_spec(
             "effective_gradient_accumulation_steps": effective_grad_accum,
             "global_batch_size": int(case.global_batch_size),
             "activation_checkpointing": bool(case.activation_checkpointing),
+            "activation_checkpointing_mode": activation_checkpointing_mode,
         },
         order=idx,
     )
@@ -306,6 +350,7 @@ def build_specs(
     *,
     use_flashattention: bool,
     attention_tile_size: Optional[int],
+    activation_checkpointing_true_mode: str = "selective",
 ) -> Tuple[List[ValidationSpec], Dict[int, float]]:
     specs: List[ValidationSpec] = []
     actual_lookup: Dict[int, float] = {}
@@ -324,6 +369,7 @@ def build_specs(
                 hardware_config_path,
                 use_flashattention=use_flashattention,
                 attention_tile_size=attention_tile_size,
+                activation_checkpointing_true_mode=activation_checkpointing_true_mode,
             )
         )
         actual_lookup[int(case.case_index)] = float(case.inferred_total_latency_s)
@@ -362,6 +408,9 @@ def compute_rows(results, actual_lookup: Dict[int, float]) -> List[Dict[str, obj
                 ),
                 "global_batch_size": int(meta.get("global_batch_size", 0)),
                 "activation_checkpointing": bool(meta.get("activation_checkpointing", False)),
+                "activation_checkpointing_mode": str(
+                    meta.get("activation_checkpointing_mode", "none")
+                ),
                 "pred_training_time_s": pred,
                 "actual_inferred_total_latency_s": actual,
                 "signed_pct_error": signed_pct_error,
@@ -933,6 +982,7 @@ def run(
     emit_logs: bool = True,
     use_flashattention: bool = True,
     attention_tile_size: Optional[int] = None,
+    activation_checkpointing_true_mode: str = "selective",
 ) -> List[Dict[str, object]]:
     input_path = Path(input_csv) if input_csv else DEFAULT_INPUT_CSV
     model_cfg = str(model_config) if model_config else None
@@ -946,6 +996,7 @@ def run(
         raise ValueError(
             f"attention_tile_size must be positive when flash attention is enabled (got {attention_tile_size})"
         )
+    ckpt_true_mode = _normalize_activation_checkpointing_true_mode(activation_checkpointing_true_mode)
 
     cases = _load_cases(input_path, model_size=model_size)
     if emit_logs:
@@ -959,6 +1010,7 @@ def run(
         hardware_config_path=hw_cfg,
         use_flashattention=bool(use_flashattention),
         attention_tile_size=None if attention_tile_size is None else int(attention_tile_size),
+        activation_checkpointing_true_mode=ckpt_true_mode,
     )
     base_model_cfg = specs[0].model_config_path if specs and specs[0].model_config_path else str(DEFAULT_MODEL_CONFIG)
 
@@ -981,7 +1033,7 @@ def run(
             block = [
                 (
                     "\n=== Result (case={case}, model={model}, seq={seq}, gpus={gpus}, "
-                    "tp={tp}, dp={dp}, mb={mb}, ga={ga}, gbs={gbs}, ckpt={ckpt}) ==="
+                    "tp={tp}, dp={dp}, mb={mb}, ga={ga}, gbs={gbs}, ckpt={ckpt}, ckpt_mode={ckpt_mode}) ==="
                 ).format(
                     case=row["case_index"],
                     model=row["model_size"],
@@ -993,6 +1045,7 @@ def run(
                     ga=row["gradient_accumulation_steps"],
                     gbs=row["global_batch_size"],
                     ckpt=row["activation_checkpointing"],
+                    ckpt_mode=row.get("activation_checkpointing_mode", "none"),
                 )
             ]
             if row["success"] and not math.isnan(float(row["abs_pct_error"])):
@@ -1107,6 +1160,15 @@ def _parse_args() -> argparse.Namespace:
             "Default: leave unchanged from model config."
         ),
     )
+    parser.add_argument(
+        "--activation-checkpointing-true-mode",
+        choices=("full", "selective"),
+        default="selective",
+        help=(
+            "Interpretation of CSV activation_checkpointing=True. "
+            "'full' maps to full recomputation; 'selective' maps to selective checkpointing."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1125,4 +1187,5 @@ if __name__ == "__main__":
         show_progress=args.show_progress,
         use_flashattention=(not bool(args.disable_flashattention)),
         attention_tile_size=args.attention_tile_size,
+        activation_checkpointing_true_mode=args.activation_checkpointing_true_mode,
     )

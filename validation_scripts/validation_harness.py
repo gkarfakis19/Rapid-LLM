@@ -82,7 +82,7 @@ NVIDIA_TRAIN_DEFAULT_INPUT = (
 NVIDIA_TRAIN_DEFAULT_STAGE = PROJECT_ROOT / "validation_scripts" / "train_validation_data" / "STAGE_data.csv"
 
 MOSAIC_DEFAULT_HW = (
-    PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB.mosaic_train.yaml"
+    PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "H100_SXM5_80GB.yaml"
 )
 
 
@@ -1177,6 +1177,7 @@ def _build_mosaic_train_bundle(args: argparse.Namespace) -> SuiteBundle:
         hardware_config_path=hardware_config,
         use_flashattention=use_flashattention,
         attention_tile_size=tile_size,
+        activation_checkpointing_true_mode=str(args.mosaic_activation_checkpointing_true_mode),
     )
     specs = _augment_specs(
         specs,
@@ -1375,6 +1376,16 @@ def _parse_args() -> argparse.Namespace:
         help="Disable flash attention override for mosaic suite specs.",
     )
     parser.add_argument("--mosaic-attention-tile-size", type=int, default=None)
+    parser.add_argument(
+        "--mosaic-activation-checkpointing-true-mode",
+        type=str,
+        default="selective",
+        choices=["full", "selective"],
+        help=(
+            "Interpretation of Mosaic CSV activation_checkpointing=True. "
+            "'full' maps to full recomputation; 'selective' maps to selective checkpointing."
+        ),
+    )
     return parser.parse_args()
 
 

@@ -302,7 +302,7 @@ class TimeCalculationLLM(TimeCalculation):
         self._debug_memory = _env_flag("RAPID_DEBUG_MEMORY")
         self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
-        self.pipeline_style_recompute = bool(self.full_recomputation)
+        self.pipeline_style_recompute = self.activation_checkpointing in {"selective", "full"}
 
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
@@ -1285,7 +1285,7 @@ class TimeCalculationLLM(TimeCalculation):
         softmax_time_backward *= batch_size * num_heads / max(1, self.tp)
         act_dQ_time *= batch_size * num_heads / max(1, self.tp)
         act_dQ_time += self.O
-        if self.full_recomputation:  #attention recompute is already included in full recomputation   
+        if self.activation_checkpointing == "full":  # attention recompute is already included in full replay
             recompute_time = 0
         else:
             recompute_time = attn_score_time + attn_scale_softmax_time #selective recomputation only recompute attention score and softmax
@@ -4297,6 +4297,16 @@ class TimeCalculationLLM(TimeCalculation):
                 if op_name in transformer_timings:
                     transformer_time_f += transformer_timings[op_name].total_forward_time()
                     transformer_time_b += transformer_timings[op_name].total_backward_time()
+        selective_recompute_time = (
+            transformer_timings["layernorm1"].total_forward_time()
+            + transformer_timings["layernorm2"].total_forward_time()
+            + transformer_timings["gelu"].total_forward_time()
+        )
+        if not self.flash_attention:
+            selective_recompute_time += (
+                transformer_timings["attention_score"].total_forward_time()
+                + transformer_timings["attention_scale_softmax"].total_forward_time()
+            )
         # Pipeline-style recompute uses explicit recompute nodes, so keep backward time as-is.
         transformer_time_b_combined = transformer_time_b
 
@@ -4304,6 +4314,7 @@ class TimeCalculationLLM(TimeCalculation):
             "transformer_time_f": transformer_time_f,
             "transformer_time_b": transformer_time_b,
             "transformer_time_b_combined": transformer_time_b_combined,
+            "transformer_time_recompute_selective": selective_recompute_time,
             "embedding_f": transformer_timings["embedding"].total_forward_time(),
             "embedding_b": transformer_timings["embedding"].total_backward_time(),
             "linear_softmax_f": transformer_timings["linear_softmax"].total_forward_time(),
@@ -5013,8 +5024,15 @@ class TimeCalculationLLM(TimeCalculation):
 
         dense_transformer_f = node_breakdown.get('transformer_time_f', 0.0)
         dense_transformer_b = node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0
+        if self.activation_checkpointing == "full":
+            dense_transformer_recompute = dense_transformer_f
+        elif self.activation_checkpointing == "selective":
+            dense_transformer_recompute = node_breakdown.get("transformer_time_recompute_selective", 0.0)
+        else:
+            dense_transformer_recompute = 0.0
         moe_transformer_f = dense_transformer_f
         moe_transformer_b = dense_transformer_b
+        moe_transformer_recompute = dense_transformer_recompute
         if has_moe_layers and moe_node_breakdown:
             moe_transformer_f = moe_node_breakdown.get('transformer_time_f', dense_transformer_f)
             moe_transformer_b = (
@@ -5022,6 +5040,15 @@ class TimeCalculationLLM(TimeCalculation):
                 if include_pipeline_backward
                 else 0.0
             )
+            if self.activation_checkpointing == "full":
+                moe_transformer_recompute = moe_transformer_f
+            elif self.activation_checkpointing == "selective":
+                moe_transformer_recompute = moe_node_breakdown.get(
+                    "transformer_time_recompute_selective",
+                    dense_transformer_recompute,
+                )
+            else:
+                moe_transformer_recompute = 0.0
 
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),
@@ -5034,6 +5061,8 @@ class TimeCalculationLLM(TimeCalculation):
             "transformer_b_dense": dense_transformer_b,
             "transformer_f_moe": moe_transformer_f,
             "transformer_b_moe": moe_transformer_b,
+            "transformer_recompute_dense": dense_transformer_recompute,
+            "transformer_recompute_moe": moe_transformer_recompute,
             "optimizer": self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size),
             "cross_layer_f": 0.0,
             "cross_layer_b": 0.0,
@@ -5065,11 +5094,12 @@ class TimeCalculationLLM(TimeCalculation):
                     hidden_dim=hidden_dim,
                 )
         flattened_mode = self.execution_mode == ExecutionMode.FULL_ASTRASIM_FLATTENED
-        pipeline_style_recompute_flag = bool(getattr(self, "full_recomputation", False))
+        pipeline_style_recompute_flag = self.activation_checkpointing in {"selective", "full"}
         misc_metadata = {
             "num_batch": self.mb,
             "num_layer": self.num_layers,
             "dp_zero_stage": self.zero_stage,
+            "activation_checkpointing": self.activation_checkpointing,
             "full_recomputation": self.full_recomputation,
             "flattened_mode": flattened_mode,
             "pipeline_style_recompute": pipeline_style_recompute_flag,

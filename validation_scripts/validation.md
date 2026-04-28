@@ -148,8 +148,8 @@ Harness defaults:
 
 - Devices: `A100,H100`
 - Hardware configs:
-  - `validation_scripts/validation_configs/hardware-config/a100_80GB_inf.fitted.yaml` if present, otherwise `validation_scripts/validation_configs/hardware-config/a100_80GB_inf.yaml`
-  - `validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB.fitted.yaml` if present, otherwise `validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB.yaml`
+  - `validation_scripts/validation_configs/hardware-config/A100_SXM4_80GB_inf.yaml`
+  - `validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB.yaml`
 - IMEC model configs:
   - `validation_scripts/validation_configs/model-config/Llama2-7B_inf.yaml`
   - `validation_scripts/validation_configs/model-config/Llama2-13B_inf.yaml`

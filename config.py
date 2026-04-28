@@ -2006,6 +2006,8 @@ class SWConfig:
     precision: PrecisionConfig
     h2d_bandwidth: float
     dp_zero_stage: int
+    activation_checkpointing: str
+    selective_checkpointing: bool
     full_recomputation: bool
     dp_microbatch: str
     const_mem_offset: float
@@ -2019,10 +2021,38 @@ class SWConfig:
         kernel_launch_overhead = float(_require_field("sw_param", sw_block, "kernel_launch_overhead"))
         h2d_bandwidth = float(sw_block.get("h2d_bandwidth", -1))
         dp_zero_stage = _coerce_int(sw_block.get("dp_zero_stage", 0), "sw_param.dp_zero_stage", min_value=0)
-        full_recomputation = _coerce_bool(
-            sw_block.get("full_recomputation", False),
-            "sw_param.full_recomputation",
-        )
+        raw_activation_checkpointing = sw_block.get("activation_checkpointing", None)
+        raw_full_recomputation = sw_block.get("full_recomputation", None)
+        if raw_activation_checkpointing is None:
+            full_recomputation = _coerce_bool(
+                raw_full_recomputation if raw_full_recomputation is not None else False,
+                "sw_param.full_recomputation",
+            )
+            activation_checkpointing = "full" if full_recomputation else "none"
+        else:
+            activation_checkpointing = str(raw_activation_checkpointing).strip().lower()
+            if activation_checkpointing not in {"none", "selective", "full"}:
+                raise ValueError(
+                    "sw_param.activation_checkpointing must be one of: none, selective, full"
+                )
+            if raw_full_recomputation is not None:
+                full_recomputation = _coerce_bool(
+                    raw_full_recomputation,
+                    "sw_param.full_recomputation",
+                )
+                if full_recomputation and activation_checkpointing != "full":
+                    raise ValueError(
+                        "sw_param.full_recomputation=true conflicts with "
+                        f"sw_param.activation_checkpointing={activation_checkpointing!r}"
+                    )
+                if not full_recomputation and activation_checkpointing == "full":
+                    raise ValueError(
+                        "sw_param.full_recomputation=false conflicts with "
+                        "sw_param.activation_checkpointing='full'"
+                    )
+            else:
+                full_recomputation = activation_checkpointing == "full"
+        selective_checkpointing = activation_checkpointing == "selective"
         dp_microbatch_raw = sw_block.get("dp_microbatch", "every_mb")
         dp_microbatch = str(dp_microbatch_raw).strip().lower()
         if dp_microbatch not in {"every_mb", "last_mb"}:
@@ -2052,6 +2082,8 @@ class SWConfig:
             precision=precision_config,
             h2d_bandwidth=h2d_bandwidth,
             dp_zero_stage=dp_zero_stage,
+            activation_checkpointing=activation_checkpointing,
+            selective_checkpointing=selective_checkpointing,
             full_recomputation=full_recomputation,
             dp_microbatch=dp_microbatch,
             const_mem_offset=const_mem_offset,
