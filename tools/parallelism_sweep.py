@@ -43,7 +43,7 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stdout, redirect_stderr
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -130,6 +130,7 @@ BEST_RUNTIME_PER_GPU_DIR = "tools/parallelism_best_runtimes_per_gpu"
 BEST_RUNTIME_PER_GPU_COMBINED_PATH = "tools/parallelism_best_runtimes_per_gpu_combined.png"
 BEST_SPEEDUP_PER_GPU_COMBINED_PATH = "tools/parallelism_speedup_per_gpu_combined.png"
 RUNTIME_CACHE_PATH = "tools/parallelism_sweep_cache.csv"
+ERROR_LOG_PATH = ""
 PLOT_TITLE = "Parallelism options vs runtime"
 
 # AstraSim cache handling within RAPID-LLM (mirrors run_perf default options).
@@ -450,6 +451,29 @@ def _cache_key(hw_path: str, model_id: str, settings: Dict[str, object]) -> Tupl
     hw_id = str(Path(hw_path).resolve())
     settings_json = json.dumps(settings, sort_keys=True)
     return (hw_id, model_id, settings_json)
+
+
+def _json_safe(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _append_error_log(record: Dict[str, object], path: str = "") -> None:
+    active_path = str(path or ERROR_LOG_PATH or "").strip()
+    if not active_path:
+        return
+    log_path = Path(active_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _json_safe(record)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def _load_runtime_cache(path: str) -> Dict[Tuple[str, str, str], Dict[str, object]]:
@@ -1762,6 +1786,12 @@ def main():
         if output_tag
         else rooted_best_speedup_per_gpu_combined_path
     )
+    active_error_log_path = str(ERROR_LOG_PATH or "").strip()
+    if active_error_log_path and not args.plot_only:
+        error_log = Path(active_error_log_path)
+        error_log.parent.mkdir(parents=True, exist_ok=True)
+        if error_log.exists():
+            error_log.unlink()
     mode = determine_model_mode(active_model_config_path)
     runtime_cache = _load_runtime_cache(rooted_runtime_cache_path)
     cache_dirty = False
@@ -1867,6 +1897,32 @@ def main():
         evaluated = 0
         model_config_id = ""
 
+        def _record_error(
+            *,
+            status: str,
+            error: str,
+            source: str,
+            parallelism: Optional[Dict[str, object]] = None,
+            num_gpus: Optional[int] = None,
+            traceback_text: str = "",
+        ) -> None:
+            record: Dict[str, object] = {
+                "status": status,
+                "source": source,
+                "error": error,
+                "hardware_config": str(Path(hw_path).resolve()),
+                "hardware_label": hw_label,
+            }
+            if model_config_id:
+                record["model_config"] = model_config_id
+            if parallelism is not None:
+                record["parallelism"] = dict(parallelism)
+            if num_gpus is not None:
+                record["num_gpus"] = int(num_gpus)
+            if traceback_text:
+                record["traceback"] = traceback_text
+            _append_error_log(record, active_error_log_path)
+
         def _consume_worker_result(result: Dict[str, object]) -> None:
             nonlocal skipped_errors, memory_violations, evaluated, cache_dirty
             settings = result.get("parallelism", {})
@@ -1879,6 +1935,14 @@ def main():
                     error_messages.append(f"{settings}: {msg}\n{tb}")
                 else:
                     error_messages.append(f"{settings}: {msg}")
+                _record_error(
+                    status="error",
+                    source="worker_result",
+                    error=str(msg),
+                    parallelism=dict(settings),
+                    num_gpus=num_gpus,
+                    traceback_text=str(tb or ""),
+                )
                 return
             metrics = result.get("metrics", {})
             entry = {
@@ -1979,17 +2043,35 @@ def main():
 
                     def _retry_isolated(items: Tuple[Tuple[str, object], ...]) -> None:
                         nonlocal skipped_errors
+                        retry_settings = build_parallelism_settings(dict(items))
+                        retry_num_gpus = total_gpu_count(retry_settings)
                         try:
                             result = _run_task_in_isolated_process(items, base_hw_dict, model_config_path, mode)
                         except BrokenProcessPool as exc2:
                             skipped_errors += 1
                             error_messages.append(f"{dict(items)}: isolated worker died ({exc2})")
+                            _record_error(
+                                status="error",
+                                source="isolated_worker",
+                                error=str(exc2),
+                                parallelism=retry_settings,
+                                num_gpus=retry_num_gpus,
+                            )
                             return
                         except BaseException as exc2:
                             skipped_errors += 1
+                            tb = traceback.format_exc()
                             error_messages.append(
                                 f"{dict(items)}: isolated retry crashed ({exc2.__class__.__name__}: {exc2})\n"
-                                f"{traceback.format_exc()}"
+                                f"{tb}"
+                            )
+                            _record_error(
+                                status="error",
+                                source="isolated_retry",
+                                error=f"{exc2.__class__.__name__}: {exc2}",
+                                parallelism=retry_settings,
+                                num_gpus=retry_num_gpus,
+                                traceback_text=tb,
                             )
                             return
                         _consume_worker_result(result)
@@ -2020,12 +2102,28 @@ def main():
                                         pool_broken = True
                                         skipped_errors += 1
                                         error_messages.append(f"{dict(items)}: worker process died ({exc})")
+                                        broken_settings = build_parallelism_settings(dict(items))
+                                        _record_error(
+                                            status="error",
+                                            source="process_pool",
+                                            error=str(exc),
+                                            parallelism=broken_settings,
+                                            num_gpus=total_gpu_count(broken_settings),
+                                        )
                                         processed_futures.add(future)
                                         _retry_isolated(items)
                                         break
                                     except Exception as exc:
                                         skipped_errors += 1
                                         error_messages.append(f"{dict(items)}: {exc}")
+                                        future_settings = build_parallelism_settings(dict(items))
+                                        _record_error(
+                                            status="error",
+                                            source="future_result",
+                                            error=f"{exc.__class__.__name__}: {exc}",
+                                            parallelism=future_settings,
+                                            num_gpus=total_gpu_count(future_settings),
+                                        )
                                         processed_futures.add(future)
                                         _retry_isolated(items)
                                         continue
@@ -2035,6 +2133,11 @@ def main():
                         pool_broken = True
                         skipped_errors += 1
                         error_messages.append(f"worker pool terminated early: {exc}")
+                        _record_error(
+                            status="error",
+                            source="process_pool",
+                            error=str(exc),
+                        )
 
                     if pool_broken:
                         if not futures:
@@ -2047,8 +2150,17 @@ def main():
                                     try:
                                         result = future.result()
                                     except Exception as exc:
-                                        skipped_errors += 1
-                                        error_messages.append(f"{dict(items)}: {exc}")
+                                        pending_settings = build_parallelism_settings(dict(items))
+                                        # A broken pool can leave completed futures unreadable. Retry the
+                                        # configuration in a fresh isolated worker instead of dropping it.
+                                        _record_error(
+                                            status="retry",
+                                            source="pending_future",
+                                            error=f"{exc.__class__.__name__}: {exc}",
+                                            parallelism=pending_settings,
+                                            num_gpus=total_gpu_count(pending_settings),
+                                        )
+                                        _retry_isolated(items)
                                         continue
                                     _consume_worker_result(result)
                                 else:
@@ -2067,10 +2179,26 @@ def main():
                                 except BrokenProcessPool as exc:
                                     skipped_errors += 1
                                     error_messages.append(f"{dict(items)}: worker process died ({exc})")
+                                    retry_settings = build_parallelism_settings(dict(items))
+                                    _record_error(
+                                        status="error",
+                                        source="isolated_worker",
+                                        error=str(exc),
+                                        parallelism=retry_settings,
+                                        num_gpus=total_gpu_count(retry_settings),
+                                    )
                                     continue
                                 except Exception as exc:
                                     skipped_errors += 1
                                     error_messages.append(f"{dict(items)}: {exc}")
+                                    retry_settings = build_parallelism_settings(dict(items))
+                                    _record_error(
+                                        status="error",
+                                        source="isolated_retry",
+                                        error=f"{exc.__class__.__name__}: {exc}",
+                                        parallelism=retry_settings,
+                                        num_gpus=total_gpu_count(retry_settings),
+                                    )
                                     continue
                                 _consume_worker_result(result)
                 elif tasks_to_eval:
@@ -2084,6 +2212,13 @@ def main():
                             except Exception as exc:
                                 skipped_errors += 1
                                 error_messages.append(f"{settings}: {exc}")
+                                _record_error(
+                                    status="error",
+                                    source="serial_eval",
+                                    error=f"{exc.__class__.__name__}: {exc}",
+                                    parallelism=settings,
+                                    num_gpus=num_gpus,
+                                )
                                 continue
 
                             entry = {
