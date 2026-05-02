@@ -957,6 +957,28 @@ def test_raw_parallelism_axis_sweeps_are_rejected(monkeypatch, tmp_path):
     assert "Unsupported sweep field: hardware.parallelism.tp" in preview["errors"]
 
 
+def test_network_bandwidth_and_latency_sweeps_apply_per_dimension(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["dimensions"] = [
+        {"field_key": "hardware.network.dim0.bandwidth_gbs", "mode": "list", "list_text": "100, 200"},
+        {"field_key": "hardware.network.dim1.latency_s", "mode": "list", "list_text": "0.000001, 0.000002"},
+    ]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["top_level_case_count"] == 4
+    first_dimensions = preview["top_level_cases"][0]["hardware"]["network"]["dimensions"]
+    last_dimensions = preview["top_level_cases"][-1]["hardware"]["network"]["dimensions"]
+    assert first_dimensions[0]["topology"]["bandwidth"] == "100 GB"
+    assert first_dimensions[1]["topology"]["latency"] == 0.000001
+    assert last_dimensions[0]["topology"]["bandwidth"] == "200 GB"
+    assert last_dimensions[1]["topology"]["latency"] == 0.000002
+    assert preview["top_level_cases"][0]["dimension_values"]["hardware.network.dim0.bandwidth_gbs"] == 100.0
+    assert preview["top_level_cases"][0]["dimension_values"]["hardware.network.dim1.latency_s"] == 0.000001
+
+
 def test_vit_model_type_rejects_sequence_length_sweeps(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()

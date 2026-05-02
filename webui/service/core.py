@@ -89,6 +89,17 @@ FIELD_TYPES: Dict[str, Dict[str, Any]] = {
     "hardware.gpu_clock_ghz": {"kind": "float"},
     "hardware.memory_bw_gbs": {"kind": "float"},
 }
+NETWORK_SWEEP_FIELD_OPTIONS: List[Dict[str, str]] = [
+    option
+    for idx in range(3)
+    for option in (
+        {"value": f"hardware.network.dim{idx}.bandwidth_gbs", "label": f"Dimension {idx} Bandwidth (GB/s)"},
+        {"value": f"hardware.network.dim{idx}.latency_s", "label": f"Dimension {idx} Latency (s)"},
+    )
+]
+for option in NETWORK_SWEEP_FIELD_OPTIONS:
+    FIELD_TYPES[option["value"]] = {"kind": "float", "label": f"Network {option['label']}"}
+NETWORK_SWEEP_FIELD_RE = re.compile(r"^hardware\.network\.dim([0-2])\.(bandwidth_gbs|latency_s)$")
 
 METRIC_LABELS = {
     "training_time_s": "Time / Batch",
@@ -307,6 +318,7 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
         sanitized.append(
             {
                 "field": _trim_text(row.get("field"), 128),
+                "network_field": _trim_text(row.get("network_field"), 128),
                 "mode": mode,
                 "list_text": _trim_text(row.get("list_text"), LAST_UI_STATE_MAX_TEXT) or "",
                 "config_values": _trim_string_list(row.get("config_values"), 24),
@@ -316,7 +328,7 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
             }
         )
     while len(sanitized) < 3:
-        sanitized.append({"field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
+        sanitized.append({"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
     return sanitized
 
 
@@ -900,6 +912,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
                 "label": f"Dimension {idx}",
                 "topology_type": topology_type,
                 "bandwidth": _format_bandwidth_field(topology.get("bandwidth", "")),
+                "latency": float(topology.get("latency", 0.0) or 0.0),
                 "util": float(topology.get("util", 1.0) or 1.0),
                 "parallelisms": [str(axis).upper() for axis in dim.get("parallelisms", []) or []],
             }
@@ -1096,6 +1109,8 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
             if str(topology.get("type", "")).strip().lower() == "superpod" and not isinstance(bandwidth, (list, tuple)):
                 bandwidth = [bandwidth, bandwidth]
             topology["bandwidth"] = bandwidth
+        if row.get("latency") not in (None, ""):
+            topology["latency"] = _safe_float(row.get("latency"), _safe_float(topology.get("latency"), 0.0))
         topology["util"] = _safe_float(row.get("util"), network_derate)
     for idx in range(len(payload.get("network_dimensions", []) or []), len(dimensions)):
         topology = dimensions[idx].setdefault("topology", {})
@@ -1280,6 +1295,25 @@ def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], fie
         "hardware.gpu_clock_ghz": (hardware, ("tech_param", "core", "operating_frequency"), float(value) * 1e9),
         "hardware.memory_bw_gbs": (hardware, ("tech_param", "DRAM", "bandwidth"), float(value) * 1e9),
     }
+    network_match = NETWORK_SWEEP_FIELD_RE.match(field_key)
+    if network_match:
+        dim_index = int(network_match.group(1))
+        network_field = network_match.group(2)
+        dimensions = hardware.setdefault("network", {}).setdefault("dimensions", [])
+        if dim_index >= len(dimensions):
+            raise ValueError(f"Network Dimension {dim_index} is not present in the selected hardware config.")
+        topology = dimensions[dim_index].setdefault("topology", {})
+        if network_field == "bandwidth_gbs":
+            bandwidth_gbs = float(value)
+            if bandwidth_gbs <= 0:
+                raise ValueError(f"{dimension_label(field_key)} must be greater than 0.")
+            topology["bandwidth"] = format_gb(bandwidth_gbs)
+        elif network_field == "latency_s":
+            latency_s = float(value)
+            if latency_s < 0:
+                raise ValueError(f"{dimension_label(field_key)} cannot be negative.")
+            topology["latency"] = latency_s
+        return
     if field_key == "hardware.total_gpus":
         target_total_gpus = int(value)
         case_meta["target_total_gpus"] = target_total_gpus

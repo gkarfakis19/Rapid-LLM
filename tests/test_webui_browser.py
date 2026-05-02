@@ -557,11 +557,39 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.locator("#dim-1-field").scroll_into_view_if_needed()
             page.locator("#dim-1-field").click(force=True)
             sweep_option_text = page.evaluate(
-                """() => Array.from(document.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]')).map((el) => el.textContent || '').join('\\n')"""
+                """() => {
+                    const dropdowns = Array.from(document.querySelectorAll('.mantine-Combobox-dropdown, .mantine-Select-dropdown, .mantine-MultiSelect-dropdown, .mantine-Popover-dropdown'))
+                        .filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none' && el.getAttribute('data-hidden') !== 'true');
+                    const dropdown = dropdowns[dropdowns.length - 1];
+                    return Array.from(dropdown?.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]') || [])
+                        .map((el) => el.textContent || '')
+                        .join('\\n');
+                }"""
             )
             assert "Tensor Parallelism" not in sweep_option_text
             assert "Data Parallelism" not in sweep_option_text
             assert "Total GPUs" in sweep_option_text
+            assert "Network" in sweep_option_text
+            assert "Dimension 0 Bandwidth" not in sweep_option_text
+            assert "Dimension 2 Latency" not in sweep_option_text
+            page.get_by_role("option", name="Network", exact=True).click()
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-network-wrap')).display !== 'none'", timeout=5000)
+            page.locator("#dim-1-network-field").click(force=True)
+            network_option_text = page.evaluate(
+                """() => {
+                    const dropdowns = Array.from(document.querySelectorAll('.mantine-Combobox-dropdown, .mantine-Select-dropdown, .mantine-MultiSelect-dropdown, .mantine-Popover-dropdown'))
+                        .filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none' && el.getAttribute('data-hidden') !== 'true');
+                    const dropdown = dropdowns[dropdowns.length - 1];
+                    return Array.from(dropdown?.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]') || [])
+                        .map((el) => el.textContent || '')
+                        .join('\\n');
+                }"""
+            )
+            assert "Dimension 0 Bandwidth (GB/s)" in network_option_text
+            assert "Dimension 2 Latency (s)" in network_option_text
+            page.get_by_role("option", name="Dimension 1 Latency (s)", exact=True).click()
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-values-wrap')).display !== 'none'", timeout=5000)
+            page.locator("#dim-1-field").click(force=True)
             page.get_by_role("option", name="Batch Size").click()
             page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-values-wrap')).display !== 'none'", timeout=5000)
             sweep_values_state = page.evaluate(

@@ -510,6 +510,13 @@ body {
   box-shadow: none;
 }
 
+.sweep-submenu {
+  padding: 10px 12px;
+  border: 1px solid #cddfeb;
+  border-radius: 8px;
+  background: #f7fbfe;
+}
+
 .topology-mapping-note {
   padding: 10px 12px;
 }

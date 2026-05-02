@@ -30,6 +30,7 @@ from webui.service.core import (
     FIELD_OPTIONS,
     FIELD_TYPES,
     METRIC_LABELS,
+    NETWORK_SWEEP_FIELD_OPTIONS,
     RUN_MANAGER,
     build_form_defaults,
     build_case_label,
@@ -75,6 +76,17 @@ def format_worst_case_wall_clock(value: Any) -> str:
 
 
 FIELD_LABEL_MAP = {item["value"]: item["label"] for item in FIELD_OPTIONS}
+FIELD_LABEL_MAP.update({key: str(meta["label"]) for key, meta in FIELD_TYPES.items() if meta.get("label")})
+NETWORK_SWEEP_GROUP_VALUE = "__network__"
+NETWORK_SWEEP_FIELD_KEYS = {item["value"] for item in NETWORK_SWEEP_FIELD_OPTIONS}
+DEFAULT_NETWORK_SWEEP_FIELD = NETWORK_SWEEP_FIELD_OPTIONS[0]["value"]
+SWEEP_FIELD_OPTIONS = FIELD_OPTIONS + [{"value": NETWORK_SWEEP_GROUP_VALUE, "label": "Network"}]
+NETWORK_TOPOLOGY_OPTIONS = [
+    {"value": "Ring", "label": "Ring"},
+    {"value": "FC", "label": "Fully Connected"},
+    {"value": "Mesh2D", "label": "Mesh2D"},
+    {"value": "Torus2D", "label": "Torus2D"},
+]
 METRIC_KEY_BY_LABEL: Dict[str, str] = {}
 for metric_key, metric_label in METRIC_LABELS.items():
     METRIC_KEY_BY_LABEL.setdefault(metric_label, metric_key)
@@ -232,6 +244,7 @@ HELP_TEXT = {
     "pp_topology_dimension": "Select how PP and DP map to Dimensions 1 and 2. The PP+DP option disables Dimension 2 and leaves its YAML parallelisms list empty.",
     "network_topology": "Collective topology model for this network dimension. SuperPOD is not exposed because support is not reliable enough yet.",
     "network_bandwidth": "Per-link or dimension bandwidth, such as 100 GB.",
+    "network_latency": "Per-hop latency for this network dimension in seconds.",
     "network_util": "Utilization multiplier for this network dimension.",
     "full_recomp": "Enable full activation recomputation to trade compute for memory.",
     "zero_stage": "ZeRO sharding stage for optimizer, gradient, and parameter state.",
@@ -259,7 +272,8 @@ HELP_TEXT = {
     "metric": "Metric used for ranking sweep cases and picking the best result. Inference runs offer TPOT throughput, TTFT, and time per batch.",
     "x_axis": "Sweep field used as the plot x-axis in Details. Defaults to the first active sweep dimension.",
     "series_axis": "Optional sweep field used to color plot series. Defaults to the last active sweep dimension when there is more than one.",
-    "sweep_dimensions": "Sweep workload size or hardware scaling. Use Total GPUs for GPU scaling; raw TP/CP/PP/DP/EP are edited once or found by Optimize parallelism, not swept independently.",
+    "sweep_dimensions": "Sweep workload size or hardware scaling. Network opens per-dimension bandwidth and latency choices without exposing every network field in this list. Use Total GPUs for GPU scaling; raw TP/CP/PP/DP/EP are edited once or found by Optimize parallelism, not swept independently.",
+    "network_sweep_field": "Choose the exact network dimension and parameter to sweep.",
     "reset_last_state": "Clear remembered selections and return sweep/config controls to defaults.",
     "run_launch": "Start the launch plan shown on the right.",
     "progress_run_log": "Open the run log entry for the finished job.",
@@ -757,7 +771,27 @@ def _default_payload() -> Dict[str, Any]:
 
 
 def default_sweep_rows() -> List[Dict[str, Any]]:
-    return [{"field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+    return [{"field": None, "network_field": DEFAULT_NETWORK_SWEEP_FIELD, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+
+
+def is_network_sweep_field(field_key: str | None) -> bool:
+    return field_key in NETWORK_SWEEP_FIELD_KEYS
+
+
+def display_sweep_field_value(field_key: str | None) -> str | None:
+    return NETWORK_SWEEP_GROUP_VALUE if is_network_sweep_field(field_key) else field_key
+
+
+def selected_network_sweep_field(row: Dict[str, Any] | None) -> str:
+    row = row or {}
+    candidate = row.get("network_field") or row.get("field")
+    return str(candidate) if is_network_sweep_field(candidate) else DEFAULT_NETWORK_SWEEP_FIELD
+
+
+def resolve_sweep_field(field_key: str | None, network_field: str | None = None) -> str | None:
+    if field_key == NETWORK_SWEEP_GROUP_VALUE:
+        return str(network_field) if is_network_sweep_field(network_field) else DEFAULT_NETWORK_SWEEP_FIELD
+    return field_key
 
 
 def _valid_preset_ids(kind: str) -> set[str]:
@@ -817,6 +851,7 @@ def state_dimensions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         [
             {
                 "field": row.get("field"),
+                "network_field": row.get("network_field"),
                 "mode": row.get("mode"),
                 "list_text": row.get("list_text"),
                 "config_values": row.get("config_values"),
@@ -1166,6 +1201,8 @@ def history_title_component(item: Dict[str, Any]) -> dmc.Group:
 
 def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
     row = row or default_sweep_rows()[0]
+    field_value = display_sweep_field_value(row.get("field"))
+    network_field_value = selected_network_sweep_field(row)
     return dmc.Paper(
         radius="xl",
         p="md",
@@ -1175,7 +1212,22 @@ def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
             gap="sm",
             children=[
                 dmc.Group(justify="space-between", children=[dmc.Text(f"Dimension {index}", fw=700, size="sm"), dmc.Badge("Optional", variant="light", color="gray")]),
-                with_tip(dmc.Select(id=f"dim-{index}-field", label="Field", placeholder="Select a sweep field", value=row.get("field"), data=FIELD_OPTIONS, clearable=True), "Select a workload or hardware-scaling field to vary. Use Total GPUs for GPU scaling; individual parallelism axes are not sweep fields."),
+                with_tip(dmc.Select(id=f"dim-{index}-field", label="Field", placeholder="Select a sweep field", value=field_value, data=SWEEP_FIELD_OPTIONS, clearable=True), "Select a workload or hardware-scaling field to vary. Use Network for per-dimension bandwidth and latency; individual parallelism axes are not sweep fields."),
+                html.Div(
+                    id=f"dim-{index}-network-wrap",
+                    className="sweep-submenu",
+                    style={"display": "none"},
+                    children=with_tip(
+                        dmc.Select(
+                            id=f"dim-{index}-network-field",
+                            label="Network setting",
+                            value=network_field_value,
+                            data=NETWORK_SWEEP_FIELD_OPTIONS,
+                            clearable=False,
+                        ),
+                        HELP_TEXT["network_sweep_field"],
+                    ),
+                ),
                 html.Div(
                     id=f"dim-{index}-mode-wrap",
                     style={"display": "none"},
@@ -1296,11 +1348,12 @@ def network_editor(defaults: List[Dict[str, Any]], pp_dimension: str | None = No
                             ],
                         ),
                         dmc.SimpleGrid(
-                            cols={"base": 1, "sm": 3},
+                            cols={"base": 1, "sm": 4},
                             spacing="sm",
                             children=[
-                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=[{"value": "Ring", "label": "Ring"}, {"value": "FC", "label": "Fully Connected"}, {"value": "Mesh2D", "label": "Mesh2D"}, {"value": "Torus2D", "label": "Torus2D"}], disabled=disabled), HELP_TEXT["network_topology"]),
+                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=NETWORK_TOPOLOGY_OPTIONS, disabled=disabled), HELP_TEXT["network_topology"]),
                                 with_tip(dmc.TextInput(id={"type": "net-bandwidth", "index": idx}, label="Bandwidth", value=str(row["bandwidth"]), disabled=disabled), HELP_TEXT["network_bandwidth"]),
+                                with_tip(dmc.NumberInput(id={"type": "net-latency", "index": idx}, label="Latency (s)", min=0, step=0.000001, decimalScale=9, value=float(row.get("latency", 0.0) or 0.0), disabled=disabled), HELP_TEXT["network_latency"]),
                                 with_tip(dmc.NumberInput(id={"type": "net-util", "index": idx}, label="Utilization", min=0, max=1, step=0.01, decimalScale=3, value=float(row["util"]), disabled=disabled), HELP_TEXT["network_util"]),
                             ],
                         ),
@@ -2100,6 +2153,7 @@ def collect_form_payload(
     adv_imbalance: float,
     net_topologies: List[str],
     net_bandwidths: List[str],
+    net_latencies: List[float],
     net_utils: List[float],
     parallelism_topology_mode: str,
     dimensions: List[Dict[str, Any]],
@@ -2117,7 +2171,7 @@ def collect_form_payload(
         optimizer_preset,
         {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count if simple_run_type == "inference" else 1, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
         {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": int(adv_dp_zero or 0), "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "pp_network_dimension": parallelism_topology_mode, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
-        _network_rows_from_callback(net_topologies, net_bandwidths, net_utils),
+        _network_rows_from_callback(net_topologies, net_bandwidths, net_latencies, net_utils),
         dimensions,
         metric,
         x_axis,
@@ -2423,6 +2477,7 @@ def refresh_parallelism_topology_preview(pp_dimension: str | None):
 @callback(
     Output({"type": "net-topology", "index": ALL}, "disabled"),
     Output({"type": "net-bandwidth", "index": ALL}, "disabled"),
+    Output({"type": "net-latency", "index": ALL}, "disabled"),
     Output({"type": "net-util", "index": ALL}, "disabled"),
     Input("parallelism-topology-mode", "value"),
     State({"type": "net-topology", "index": ALL}, "id"),
@@ -2436,7 +2491,7 @@ def toggle_network_dimension_controls(pp_dimension: str | None, topology_ids: Li
         mode = "dim1_dim2"
     disabled_indices = disabled_network_dimension_indices(mode)
     disabled = [item.get("index") in disabled_indices for item in topology_ids]
-    return disabled, disabled, disabled
+    return disabled, disabled, disabled, disabled
 
 
 @callback(
@@ -2538,13 +2593,30 @@ def toggle_sweep_dimensions_section(run_mode: str):
     Output("dim-2-configs", "data"),
     Output("dim-3-configs", "data"),
     Input("dim-1-field", "value"),
+    Input("dim-1-network-field", "value"),
     Input("dim-2-field", "value"),
+    Input("dim-2-network-field", "value"),
     Input("dim-3-field", "value"),
+    Input("dim-3-network-field", "value"),
     State("x-axis-select", "value"),
     State("series-select", "value"),
 )
-def refresh_dimension_options(field1: str | None, field2: str | None, field3: str | None, current_x_axis: str | None, current_series_axis: str | None):
-    active_fields = [field for field in [field1, field2, field3] if field]
+def refresh_dimension_options(
+    field1: str | None,
+    network_field1: str | None,
+    field2: str | None,
+    network_field2: str | None,
+    field3: str | None,
+    network_field3: str | None,
+    current_x_axis: str | None,
+    current_series_axis: str | None,
+):
+    row_fields = [
+        resolve_sweep_field(field1, network_field1),
+        resolve_sweep_field(field2, network_field2),
+        resolve_sweep_field(field3, network_field3),
+    ]
+    active_fields = [field for field in row_fields if field]
     options = [{"value": field, "label": dimension_label(field)} for field in active_fields]
     x_value = current_x_axis if current_x_axis in active_fields else (active_fields[0] if active_fields else None)
     series_default = active_fields[-1] if len(active_fields) > 1 else None
@@ -2553,21 +2625,24 @@ def refresh_dimension_options(field1: str | None, field2: str | None, field3: st
         series_value = active_fields[-1] if active_fields[-1] != x_value else active_fields[0]
     config_data = {"model_config": preset_options("models"), "hardware_config": preset_options("hardware")}
     rows = []
-    for field in [field1, field2, field3]:
+    for field in row_fields:
         rows.append(config_data.get(field, []))
     return options, x_value, options, series_value, rows[0], rows[1], rows[2]
 
 
-def sweep_control_visibility(field_key: str | None, mode: str | None) -> Dict[str, Any]:
+def sweep_control_visibility(field_key: str | None, mode: str | None, network_field: str | None = None) -> Dict[str, Any]:
     hidden = {"display": "none"}
     shown = {}
     if not field_key:
-        return {"mode_style": hidden, "values_style": hidden, "configs_style": hidden, "range_style": hidden, "mode": "values"}
-    kind = FIELD_TYPES.get(field_key, {}).get("kind")
+        return {"network_style": hidden, "mode_style": hidden, "values_style": hidden, "configs_style": hidden, "range_style": hidden, "mode": "values"}
+    resolved_field = resolve_sweep_field(field_key, network_field)
+    network_style = shown if field_key == NETWORK_SWEEP_GROUP_VALUE else hidden
+    kind = FIELD_TYPES.get(resolved_field, {}).get("kind")
     if kind == "config":
-        return {"mode_style": hidden, "values_style": hidden, "configs_style": shown, "range_style": hidden, "mode": "values"}
+        return {"network_style": network_style, "mode_style": hidden, "values_style": hidden, "configs_style": shown, "range_style": hidden, "mode": "values"}
     active_mode = "range" if mode == "range" else "values"
     return {
+        "network_style": network_style,
         "mode_style": shown,
         "values_style": shown if active_mode == "values" else hidden,
         "configs_style": hidden,
@@ -2577,30 +2652,46 @@ def sweep_control_visibility(field_key: str | None, mode: str | None) -> Dict[st
 
 
 @callback(
+    Output("dim-1-network-wrap", "style"),
     Output("dim-1-mode-wrap", "style"),
     Output("dim-1-values-wrap", "style"),
     Output("dim-1-configs-wrap", "style"),
     Output("dim-1-range-wrap", "style"),
+    Output("dim-2-network-wrap", "style"),
     Output("dim-2-mode-wrap", "style"),
     Output("dim-2-values-wrap", "style"),
     Output("dim-2-configs-wrap", "style"),
     Output("dim-2-range-wrap", "style"),
+    Output("dim-3-network-wrap", "style"),
     Output("dim-3-mode-wrap", "style"),
     Output("dim-3-values-wrap", "style"),
     Output("dim-3-configs-wrap", "style"),
     Output("dim-3-range-wrap", "style"),
     Input("dim-1-field", "value"),
+    Input("dim-1-network-field", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-2-field", "value"),
+    Input("dim-2-network-field", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-3-field", "value"),
+    Input("dim-3-network-field", "value"),
     Input("dim-3-mode", "value"),
 )
-def refresh_sweep_controls(field1: str | None, mode1: str | None, field2: str | None, mode2: str | None, field3: str | None, mode3: str | None):
+def refresh_sweep_controls(
+    field1: str | None,
+    network_field1: str | None,
+    mode1: str | None,
+    field2: str | None,
+    network_field2: str | None,
+    mode2: str | None,
+    field3: str | None,
+    network_field3: str | None,
+    mode3: str | None,
+):
     outputs = []
-    for field, mode in [(field1, mode1), (field2, mode2), (field3, mode3)]:
-        visibility = sweep_control_visibility(field, mode)
-        outputs.extend([visibility["mode_style"], visibility["values_style"], visibility["configs_style"], visibility["range_style"]])
+    for field, network_field, mode in [(field1, network_field1, mode1), (field2, network_field2, mode2), (field3, network_field3, mode3)]:
+        visibility = sweep_control_visibility(field, mode, network_field)
+        outputs.extend([visibility["network_style"], visibility["mode_style"], visibility["values_style"], visibility["configs_style"], visibility["range_style"]])
     return tuple(outputs)
 
 
@@ -2609,16 +2700,19 @@ def refresh_sweep_controls(field1: str | None, mode1: str | None, field2: str | 
     Output("dim-2-range-preview", "children"),
     Output("dim-3-range-preview", "children"),
     Input("dim-1-field", "value"),
+    Input("dim-1-network-field", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-1-start", "value"),
     Input("dim-1-end", "value"),
     Input("dim-1-step_or_points", "value"),
     Input("dim-2-field", "value"),
+    Input("dim-2-network-field", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-2-start", "value"),
     Input("dim-2-end", "value"),
     Input("dim-2-step_or_points", "value"),
     Input("dim-3-field", "value"),
+    Input("dim-3-network-field", "value"),
     Input("dim-3-mode", "value"),
     Input("dim-3-start", "value"),
     Input("dim-3-end", "value"),
@@ -2626,25 +2720,28 @@ def refresh_sweep_controls(field1: str | None, mode1: str | None, field2: str | 
 )
 def refresh_range_previews(
     field1: str | None,
+    network_field1: str | None,
     mode1: str | None,
     start1: float | None,
     end1: float | None,
     step1: float | None,
     field2: str | None,
+    network_field2: str | None,
     mode2: str | None,
     start2: float | None,
     end2: float | None,
     step2: float | None,
     field3: str | None,
+    network_field3: str | None,
     mode3: str | None,
     start3: float | None,
     end3: float | None,
     step3: float | None,
 ):
     return (
-        build_range_preview(field1, mode1, start1, end1, step1),
-        build_range_preview(field2, mode2, start2, end2, step2),
-        build_range_preview(field3, mode3, start3, end3, step3),
+        build_range_preview(resolve_sweep_field(field1, network_field1), mode1, start1, end1, step1),
+        build_range_preview(resolve_sweep_field(field2, network_field2), mode2, start2, end2, step2),
+        build_range_preview(resolve_sweep_field(field3, network_field3), mode3, start3, end3, step3),
     )
 
 
@@ -2653,7 +2750,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
     rows = state["sweep_rows"]
     row_values: List[Any] = []
     for row in rows:
-        row_values.extend([row.get("field"), row.get("mode"), row.get("list_text"), row.get("config_values"), row.get("start"), row.get("end"), row.get("step_or_points")])
+        row_values.extend([display_sweep_field_value(row.get("field")), selected_network_sweep_field(row), row.get("mode"), row.get("list_text"), row.get("config_values"), row.get("start"), row.get("end"), row.get("step_or_points")])
     return (
         "Restored default selections.",
         state["model_run_configs"],
@@ -2684,6 +2781,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("optimize-switch", "checked"),
     Output("optimizer-preset", "value"),
     Output("dim-1-field", "value"),
+    Output("dim-1-network-field", "value"),
     Output("dim-1-mode", "value"),
     Output("dim-1-list", "value"),
     Output("dim-1-configs", "value"),
@@ -2691,6 +2789,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("dim-1-end", "value"),
     Output("dim-1-step_or_points", "value"),
     Output("dim-2-field", "value"),
+    Output("dim-2-network-field", "value"),
     Output("dim-2-mode", "value"),
     Output("dim-2-list", "value"),
     Output("dim-2-configs", "value"),
@@ -2698,6 +2797,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("dim-2-end", "value"),
     Output("dim-2-step_or_points", "value"),
     Output("dim-3-field", "value"),
+    Output("dim-3-network-field", "value"),
     Output("dim-3-mode", "value"),
     Output("dim-3-list", "value"),
     Output("dim-3-configs", "value"),
@@ -2714,21 +2814,32 @@ def reset_last_state_values() -> tuple[Any, ...]:
 )
 def reset_saved_last_state(n_clicks: int | None):
     if not n_clicks:
-        return tuple(no_update for _ in range(35))
+        return tuple(no_update for _ in range(38))
     clear_last_ui_state()
     return reset_last_state_values()
 
 
-def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], utils: List[float]) -> List[Dict[str, Any]]:
-    return [{"topology_type": topology, "bandwidth": bandwidth, "util": util} for topology, bandwidth, util in zip(topologies, bandwidths, utils)]
+def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], latencies: List[float], utils: List[float]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for idx, topology in enumerate(topologies or []):
+        rows.append(
+            {
+                "topology_type": topology,
+                "bandwidth": (bandwidths or [""])[idx] if idx < len(bandwidths or []) else "",
+                "latency": (latencies or [0.0])[idx] if idx < len(latencies or []) else 0.0,
+                "util": (utils or [1.0])[idx] if idx < len(utils or []) else 1.0,
+            }
+        )
+    return rows
 
 
 def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     dimensions = []
     for row in raw_rows:
-        if row["field"]:
+        field_key = resolve_sweep_field(row.get("field"), row.get("network_field"))
+        if field_key:
             mode = row["mode"] or "values"
-            dimensions.append({"field_key": row["field"], "mode": mode, "list_text": row["list_text"], "config_values": row["config_values"], "start": row["start"], "end": row["end"], "points": None, "step": row["step_or_points"] if mode == "range" else None})
+            dimensions.append({"field_key": field_key, "mode": mode, "list_text": row["list_text"], "config_values": row["config_values"], "start": row["start"], "end": row["end"], "points": None, "step": row["step_or_points"] if mode == "range" else None})
     return dimensions
 
 
@@ -2782,6 +2893,7 @@ def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     Input("adv-imbalance", "value"),
     Input({"type": "net-topology", "index": ALL}, "value"),
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
+    Input({"type": "net-latency", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
     Input("parallelism-topology-mode", "value"),
     State("model-preset", "value"),
@@ -2845,6 +2957,7 @@ def sync_config_files(
     adv_imbalance: float,
     net_topologies: List[str],
     net_bandwidths: List[str],
+    net_latencies: List[float],
     net_utils: List[float],
     parallelism_topology_mode: str,
     model_preset: str,
@@ -2912,6 +3025,7 @@ def sync_config_files(
         adv_imbalance,
         net_topologies,
         net_bandwidths,
+        net_latencies,
         net_utils,
         parallelism_topology_mode,
         [],
@@ -2988,9 +3102,11 @@ def sync_config_files(
     Input("adv-imbalance", "value"),
     Input({"type": "net-topology", "index": ALL}, "value"),
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
+    Input({"type": "net-latency", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
     Input("parallelism-topology-mode", "value"),
     Input("dim-1-field", "value"),
+    Input("dim-1-network-field", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-1-list", "value"),
     Input("dim-1-configs", "value"),
@@ -2998,6 +3114,7 @@ def sync_config_files(
     Input("dim-1-end", "value"),
     Input("dim-1-step_or_points", "value"),
     Input("dim-2-field", "value"),
+    Input("dim-2-network-field", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-2-list", "value"),
     Input("dim-2-configs", "value"),
@@ -3005,6 +3122,7 @@ def sync_config_files(
     Input("dim-2-end", "value"),
     Input("dim-2-step_or_points", "value"),
     Input("dim-3-field", "value"),
+    Input("dim-3-network-field", "value"),
     Input("dim-3-mode", "value"),
     Input("dim-3-list", "value"),
     Input("dim-3-configs", "value"),
@@ -3072,9 +3190,11 @@ def build_preview(
     adv_imbalance: float,
     net_topologies: List[str],
     net_bandwidths: List[str],
+    net_latencies: List[float],
     net_utils: List[float],
     parallelism_topology_mode: str,
     dim1_field: str,
+    dim1_network_field: str,
     dim1_mode: str,
     dim1_list: str,
     dim1_configs: List[str],
@@ -3082,6 +3202,7 @@ def build_preview(
     dim1_end: float,
     dim1_step_or_points: float,
     dim2_field: str,
+    dim2_network_field: str,
     dim2_mode: str,
     dim2_list: str,
     dim2_configs: List[str],
@@ -3089,6 +3210,7 @@ def build_preview(
     dim2_end: float,
     dim2_step_or_points: float,
     dim3_field: str,
+    dim3_network_field: str,
     dim3_mode: str,
     dim3_list: str,
     dim3_configs: List[str],
@@ -3105,9 +3227,9 @@ def build_preview(
     if preview_rebuild_is_load_only(dash.ctx.triggered_prop_ids):
         return no_update, no_update, no_update
     sweep_rows = [
-        {"field": dim1_field, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
-        {"field": dim2_field, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
-        {"field": dim3_field, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points},
+        {"field": dim1_field, "network_field": dim1_network_field, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
+        {"field": dim2_field, "network_field": dim2_network_field, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
+        {"field": dim3_field, "network_field": dim3_network_field, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points},
     ]
     dimensions = config_dimensions_from_selection(model_run_configs, hardware_run_configs, model_preset, hardware_preset)
     dimensions.extend(_dimensions_from_inputs(sweep_rows))
@@ -3163,6 +3285,7 @@ def build_preview(
         adv_imbalance,
         net_topologies,
         net_bandwidths,
+        net_latencies,
         net_utils,
         parallelism_topology_mode,
         dimensions,

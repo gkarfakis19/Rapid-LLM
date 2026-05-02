@@ -227,7 +227,10 @@ def test_zero_stage_options_are_dropdown_labels():
 def test_plot_grouping_defaults_to_last_active_sweep_dimension():
     x_data, x_value, series_data, series_value, *_ = refresh_dimension_options(
         "model.global_batch_size",
+        None,
         "hardware.total_gpus",
+        None,
+        None,
         None,
         None,
         None,
@@ -244,6 +247,7 @@ def test_sweep_controls_mutate_by_field_kind():
     assert config_state["configs_style"] == {}
     assert config_state["values_style"] == {"display": "none"}
     assert config_state["range_style"] == {"display": "none"}
+    assert config_state["network_style"] == {"display": "none"}
 
     values_state = sweep_control_visibility("model.global_batch_size", "values")
     assert values_state["values_style"] == {}
@@ -254,11 +258,21 @@ def test_sweep_controls_mutate_by_field_kind():
     assert range_state["range_style"] == {}
     assert range_state["values_style"] == {"display": "none"}
 
+    network_state = sweep_control_visibility(webui_main.NETWORK_SWEEP_GROUP_VALUE, "values", "hardware.network.dim1.latency_s")
+    assert network_state["network_style"] == {}
+    assert network_state["values_style"] == {}
+    assert network_state["configs_style"] == {"display": "none"}
+    assert network_state["range_style"] == {"display": "none"}
+
 
 def test_sweep_field_options_exclude_raw_parallelism_axes():
     values = {item["value"] for item in FIELD_OPTIONS}
+    top_level_values = {item["value"] for item in webui_main.SWEEP_FIELD_OPTIONS}
 
     assert "hardware.total_gpus" in values
+    assert webui_main.NETWORK_SWEEP_GROUP_VALUE in top_level_values
+    assert "hardware.network.dim0.bandwidth_gbs" not in top_level_values
+    assert "hardware.network.dim2.latency_s" not in top_level_values
     assert "hardware.parallelism.tp" not in values
     assert "hardware.parallelism.cp" not in values
     assert "hardware.parallelism.pp" not in values
@@ -416,6 +430,23 @@ def test_layout_restores_last_saved_sweep_and_config_state(monkeypatch):
     assert _collect_by_id(layout, "reset-last-state-button")
 
 
+def test_layout_restores_network_sweep_as_grouped_selector(monkeypatch):
+    saved_state = {
+        "sweep_rows": [
+            {"field": "hardware.network.dim2.latency_s", "network_field": "hardware.network.dim2.latency_s", "mode": "range", "list_text": "", "config_values": [], "start": 0, "end": 0.00001, "step_or_points": 0.000005},
+            {"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
+            {"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
+        ],
+    }
+    monkeypatch.setattr(webui_main, "load_last_ui_state", lambda: saved_state)
+
+    layout = create_layout()
+
+    assert _collect_by_id(layout, "dim-1-field")[0].value == webui_main.NETWORK_SWEEP_GROUP_VALUE
+    assert _collect_by_id(layout, "dim-1-network-field")[0].value == "hardware.network.dim2.latency_s"
+    assert _collect_by_id(layout, "dim-1-mode")[0].value == "range"
+
+
 def test_model_dropdown_options_show_training_or_inference(monkeypatch):
     def fake_records(kind):
         if kind == "models":
@@ -461,7 +492,7 @@ def test_reset_last_state_values_returns_default_scratchpad_controls():
     assert values[5] == config_tab_value("models", "Llama2-7B.yaml")
     assert values[6] == "sweep"
     assert values[7] is DEFAULT_OPTIMIZE_PARALLELISM
-    assert values[9:30] == tuple([None, "values", "", [], None, None, None] * 3)
+    assert values[9:33] == tuple([None, webui_main.DEFAULT_NETWORK_SWEEP_FIELD, "values", "", [], None, None, None] * 3)
 
 
 def test_optimize_parallelism_does_not_auto_replica_count_for_inference():
@@ -804,6 +835,7 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
     preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_shared"))
     split_preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_dim2"))
     topology_select = _collect_by_id(layout, {"type": "net-topology", "index": 0})[0]
+    latency_input = _collect_by_id(layout, {"type": "net-latency", "index": 0})[0]
     reset_button = _collect_by_id(layout, "reset-paper-derates-button")
 
     assert selector.data == PP_TOPOLOGY_OPTIONS
@@ -821,6 +853,7 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
     assert "Dimension 1 off" not in split_preview_text
     assert {"value": "Mesh2D", "label": "Mesh2D"} in topology_select.data
     assert all(option["value"] != "SuperPOD" for option in topology_select.data)
+    assert latency_input.label == "Latency (s)"
     assert "SuperPOD is not exposed because support is not reliable enough yet." in HELP_TEXT["network_topology"]
     assert reset_button
 
