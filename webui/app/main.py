@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import quote
 
 import dash
 import dash_mantine_components as dmc
@@ -18,7 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
 from dash_iconify import DashIconify
-from flask import Response, request
+from flask import Response, abort, request, send_file
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -33,6 +34,8 @@ from webui.service.core import (
     NETWORK_SWEEP_FIELD_OPTIONS,
     NETWORK_SWEEP_TARGETS,
     RUN_MANAGER,
+    RUNS_ROOT,
+    SWEEPS_ROOT,
     build_form_defaults,
     build_case_label,
     build_job_title,
@@ -201,6 +204,53 @@ PP_TOPOLOGY_OPTIONS = [
     {"value": "dim1_shared", "label": "Dimension 1 | Dimension 2: PP+DP | None"},
     {"value": "dim1_dim2", "label": "Dimension 1 | Dimension 2: PP | DP"},
 ]
+SWEEP_PRESETS = [
+    {
+        "key": "batch_x3",
+        "label": "Batch x3",
+        "description": "Sweep common global batch sizes.",
+        "field": "model.global_batch_size",
+        "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
+        "network_apply": "set",
+        "mode": "values",
+        "list_text": "8, 16, 32",
+    },
+    {
+        "key": "gpu_scale",
+        "label": "GPU scale",
+        "description": "Sweep target GPU counts for scaling studies.",
+        "field": "hardware.total_gpus",
+        "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
+        "network_apply": "set",
+        "mode": "values",
+        "list_text": "8, 16, 32",
+    },
+    {
+        "key": "seq_len",
+        "label": "Seq length",
+        "description": "Sweep short, medium, and long input contexts.",
+        "field": "model.seq_len",
+        "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
+        "network_apply": "set",
+        "mode": "values",
+        "list_text": "4096, 8192, 16384",
+    },
+    {
+        "key": "network_bw_scale",
+        "label": "Network BW scale",
+        "description": "Scale all network bandwidth dimensions together.",
+        "field": NETWORK_SWEEP_GROUP_VALUE,
+        "network_targets": [
+            "hardware.network.dim0.bandwidth_gbs",
+            "hardware.network.dim1.bandwidth_gbs",
+            "hardware.network.dim2.bandwidth_gbs",
+        ],
+        "network_apply": "scale",
+        "mode": "values",
+        "list_text": "0.5, 1, 2",
+    },
+]
+SWEEP_PRESET_BY_KEY = {preset["key"]: preset for preset in SWEEP_PRESETS}
 HELP_TEXT = {
     "app_title": "RAPID-LLM launch workspace for editing YAML configs, previewing run size, launching jobs, and reviewing saved results.",
     "app_flow": "Basic flow: configure in Launch, start the run, open Run log, then click Details. Hover controls, metrics, and table columns for explanations.",
@@ -740,6 +790,40 @@ def require_basic_auth() -> Response | None:
     )
 
 
+def artifact_download_href(path: str | Path) -> str | None:
+    artifact_path = Path(path).expanduser().resolve()
+    for job_kind, root in (("run", RUNS_ROOT), ("sweep", SWEEPS_ROOT)):
+        root_path = root.resolve()
+        try:
+            relative = artifact_path.relative_to(root_path)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) < 3:
+            return None
+        job_id, artifact_folder = parts[0], parts[1]
+        filename = "/".join(parts[2:])
+        return f"/webui/artifact/{job_kind}/{quote(job_id, safe='')}/{quote(artifact_folder, safe='')}/{quote(filename, safe='/')}"
+    return None
+
+
+@server.route("/webui/artifact/<job_kind>/<job_id>/<artifact_folder>/<path:filename>")
+def download_saved_artifact(job_kind: str, job_id: str, artifact_folder: str, filename: str):
+    if job_kind not in {"run", "sweep"} or artifact_folder not in {"plots", "exports", "artifacts"}:
+        abort(404)
+    root = RUNS_ROOT if job_kind == "run" else SWEEPS_ROOT
+    job_root = (root / job_id).resolve()
+    artifact_root = (job_root / artifact_folder).resolve()
+    artifact_path = (artifact_root / filename).resolve()
+    if job_root != artifact_root and job_root not in artifact_root.parents:
+        abort(404)
+    if artifact_path != artifact_root and artifact_root not in artifact_path.parents:
+        abort(404)
+    if not artifact_path.is_file():
+        abort(404)
+    return send_file(artifact_path, as_attachment=True, download_name=artifact_path.name)
+
+
 def stat_card(label: str, value: Any, icon: str, color: str) -> dmc.Paper:
     return dmc.Paper(
         radius="lg",
@@ -1042,20 +1126,67 @@ def config_dimensions_from_selection(model_ids: List[str] | None, hardware_ids: 
     return dimensions
 
 
-def render_error_summary(errors: List[str]) -> dmc.Stack:
-    return dmc.Stack(
-        gap="sm",
-        children=[
+def launch_error_guidance(message: str) -> str:
+    lower = str(message).lower()
+    if "sweep values are invalid" in lower or "range step" in lower:
+        return "Check the selected sweep field, values, range start/end, and step size."
+    if "unsupported sweep field" in lower:
+        return "Choose a supported field from the sweep selector or switch Network targets back to the visible matrix."
+    if "mixed training and inference" in lower:
+        return "Run training and inference model configs as separate launches."
+    if "all sweep cases were invalid" in lower or "total gpus" in lower:
+        return "Check Total GPUs, fixed parallelism axes, and whether Optimize parallelism should be enabled."
+    if "network" in lower:
+        return "Check Network target selection and use Scale baseline when mixing bandwidth and latency targets."
+    if "vit" in lower and "sequence" in lower:
+        return "Use ViT image and patch settings instead of sequence-length sweeps for ViT configs."
+    return "Fix this item in Launch Builder, then re-check the Launch Plan."
+
+
+def render_error_summary(errors: List[str], preview: Dict[str, Any] | None = None) -> dmc.Stack:
+    invalid_cases = (preview or {}).get("invalid_cases") or []
+    children: List[Any] = []
+    for item in errors or ["Launch plan is not valid."]:
+        children.append(
             dmc.Alert(
-                item,
+                dmc.Stack(
+                    gap=4,
+                    children=[
+                        dmc.Text(item, fw=900),
+                        dmc.Text(launch_error_guidance(item), size="sm"),
+                    ],
+                ),
                 title="Launch plan error",
                 color="red",
                 radius="lg",
                 className="launch-error-alert",
                 icon=DashIconify(icon="solar:danger-triangle-bold", width=22),
             )
-            for item in errors
-        ],
+        )
+    if invalid_cases:
+        sample = invalid_cases[:3]
+        children.append(
+            dmc.Alert(
+                dmc.Stack(
+                    gap=4,
+                    children=[
+                        dmc.Text(f"{len(invalid_cases):,} case(s) were invalid before pruning.", fw=900),
+                        *[
+                            dmc.Text(f"{case.get('label', 'Case')}: {case.get('error', 'Invalid case')}", size="sm")
+                            for case in sample
+                        ],
+                    ],
+                ),
+                title="Invalid case examples",
+                color="orange",
+                radius="lg",
+                className="launch-warning-alert",
+                icon=DashIconify(icon="solar:info-circle-bold", width=20),
+            )
+        )
+    return dmc.Stack(
+        gap="sm",
+        children=children,
     )
 
 
@@ -1153,7 +1284,7 @@ def detail_loading_placeholder(selected_detail: Dict[str, Any] | None) -> dmc.Pa
 
 def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
     if not preview.get("ok"):
-        return render_error_summary(preview.get("errors", []))
+        return render_error_summary(preview.get("errors", []), preview)
     telemetry = get_telemetry()
     return dmc.Stack(
         gap="sm",
@@ -1185,6 +1316,119 @@ def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
             dmc.Stack(children=[dmc.Alert(w, color="red", radius="lg") for w in preview.get("warnings", [])]) if preview.get("warnings") else html.Div(),
         ],
     )
+
+
+def launch_summary_item(label: str, value: str, color: str = "blue") -> html.Div:
+    return html.Div(
+        className="launch-summary-item",
+        children=[
+            html.Span(label, className="launch-summary-label"),
+            html.Span(value, className=f"launch-summary-value launch-summary-value-{color}"),
+        ],
+    )
+
+
+def _preview_config_count(preview: Dict[str, Any], payload: Dict[str, Any], field_key: str, fallback_key: str) -> int:
+    values = {
+        str((case.get("dimension_values") or {}).get(field_key) or payload.get(fallback_key) or "")
+        for case in (preview.get("top_level_cases") or [])
+    }
+    values.discard("")
+    return max(1, len(values))
+
+
+def render_launch_summary_strip(preview: Dict[str, Any] | None, payload: Dict[str, Any] | None) -> Any:
+    preview = preview or {}
+    payload = payload or {}
+    if not preview.get("ok"):
+        return dmc.Alert(
+            "Fix Launch Plan errors before launching.",
+            color="red",
+            radius="lg",
+            className="launch-summary-error",
+            icon=DashIconify(icon="solar:danger-triangle-bold", width=18),
+        )
+    metric = preview.get("metric") or payload.get("metric") or DEFAULT_METRIC
+    optimizer_text = "On" if preview.get("optimizer_enabled") else "Off"
+    if preview.get("optimizer_enabled"):
+        optimizer_text = str(preview.get("optimizer_preset") or "On")
+    return html.Div(
+        className="launch-summary-strip",
+        children=[
+            launch_summary_item("Mode", str(preview.get("run_type") or "training").title(), "teal"),
+            launch_summary_item("Models", str(_preview_config_count(preview, payload, "model_config", "model_preset_id")), "blue"),
+            launch_summary_item("Hardware", str(_preview_config_count(preview, payload, "hardware_config", "hardware_preset_id")), "orange"),
+            launch_summary_item("Cases", format_metric_value(preview.get("top_level_case_count", 0), "case_count"), "violet"),
+            launch_summary_item("Invocations", format_metric_value(preview.get("total_invocations", 0), "invocation_count"), "blue"),
+            launch_summary_item("Workers", format_metric_value(preview.get("worker_count", 0), "worker_count"), "teal"),
+            launch_summary_item("Timeout", format_metric_value(preview.get("timeout_seconds", 0), "timeout_seconds"), "orange"),
+            launch_summary_item("Metric", METRIC_LABELS.get(metric, str(metric)), "blue"),
+            launch_summary_item("Search", optimizer_text, "violet" if preview.get("optimizer_enabled") else "gray"),
+        ],
+    )
+
+
+def _dimension_value_count_from_inputs(dim: Dict[str, Any]) -> int | None:
+    field_key = dim.get("field_key")
+    if FIELD_TYPES.get(field_key, {}).get("kind") == "config":
+        return len([item for item in dim.get("config_values", []) or [] if item])
+    mode = dim.get("mode") or "values"
+    if mode == "range":
+        try:
+            start = float(dim.get("start"))
+            end = float(dim.get("end"))
+            step = float(dim.get("step") if dim.get("step") is not None else dim.get("step_or_points"))
+        except (TypeError, ValueError):
+            return None
+        if step <= 0 or end < start:
+            return None
+        return int((end - start) // step) + 1
+    values = [item.strip() for item in str(dim.get("list_text") or "").split(",") if item.strip()]
+    return len(values) or None
+
+
+def _dimension_value_count_from_preview(preview: Dict[str, Any], field_key: str) -> int | None:
+    values = []
+    for case in preview.get("top_level_cases") or []:
+        dimension_values = case.get("dimension_values") or {}
+        if field_key in dimension_values:
+            values.append(json.dumps(dimension_values[field_key], sort_keys=True, default=str))
+    return len(set(values)) if values else None
+
+
+def render_sweep_preview_chips(preview: Dict[str, Any] | None, payload: Dict[str, Any] | None) -> Any:
+    payload = payload or {}
+    preview = preview or {}
+    if str(payload.get("run_mode") or "sweep").lower() == "single":
+        return dmc.Text("Single launch mode; sweep dimensions are ignored.", size="xs", c="dimmed")
+    dimensions = [dim for dim in payload.get("dimensions", []) or [] if dim.get("field_key")]
+    chips: List[Any] = []
+    for dim in dimensions:
+        field_key = str(dim["field_key"])
+        count = _dimension_value_count_from_preview(preview, field_key) or _dimension_value_count_from_inputs(dim)
+        chip_text = f"{dimension_label(field_key)} x{count}" if count else dimension_label(field_key)
+        chips.append(dmc.Badge(chip_text, radius="xl", color="blue", variant="light", className="sweep-preview-chip"))
+    if preview.get("optimizer_enabled"):
+        preset = str(preview.get("optimizer_preset") or "Search")
+        chips.append(dmc.Badge(f"Search: {preset}", radius="xl", color="violet", variant="light", className="sweep-preview-chip"))
+    if not chips:
+        chips.append(dmc.Badge("Base case only", radius="xl", color="gray", variant="light", className="sweep-preview-chip"))
+    return dmc.Group(gap="xs", className="sweep-chip-row", children=chips)
+
+
+def saved_artifact_status(prefix: str, path: str | Path) -> html.Div:
+    href = artifact_download_href(path)
+    children: List[Any] = [html.Span(f"{prefix}: {path}", className="artifact-status-text")]
+    if href:
+        children.append(
+            html.A(
+                "Download link",
+                href=href,
+                download=Path(path).name,
+                className="artifact-download-link",
+            )
+        )
+    return html.Div(className="detail-export-status", children=children)
 
 
 def launch_button_label(preview: Dict[str, Any] | None) -> str:
@@ -1285,6 +1529,40 @@ def network_sweep_target_grid(index: int, selected_targets: List[str]) -> dmc.Ch
     )
 
 
+def sweep_preset_buttons() -> dmc.Stack:
+    return dmc.Stack(
+        gap=6,
+        className="sweep-preset-block",
+        children=[
+            dmc.Group(
+                justify="space-between",
+                align="center",
+                gap="xs",
+                children=[
+                    dmc.Text("Reusable sweep starters", fw=800, size="sm"),
+                ],
+            ),
+            dmc.Group(
+                gap="xs",
+                className="sweep-preset-row",
+                children=[
+                    with_tip(
+                        dmc.Button(
+                            preset["label"],
+                            id={"type": "sweep-preset", "name": preset["key"]},
+                            variant="light",
+                            size="xs",
+                            leftSection=DashIconify(icon="solar:magic-stick-3-bold", width=15),
+                        ),
+                        preset["description"],
+                    )
+                    for preset in SWEEP_PRESETS
+                ],
+            ),
+        ],
+    )
+
+
 def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
     row = row or default_sweep_rows()[0]
     field_value = display_sweep_field_value(row.get("field"))
@@ -1298,7 +1576,14 @@ def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
         children=dmc.Stack(
             gap="sm",
             children=[
-                dmc.Group(justify="space-between", children=[dmc.Text(f"Dimension {index}", fw=700, size="sm"), dmc.Badge("Optional", variant="light", color="gray")]),
+                dmc.Group(
+                    justify="space-between",
+                    className="dimension-card-header",
+                    children=[
+                        dmc.Group(gap="xs", children=[html.Span(str(index), className="dimension-card-index"), dmc.Text(f"Dimension {index}", fw=800, size="sm")]),
+                        dmc.Badge("Optional", variant="light", color="gray"),
+                    ],
+                ),
                 with_tip(dmc.Select(id=f"dim-{index}-field", label="Field", placeholder="Select a sweep field", value=field_value, data=SWEEP_FIELD_OPTIONS, clearable=True), "Select a workload or hardware-scaling field to vary. Use Network for per-dimension bandwidth and latency; individual parallelism axes are not sweep fields."),
                 html.Div(
                     id=f"dim-{index}-network-wrap",
@@ -1529,8 +1814,8 @@ def create_layout() -> dmc.MantineProvider:
             className="app-shell",
             children=[
                 build_header(),
-                dcc.Interval(id="telemetry-poller", interval=5000, n_intervals=0),
-                dcc.Interval(id="job-poller", interval=1500, n_intervals=0),
+                dcc.Interval(id="telemetry-poller", interval=10000, n_intervals=0),
+                dcc.Interval(id="job-poller", interval=2500, n_intervals=0),
                 dcc.Store(id="preview-store"),
                 dcc.Store(id="selected-detail-store"),
                 dcc.Store(id="history-refresh-store"),
@@ -2136,6 +2421,8 @@ def config_options_card(state: Dict[str, Any]) -> dmc.Paper:
 
 def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
     rows = state.get("sweep_rows") or default_sweep_rows()
+    initial_payload = initial_payload_from_state(state)
+    initial_preview = build_launch_preview(initial_payload)
     return dmc.Paper(
         radius="xl",
         p="lg",
@@ -2155,6 +2442,8 @@ def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
                     dmc.Text("Sweep workload size and hardware scaling. Select multiple model or hardware files in Launch Setup for config comparisons.", size="sm", c="dimmed"),
                     HELP_TEXT["sweep_dimensions"],
                 ),
+                sweep_preset_buttons(),
+                html.Div(id="sweep-preview-chips", children=render_sweep_preview_chips(initial_preview, initial_payload)),
                 dmc.Text(id="last-state-status", size="xs", c="dimmed"),
                 dim_card(1, rows[0]),
                 dim_card(2, rows[1]),
@@ -2173,6 +2462,8 @@ def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
 
 
 def launch_controls_card(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> dmc.Paper:
+    initial_payload = initial_payload_from_state(state)
+    initial_preview = build_launch_preview(initial_payload)
     return dmc.Paper(
         radius="xl",
         p="lg",
@@ -2181,6 +2472,7 @@ def launch_controls_card(metric_options: List[Dict[str, str]], state: Dict[str, 
             gap="md",
             children=[
                 dmc.Title("Launch", order=3),
+                html.Div(id="launch-summary-strip", children=render_launch_summary_strip(initial_preview, initial_payload)),
                 with_tip(dmc.Select(id="metric-select", label="Metric", value=state["metric"], data=metric_options), HELP_TEXT["metric"]),
                 dmc.Group(
                     justify="flex-end",
@@ -2940,6 +3232,42 @@ def reset_saved_last_state(n_clicks: int | None):
     return reset_last_state_values()
 
 
+@callback(
+    Output("last-state-status", "children", allow_duplicate=True),
+    Output("dim-1-field", "value", allow_duplicate=True),
+    Output("dim-1-network-targets", "value", allow_duplicate=True),
+    Output("dim-1-network-apply", "value", allow_duplicate=True),
+    Output("dim-1-mode", "value", allow_duplicate=True),
+    Output("dim-1-list", "value", allow_duplicate=True),
+    Output("dim-1-configs", "value", allow_duplicate=True),
+    Output("dim-1-start", "value", allow_duplicate=True),
+    Output("dim-1-end", "value", allow_duplicate=True),
+    Output("dim-1-step_or_points", "value", allow_duplicate=True),
+    Input({"type": "sweep-preset", "name": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def apply_sweep_preset(n_clicks: List[int] | None):
+    trigger = dash.ctx.triggered_id
+    clicked = dash.ctx.triggered[0].get("value") if dash.ctx.triggered else None
+    if not isinstance(trigger, dict) or not clicked:
+        return tuple(no_update for _ in range(10))
+    preset = SWEEP_PRESET_BY_KEY.get(str(trigger.get("name")))
+    if not preset:
+        return tuple(no_update for _ in range(10))
+    return (
+        f"Applied preset: {preset['label']}.",
+        preset["field"],
+        list(preset["network_targets"]),
+        preset["network_apply"],
+        preset["mode"],
+        preset["list_text"],
+        [],
+        None,
+        None,
+        None,
+    )
+
+
 def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], latencies: List[float], utils: List[float]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for idx, topology in enumerate(topologies or []):
@@ -3175,6 +3503,8 @@ def sync_config_files(
     Output("preview-store", "data"),
     Output("preview-summary", "children"),
     Output("run-button", "children"),
+    Output("sweep-preview-chips", "children"),
+    Output("launch-summary-strip", "children"),
     Input("model-preset", "value"),
     Input("hardware-preset", "value"),
     Input("model-run-configs", "value"),
@@ -3357,7 +3687,7 @@ def build_preview(
     active_config_tab: str | None,
 ):
     if preview_rebuild_is_load_only(dash.ctx.triggered_prop_ids):
-        return no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update, no_update
     sweep_rows = [
         {"field": dim1_field, "network_targets": dim1_network_targets, "network_apply": dim1_network_apply, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
         {"field": dim2_field, "network_targets": dim2_network_targets, "network_apply": dim2_network_apply, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
@@ -3447,8 +3777,20 @@ def build_preview(
     )
     preview = build_launch_preview(payload)
     if not preview.get("ok"):
-        return {"payload": payload, "preview": preview}, render_error_summary(preview.get("errors", [])), launch_button_label(preview)
-    return {"payload": payload, "preview": preview}, render_preview_summary(preview, metric), launch_button_label(preview)
+        return (
+            {"payload": payload, "preview": preview},
+            render_error_summary(preview.get("errors", []), preview),
+            launch_button_label(preview),
+            render_sweep_preview_chips(preview, payload),
+            render_launch_summary_strip(preview, payload),
+        )
+    return (
+        {"payload": payload, "preview": preview},
+        render_preview_summary(preview, metric),
+        launch_button_label(preview),
+        render_sweep_preview_chips(preview, payload),
+        render_launch_summary_strip(preview, payload),
+    )
 
 
 @callback(Output("preview-summary", "children", allow_duplicate=True), Input("run-button", "n_clicks"), State("preview-store", "data"), prevent_initial_call=True)
@@ -3554,7 +3896,7 @@ def save_current_detail_plot(n_clicks: int | None, selected_detail: Dict[str, An
             row[y_axis] = 0
     png_bytes = detail_plot_png_bytes(rows, x_axis, y_axis, series_axis, plot_type or "line", detail.get("title") or selected_detail["id"])
     path = save_plot_png(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], png_bytes)
-    return f"Downloaded and saved plot: {path}", download_payload_for_file(path, png_bytes, "image/png")
+    return saved_artifact_status("Downloaded and saved plot", path), download_payload_for_file(path, png_bytes, "image/png")
 
 
 @callback(
@@ -3580,7 +3922,7 @@ def export_current_detail_table(csv_clicks: int | None, json_clicks: int | None,
     content, row_count = detail_table_export_payload(detail, fmt)
     path = save_table_export(selected_detail["kind"], selected_detail["id"], detail.get("title") or selected_detail["id"], fmt, content)
     mime_type = "text/csv" if fmt == "csv" else "application/json"
-    return f"Downloaded {row_count:,} rows and saved: {path}", download_payload_for_file(path, content, mime_type)
+    return saved_artifact_status(f"Downloaded {row_count:,} rows and saved", path), download_payload_for_file(path, content, mime_type)
 
 
 def render_active_job_panel(active: Dict[str, Any] | None = None, finished: Dict[str, Any] | None = None) -> Any:
@@ -3942,6 +4284,21 @@ def _apply_plotly_oom_styling(figure: Any, plot_kind: str, has_oom: bool) -> Non
         )
 
 
+def plot_axis_title(axis_key: str) -> str:
+    label = pretty_label(axis_key)
+    if axis_key in TIME_KEYS or axis_key.endswith(("_time_s", "_seconds", "_s")):
+        return f"{label} (s)"
+    if axis_key in FLOP_RATE_KEYS or (axis_key.endswith("_flops") and axis_key not in FLOP_COUNT_KEYS):
+        return f"{label} (FLOP/s)"
+    if axis_key in FLOP_COUNT_KEYS:
+        return f"{label} (FLOP)"
+    if axis_key in TOKEN_RATE_KEYS:
+        return f"{label} (tok/s)"
+    if axis_key.endswith("_gb") or axis_key == "hbm_gb":
+        return f"{label} (GB)"
+    return label
+
+
 def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, series_axis: str | None, plot_type: str | None):
     plot_rows = [dict(row) for row in rows]
     for row in plot_rows:
@@ -3956,7 +4313,7 @@ def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, ser
             if len(values) > 1:
                 color_axis = candidate
                 break
-    hover_fields = [key for key in ["status", "memory_exceeded", "model_config", "hardware_config", "parallelism"] if key in plot_rows[0]]
+    hover_fields = [key for key in ["_memory_fit", "status", "memory_exceeded", "model_config", "hardware_config", "parallelism"] if key in plot_rows[0]]
     plot_kind = plot_type or "line"
     common = {
         "data_frame": plot_rows,
@@ -3983,8 +4340,8 @@ def detail_plot_figure(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, ser
         font_family="Arial, Calibri, Segoe UI, sans-serif",
         font_color="#17212b",
         margin=dict(l=20, r=20, t=40, b=20),
-        xaxis_title=pretty_label(x_axis),
-        yaxis_title=pretty_label(y_axis),
+        xaxis_title=plot_axis_title(x_axis),
+        yaxis_title=plot_axis_title(y_axis),
         legend_title_text=pretty_label(color_axis) if color_axis else "",
     )
     figure.update_xaxes(gridcolor="#e3edf4", zerolinecolor="#bfd2df")
@@ -4094,8 +4451,8 @@ def detail_plot_png_bytes(rows: List[Dict[str, Any]], x_axis: str, y_axis: str, 
                     ax.scatter([item[0] for item in oom_points], [item[1] for item in oom_points], s=78, color="#c1121f", marker="x", linewidths=2.0, zorder=4)
 
     ax.set_title(title, loc="left", fontsize=15, fontweight=800, color="#17212b", pad=16)
-    ax.set_xlabel(pretty_label(x_axis), fontsize=11, color="#17212b")
-    ax.set_ylabel(pretty_label(y_axis), fontsize=11, color="#17212b")
+    ax.set_xlabel(plot_axis_title(x_axis), fontsize=11, color="#17212b")
+    ax.set_ylabel(plot_axis_title(y_axis), fontsize=11, color="#17212b")
     ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: format_metric_value(value, y_axis)))
     if category_labels is not None:
         ax.set_xticks(range(len(category_labels)))
@@ -4288,18 +4645,11 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
                 align="center",
                 children=[
                     dmc.Stack(gap=2, children=[dmc.Title(detail["title"], order=2), dmc.Text(detail_note, size="sm", c="dimmed")]),
-                    dmc.Group(
-                        gap="xs",
-                        className="detail-status-badges",
-                        children=[
-                            dmc.Badge("Parallelism optimized" if optimizer_enabled else "Fixed parallelism", color="blue" if optimizer_enabled else "gray", variant="light", radius="xl"),
-                        ],
-                    ),
                 ],
             ),
             termination_summary_component(detail, rows),
             dmc.Title("Graph", order=3),
-            dcc.Graph(figure=figure, config={"displayModeBar": False}, style={"height": "420px"}),
+            dcc.Graph(figure=figure, config={"displayModeBar": False, "responsive": True}, className="detail-graph", style={"height": "460px"}),
             dmc.Paper(radius="xl", p="lg", withBorder=True, children=table),
         ],
     )

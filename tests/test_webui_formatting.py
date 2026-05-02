@@ -29,11 +29,13 @@ from webui.app.main import (
     MODEL_MODE_OPTIONS,
     PP_TOPOLOGY_OPTIONS,
     PRECISION_FORMAT_OPTIONS,
+    SWEEP_PRESETS,
     TENSOR_FORMAT_OPTIONS,
     ZERO_STAGE_OPTIONS,
     _default_payload,
     active_config_tab_for_selection_change,
     active_config_tab_value,
+    artifact_download_href,
     basic_auth_credentials_are_valid,
     basic_auth_credentials_from_header,
     basic_auth_password_from_header,
@@ -65,7 +67,9 @@ from webui.app.main import (
     preview_rebuild_is_load_only,
     progress_count_label,
     render_detail,
+    render_launch_summary_strip,
     render_preview_summary,
+    render_sweep_preview_chips,
     refresh_job_status,
     reset_paper_derates,
     reset_last_state_values,
@@ -485,6 +489,79 @@ def test_launch_plan_renders_zero_timeout_as_unbounded(monkeypatch):
 
     assert "N/A" in texts
     assert "Timeout: Disabled" in texts
+
+
+def test_plan_features_render_launch_summary_and_sweep_chips():
+    payload = {
+        "run_mode": "sweep",
+        "model_preset_id": "Llama2-7B.yaml",
+        "hardware_preset_id": "H100_SXM5_80GB.yaml",
+        "metric": "training_time_s",
+        "dimensions": [
+            {"field_key": "model.global_batch_size", "mode": "values", "list_text": "8, 16, 32"},
+            {"field_key": "hardware.network.scale.d0bw.d1bw.d2bw", "mode": "values", "list_text": "0.5, 1, 2"},
+        ],
+    }
+    preview = {
+        "ok": True,
+        "run_type": "training",
+        "metric": "training_time_s",
+        "optimizer_enabled": True,
+        "optimizer_preset": "Fast",
+        "worker_count": 8,
+        "timeout_seconds": 180,
+        "top_level_case_count": 9,
+        "total_invocations": 72,
+        "top_level_cases": [
+            {"dimension_values": {"model.global_batch_size": batch, "hardware.network.scale.d0bw.d1bw.d2bw": scale}}
+            for batch in [8, 16, 32]
+            for scale in [0.5, 1, 2]
+        ],
+    }
+
+    summary_text = _collect_text(render_launch_summary_strip(preview, payload))
+    chip_text = _collect_text(render_sweep_preview_chips(preview, payload))
+
+    assert "Mode" in summary_text
+    assert "Training" in summary_text
+    assert "Cases" in summary_text
+    assert "9" in summary_text
+    assert "Invocations" in summary_text
+    assert "72" in summary_text
+    assert "Workers" in summary_text
+    assert "8" in summary_text
+    assert "Timeout" in summary_text
+    assert "3m 0s" in summary_text
+    assert "Metric" in summary_text
+    assert "Time / Batch" in summary_text
+    assert "Search" in summary_text
+    assert "Fast" in summary_text
+    assert "Batch Size x3" in chip_text
+    assert "Network Bandwidth Scale x3" in chip_text
+    assert "Search: Fast" in chip_text
+
+
+def test_plan_features_include_reusable_sweep_presets_and_slow_polling():
+    layout = create_layout()
+    telemetry_interval = _collect_by_id(layout, "telemetry-poller")[0]
+    job_interval = _collect_by_id(layout, "job-poller")[0]
+
+    assert {preset["key"] for preset in SWEEP_PRESETS} == {"batch_x3", "gpu_scale", "seq_len", "network_bw_scale"}
+    assert telemetry_interval.interval == 10_000
+    assert job_interval.interval == 2_500
+
+
+def test_saved_artifact_href_is_scoped_to_known_job_roots(monkeypatch, tmp_path):
+    sweeps_root = tmp_path / "sweeps"
+    runs_root = tmp_path / "runs"
+    monkeypatch.setattr(webui_main, "SWEEPS_ROOT", sweeps_root)
+    monkeypatch.setattr(webui_main, "RUNS_ROOT", runs_root)
+
+    sweep_plot = sweeps_root / "sweep-1" / "plots" / "plot one.png"
+    external_file = tmp_path / "elsewhere" / "plot.png"
+
+    assert artifact_download_href(sweep_plot) == "/webui/artifact/sweep/sweep-1/plots/plot%20one.png"
+    assert artifact_download_href(external_file) is None
 
 
 def test_reset_last_state_values_returns_default_scratchpad_controls():
@@ -992,7 +1069,7 @@ def test_config_options_css_does_not_clip_stacked_layout():
     assert ".config-options-card {\n  overflow: visible;\n}" in css
     assert ".builder-grid {\n    height: auto;\n    overflow: visible;" in stacked_breakpoint
     assert ".builder-left-scroll {\n    max-height: none;\n    overflow: visible;" in stacked_breakpoint
-    assert ".right-rail {\n    position: static;\n    max-height: none;\n    overflow: visible;" in short_viewport_breakpoint
+    assert ".right-rail {\n    position: sticky;\n    max-height: calc(100vh - 130px);\n    overflow-y: auto;" in short_viewport_breakpoint
 
 
 def _large_sweep_detail(case_count: int):
@@ -1192,7 +1269,7 @@ def test_sweep_detail_ignores_hidden_peak_metric_axis():
     graph = _collect_graphs(render_detail(detail))[0]
 
     assert y_axis == "training_time_s"
-    assert graph.figure.layout.yaxis.title.text == "Time / Batch"
+    assert graph.figure.layout.yaxis.title.text == "Time / Batch (s)"
 
 
 def test_detail_memory_fields_are_merged():
@@ -1276,8 +1353,7 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     assert table.style_data_conditional[0]["if"]["column_id"] == "memory_exceeded"
     assert table.style_data_conditional[0]["color"] == "#c1121f"
     assert table.data[1]["training_time_s"] == "0.00 us"
-    assert len(status_badges) == 1
-    assert _collect_text(status_badges[0]) == ["Parallelism optimized"]
+    assert status_badges == []
     assert [column["id"] for column in table.columns[:8]] == [
         "case",
         "label",

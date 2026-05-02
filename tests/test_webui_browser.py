@@ -398,6 +398,19 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("Detail Smoke").wait_for(timeout=5000)
             page.locator("button").filter(has_text="Details").first.click()
             page.get_by_role("dialog").wait_for(timeout=5000)
+            page.wait_for_function("() => document.activeElement?.id === 'detail-close-button'", timeout=5000)
+            page.keyboard.press("Escape")
+            page.wait_for_function("() => getComputedStyle(document.querySelector('#detail-overlay')).display === 'none'", timeout=5000)
+            page.wait_for_function(
+                """() => {
+                    const active = document.activeElement;
+                    return active?.tagName === 'BUTTON' && (active.textContent || '').includes('Details');
+                }""",
+                timeout=5000,
+            )
+            page.keyboard.press("Enter")
+            page.get_by_role("dialog").wait_for(timeout=5000)
+            page.wait_for_function("() => document.activeElement?.id === 'detail-close-button'", timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Line Plot", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Scatter", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Bar chart", exact=True).wait_for(timeout=5000)
@@ -405,15 +418,18 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.locator("#detail-plot-toolbar").get_by_text("Download plot", exact=True).click()
             page.get_by_text("Downloaded and saved plot:").wait_for(timeout=5000)
             saved_plot_text = page.locator("#plot-save-status").inner_text(timeout=5000)
-            assert saved_plot_text.endswith(".png")
-            saved_plot_path = Path(saved_plot_text.removeprefix("Downloaded and saved plot: ").strip())
+            assert "Download link" in saved_plot_text
+            saved_plot_path_text = saved_plot_text.split("Download link", 1)[0].removeprefix("Downloaded and saved plot: ").strip()
+            assert saved_plot_path_text.endswith(".png")
+            saved_plot_path = Path(saved_plot_path_text)
             assert saved_plot_path.exists()
             assert saved_plot_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             assert saved_plot_path.stat().st_size > 20_000
+            download_href = page.locator("#plot-save-status .artifact-download-link").get_attribute("href")
+            assert download_href and download_href.startswith("/webui/artifact/sweep/")
             page.get_by_text("Memory Exceeded").wait_for(timeout=5000)
             page.get_by_text("12.5 GB").wait_for(timeout=5000)
             page.get_by_text("case-0001 - batch 64").wait_for(timeout=5000)
-            page.get_by_text("Fixed parallelism").wait_for(timeout=5000)
             page.get_by_text("Early termination rate: 50.0% (1/2 runs).").wait_for(timeout=5000)
             page.get_by_text("Many runs terminated early").wait_for(timeout=5000)
             page.get_by_text("0.00 us").wait_for(timeout=5000)
@@ -466,7 +482,6 @@ def test_webui_layout_and_visual_health(tmp_path):
                     const dialog = document.querySelector('[role="dialog"]');
                     const close = document.querySelector('#detail-close-button');
                     const title = document.querySelector('#detail-modal-title');
-                    const badges = document.querySelector('.detail-status-badges');
                     const dialogRect = dialog.getBoundingClientRect();
                     const closeRect = close.getBoundingClientRect();
                     const titleStyle = getComputedStyle(title);
@@ -474,14 +489,14 @@ def test_webui_layout_and_visual_health(tmp_path):
                         closeTopOffset: Math.round(closeRect.top - dialogRect.top),
                         closeRightOffset: Math.round(dialogRect.right - closeRect.right),
                         titleFontSize: parseFloat(titleStyle.fontSize),
-                        badgeText: badges?.innerText || '',
+                        hasSweepStatusBadges: !!document.querySelector('.detail-status-badges'),
                     };
                 }"""
             )
             assert 10 <= detail_chrome_metrics["closeTopOffset"] <= 24
             assert 12 <= detail_chrome_metrics["closeRightOffset"] <= 26
             assert detail_chrome_metrics["titleFontSize"] >= 26
-            assert detail_chrome_metrics["badgeText"].strip().lower() == "fixed parallelism"
+            assert not detail_chrome_metrics["hasSweepStatusBadges"]
             page.screenshot(path=screenshot_dir / f"webui-details-{stamp}.png", full_page=True)
             page.mouse.click(8, 8)
             page.wait_for_function("() => getComputedStyle(document.querySelector('#detail-overlay')).display === 'none'", timeout=5000)
