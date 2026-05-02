@@ -3755,10 +3755,16 @@ def _customdata_memory_flags(trace: Any) -> List[str]:
         return []
     flags: List[str] = []
     for item in customdata:
-        if isinstance(item, (list, tuple)) and item:
-            flags.append(str(item[0]))
-        else:
+        if isinstance(item, (str, bytes)):
             flags.append(str(item))
+            continue
+        try:
+            if len(item):
+                flags.append(str(item[0]))
+                continue
+        except (TypeError, IndexError):
+            pass
+        flags.append(str(item))
     return flags
 
 

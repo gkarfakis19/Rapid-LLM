@@ -540,11 +540,18 @@ def test_detail_plot_marks_oom_points_and_bars():
     ]
 
     scatter = detail_plot_figure(rows, "model.global_batch_size", "training_time_s", None, "scatter")
+    line = detail_plot_figure(rows, "model.global_batch_size", "training_time_s", None, "line")
     bar = detail_plot_figure(rows, "model.global_batch_size", "training_time_s", None, "bar")
+    scatter_data_trace = next(trace for trace in scatter.data if trace.name != "OOM")
+    line_data_trace = next(trace for trace in line.data if trace.name != "OOM")
+    bar_data_trace = next(trace for trace in bar.data if trace.name != "OOM")
 
     assert any("OOM" in str(trace.name) for trace in scatter.data)
-    assert any(getattr(trace.marker, "symbol", None) == "x" for trace in scatter.data)
-    assert any(getattr(trace.marker.pattern, "shape", None) == "x" for trace in bar.data)
+    assert list(scatter_data_trace.marker.symbol) == ["circle", "x"]
+    assert list(scatter_data_trace.marker.size) == [7, 11]
+    assert list(line_data_trace.marker.symbol) == ["circle", "x"]
+    assert list(bar_data_trace.marker.pattern.shape) == ["", "x"]
+    assert list(bar_data_trace.marker.line.color) == ["rgba(0,0,0,0)", "#c1121f"]
 
 
 def _collect_datatables(component):
