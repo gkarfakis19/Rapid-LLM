@@ -34,6 +34,8 @@ from webui.app.main import (
     _default_payload,
     active_config_tab_for_selection_change,
     active_config_tab_value,
+    basic_auth_credentials_are_valid,
+    basic_auth_credentials_from_header,
     basic_auth_password_from_header,
     branded_progress_bar,
     build_range_preview,
@@ -95,12 +97,19 @@ def test_token_rate_and_time_values_are_human_readable():
 
 
 def test_basic_auth_accepts_required_password_pattern():
-    encoded = base64.b64encode("user:nanocad_anything_rapidllm".encode()).decode()
+    admin_encoded = base64.b64encode("admin:!@#$57005!@#$".encode()).decode()
+    guest_encoded = base64.b64encode("guest:$extern_VA9Z0$".encode()).decode()
 
-    assert password_matches_required_pattern("nanocad_anything_rapidllm")
-    assert password_matches_required_pattern("nanocad__rapidllm") is False
-    assert password_matches_required_pattern("wrong_nanocad_anything_rapidllm") is False
-    assert basic_auth_password_from_header(f"Basic {encoded}") == "nanocad_anything_rapidllm"
+    assert password_matches_required_pattern("!@#$57005!@#$")
+    assert password_matches_required_pattern("$extern_VA9Z0$")
+    assert password_matches_required_pattern("$extern_Vabc1$") is False
+    assert basic_auth_credentials_from_header(f"Basic {admin_encoded}") == ("admin", "!@#$57005!@#$")
+    assert basic_auth_password_from_header(f"Basic {guest_encoded}") == "$extern_VA9Z0$"
+    assert basic_auth_credentials_are_valid("admin", "!@#$57005!@#$")
+    assert basic_auth_credentials_are_valid("guest", "$extern_V0A9Z$")
+    assert basic_auth_credentials_are_valid("guest", "$extern_VA9Z0$extra") is False
+    assert basic_auth_credentials_are_valid("admin", "$extern_VA9Z0$") is False
+    assert basic_auth_credentials_are_valid("guest", "!@#$57005!@#$") is False
     assert basic_auth_password_from_header("Basic invalid") is None
 
 

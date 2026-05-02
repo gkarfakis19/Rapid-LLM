@@ -132,7 +132,10 @@ DETAIL_TABLE_COLUMN_ORDER = [
 ]
 EARLY_TERMINATION_MILD_THRESHOLD = 35.0
 EARLY_TERMINATION_BIG_THRESHOLD = 70.0
-AUTH_PASSWORD_RE = re.compile(r"^nanocad_.+_rapidllm$", re.DOTALL)
+AUTH_ADMIN_USERNAME = "admin"
+AUTH_ADMIN_PASSWORD = "!@#$57005!@#$"
+AUTH_GUEST_USERNAME = "guest"
+AUTH_GUEST_PASSWORD_RE = re.compile(r"^\$extern_V[A-Z0-9]{4}\$")
 FLOP_COUNT_KEYS = {"total_flops"}
 FLOP_RATE_KEYS = {"achieved_flops", "achieved_flops_per_gpu", "peak_flops_per_gpu", "peak_system_flops"}
 TOKEN_RATE_KEYS = {"decode_throughput_tok_s"}
@@ -674,10 +677,10 @@ server = app.server
 
 
 def password_matches_required_pattern(password: str) -> bool:
-    return bool(AUTH_PASSWORD_RE.fullmatch(password or ""))
+    return password == AUTH_ADMIN_PASSWORD or bool(AUTH_GUEST_PASSWORD_RE.fullmatch(password or ""))
 
 
-def basic_auth_password_from_header(header_value: str | None) -> str | None:
+def basic_auth_credentials_from_header(header_value: str | None) -> tuple[str, str] | None:
     if not header_value or not header_value.startswith("Basic "):
         return None
     try:
@@ -686,14 +689,27 @@ def basic_auth_password_from_header(header_value: str | None) -> str | None:
         return None
     if ":" not in decoded:
         return None
-    _, password = decoded.split(":", 1)
-    return password
+    username, password = decoded.split(":", 1)
+    return username, password
+
+
+def basic_auth_password_from_header(header_value: str | None) -> str | None:
+    credentials = basic_auth_credentials_from_header(header_value)
+    return credentials[1] if credentials else None
+
+
+def basic_auth_credentials_are_valid(username: str, password: str) -> bool:
+    if username == AUTH_ADMIN_USERNAME:
+        return password == AUTH_ADMIN_PASSWORD
+    if username == AUTH_GUEST_USERNAME:
+        return bool(AUTH_GUEST_PASSWORD_RE.fullmatch(password or ""))
+    return False
 
 
 @server.before_request
 def require_basic_auth() -> Response | None:
-    password = basic_auth_password_from_header(request.headers.get("Authorization"))
-    if password_matches_required_pattern(password or ""):
+    credentials = basic_auth_credentials_from_header(request.headers.get("Authorization"))
+    if credentials and basic_auth_credentials_are_valid(*credentials):
         return None
     return Response(
         "Authentication required for RAPID-LLM Workbench.",

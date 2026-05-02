@@ -157,7 +157,7 @@ def test_webui_layout_and_visual_health(tmp_path):
         with sync_api.sync_playwright() as playwright:
             browser = _launch_browser(playwright)
             context = browser.new_context(
-                http_credentials={"username": "nanocad", "password": "nanocad_test_rapidllm"},
+                http_credentials={"username": "admin", "password": "!@#$57005!@#$"},
                 viewport={"width": 1440, "height": 1100},
             )
             page = context.new_page()
