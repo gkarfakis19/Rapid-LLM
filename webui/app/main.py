@@ -2010,7 +2010,6 @@ def config_options_card(state: Dict[str, Any]) -> dmc.Paper:
                     align="center",
                     children=[
                         with_tip(dmc.Title("Config Options", order=3), HELP_TEXT["editor_tabs"]),
-                        dmc.Badge("active YAML workbook", radius="xl", color="teal", variant="light"),
                     ],
                 ),
                 with_tip(

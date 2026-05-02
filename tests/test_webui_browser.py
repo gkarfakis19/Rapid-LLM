@@ -234,7 +234,7 @@ def test_webui_layout_and_visual_health(tmp_path):
                         telemetryBackdrop: getComputedStyle(document.querySelector('.telemetry-pills')).backgroundColor,
                         hasSettingsBadge: text.includes('Updates as settings change'),
                         hasRuntimeScalingCopy: text.includes('10-70% of worst-case') && text.includes('rapidly approach worst-case') && text.includes('beyond 256 GPUs'),
-                        hasEditorTabs: text.includes('ACTIVE YAML WORKBOOK') && text.includes('Model') && text.includes('Hardware'),
+                        hasEditorTabs: text.includes('Model') && text.includes('Hardware') && !!document.querySelector('.config-workbook-tab-list'),
                         hasFileActions: text.includes('Active file actions') && text.includes('New copy') && text.includes('Rename'),
                         hasDespisedRunSetupCopy: text.includes('Choose one hardware target and any number of models'),
                         hasParallelismSearch: text.includes('Parallelism search'),
