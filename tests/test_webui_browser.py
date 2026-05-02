@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,10 @@ def _wait_for_http(url: str, timeout_s: float = 25.0) -> None:
             with urllib.request.urlopen(url, timeout=1.0) as response:
                 if response.status < 500:
                     return
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                return
+            last_error = exc
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             time.sleep(0.25)
@@ -151,7 +156,11 @@ def test_webui_layout_and_visual_health(tmp_path):
         _wait_for_http(url)
         with sync_api.sync_playwright() as playwright:
             browser = _launch_browser(playwright)
-            page = browser.new_page(viewport={"width": 1440, "height": 1100})
+            context = browser.new_context(
+                http_credentials={"username": "nanocad", "password": "nanocad_test_rapidllm"},
+                viewport={"width": 1440, "height": 1100},
+            )
+            page = context.new_page()
             console_errors: list[str] = []
             page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
             page.goto(url, wait_until="networkidle")
@@ -392,18 +401,18 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.locator("#detail-plot-toolbar").get_by_text("Line Plot", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Scatter", exact=True).wait_for(timeout=5000)
             page.locator("#detail-plot-toolbar").get_by_text("Bar chart", exact=True).wait_for(timeout=5000)
-            page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).wait_for(timeout=5000)
-            page.locator("#detail-plot-toolbar").get_by_text("Save plot", exact=True).click()
-            page.get_by_text("Saved plot:").wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Download plot", exact=True).wait_for(timeout=5000)
+            page.locator("#detail-plot-toolbar").get_by_text("Download plot", exact=True).click()
+            page.get_by_text("Downloaded and saved plot:").wait_for(timeout=5000)
             saved_plot_text = page.locator("#plot-save-status").inner_text(timeout=5000)
             assert saved_plot_text.endswith(".png")
-            saved_plot_path = Path(saved_plot_text.removeprefix("Saved plot: ").strip())
+            saved_plot_path = Path(saved_plot_text.removeprefix("Downloaded and saved plot: ").strip())
             assert saved_plot_path.exists()
             assert saved_plot_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             assert saved_plot_path.stat().st_size > 20_000
             page.get_by_text("Memory Exceeded").wait_for(timeout=5000)
             page.get_by_text("12.5 GB").wait_for(timeout=5000)
-            page.get_by_text("case-0001 - Llama2-7B").wait_for(timeout=5000)
+            page.get_by_text("case-0001 - batch 64").wait_for(timeout=5000)
             page.get_by_text("Fixed parallelism").wait_for(timeout=5000)
             page.get_by_text("Early termination rate: 50.0% (1/2 runs).").wait_for(timeout=5000)
             page.get_by_text("Many runs terminated early").wait_for(timeout=5000)
@@ -508,7 +517,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             page.get_by_text("deepseek_v3").first.hover()
             page.get_by_text("DeepSeek-V3 family.").wait_for(timeout=5000)
             page.locator("#adv-model-mode").hover()
-            page.get_by_text("Select the execution family written to model_param.mode.").wait_for(timeout=5000)
+            page.get_by_text("Execution family written to model_param.mode.").wait_for(timeout=5000)
             page.get_by_role("tab").filter(has_text="H100").click()
             page.locator("#adv-tensor-format").scroll_into_view_if_needed()
             page.locator("#adv-tensor-format").click(force=True)

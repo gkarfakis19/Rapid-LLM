@@ -197,6 +197,33 @@ def test_hf_to_config_maps_deepseek_v3_to_mla_and_moe():
     assert "rope_scaling" not in model
 
 
+def test_hf_to_config_rejects_unsupported_huggingface_families_and_features():
+    hf_to_config = _load_hf_to_config_module()
+
+    try:
+        hf_to_config._infer_model_type("chatglm")
+    except SystemExit as exc:
+        assert "Unsupported Hugging Face model_type" in str(exc)
+    else:
+        raise AssertionError("generic chatglm configs should be rejected")
+
+    _, qwen_alias = hf_to_config._infer_model_type("qwen2")
+    try:
+        hf_to_config._validate_supported_config_features({"model_type": "qwen2", "use_sliding_window": True}, qwen_alias)
+    except SystemExit as exc:
+        assert "sliding-window attention is not modeled" in str(exc)
+    else:
+        raise AssertionError("active qwen2 sliding-window configs should be rejected")
+
+    _, phi_alias = hf_to_config._infer_model_type("phi3")
+    try:
+        hf_to_config._validate_supported_config_features({"model_type": "phi3", "sliding_window": 4096}, phi_alias)
+    except SystemExit as exc:
+        assert "sliding-window attention is not modeled" in str(exc)
+    else:
+        raise AssertionError("active phi3 sliding-window configs should be rejected")
+
+
 def test_deepseek_v3_yaml_configs_parse_and_validate():
     hw_config = _build_hw_config()
     train_model = config.parse_config(str(DEEPSEEK_TRAIN), config_type="LLM")

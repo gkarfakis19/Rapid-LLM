@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -33,6 +34,7 @@ from webui.app.main import (
     _default_payload,
     active_config_tab_for_selection_change,
     active_config_tab_value,
+    basic_auth_password_from_header,
     branded_progress_bar,
     build_range_preview,
     clamp_percent,
@@ -41,6 +43,7 @@ from webui.app.main import (
     config_workbook_tabs_children,
     create_layout,
     detail_axes,
+    detail_plot_figure,
     detail_plot_png_bytes,
     detail_table_export_payload,
     detail_loading_placeholder,
@@ -56,11 +59,12 @@ from webui.app.main import (
     mode_badge,
     open_run_log_from_completed_progress,
     parse_config_tab,
+    password_matches_required_pattern,
     preview_rebuild_is_load_only,
     progress_count_label,
     render_detail,
     render_preview_summary,
-    refresh_status,
+    refresh_job_status,
     reset_paper_derates,
     reset_last_state_values,
     refresh_metric_options_for_run_type,
@@ -88,6 +92,16 @@ def test_token_rate_and_time_values_are_human_readable():
     assert format_metric_value(0, "timeout_seconds") == "Disabled"
     assert format_worst_case_wall_clock(None) == "N/A"
     assert format_worst_case_wall_clock(180) == "3m 0s"
+
+
+def test_basic_auth_accepts_required_password_pattern():
+    encoded = base64.b64encode("user:nanocad_anything_rapidllm".encode()).decode()
+
+    assert password_matches_required_pattern("nanocad_anything_rapidllm")
+    assert password_matches_required_pattern("nanocad__rapidllm") is False
+    assert password_matches_required_pattern("wrong_nanocad_anything_rapidllm") is False
+    assert basic_auth_password_from_header(f"Basic {encoded}") == "nanocad_anything_rapidllm"
+    assert basic_auth_password_from_header("Basic invalid") is None
 
 
 def test_progress_percent_is_clamped():
@@ -470,13 +484,27 @@ def test_optimize_parallelism_defaults_on_in_layout_and_payload():
 def test_detail_plot_png_export_is_valid_image_bytes():
     rows = [
         {"case": "case-0001", "case_id": "case-0001", "status": "completed", "model.global_batch_size": 64, "training_time_s": 1.2, "model_config": "Llama2-7B.yaml", "hardware_config": "H100.yaml", "parallelism": "TP 4"},
-        {"case": "case-0002", "case_id": "case-0002", "status": "completed", "model.global_batch_size": 128, "training_time_s": 0.8, "model_config": "Llama2-7B.yaml", "hardware_config": "H100.yaml", "parallelism": "TP 8"},
+        {"case": "case-0002", "case_id": "case-0002", "status": "completed", "model.global_batch_size": 128, "training_time_s": 0.8, "model_config": "Llama2-7B.yaml", "hardware_config": "H100.yaml", "parallelism": "TP 8", "memory_exceeded": "12.5 GB"},
     ]
 
     png_bytes = detail_plot_png_bytes(rows, "model.global_batch_size", "training_time_s", None, "line", "Llama2-7B on H100 Sweep")
 
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert len(png_bytes) > 20_000
+
+
+def test_detail_plot_marks_oom_points_and_bars():
+    rows = [
+        {"case": "case-0001", "case_id": "case-0001", "status": "completed", "model.global_batch_size": 64, "training_time_s": 1.2, "model_config": "Llama2-7B.yaml", "hardware_config": "H100.yaml", "memory_exceeded": "No"},
+        {"case": "case-0002", "case_id": "case-0002", "status": "completed", "model.global_batch_size": 128, "training_time_s": 0.8, "model_config": "Llama2-7B.yaml", "hardware_config": "H100.yaml", "memory_exceeded": "12.5 GB"},
+    ]
+
+    scatter = detail_plot_figure(rows, "model.global_batch_size", "training_time_s", None, "scatter")
+    bar = detail_plot_figure(rows, "model.global_batch_size", "training_time_s", None, "bar")
+
+    assert any("OOM" in str(trace.name) for trace in scatter.data)
+    assert any(getattr(trace.marker, "symbol", None) == "x" for trace in scatter.data)
+    assert any(getattr(trace.marker.pattern, "shape", None) == "x" for trace in bar.data)
 
 
 def _collect_datatables(component):
@@ -629,7 +657,7 @@ def test_layout_includes_huggingface_model_import_controls():
     assert hf_name_fields
     assert hf_name_fields[0].label == "Save as"
     assert "Create model config" in texts
-    assert any("Not automatically determinable:" in text and "decode length" in text for text in texts)
+    assert any("Supported importer families:" in text and "DeepSeek-V3" in text for text in texts)
 
 
 def test_branded_progress_bar_fills_rapid_llm_text():
@@ -732,7 +760,7 @@ def test_live_status_active_panel_includes_eta(monkeypatch):
     monkeypatch.setattr(webui_main, "list_history", lambda: [])
     monkeypatch.setattr(webui_main, "job_eta_readout", lambda job: "ETA: ~10m 0s remaining (12:20)")
 
-    _, _, _, active_panel, _, _ = refresh_status(0, None)
+    _, active_panel, _ = refresh_job_status(0, None)
 
     texts = _collect_text(active_panel)
     assert "ETA: ~10m 0s remaining (12:20)" in texts
@@ -1172,8 +1200,9 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     assert any("Early termination rate: 50.0% (1/2 runs)." in text for text in texts)
     assert any("Many runs terminated early" in text for text in texts)
     assert table.data[0]["parallelism"] == "TP 2 / CP 1 / PP 1 / DP 4 / EP 1"
-    assert table.data[0]["model.decode_len"] == "0"
-    assert table.tooltip_header["model.decode_len"].startswith("Generated token count")
+    assert table.data[0]["model.seq_len"] == "0"
+    assert "model.decode_len" not in table.data[0]
+    assert table.tooltip_header["model.seq_len"].startswith("Input sequence length")
     assert all("model.decode_len" not in str(trace.hovertemplate) for trace in graph.figure.data)
     assert table.style_filter == DATA_TABLE_STYLE_FILTER
     assert table.style_data_conditional[0]["if"]["column_id"] == "memory_exceeded"
@@ -1192,10 +1221,10 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     assert all(trace.name not in {"completed", "failed", "timed_out"} for trace in graph.figure.data)
 
 
-def test_detail_rows_include_decode_length_for_inference_and_training():
+def test_detail_rows_include_sequence_length_and_decode_length_only_for_inference():
     inference_detail = {
         "request_record": {
-            "payload": {"simple": {"run_type": "inference", "decode_len": 64}},
+            "payload": {"simple": {"run_type": "inference", "seq_len": 4096, "decode_len": 64}},
             "preview": {"run_type": "inference"},
         },
         "cases": [
@@ -1203,7 +1232,7 @@ def test_detail_rows_include_decode_length_for_inference_and_training():
                 "case_id": "case-0001",
                 "label": "decode 128",
                 "status": "completed",
-                "dimension_values": {"model.decode_len": 128},
+                "dimension_values": {"model.seq_len": 8192, "model.decode_len": 128},
                 "metrics": {"prefill_time_s": 1.0},
             },
             {
@@ -1217,7 +1246,7 @@ def test_detail_rows_include_decode_length_for_inference_and_training():
     }
     training_detail = {
         "request_record": {
-            "payload": {"simple": {"run_type": "training", "decode_len": 512}},
+            "payload": {"simple": {"run_type": "training", "seq_len": 2048, "decode_len": 512}},
             "preview": {"run_type": "training"},
         },
         "cases": [{"case_id": "case-0001", "label": "train", "status": "completed", "dimension_values": {}, "metrics": {"training_time_s": 1.0}}],
@@ -1227,4 +1256,6 @@ def test_detail_rows_include_decode_length_for_inference_and_training():
     training_rows = sweep_rows_from_detail(training_detail)
 
     assert [row["model.decode_len"] for row in inference_rows] == [128, 64]
-    assert training_rows[0]["model.decode_len"] == 0
+    assert [row["model.seq_len"] for row in inference_rows] == [8192, 4096]
+    assert training_rows[0]["model.seq_len"] == 2048
+    assert "model.decode_len" not in training_rows[0]

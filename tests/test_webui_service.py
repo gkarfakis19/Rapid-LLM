@@ -365,7 +365,76 @@ def test_config_file_actions_reject_case_names_and_duplicates(monkeypatch, tmp_p
 def test_huggingface_model_references_are_parsed():
     assert core.parse_huggingface_model_reference("https://huggingface.co/Qwen/Qwen2.5-7B") == ("Qwen/Qwen2.5-7B", "main")
     assert core.parse_huggingface_model_reference("https://huggingface.co/Qwen/Qwen2.5-7B/blob/main/config.json") == ("Qwen/Qwen2.5-7B", "main")
+    assert core.parse_huggingface_model_reference("https://huggingface.co/Qwen/Qwen2.5-7B/blob/refs/pr/1/config.json") == ("Qwen/Qwen2.5-7B", "refs/pr/1")
     assert core.parse_huggingface_model_reference("Qwen/Qwen2.5-7B@refs/pr/1") == ("Qwen/Qwen2.5-7B", "refs/pr/1")
+
+
+def test_huggingface_model_references_reject_unsafe_inputs():
+    for reference in [
+        "http://huggingface.co/Qwen/Qwen2.5-7B",
+        "https://huggingface.co.evil.test/Qwen/Qwen2.5-7B",
+        "https://huggingface.co/Qwen/Qwen2.5-7B?download=1",
+        "Qwen/Qwen2.5-7B?x=1",
+        "Qwen/../../secret",
+        "Qwen/Qwen2.5-7B@refs/../main",
+    ]:
+        try:
+            core.parse_huggingface_model_reference(reference)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe Hugging Face reference was accepted: {reference}")
+
+
+def test_huggingface_import_rejects_unsupported_model_type(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+
+    class FakeConverter:
+        @staticmethod
+        def _fetch_hf_config(model_id, revision="main"):
+            del model_id, revision
+            return {"model_type": "bert"}
+
+        @staticmethod
+        def _infer_model_type(model_type):
+            raise AssertionError(f"unsupported model_type should be rejected before inference: {model_type}")
+
+    monkeypatch.setattr(core, "_load_hf_to_config_module", lambda: FakeConverter)
+
+    try:
+        core.create_model_config_from_huggingface("bert-base-uncased", "bert")
+    except ValueError as exc:
+        assert "Unsupported Hugging Face model_type" in str(exc)
+    else:
+        raise AssertionError("unsupported Hugging Face model_type should fail")
+
+
+def test_huggingface_import_rejects_unsupported_active_attention_features(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+
+    class FakeConverter:
+        @staticmethod
+        def _fetch_hf_config(model_id, revision="main"):
+            del model_id, revision
+            return {"model_type": "qwen2", "use_sliding_window": True}
+
+        @staticmethod
+        def _infer_model_type(model_type):
+            assert model_type == "qwen2"
+            return "llama", "qwen2"
+
+        @staticmethod
+        def _build_yaml_config(cfg, args, model_type):
+            raise AssertionError("unsupported active sliding-window attention should be rejected before YAML generation")
+
+    monkeypatch.setattr(core, "_load_hf_to_config_module", lambda: FakeConverter)
+
+    try:
+        core.create_model_config_from_huggingface("Qwen/Qwen2.5-7B", "qwen")
+    except ValueError as exc:
+        assert "sliding-window attention is not modeled" in str(exc)
+    else:
+        raise AssertionError("unsupported active Hugging Face attention feature should fail")
 
 
 def test_huggingface_import_creates_editable_model_config(monkeypatch, tmp_path):

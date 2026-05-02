@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import psutil
 import yaml
@@ -107,6 +107,24 @@ PAPER_DERATE_DEFAULTS = {
 }
 SUPPORTED_MODEL_TYPES = {"gpt", "llama", "deepseek_v3", "glm4_moe", "vit", "vit_dinov3"}
 VIT_MODEL_TYPES = {"vit", "vit_dinov3"}
+SUPPORTED_HF_IMPORT_MODEL_TYPES = {
+    "deepseek_v3",
+    "deepseekv3",
+    "gpt2",
+    "gpt_bigcode",
+    "gpt_j",
+    "gpt_neox",
+    "gptj",
+    "glm4",
+    "glm4_moe",
+    "llama",
+    "mpt",
+    "opt",
+    "phi3",
+    "qwen2",
+}
+HF_REPO_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+HF_REVISION_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PRECISION_OVERRIDE_FIELDS = [
     "kv_cache",
     "parameters",
@@ -489,6 +507,39 @@ def rename_config_file(kind: str, preset_id: str, new_name: str) -> str:
     return filename
 
 
+def _validate_hf_repo_id(model_id: str) -> str:
+    model_id = str(model_id or "").strip().strip("/")
+    parts = model_id.split("/")
+    if len(parts) not in {1, 2} or any(not part for part in parts):
+        raise ValueError("Use a Hugging Face model id like org/model or model.")
+    for part in parts:
+        if not HF_REPO_ID_SEGMENT_RE.fullmatch(part) or "--" in part or ".." in part:
+            raise ValueError("Hugging Face model ids may contain only letters, numbers, '.', '_', and '-' in one or two path segments.")
+    return "/".join(parts)
+
+
+def _validate_hf_revision(revision: str | None) -> str:
+    revision = str(revision or "main").strip().strip("/")
+    if not revision:
+        return "main"
+    parts = revision.split("/")
+    if any(not part for part in parts) or any(part in {".", ".."} for part in parts):
+        raise ValueError("Hugging Face revisions may not contain empty, '.', or '..' path segments.")
+    for part in parts:
+        if not HF_REVISION_SEGMENT_RE.fullmatch(part) or "--" in part or ".." in part:
+            raise ValueError("Hugging Face revisions may contain only letters, numbers, '/', '.', '_', and '-'.")
+    return "/".join(parts)
+
+
+def _extract_hf_revision_parts(parts: List[str], marker_index: int) -> List[str]:
+    revision_parts = parts[marker_index + 1 :]
+    if revision_parts and revision_parts[-1] == "config.json":
+        revision_parts = revision_parts[:-1]
+    if not revision_parts:
+        return ["main"]
+    return revision_parts
+
+
 def parse_huggingface_model_reference(raw_reference: str) -> Tuple[str, str]:
     text = str(raw_reference or "").strip()
     if not text:
@@ -496,10 +547,16 @@ def parse_huggingface_model_reference(raw_reference: str) -> Tuple[str, str]:
     if "://" not in text:
         if "@" in text:
             model_id, revision = text.rsplit("@", 1)
-            return model_id.strip("/"), revision or "main"
-        return text.strip("/"), "main"
+            return _validate_hf_repo_id(model_id), _validate_hf_revision(revision)
+        return _validate_hf_repo_id(text), "main"
 
     parsed = urlparse(text)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Use an https:// Hugging Face model URL.")
+    if parsed.username or parsed.password:
+        raise ValueError("Hugging Face URLs may not include embedded credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Hugging Face URLs may not include query strings or fragments.")
     host = parsed.netloc.lower()
     if host not in {"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"}:
         raise ValueError("Use a huggingface.co or hf.co model URL.")
@@ -514,14 +571,70 @@ def parse_huggingface_model_reference(raw_reference: str) -> Tuple[str, str]:
         if marker in parts:
             marker_index = parts.index(marker)
             model_parts = parts[:marker_index]
-            if marker_index + 1 < len(parts):
-                revision = parts[marker_index + 1]
+            revision = "/".join(_extract_hf_revision_parts(parts, marker_index))
             break
     else:
-        model_parts = parts[:2] if len(parts) >= 2 else parts[:1]
+        if len(parts) > 2:
+            raise ValueError("Use the model page URL or a /blob/<revision>/config.json URL.")
+        model_parts = parts
     if not model_parts:
         raise ValueError("Hugging Face URL does not contain a model id.")
-    return "/".join(model_parts), revision or "main"
+    return _validate_hf_repo_id("/".join(model_parts)), _validate_hf_revision(revision)
+
+
+def _hf_language_config(hf_config: Dict[str, Any]) -> Dict[str, Any]:
+    lang_cfg = hf_config.get("language_config", {})
+    return lang_cfg if isinstance(lang_cfg, dict) else {}
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_truthy_flag(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
+
+
+def validate_huggingface_import_features(hf_config: Dict[str, Any], alias: str | None) -> None:
+    lang_cfg = _hf_language_config(hf_config)
+    if alias == "phi3":
+        sliding_candidates = [hf_config.get("sliding_window"), lang_cfg.get("sliding_window")]
+        if any(_is_positive_int(value) for value in sliding_candidates):
+            raise ValueError(
+                "Unsupported Phi-3 config: sliding-window attention is not modeled by RAPID-LLM, "
+                "so this Hugging Face model cannot be imported safely."
+            )
+    if alias == "qwen2":
+        sliding_flags = [hf_config.get("use_sliding_window"), lang_cfg.get("use_sliding_window")]
+        if any(_is_truthy_flag(value) for value in sliding_flags):
+            raise ValueError(
+                "Unsupported Qwen2 config: active sliding-window attention is not modeled by RAPID-LLM, "
+                "so this Hugging Face model cannot be imported safely."
+            )
+
+
+def validate_huggingface_import_config(hf_config: Dict[str, Any], converter: Any | None = None) -> Tuple[str, str | None]:
+    converter = converter or _load_hf_to_config_module()
+    raw_model_type = str(hf_config.get("model_type") or "").strip().lower()
+    normalized_model_type = raw_model_type.replace("-", "_")
+    if normalized_model_type not in SUPPORTED_HF_IMPORT_MODEL_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_HF_IMPORT_MODEL_TYPES))
+        raise ValueError(f"Unsupported Hugging Face model_type '{raw_model_type or 'missing'}'. Supported importer model types: {supported}.")
+    inferred_model_type, alias = converter._infer_model_type(raw_model_type)
+    if inferred_model_type not in {"gpt", "llama", "deepseek_v3", "glm4_moe"}:
+        raise ValueError(f"Imported Hugging Face model_type '{raw_model_type}' maps to unsupported RAPID-LLM model_type '{inferred_model_type}'.")
+    validate_huggingface_import_features(hf_config, alias)
+    return inferred_model_type, alias
+
+
+def build_huggingface_config_url(model_id: str, revision: str = "main") -> str:
+    safe_model_id = "/".join(quote(part, safe="") for part in _validate_hf_repo_id(model_id).split("/"))
+    safe_revision = "/".join(quote(part, safe="") for part in _validate_hf_revision(revision).split("/"))
+    return f"https://huggingface.co/{safe_model_id}/resolve/{safe_revision}/config.json"
 
 
 def _load_hf_to_config_module():
@@ -545,7 +658,7 @@ def create_model_config_from_huggingface(raw_reference: str, new_name: str | Non
     try:
         converter = _load_hf_to_config_module()
         hf_config = converter._fetch_hf_config(model_id, revision=revision)
-        inferred_model_type, alias = converter._infer_model_type(hf_config.get("model_type"))
+        inferred_model_type, alias = validate_huggingface_import_config(hf_config, converter)
         args = SimpleNamespace(
             global_batch_size=1,
             gradient_accumulation_steps=1,

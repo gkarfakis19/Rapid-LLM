@@ -18,20 +18,78 @@
 
 import argparse
 import json
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import yaml
 
+HF_CONFIG_MAX_BYTES = 2 * 1024 * 1024
+HF_REPO_ID_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+HF_REVISION_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SUPPORTED_HF_MODEL_TYPES = {
+    "deepseek_v3",
+    "deepseekv3",
+    "gpt2",
+    "gpt_bigcode",
+    "gpt_j",
+    "gpt_neox",
+    "gptj",
+    "glm4",
+    "glm4_moe",
+    "llama",
+    "mpt",
+    "opt",
+    "phi3",
+    "qwen2",
+}
+
+
+def _validate_repo_id(model_id: str) -> str:
+    text = str(model_id or "").strip().strip("/")
+    parts = text.split("/")
+    if len(parts) not in {1, 2} or any(not part for part in parts):
+        raise SystemExit("Model id must look like 'org/model' or 'model'.")
+    for part in parts:
+        if not HF_REPO_ID_SEGMENT_RE.fullmatch(part) or "--" in part or ".." in part:
+            raise SystemExit("Model id may contain only letters, numbers, '.', '_', and '-' in one or two path segments.")
+    return "/".join(parts)
+
+
+def _validate_revision(revision: str = "main") -> str:
+    text = str(revision or "main").strip().strip("/")
+    if not text:
+        return "main"
+    parts = text.split("/")
+    if any(not part for part in parts) or any(part in {".", ".."} for part in parts):
+        raise SystemExit("Revision may not contain empty, '.', or '..' path segments.")
+    for part in parts:
+        if not HF_REVISION_SEGMENT_RE.fullmatch(part) or "--" in part or ".." in part:
+            raise SystemExit("Revision may contain only letters, numbers, '/', '.', '_', and '-'.")
+    return "/".join(parts)
+
+
+def _hf_config_url(model_id: str, revision: str = "main") -> str:
+    safe_model = "/".join(urllib.parse.quote(part, safe="") for part in _validate_repo_id(model_id).split("/"))
+    safe_revision = "/".join(urllib.parse.quote(part, safe="") for part in _validate_revision(revision).split("/"))
+    return f"https://huggingface.co/{safe_model}/resolve/{safe_revision}/config.json"
+
 
 def _fetch_hf_config(model_id: str, revision: str = "main") -> dict:
-    url = f"https://huggingface.co/{model_id}/resolve/{revision}/config.json"
+    url = _hf_config_url(model_id, revision)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req) as resp:
-            payload = resp.read().decode("utf-8")
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            final_host = urllib.parse.urlparse(resp.geturl()).netloc.lower()
+            if final_host not in {"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"}:
+                raise SystemExit(f"Hugging Face redirected config.json to unsupported host '{final_host}'.")
+            raw_payload = resp.read(HF_CONFIG_MAX_BYTES + 1)
+            if len(raw_payload) > HF_CONFIG_MAX_BYTES:
+                raise SystemExit("Hugging Face config.json is too large to import safely.")
+            payload = raw_payload.decode("utf-8")
     except urllib.error.HTTPError as exc:  # pragma: no cover - runtime fetch
         raise SystemExit(f"Failed to fetch config.json for '{model_id}' ({exc.code} {exc.reason}).")
     except urllib.error.URLError as exc:  # pragma: no cover - runtime fetch
@@ -53,8 +111,12 @@ def _first(cfg: dict, *keys: str, default: Any = None) -> Any:
 def _infer_model_type(model_type_field: Optional[str]) -> Tuple[str, Optional[str]]:
     alias = None
     if not model_type_field:
-        return "gpt", alias
+        raise SystemExit("config.json is missing model_type; only explicit supported Hugging Face model families can be imported.")
     lowered = model_type_field.lower()
+    normalized_for_support = lowered.replace("-", "_")
+    if normalized_for_support not in SUPPORTED_HF_MODEL_TYPES:
+        supported = ", ".join(sorted(SUPPORTED_HF_MODEL_TYPES))
+        raise SystemExit(f"Unsupported Hugging Face model_type '{model_type_field}'. Supported importer model types: {supported}.")
     normalized = lowered.replace("-", "").replace("_", "")
     if "glm" in normalized:
         return "glm4_moe", "glm"
@@ -68,8 +130,42 @@ def _infer_model_type(model_type_field: Optional[str]) -> Tuple[str, Optional[st
         return "llama", alias
     if "gpt" in lowered or "opt" in lowered or "mpt" in lowered:
         return "gpt", alias
-    # default catch-all
-    return "gpt", alias
+    raise SystemExit(f"Unsupported Hugging Face model_type '{model_type_field}'.")
+
+
+def _language_config(cfg: dict) -> dict:
+    lang_cfg = cfg.get("language_config", {})
+    return lang_cfg if isinstance(lang_cfg, dict) else {}
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_truthy_flag(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
+
+
+def _validate_supported_config_features(cfg: dict, alias: Optional[str]) -> None:
+    lang_cfg = _language_config(cfg)
+    if alias == "phi3":
+        sliding_candidates = [cfg.get("sliding_window"), lang_cfg.get("sliding_window")]
+        if any(_is_positive_int(value) for value in sliding_candidates):
+            raise SystemExit(
+                "Unsupported Phi-3 config: sliding-window attention is not modeled by RAPID-LLM, "
+                "so this Hugging Face model cannot be imported safely."
+            )
+    if alias == "qwen2":
+        sliding_flags = [cfg.get("use_sliding_window"), lang_cfg.get("use_sliding_window")]
+        if any(_is_truthy_flag(value) for value in sliding_flags):
+            raise SystemExit(
+                "Unsupported Qwen2 config: active sliding-window attention is not modeled by RAPID-LLM, "
+                "so this Hugging Face model cannot be imported safely."
+            )
 
 
 def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> dict:
@@ -378,6 +474,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = _fetch_hf_config(args.model_id, revision=args.revision)
     orig_model_type = cfg.get("model_type")
     inferred_model_type, alias = _infer_model_type(orig_model_type)
+    _validate_supported_config_features(cfg, alias)
     yaml_config = _build_yaml_config(cfg, args, inferred_model_type)
 
     yaml_dump = yaml.dump(
@@ -396,22 +493,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(
             f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to RAPID-LLM model_type '{inferred_model_type}'."
         )
-
-    lang_cfg = cfg.get("language_config", {})
-    if alias == "phi3":
-        sliding_candidates = [
-            cfg.get("sliding_window"),
-            lang_cfg.get("sliding_window"),
-        ]
-        if any(isinstance(value, int) and not isinstance(value, bool) for value in sliding_candidates):
-            print("[WARNING] Provided config uses phi3 Sliding Window Attention. This is not currently implemented in Deepflow and fully dense attention will be used instead.")
-    if alias == "qwen2":
-        sliding_candidates = [
-            cfg.get("use_sliding_window"),
-            lang_cfg.get("use_sliding_window"),
-        ]
-        if any(value is True for value in sliding_candidates):
-            print("[WARNING] Provided config uses qwen2 Sliding Window Attention. This is not currently implemented in Deepflow and fully dense attention will be used instead.")
 
     return 0
 
