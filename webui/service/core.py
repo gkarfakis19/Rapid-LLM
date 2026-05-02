@@ -89,17 +89,21 @@ FIELD_TYPES: Dict[str, Dict[str, Any]] = {
     "hardware.gpu_clock_ghz": {"kind": "float"},
     "hardware.memory_bw_gbs": {"kind": "float"},
 }
-NETWORK_SWEEP_FIELD_OPTIONS: List[Dict[str, str]] = [
-    option
+NETWORK_SWEEP_TARGETS: List[Dict[str, str]] = [
+    target
     for idx in range(3)
-    for option in (
-        {"value": f"hardware.network.dim{idx}.bandwidth_gbs", "label": f"Dimension {idx} Bandwidth (GB/s)"},
-        {"value": f"hardware.network.dim{idx}.latency_s", "label": f"Dimension {idx} Latency (s)"},
+    for target in (
+        {"value": f"hardware.network.dim{idx}.bandwidth_gbs", "slug": f"d{idx}bw", "kind": "bandwidth", "dim": str(idx), "label": f"Dimension {idx} Bandwidth (GB/s)", "short_label": f"D{idx} BW"},
+        {"value": f"hardware.network.dim{idx}.latency_s", "slug": f"d{idx}lat", "kind": "latency", "dim": str(idx), "label": f"Dimension {idx} Latency (s)", "short_label": f"D{idx} Latency"},
     )
 ]
+NETWORK_SWEEP_FIELD_OPTIONS: List[Dict[str, str]] = [{"value": target["value"], "label": target["label"]} for target in NETWORK_SWEEP_TARGETS]
 for option in NETWORK_SWEEP_FIELD_OPTIONS:
     FIELD_TYPES[option["value"]] = {"kind": "float", "label": f"Network {option['label']}"}
 NETWORK_SWEEP_FIELD_RE = re.compile(r"^hardware\.network\.dim([0-2])\.(bandwidth_gbs|latency_s)$")
+NETWORK_SWEEP_BUNDLE_RE = re.compile(r"^hardware\.network\.(set|scale)\.([A-Za-z0-9_.-]+)$")
+NETWORK_SWEEP_TARGET_BY_VALUE = {target["value"]: target for target in NETWORK_SWEEP_TARGETS}
+NETWORK_SWEEP_TARGET_BY_SLUG = {target["slug"]: target for target in NETWORK_SWEEP_TARGETS}
 
 METRIC_LABELS = {
     "training_time_s": "Time / Batch",
@@ -319,6 +323,8 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
             {
                 "field": _trim_text(row.get("field"), 128),
                 "network_field": _trim_text(row.get("network_field"), 128),
+                "network_targets": _trim_string_list(row.get("network_targets"), 6),
+                "network_apply": row.get("network_apply") if row.get("network_apply") in {"set", "scale"} else "set",
                 "mode": mode,
                 "list_text": _trim_text(row.get("list_text"), LAST_UI_STATE_MAX_TEXT) or "",
                 "config_values": _trim_string_list(row.get("config_values"), 24),
@@ -328,7 +334,7 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
             }
         )
     while len(sanitized) < 3:
-        sanitized.append({"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
+        sanitized.append({"field": None, "network_field": None, "network_targets": [], "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
     return sanitized
 
 
@@ -804,7 +810,49 @@ def dimension_label(field_key: str) -> str:
             return option["label"]
     if field_key in FIELD_TYPES and FIELD_TYPES[field_key].get("label"):
         return str(FIELD_TYPES[field_key]["label"])
+    bundle_label = _network_bundle_label(field_key)
+    if bundle_label:
+        return bundle_label
     return field_key
+
+
+def _network_bundle_parts(field_key: str | None) -> Tuple[str | None, List[str]]:
+    match = NETWORK_SWEEP_BUNDLE_RE.match(str(field_key or ""))
+    if not match:
+        return None, []
+    mode = match.group(1)
+    targets = [
+        NETWORK_SWEEP_TARGET_BY_SLUG[slug]["value"]
+        for slug in match.group(2).split(".")
+        if slug in NETWORK_SWEEP_TARGET_BY_SLUG
+    ]
+    return mode, targets
+
+
+def _network_bundle_label(field_key: str | None) -> str | None:
+    mode, targets = _network_bundle_parts(field_key)
+    if not mode or not targets:
+        return None
+    prefix = "Scale" if mode == "scale" else "Network"
+    kinds = {NETWORK_SWEEP_TARGET_BY_VALUE[target]["kind"] for target in targets if target in NETWORK_SWEEP_TARGET_BY_VALUE}
+    dims = {NETWORK_SWEEP_TARGET_BY_VALUE[target]["dim"] for target in targets if target in NETWORK_SWEEP_TARGET_BY_VALUE}
+    if kinds == {"bandwidth"} and dims == {"0", "1", "2"}:
+        return "Network Bandwidth Scale" if mode == "scale" else "Network Bandwidth"
+    if kinds == {"latency"} and dims == {"0", "1", "2"}:
+        return "Network Latency Scale" if mode == "scale" else "Network Latency"
+    labels = [NETWORK_SWEEP_TARGET_BY_VALUE[target]["short_label"] for target in targets if target in NETWORK_SWEEP_TARGET_BY_VALUE]
+    return f"{prefix} {' + '.join(labels)}"
+
+
+def _is_network_bundle_field(field_key: str | None) -> bool:
+    mode, targets = _network_bundle_parts(field_key)
+    return bool(mode and targets)
+
+
+def _field_type_for_dimension(field_key: str) -> Dict[str, Any]:
+    if _is_network_bundle_field(field_key):
+        return {"kind": "float", "label": dimension_label(field_key)}
+    return FIELD_TYPES[field_key]
 
 
 def _initial_network_derate(hw_dict: Dict[str, Any]) -> float:
@@ -1224,7 +1272,7 @@ def build_configs_from_payload(payload: Dict[str, Any]) -> Tuple[Optional[Dict[s
 
 
 def _parse_list_values(raw_text: str, field_key: str) -> List[Any]:
-    field_type = FIELD_TYPES[field_key]
+    field_type = _field_type_for_dimension(field_key)
     parts = [part.strip() for part in str(raw_text or "").split(",") if part.strip()]
     if field_type["kind"] == "int":
         return [int(part) for part in parts]
@@ -1237,7 +1285,7 @@ def _parse_dimension_values(dim: Dict[str, Any]) -> List[Any]:
     field_key = dim.get("field_key")
     if not field_key:
         return []
-    field_type = FIELD_TYPES.get(field_key, {"kind": "str"})
+    field_type = _field_type_for_dimension(field_key) if field_key in FIELD_TYPES or _is_network_bundle_field(field_key) else {"kind": "str"}
     mode = dim.get("mode") or "values"
     if field_type.get("kind") == "config":
         return list(dim.get("config_values") or [])
@@ -1283,7 +1331,56 @@ def _scale_parallelism_to_total_gpus(hardware: Dict[str, Any], run_type: str, ta
         train_block["dp"] = scaled_axis
 
 
-def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], field_key: str, value: Any, case_meta: Dict[str, Any], optimize_parallelism: bool = False) -> None:
+def _network_targets_for_dimension(field_key: str, dim: Dict[str, Any] | None) -> Tuple[str, List[str]]:
+    if NETWORK_SWEEP_FIELD_RE.match(field_key):
+        return "set", [field_key]
+    mode, targets = _network_bundle_parts(field_key)
+    if dim:
+        dim_mode = str(dim.get("network_apply") or mode or "set")
+        dim_targets = [str(item) for item in dim.get("network_targets") or [] if str(item) in NETWORK_SWEEP_TARGET_BY_VALUE]
+        if dim_mode in {"set", "scale"} and dim_targets:
+            return dim_mode, dim_targets
+    if mode and targets:
+        return mode, targets
+    return "set", []
+
+
+def _topology_bandwidth_gbs(topology: Dict[str, Any]) -> float:
+    raw = topology.get("bandwidth", 0.0)
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0] if raw else 0.0
+    return parse_bandwidth_to_gbs(raw)
+
+
+def _format_network_bandwidth_value(bandwidth_gbs: float) -> Any:
+    if abs(bandwidth_gbs - round(bandwidth_gbs)) < 1e-9:
+        return format_gb(bandwidth_gbs)
+    return bandwidth_gbs * 1e9
+
+
+def _apply_network_target_dimension(hardware: Dict[str, Any], target: str, value: Any, apply_mode: str) -> None:
+    target_meta = NETWORK_SWEEP_TARGET_BY_VALUE.get(target)
+    if not target_meta:
+        raise ValueError(f"Unsupported network sweep target: {target}")
+    dim_index = int(target_meta["dim"])
+    dimensions = hardware.setdefault("network", {}).setdefault("dimensions", [])
+    if dim_index >= len(dimensions):
+        raise ValueError(f"Network Dimension {dim_index} is not present in the selected hardware config.")
+    topology = dimensions[dim_index].setdefault("topology", {})
+    numeric_value = float(value)
+    if target_meta["kind"] == "bandwidth":
+        bandwidth_gbs = _topology_bandwidth_gbs(topology) * numeric_value if apply_mode == "scale" else numeric_value
+        if bandwidth_gbs <= 0:
+            raise ValueError(f"{dimension_label(target)} must be greater than 0.")
+        topology["bandwidth"] = _format_network_bandwidth_value(bandwidth_gbs)
+        return
+    latency_s = _safe_float(topology.get("latency"), 0.0) * numeric_value if apply_mode == "scale" else numeric_value
+    if latency_s < 0:
+        raise ValueError(f"{dimension_label(target)} cannot be negative.")
+    topology["latency"] = latency_s
+
+
+def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], field_key: str, value: Any, case_meta: Dict[str, Any], optimize_parallelism: bool = False, dim: Dict[str, Any] | None = None) -> None:
     mapping = {
         "model.seq_len": (model, ("model_param", "seq_len"), int(value)),
         "model.decode_len": (model, ("model_param", "decode_len"), int(value)),
@@ -1295,24 +1392,15 @@ def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], fie
         "hardware.gpu_clock_ghz": (hardware, ("tech_param", "core", "operating_frequency"), float(value) * 1e9),
         "hardware.memory_bw_gbs": (hardware, ("tech_param", "DRAM", "bandwidth"), float(value) * 1e9),
     }
-    network_match = NETWORK_SWEEP_FIELD_RE.match(field_key)
-    if network_match:
-        dim_index = int(network_match.group(1))
-        network_field = network_match.group(2)
-        dimensions = hardware.setdefault("network", {}).setdefault("dimensions", [])
-        if dim_index >= len(dimensions):
-            raise ValueError(f"Network Dimension {dim_index} is not present in the selected hardware config.")
-        topology = dimensions[dim_index].setdefault("topology", {})
-        if network_field == "bandwidth_gbs":
-            bandwidth_gbs = float(value)
-            if bandwidth_gbs <= 0:
-                raise ValueError(f"{dimension_label(field_key)} must be greater than 0.")
-            topology["bandwidth"] = format_gb(bandwidth_gbs)
-        elif network_field == "latency_s":
-            latency_s = float(value)
-            if latency_s < 0:
-                raise ValueError(f"{dimension_label(field_key)} cannot be negative.")
-            topology["latency"] = latency_s
+    if NETWORK_SWEEP_FIELD_RE.match(field_key) or _is_network_bundle_field(field_key):
+        apply_mode, targets = _network_targets_for_dimension(field_key, dim)
+        if not targets:
+            raise ValueError("Choose at least one network setting to sweep.")
+        kinds = {NETWORK_SWEEP_TARGET_BY_VALUE[target]["kind"] for target in targets if target in NETWORK_SWEEP_TARGET_BY_VALUE}
+        if apply_mode == "set" and len(kinds) > 1:
+            raise ValueError("Set-value network sweeps cannot mix bandwidth and latency targets. Use Scale baseline for mixed-unit sweeps.")
+        for target in targets:
+            _apply_network_target_dimension(hardware, target, value, apply_mode)
         return
     if field_key == "hardware.total_gpus":
         target_total_gpus = int(value)
@@ -1452,7 +1540,7 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
             field_key = dim.get("field_key")
             if not field_key:
                 continue
-            if field_key not in FIELD_TYPES:
+            if field_key not in FIELD_TYPES and not _is_network_bundle_field(field_key):
                 base_errors.append(f"Unsupported sweep field: {field_key}")
                 continue
             try:
@@ -1507,7 +1595,7 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if value == payload.get("hardware_preset_id"):
                         _apply_hardware_overrides(case_hw, payload)
                 else:
-                    _apply_scalar_dimension(case_model, case_hw, field_key, value, case_meta, optimize)
+                    _apply_scalar_dimension(case_model, case_hw, field_key, value, case_meta, optimize, dim)
             _validate_pair(case_model, case_hw)
             top_level_cases.append({
                 "case_id": f"case-{combo_index + 1:04d}",

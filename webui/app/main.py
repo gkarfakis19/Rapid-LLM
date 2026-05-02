@@ -31,6 +31,7 @@ from webui.service.core import (
     FIELD_TYPES,
     METRIC_LABELS,
     NETWORK_SWEEP_FIELD_OPTIONS,
+    NETWORK_SWEEP_TARGETS,
     RUN_MANAGER,
     build_form_defaults,
     build_case_label,
@@ -80,6 +81,9 @@ FIELD_LABEL_MAP.update({key: str(meta["label"]) for key, meta in FIELD_TYPES.ite
 NETWORK_SWEEP_GROUP_VALUE = "__network__"
 NETWORK_SWEEP_FIELD_KEYS = {item["value"] for item in NETWORK_SWEEP_FIELD_OPTIONS}
 DEFAULT_NETWORK_SWEEP_FIELD = NETWORK_SWEEP_FIELD_OPTIONS[0]["value"]
+DEFAULT_NETWORK_SWEEP_TARGETS = [DEFAULT_NETWORK_SWEEP_FIELD]
+NETWORK_SWEEP_TARGET_BY_VALUE = {target["value"]: target for target in NETWORK_SWEEP_TARGETS}
+NETWORK_SWEEP_TARGET_BY_SLUG = {target["slug"]: target for target in NETWORK_SWEEP_TARGETS}
 SWEEP_FIELD_OPTIONS = FIELD_OPTIONS + [{"value": NETWORK_SWEEP_GROUP_VALUE, "label": "Network"}]
 NETWORK_TOPOLOGY_OPTIONS = [
     {"value": "Ring", "label": "Ring"},
@@ -273,7 +277,8 @@ HELP_TEXT = {
     "x_axis": "Sweep field used as the plot x-axis in Details. Defaults to the first active sweep dimension.",
     "series_axis": "Optional sweep field used to color plot series. Defaults to the last active sweep dimension when there is more than one.",
     "sweep_dimensions": "Sweep workload size or hardware scaling. Network opens per-dimension bandwidth and latency choices without exposing every network field in this list. Use Total GPUs for GPU scaling; raw TP/CP/PP/DP/EP are edited once or found by Optimize parallelism, not swept independently.",
-    "network_sweep_field": "Choose the exact network dimension and parameter to sweep.",
+    "network_sweep_field": "Choose one or more network dimensions and parameters for this sweep dimension.",
+    "network_sweep_apply": "Set values writes the sweep value into selected same-unit fields. Scale baseline multiplies each selected field's current value by the sweep value.",
     "reset_last_state": "Clear remembered selections and return sweep/config controls to defaults.",
     "run_launch": "Start the launch plan shown on the right.",
     "progress_run_log": "Open the run log entry for the finished job.",
@@ -316,6 +321,9 @@ def pretty_label(key: str) -> str:
         return METRIC_LABELS[key]
     if key in FIELD_LABEL_MAP:
         return FIELD_LABEL_MAP[key]
+    label = dimension_label(key)
+    if label != key:
+        return label
     cleaned = key.replace(".", " ").replace("_", " ")
     return cleaned[:1].upper() + cleaned[1:]
 
@@ -771,26 +779,70 @@ def _default_payload() -> Dict[str, Any]:
 
 
 def default_sweep_rows() -> List[Dict[str, Any]]:
-    return [{"field": None, "network_field": DEFAULT_NETWORK_SWEEP_FIELD, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+    return [{"field": None, "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS), "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
 
 
 def is_network_sweep_field(field_key: str | None) -> bool:
     return field_key in NETWORK_SWEEP_FIELD_KEYS
 
 
+def is_network_bundle_field(field_key: str | None) -> bool:
+    return bool(re.match(r"^hardware\.network\.(set|scale)\.", str(field_key or "")))
+
+
+def network_targets_from_bundle_field(field_key: str | None) -> List[str]:
+    match = re.match(r"^hardware\.network\.(set|scale)\.([A-Za-z0-9_.-]+)$", str(field_key or ""))
+    if not match:
+        return []
+    return [NETWORK_SWEEP_TARGET_BY_SLUG[slug]["value"] for slug in match.group(2).split(".") if slug in NETWORK_SWEEP_TARGET_BY_SLUG]
+
+
 def display_sweep_field_value(field_key: str | None) -> str | None:
-    return NETWORK_SWEEP_GROUP_VALUE if is_network_sweep_field(field_key) else field_key
+    return NETWORK_SWEEP_GROUP_VALUE if is_network_sweep_field(field_key) or is_network_bundle_field(field_key) else field_key
 
 
-def selected_network_sweep_field(row: Dict[str, Any] | None) -> str:
+def selected_network_sweep_targets(row: Dict[str, Any] | None) -> List[str]:
     row = row or {}
+    raw_targets = row.get("network_targets")
+    targets = [str(item) for item in (raw_targets or []) if str(item) in NETWORK_SWEEP_FIELD_KEYS]
+    if targets:
+        return targets
+    bundle_targets = network_targets_from_bundle_field(row.get("field"))
+    if bundle_targets:
+        return bundle_targets
     candidate = row.get("network_field") or row.get("field")
-    return str(candidate) if is_network_sweep_field(candidate) else DEFAULT_NETWORK_SWEEP_FIELD
+    return [str(candidate)] if is_network_sweep_field(candidate) else list(DEFAULT_NETWORK_SWEEP_TARGETS)
 
 
-def resolve_sweep_field(field_key: str | None, network_field: str | None = None) -> str | None:
+def selected_network_apply_mode(row: Dict[str, Any] | None) -> str:
+    row = row or {}
+    if row.get("network_apply") not in {"set", "scale"} and is_network_bundle_field(row.get("field")):
+        return "scale" if ".scale." in str(row.get("field")) else "set"
+    return str(row.get("network_apply")) if row.get("network_apply") in {"set", "scale"} else "set"
+
+
+def _network_target_slug(field_key: str) -> str:
+    return str(NETWORK_SWEEP_TARGET_BY_VALUE[field_key]["slug"])
+
+
+def network_sweep_dimension_key(targets: List[str] | None, apply_mode: str | None) -> str | None:
+    selected = [target for target in (targets or []) if target in NETWORK_SWEEP_FIELD_KEYS]
+    if not selected:
+        return None
+    mode = "scale" if apply_mode == "scale" else "set"
+    if mode == "set" and len(selected) == 1:
+        return selected[0]
+    slugs = ".".join(_network_target_slug(target) for target in selected)
+    return f"hardware.network.{mode}.{slugs}"
+
+
+def resolve_sweep_field(field_key: str | None, network_targets: List[str] | str | None = None, network_apply: str | None = None) -> str | None:
     if field_key == NETWORK_SWEEP_GROUP_VALUE:
-        return str(network_field) if is_network_sweep_field(network_field) else DEFAULT_NETWORK_SWEEP_FIELD
+        if network_targets is None:
+            network_targets = list(DEFAULT_NETWORK_SWEEP_TARGETS)
+        if isinstance(network_targets, str):
+            network_targets = [network_targets]
+        return network_sweep_dimension_key(network_targets, network_apply)
     return field_key
 
 
@@ -852,6 +904,8 @@ def state_dimensions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             {
                 "field": row.get("field"),
                 "network_field": row.get("network_field"),
+                "network_targets": selected_network_sweep_targets(row),
+                "network_apply": selected_network_apply_mode(row),
                 "mode": row.get("mode"),
                 "list_text": row.get("list_text"),
                 "config_values": row.get("config_values"),
@@ -1199,10 +1253,43 @@ def history_title_component(item: Dict[str, Any]) -> dmc.Group:
     return dmc.Group(gap=8, align="baseline", children=children)
 
 
+def network_sweep_target_grid(index: int, selected_targets: List[str]) -> dmc.CheckboxGroup:
+    return dmc.CheckboxGroup(
+        id=f"dim-{index}-network-targets",
+        value=selected_targets,
+        children=dmc.SimpleGrid(
+            cols={"base": 1, "sm": 3},
+            spacing="xs",
+            children=[
+                html.Div(
+                    className="network-sweep-dim-group",
+                    children=[
+                        dmc.Text(f"Dimension {dim}", fw=800, size="xs", c="dimmed"),
+                        dmc.Checkbox(
+                            value=f"hardware.network.dim{dim}.bandwidth_gbs",
+                            label="Bandwidth",
+                            size="xs",
+                            className="network-sweep-check",
+                        ),
+                        dmc.Checkbox(
+                            value=f"hardware.network.dim{dim}.latency_s",
+                            label="Latency",
+                            size="xs",
+                            className="network-sweep-check",
+                        ),
+                    ],
+                )
+                for dim in range(3)
+            ],
+        ),
+    )
+
+
 def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
     row = row or default_sweep_rows()[0]
     field_value = display_sweep_field_value(row.get("field"))
-    network_field_value = selected_network_sweep_field(row)
+    network_targets = selected_network_sweep_targets(row)
+    network_apply = selected_network_apply_mode(row)
     return dmc.Paper(
         radius="xl",
         p="md",
@@ -1217,15 +1304,29 @@ def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
                     id=f"dim-{index}-network-wrap",
                     className="sweep-submenu",
                     style={"display": "none"},
-                    children=with_tip(
-                        dmc.Select(
-                            id=f"dim-{index}-network-field",
-                            label="Network setting",
-                            value=network_field_value,
-                            data=NETWORK_SWEEP_FIELD_OPTIONS,
-                            clearable=False,
-                        ),
-                        HELP_TEXT["network_sweep_field"],
+                    children=dmc.Stack(
+                        gap="xs",
+                        children=[
+                            dmc.Group(
+                                justify="space-between",
+                                align="center",
+                                gap="xs",
+                                children=[
+                                    dmc.Text("Network settings", fw=800, size="sm"),
+                                    with_tip(
+                                        dmc.SegmentedControl(
+                                            id=f"dim-{index}-network-apply",
+                                            size="xs",
+                                            value=network_apply,
+                                            data=[{"label": "Set values", "value": "set"}, {"label": "Scale baseline", "value": "scale"}],
+                                        ),
+                                        HELP_TEXT["network_sweep_apply"],
+                                    ),
+                                ],
+                            ),
+                            with_tip(network_sweep_target_grid(index, network_targets), HELP_TEXT["network_sweep_field"]),
+                            dmc.Text("Select one target for a direct sweep, multiple same-unit targets to set together, or Scale baseline to multiply selected bandwidth/latency baselines by each sweep value.", size="xs", c="dimmed", className="network-sweep-hint"),
+                        ],
                     ),
                 ),
                 html.Div(
@@ -2592,28 +2693,34 @@ def toggle_sweep_dimensions_section(run_mode: str):
     Output("dim-2-configs", "data"),
     Output("dim-3-configs", "data"),
     Input("dim-1-field", "value"),
-    Input("dim-1-network-field", "value"),
+    Input("dim-1-network-targets", "value"),
+    Input("dim-1-network-apply", "value"),
     Input("dim-2-field", "value"),
-    Input("dim-2-network-field", "value"),
+    Input("dim-2-network-targets", "value"),
+    Input("dim-2-network-apply", "value"),
     Input("dim-3-field", "value"),
-    Input("dim-3-network-field", "value"),
+    Input("dim-3-network-targets", "value"),
+    Input("dim-3-network-apply", "value"),
     State("x-axis-select", "value"),
     State("series-select", "value"),
 )
 def refresh_dimension_options(
     field1: str | None,
-    network_field1: str | None,
+    network_targets1: List[str] | None,
+    network_apply1: str | None,
     field2: str | None,
-    network_field2: str | None,
+    network_targets2: List[str] | None,
+    network_apply2: str | None,
     field3: str | None,
-    network_field3: str | None,
+    network_targets3: List[str] | None,
+    network_apply3: str | None,
     current_x_axis: str | None,
     current_series_axis: str | None,
 ):
     row_fields = [
-        resolve_sweep_field(field1, network_field1),
-        resolve_sweep_field(field2, network_field2),
-        resolve_sweep_field(field3, network_field3),
+        resolve_sweep_field(field1, network_targets1, network_apply1),
+        resolve_sweep_field(field2, network_targets2, network_apply2),
+        resolve_sweep_field(field3, network_targets3, network_apply3),
     ]
     active_fields = [field for field in row_fields if field]
     options = [{"value": field, "label": dimension_label(field)} for field in active_fields]
@@ -2629,12 +2736,12 @@ def refresh_dimension_options(
     return options, x_value, options, series_value, rows[0], rows[1], rows[2]
 
 
-def sweep_control_visibility(field_key: str | None, mode: str | None, network_field: str | None = None) -> Dict[str, Any]:
+def sweep_control_visibility(field_key: str | None, mode: str | None, network_targets: List[str] | str | None = None, network_apply: str | None = None) -> Dict[str, Any]:
     hidden = {"display": "none"}
     shown = {}
     if not field_key:
         return {"network_style": hidden, "mode_style": hidden, "values_style": hidden, "configs_style": hidden, "range_style": hidden, "mode": "values"}
-    resolved_field = resolve_sweep_field(field_key, network_field)
+    resolved_field = resolve_sweep_field(field_key, network_targets, network_apply)
     network_style = shown if field_key == NETWORK_SWEEP_GROUP_VALUE else hidden
     kind = FIELD_TYPES.get(resolved_field, {}).get("kind")
     if kind == "config":
@@ -2667,29 +2774,35 @@ def sweep_control_visibility(field_key: str | None, mode: str | None, network_fi
     Output("dim-3-configs-wrap", "style"),
     Output("dim-3-range-wrap", "style"),
     Input("dim-1-field", "value"),
-    Input("dim-1-network-field", "value"),
+    Input("dim-1-network-targets", "value"),
+    Input("dim-1-network-apply", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-2-field", "value"),
-    Input("dim-2-network-field", "value"),
+    Input("dim-2-network-targets", "value"),
+    Input("dim-2-network-apply", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-3-field", "value"),
-    Input("dim-3-network-field", "value"),
+    Input("dim-3-network-targets", "value"),
+    Input("dim-3-network-apply", "value"),
     Input("dim-3-mode", "value"),
 )
 def refresh_sweep_controls(
     field1: str | None,
-    network_field1: str | None,
+    network_targets1: List[str] | None,
+    network_apply1: str | None,
     mode1: str | None,
     field2: str | None,
-    network_field2: str | None,
+    network_targets2: List[str] | None,
+    network_apply2: str | None,
     mode2: str | None,
     field3: str | None,
-    network_field3: str | None,
+    network_targets3: List[str] | None,
+    network_apply3: str | None,
     mode3: str | None,
 ):
     outputs = []
-    for field, network_field, mode in [(field1, network_field1, mode1), (field2, network_field2, mode2), (field3, network_field3, mode3)]:
-        visibility = sweep_control_visibility(field, mode, network_field)
+    for field, targets, apply_mode, mode in [(field1, network_targets1, network_apply1, mode1), (field2, network_targets2, network_apply2, mode2), (field3, network_targets3, network_apply3, mode3)]:
+        visibility = sweep_control_visibility(field, mode, targets, apply_mode)
         outputs.extend([visibility["network_style"], visibility["mode_style"], visibility["values_style"], visibility["configs_style"], visibility["range_style"]])
     return tuple(outputs)
 
@@ -2699,19 +2812,22 @@ def refresh_sweep_controls(
     Output("dim-2-range-preview", "children"),
     Output("dim-3-range-preview", "children"),
     Input("dim-1-field", "value"),
-    Input("dim-1-network-field", "value"),
+    Input("dim-1-network-targets", "value"),
+    Input("dim-1-network-apply", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-1-start", "value"),
     Input("dim-1-end", "value"),
     Input("dim-1-step_or_points", "value"),
     Input("dim-2-field", "value"),
-    Input("dim-2-network-field", "value"),
+    Input("dim-2-network-targets", "value"),
+    Input("dim-2-network-apply", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-2-start", "value"),
     Input("dim-2-end", "value"),
     Input("dim-2-step_or_points", "value"),
     Input("dim-3-field", "value"),
-    Input("dim-3-network-field", "value"),
+    Input("dim-3-network-targets", "value"),
+    Input("dim-3-network-apply", "value"),
     Input("dim-3-mode", "value"),
     Input("dim-3-start", "value"),
     Input("dim-3-end", "value"),
@@ -2719,28 +2835,31 @@ def refresh_sweep_controls(
 )
 def refresh_range_previews(
     field1: str | None,
-    network_field1: str | None,
+    network_targets1: List[str] | None,
+    network_apply1: str | None,
     mode1: str | None,
     start1: float | None,
     end1: float | None,
     step1: float | None,
     field2: str | None,
-    network_field2: str | None,
+    network_targets2: List[str] | None,
+    network_apply2: str | None,
     mode2: str | None,
     start2: float | None,
     end2: float | None,
     step2: float | None,
     field3: str | None,
-    network_field3: str | None,
+    network_targets3: List[str] | None,
+    network_apply3: str | None,
     mode3: str | None,
     start3: float | None,
     end3: float | None,
     step3: float | None,
 ):
     return (
-        build_range_preview(resolve_sweep_field(field1, network_field1), mode1, start1, end1, step1),
-        build_range_preview(resolve_sweep_field(field2, network_field2), mode2, start2, end2, step2),
-        build_range_preview(resolve_sweep_field(field3, network_field3), mode3, start3, end3, step3),
+        build_range_preview(resolve_sweep_field(field1, network_targets1, network_apply1), mode1, start1, end1, step1),
+        build_range_preview(resolve_sweep_field(field2, network_targets2, network_apply2), mode2, start2, end2, step2),
+        build_range_preview(resolve_sweep_field(field3, network_targets3, network_apply3), mode3, start3, end3, step3),
     )
 
 
@@ -2749,7 +2868,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
     rows = state["sweep_rows"]
     row_values: List[Any] = []
     for row in rows:
-        row_values.extend([display_sweep_field_value(row.get("field")), selected_network_sweep_field(row), row.get("mode"), row.get("list_text"), row.get("config_values"), row.get("start"), row.get("end"), row.get("step_or_points")])
+        row_values.extend([display_sweep_field_value(row.get("field")), selected_network_sweep_targets(row), selected_network_apply_mode(row), row.get("mode"), row.get("list_text"), row.get("config_values"), row.get("start"), row.get("end"), row.get("step_or_points")])
     return (
         "Restored default selections.",
         state["model_run_configs"],
@@ -2780,7 +2899,8 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("optimize-switch", "checked"),
     Output("optimizer-preset", "value"),
     Output("dim-1-field", "value"),
-    Output("dim-1-network-field", "value"),
+    Output("dim-1-network-targets", "value"),
+    Output("dim-1-network-apply", "value"),
     Output("dim-1-mode", "value"),
     Output("dim-1-list", "value"),
     Output("dim-1-configs", "value"),
@@ -2788,7 +2908,8 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("dim-1-end", "value"),
     Output("dim-1-step_or_points", "value"),
     Output("dim-2-field", "value"),
-    Output("dim-2-network-field", "value"),
+    Output("dim-2-network-targets", "value"),
+    Output("dim-2-network-apply", "value"),
     Output("dim-2-mode", "value"),
     Output("dim-2-list", "value"),
     Output("dim-2-configs", "value"),
@@ -2796,7 +2917,8 @@ def reset_last_state_values() -> tuple[Any, ...]:
     Output("dim-2-end", "value"),
     Output("dim-2-step_or_points", "value"),
     Output("dim-3-field", "value"),
-    Output("dim-3-network-field", "value"),
+    Output("dim-3-network-targets", "value"),
+    Output("dim-3-network-apply", "value"),
     Output("dim-3-mode", "value"),
     Output("dim-3-list", "value"),
     Output("dim-3-configs", "value"),
@@ -2813,7 +2935,7 @@ def reset_last_state_values() -> tuple[Any, ...]:
 )
 def reset_saved_last_state(n_clicks: int | None):
     if not n_clicks:
-        return tuple(no_update for _ in range(38))
+        return tuple(no_update for _ in range(41))
     clear_last_ui_state()
     return reset_last_state_values()
 
@@ -2835,10 +2957,15 @@ def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], la
 def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     dimensions = []
     for row in raw_rows:
-        field_key = resolve_sweep_field(row.get("field"), row.get("network_field"))
+        network_targets = row.get("network_targets") if "network_targets" in row else row.get("network_field")
+        field_key = resolve_sweep_field(row.get("field"), network_targets, row.get("network_apply"))
         if field_key:
             mode = row["mode"] or "values"
-            dimensions.append({"field_key": field_key, "mode": mode, "list_text": row["list_text"], "config_values": row["config_values"], "start": row["start"], "end": row["end"], "points": None, "step": row["step_or_points"] if mode == "range" else None})
+            dimension = {"field_key": field_key, "mode": mode, "list_text": row["list_text"], "config_values": row["config_values"], "start": row["start"], "end": row["end"], "points": None, "step": row["step_or_points"] if mode == "range" else None}
+            if row.get("field") == NETWORK_SWEEP_GROUP_VALUE:
+                dimension["network_targets"] = selected_network_sweep_targets(row)
+                dimension["network_apply"] = selected_network_apply_mode(row)
+            dimensions.append(dimension)
     return dimensions
 
 
@@ -3105,7 +3232,8 @@ def sync_config_files(
     Input({"type": "net-util", "index": ALL}, "value"),
     Input("parallelism-topology-mode", "value"),
     Input("dim-1-field", "value"),
-    Input("dim-1-network-field", "value"),
+    Input("dim-1-network-targets", "value"),
+    Input("dim-1-network-apply", "value"),
     Input("dim-1-mode", "value"),
     Input("dim-1-list", "value"),
     Input("dim-1-configs", "value"),
@@ -3113,7 +3241,8 @@ def sync_config_files(
     Input("dim-1-end", "value"),
     Input("dim-1-step_or_points", "value"),
     Input("dim-2-field", "value"),
-    Input("dim-2-network-field", "value"),
+    Input("dim-2-network-targets", "value"),
+    Input("dim-2-network-apply", "value"),
     Input("dim-2-mode", "value"),
     Input("dim-2-list", "value"),
     Input("dim-2-configs", "value"),
@@ -3121,7 +3250,8 @@ def sync_config_files(
     Input("dim-2-end", "value"),
     Input("dim-2-step_or_points", "value"),
     Input("dim-3-field", "value"),
-    Input("dim-3-network-field", "value"),
+    Input("dim-3-network-targets", "value"),
+    Input("dim-3-network-apply", "value"),
     Input("dim-3-mode", "value"),
     Input("dim-3-list", "value"),
     Input("dim-3-configs", "value"),
@@ -3193,7 +3323,8 @@ def build_preview(
     net_utils: List[float],
     parallelism_topology_mode: str,
     dim1_field: str,
-    dim1_network_field: str,
+    dim1_network_targets: List[str],
+    dim1_network_apply: str,
     dim1_mode: str,
     dim1_list: str,
     dim1_configs: List[str],
@@ -3201,7 +3332,8 @@ def build_preview(
     dim1_end: float,
     dim1_step_or_points: float,
     dim2_field: str,
-    dim2_network_field: str,
+    dim2_network_targets: List[str],
+    dim2_network_apply: str,
     dim2_mode: str,
     dim2_list: str,
     dim2_configs: List[str],
@@ -3209,7 +3341,8 @@ def build_preview(
     dim2_end: float,
     dim2_step_or_points: float,
     dim3_field: str,
-    dim3_network_field: str,
+    dim3_network_targets: List[str],
+    dim3_network_apply: str,
     dim3_mode: str,
     dim3_list: str,
     dim3_configs: List[str],
@@ -3226,9 +3359,9 @@ def build_preview(
     if preview_rebuild_is_load_only(dash.ctx.triggered_prop_ids):
         return no_update, no_update, no_update
     sweep_rows = [
-        {"field": dim1_field, "network_field": dim1_network_field, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
-        {"field": dim2_field, "network_field": dim2_network_field, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
-        {"field": dim3_field, "network_field": dim3_network_field, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points},
+        {"field": dim1_field, "network_targets": dim1_network_targets, "network_apply": dim1_network_apply, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
+        {"field": dim2_field, "network_targets": dim2_network_targets, "network_apply": dim2_network_apply, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
+        {"field": dim3_field, "network_targets": dim3_network_targets, "network_apply": dim3_network_apply, "mode": dim3_mode, "list_text": dim3_list, "config_values": dim3_configs, "start": dim3_start, "end": dim3_end, "step_or_points": dim3_step_or_points},
     ]
     dimensions = config_dimensions_from_selection(model_run_configs, hardware_run_configs, model_preset, hardware_preset)
     dimensions.extend(_dimensions_from_inputs(sweep_rows))

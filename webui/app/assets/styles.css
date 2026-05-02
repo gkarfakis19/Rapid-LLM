@@ -517,6 +517,26 @@ body {
   background: #f7fbfe;
 }
 
+.network-sweep-dim-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 94px;
+  padding: 10px;
+  border: 1px solid #dce8f1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.network-sweep-check .mantine-Checkbox-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.network-sweep-hint {
+  line-height: 1.35;
+}
+
 .topology-mapping-note {
   padding: 10px 12px;
 }

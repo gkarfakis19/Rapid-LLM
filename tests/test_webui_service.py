@@ -979,6 +979,36 @@ def test_network_bandwidth_and_latency_sweeps_apply_per_dimension(monkeypatch, t
     assert preview["top_level_cases"][0]["dimension_values"]["hardware.network.dim1.latency_s"] == 0.000001
 
 
+def test_network_bundle_sweep_scales_selected_bandwidth_dimensions(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    bandwidth_targets = [
+        "hardware.network.dim0.bandwidth_gbs",
+        "hardware.network.dim1.bandwidth_gbs",
+        "hardware.network.dim2.bandwidth_gbs",
+    ]
+    payload["dimensions"] = [
+        {
+            "field_key": "hardware.network.scale.d0bw.d1bw.d2bw",
+            "network_targets": bandwidth_targets,
+            "network_apply": "scale",
+            "mode": "list",
+            "list_text": "0.5, 2",
+        }
+    ]
+    baseline_bandwidths = [core.parse_bandwidth_to_gbs(row["bandwidth"]) for row in payload["network_dimensions"]]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["top_level_case_count"] == 2
+    first_dimensions = preview["top_level_cases"][0]["hardware"]["network"]["dimensions"]
+    second_dimensions = preview["top_level_cases"][1]["hardware"]["network"]["dimensions"]
+    assert [core.parse_bandwidth_to_gbs(dim["topology"]["bandwidth"]) for dim in first_dimensions] == [value * 0.5 for value in baseline_bandwidths]
+    assert [core.parse_bandwidth_to_gbs(dim["topology"]["bandwidth"]) for dim in second_dimensions] == [value * 2 for value in baseline_bandwidths]
+    assert preview["top_level_cases"][0]["dimension_values"]["hardware.network.scale.d0bw.d1bw.d2bw"] == 0.5
+
+
 def test_vit_model_type_rejects_sequence_length_sweeps(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()

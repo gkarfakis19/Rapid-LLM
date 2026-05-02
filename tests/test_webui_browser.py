@@ -574,20 +574,32 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert "Dimension 2 Latency" not in sweep_option_text
             page.get_by_role("option", name="Network", exact=True).click()
             page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-network-wrap')).display !== 'none'", timeout=5000)
-            page.locator("#dim-1-network-field").click(force=True)
-            network_option_text = page.evaluate(
+            network_panel_state = page.evaluate(
                 """() => {
-                    const dropdowns = Array.from(document.querySelectorAll('.mantine-Combobox-dropdown, .mantine-Select-dropdown, .mantine-MultiSelect-dropdown, .mantine-Popover-dropdown'))
-                        .filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).display !== 'none' && el.getAttribute('data-hidden') !== 'true');
-                    const dropdown = dropdowns[dropdowns.length - 1];
-                    return Array.from(dropdown?.querySelectorAll('.mantine-Combobox-option, .mantine-Select-option, [role="option"]') || [])
-                        .map((el) => el.textContent || '')
-                        .join('\\n');
+                    const wrap = document.querySelector('#dim-1-network-wrap');
+                    return {
+                        text: wrap?.innerText || '',
+                        checkboxValues: Array.from(wrap?.querySelectorAll('input[type="checkbox"]') || []).map((el) => el.value),
+                        checkedValues: Array.from(wrap?.querySelectorAll('input[type="checkbox"]:checked') || []).map((el) => el.value),
+                    };
                 }"""
             )
-            assert "Dimension 0 Bandwidth (GB/s)" in network_option_text
-            assert "Dimension 2 Latency (s)" in network_option_text
-            page.get_by_role("option", name="Dimension 1 Latency (s)", exact=True).click()
+            assert "Dimension 0" in network_panel_state["text"]
+            assert "Dimension 1" in network_panel_state["text"]
+            assert "Dimension 2" in network_panel_state["text"]
+            assert network_panel_state["text"].count("Bandwidth") == 3
+            assert network_panel_state["text"].count("Latency") == 3
+            assert "Set values" in network_panel_state["text"]
+            assert "Scale baseline" in network_panel_state["text"]
+            assert set(network_panel_state["checkboxValues"]) == {
+                "hardware.network.dim0.bandwidth_gbs",
+                "hardware.network.dim0.latency_s",
+                "hardware.network.dim1.bandwidth_gbs",
+                "hardware.network.dim1.latency_s",
+                "hardware.network.dim2.bandwidth_gbs",
+                "hardware.network.dim2.latency_s",
+            }
+            assert network_panel_state["checkedValues"] == ["hardware.network.dim0.bandwidth_gbs"]
             page.wait_for_function("() => getComputedStyle(document.querySelector('#dim-1-values-wrap')).display !== 'none'", timeout=5000)
             page.locator("#dim-1-field").click(force=True)
             page.get_by_role("option", name="Batch Size").click()

@@ -228,7 +228,10 @@ def test_plot_grouping_defaults_to_last_active_sweep_dimension():
     x_data, x_value, series_data, series_value, *_ = refresh_dimension_options(
         "model.global_batch_size",
         None,
+        None,
         "hardware.total_gpus",
+        None,
+        None,
         None,
         None,
         None,
@@ -258,7 +261,7 @@ def test_sweep_controls_mutate_by_field_kind():
     assert range_state["range_style"] == {}
     assert range_state["values_style"] == {"display": "none"}
 
-    network_state = sweep_control_visibility(webui_main.NETWORK_SWEEP_GROUP_VALUE, "values", "hardware.network.dim1.latency_s")
+    network_state = sweep_control_visibility(webui_main.NETWORK_SWEEP_GROUP_VALUE, "values", ["hardware.network.dim1.latency_s"], "set")
     assert network_state["network_style"] == {}
     assert network_state["values_style"] == {}
     assert network_state["configs_style"] == {"display": "none"}
@@ -433,9 +436,9 @@ def test_layout_restores_last_saved_sweep_and_config_state(monkeypatch):
 def test_layout_restores_network_sweep_as_grouped_selector(monkeypatch):
     saved_state = {
         "sweep_rows": [
-            {"field": "hardware.network.dim2.latency_s", "network_field": "hardware.network.dim2.latency_s", "mode": "range", "list_text": "", "config_values": [], "start": 0, "end": 0.00001, "step_or_points": 0.000005},
-            {"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
-            {"field": None, "network_field": None, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
+            {"field": "hardware.network.dim2.latency_s", "network_targets": ["hardware.network.dim2.latency_s"], "network_apply": "set", "mode": "range", "list_text": "", "config_values": [], "start": 0, "end": 0.00001, "step_or_points": 0.000005},
+            {"field": None, "network_targets": [], "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
+            {"field": None, "network_targets": [], "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None},
         ],
     }
     monkeypatch.setattr(webui_main, "load_last_ui_state", lambda: saved_state)
@@ -443,7 +446,8 @@ def test_layout_restores_network_sweep_as_grouped_selector(monkeypatch):
     layout = create_layout()
 
     assert _collect_by_id(layout, "dim-1-field")[0].value == webui_main.NETWORK_SWEEP_GROUP_VALUE
-    assert _collect_by_id(layout, "dim-1-network-field")[0].value == "hardware.network.dim2.latency_s"
+    assert _collect_by_id(layout, "dim-1-network-targets")[0].value == ["hardware.network.dim2.latency_s"]
+    assert _collect_by_id(layout, "dim-1-network-apply")[0].value == "set"
     assert _collect_by_id(layout, "dim-1-mode")[0].value == "range"
 
 
@@ -492,7 +496,7 @@ def test_reset_last_state_values_returns_default_scratchpad_controls():
     assert values[5] == config_tab_value("models", "Llama2-7B.yaml")
     assert values[6] == "sweep"
     assert values[7] is DEFAULT_OPTIMIZE_PARALLELISM
-    assert values[9:33] == tuple([None, webui_main.DEFAULT_NETWORK_SWEEP_FIELD, "values", "", [], None, None, None] * 3)
+    assert values[9:36] == tuple([None, webui_main.DEFAULT_NETWORK_SWEEP_TARGETS, "set", "values", "", [], None, None, None] * 3)
 
 
 def test_optimize_parallelism_does_not_auto_replica_count_for_inference():
