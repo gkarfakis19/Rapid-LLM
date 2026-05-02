@@ -606,6 +606,20 @@ def _collect_by_id(component, component_id):
     return matches
 
 
+def _collect_by_class(component, class_name):
+    if getattr(component, "className", None) == class_name:
+        return [component]
+    children = getattr(component, "children", None)
+    if children is None:
+        return []
+    if not isinstance(children, list):
+        children = [children]
+    matches = []
+    for child in children:
+        matches.extend(_collect_by_class(child, class_name))
+    return matches
+
+
 def test_layout_includes_discreet_page_credit():
     texts = _collect_text(create_layout())
 
@@ -1194,6 +1208,7 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     table = _collect_datatables(rendered)[0]
     graph = _collect_graphs(rendered)[0]
     texts = _collect_text(rendered)
+    status_badges = _collect_by_class(rendered, "detail-status-badges")
 
     assert table.data[0]["case"] == "case-0001 - Llama2-7B on H100"
     assert table.data[1]["case"] == "case-0002 - Llama3 on H100"
@@ -1208,6 +1223,8 @@ def test_sweep_detail_uses_model_config_case_labels_and_status_not_legend():
     assert table.style_data_conditional[0]["if"]["column_id"] == "memory_exceeded"
     assert table.style_data_conditional[0]["color"] == "#c1121f"
     assert table.data[1]["training_time_s"] == "0.00 us"
+    assert len(status_badges) == 1
+    assert _collect_text(status_badges[0]) == ["Parallelism optimized"]
     assert [column["id"] for column in table.columns[:8]] == [
         "case",
         "label",

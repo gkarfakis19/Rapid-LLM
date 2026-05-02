@@ -937,7 +937,7 @@ body {
   z-index: 1000;
   align-items: center;
   justify-content: center;
-  padding: 3vh 3vw;
+  padding: 24px;
 }
 
 .detail-backdrop {
@@ -946,31 +946,83 @@ body {
   border: 0;
   padding: 0;
   background: rgba(10, 31, 51, 0.48);
-  cursor: default;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.detail-backdrop:hover {
+  background: rgba(10, 31, 51, 0.54);
 }
 
 .detail-dialog {
   position: relative;
   width: min(1500px, 94vw);
   max-height: 92vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 1px solid #cbdce8;
-  border-radius: 14px;
+  border-radius: 12px;
   background: #ffffff;
   box-shadow: 0 28px 70px rgba(0, 65, 125, 0.28);
 }
 
 .detail-dialog-header {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  padding: 16px 18px;
-  background: #ffffff;
+  position: relative;
+  z-index: 4;
+  flex: 0 0 auto;
+  padding: 20px 72px 16px 22px;
+  background: #fbfdff;
   border-bottom: 1px solid #d7e4ee;
 }
 
+.detail-dialog-title-row {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+}
+
+.detail-modal-heading,
+#detail-modal-title {
+  color: #102233;
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1.1;
+}
+
+.detail-close-button {
+  position: absolute;
+  top: 16px;
+  right: 18px;
+  z-index: 5;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #c4d7e5;
+  background: #eef6fb;
+  color: #0b4f82;
+  box-shadow: 0 8px 20px rgba(0, 65, 125, 0.12);
+}
+
+.detail-close-button:hover {
+  border-color: #91b9d4;
+  background: #dff0fa;
+  color: #003b73;
+}
+
+.detail-plot-toolbar {
+  margin-top: 10px;
+  max-width: 100%;
+}
+
+.detail-plot-toolbar .mantine-Group-root {
+  flex-wrap: wrap;
+}
+
 .detail-dialog-body {
-  padding: 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px;
 }
 
 .dash-table-container .dash-filter,
@@ -989,6 +1041,33 @@ body {
 }
 
 @media (max-width: 48em) {
+  .detail-overlay {
+    padding: 10px;
+  }
+
+  .detail-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .detail-dialog-header {
+    padding: 16px 58px 14px 16px;
+  }
+
+  .detail-modal-heading,
+  #detail-modal-title {
+    font-size: 24px;
+  }
+
+  .detail-close-button {
+    top: 12px;
+    right: 12px;
+  }
+
+  .detail-dialog-body {
+    padding: 16px;
+  }
+
   .workspace-tabs-list {
     top: 98px;
   }

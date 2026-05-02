@@ -1379,73 +1379,71 @@ def create_layout() -> dmc.MantineProvider:
                             children=[
                                 html.Div(
                                     className="detail-dialog-header",
-                                    children=dmc.Group(
-                                        justify="space-between",
-                                        align="center",
-                                        children=[
-                                            html.Div(id="detail-modal-title"),
-                                            dmc.Group(
-                                                gap="sm",
+                                    children=[
+                                        html.Div(
+                                            className="detail-dialog-title-row",
+                                            children=[
+                                                html.Div(id="detail-modal-title"),
+                                                dmc.ActionIcon(
+                                                    DashIconify(icon="solar:close-circle-bold", width=24),
+                                                    id="detail-close-button",
+                                                    className="detail-close-button",
+                                                    variant="light",
+                                                    radius="xl",
+                                                    size="xl",
+                                                    **{"aria-label": "Close details"},
+                                                ),
+                                            ],
+                                        ),
+                                        html.Div(
+                                            id="detail-plot-toolbar",
+                                            className="detail-plot-toolbar",
+                                            style={"display": "none"},
+                                            children=dmc.Stack(
+                                                gap=6,
                                                 children=[
-                                                    html.Div(
-                                                        id="detail-plot-toolbar",
-                                                        style={"display": "none"},
-                                                        children=dmc.Stack(
-                                                            gap=4,
-                                                            children=[
-                                                                dmc.Group(
-                                                                    gap="sm",
-                                                                    align="center",
-                                                                    children=[
-                                                                        dmc.SegmentedControl(
-                                                                            id="detail-plot-type",
-                                                                            value="line",
-                                                                            data=[
-                                                                                {"label": "Line Plot", "value": "line"},
-                                                                                {"label": "Scatter", "value": "scatter"},
-                                                                                {"label": "Bar chart", "value": "bar"},
-                                                                            ],
-                                                                        ),
-                                                                        with_tip(dmc.Button("Download plot", id="save-plot-button", variant="light", leftSection=DashIconify(icon="solar:download-bold", width=18)), "Save the current plot under this job's plots folder and download it as a PNG."),
+                                                    dmc.Group(
+                                                        gap="sm",
+                                                        align="center",
+                                                        children=[
+                                                            dmc.SegmentedControl(
+                                                                id="detail-plot-type",
+                                                                value="line",
+                                                                data=[
+                                                                    {"label": "Line Plot", "value": "line"},
+                                                                    {"label": "Scatter", "value": "scatter"},
+                                                                    {"label": "Bar chart", "value": "bar"},
+                                                                ],
+                                                            ),
+                                                            with_tip(dmc.Button("Download plot", id="save-plot-button", variant="light", leftSection=DashIconify(icon="solar:download-bold", width=18)), "Save the current plot under this job's plots folder and download it as a PNG."),
+                                                        ],
+                                                    ),
+                                                    dmc.Group(
+                                                        gap="sm",
+                                                        align="center",
+                                                        children=[
+                                                            with_tip(
+                                                                dmc.SegmentedControl(
+                                                                    id="detail-display-mode",
+                                                                    value="top",
+                                                                    data=[
+                                                                        {"label": "Top results", "value": "top"},
+                                                                        {"label": "All results (slow)", "value": "full"},
                                                                     ],
                                                                 ),
-                                                                dmc.Group(
-                                                                    gap="sm",
-                                                                    align="center",
-                                                                    children=[
-                                                                        with_tip(
-                                                                            dmc.SegmentedControl(
-                                                                                id="detail-display-mode",
-                                                                                value="top",
-                                                                                data=[
-                                                                                    {"label": "Top results", "value": "top"},
-                                                                                    {"label": "All results (slow)", "value": "full"},
-                                                                                ],
-                                                                            ),
-                                                                            "Top results loads the best capped rows by the selected metric. All results renders every stored case and can be slow for large sweeps.",
-                                                                        ),
-                                                                        dmc.Text("Download full table", size="xs", fw=800),
-                                                                        with_tip(dmc.Button("CSV", id="export-table-csv-button", variant="light", size="xs"), "Save every stored detail row to CSV and download it, regardless of the current display limit."),
-                                                                        with_tip(dmc.Button("JSON", id="export-table-json-button", variant="light", size="xs"), "Save every stored detail row to JSON and download it, regardless of the current display limit."),
-                                                                    ],
-                                                                ),
-                                                                dmc.Text(id="plot-save-status", size="xs", c="dimmed"),
-                                                                dmc.Text(id="table-export-status", size="xs", c="dimmed"),
-                                                            ],
-                                                        ),
+                                                                "Top results loads the best capped rows by the selected metric. All results renders every stored case and can be slow for large sweeps.",
+                                                            ),
+                                                            dmc.Text("Download full table", size="xs", fw=800),
+                                                            with_tip(dmc.Button("CSV", id="export-table-csv-button", variant="light", size="xs"), "Save every stored detail row to CSV and download it, regardless of the current display limit."),
+                                                            with_tip(dmc.Button("JSON", id="export-table-json-button", variant="light", size="xs"), "Save every stored detail row to JSON and download it, regardless of the current display limit."),
+                                                        ],
                                                     ),
-                                                    dmc.ActionIcon(
-                                                        DashIconify(icon="solar:close-circle-bold", width=22),
-                                                        id="detail-close-button",
-                                                        variant="subtle",
-                                                        radius="xl",
-                                                        size="lg",
-                                                        **{"aria-label": "Close details"},
-                                                    ),
+                                                    dmc.Text(id="plot-save-status", size="xs", c="dimmed"),
+                                                    dmc.Text(id="table-export-status", size="xs", c="dimmed"),
                                                 ],
                                             ),
-                                        ],
-                                    ),
+                                        ),
+                                    ],
                                 ),
                                 html.Div(id="details-panel", className="detail-dialog-body"),
                             ],
@@ -3242,7 +3240,7 @@ def open_detail_modal_shell(selected_detail: Dict[str, Any] | None):
     if not selected_detail:
         return {"display": "none"}, {"display": "none"}, "", render_detail(None), "top"
     plot_toolbar_style = {"display": "block"} if selected_detail.get("kind") == "sweep" else {"display": "none"}
-    return {"display": "flex"}, plot_toolbar_style, dmc.Text("Details", fw=800), detail_loading_placeholder(selected_detail), "top"
+    return {"display": "flex"}, plot_toolbar_style, html.Div("Details", className="detail-modal-heading"), detail_loading_placeholder(selected_detail), "top"
 
 
 @callback(
@@ -4015,9 +4013,9 @@ def render_detail(detail: Dict[str, Any] | None, plot_type: str | None = "line")
                     dmc.Stack(gap=2, children=[dmc.Title(detail["title"], order=2), dmc.Text(detail_note, size="sm", c="dimmed")]),
                     dmc.Group(
                         gap="xs",
+                        className="detail-status-badges",
                         children=[
                             dmc.Badge("Parallelism optimized" if optimizer_enabled else "Fixed parallelism", color="blue" if optimizer_enabled else "gray", variant="light", radius="xl"),
-                            dmc.Badge(parallelism_summary_from_payload(payload), color="teal", variant="light", radius="xl"),
                         ],
                     ),
                 ],

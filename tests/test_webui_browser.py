@@ -461,8 +461,29 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert not detail_metrics["hasStatusLegend"]
             assert not detail_metrics["hasPeakGpuFlops"]
             assert not detail_metrics["hasPeakSystemFlops"]
+            detail_chrome_metrics = page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('[role="dialog"]');
+                    const close = document.querySelector('#detail-close-button');
+                    const title = document.querySelector('#detail-modal-title');
+                    const badges = document.querySelector('.detail-status-badges');
+                    const dialogRect = dialog.getBoundingClientRect();
+                    const closeRect = close.getBoundingClientRect();
+                    const titleStyle = getComputedStyle(title);
+                    return {
+                        closeTopOffset: Math.round(closeRect.top - dialogRect.top),
+                        closeRightOffset: Math.round(dialogRect.right - closeRect.right),
+                        titleFontSize: parseFloat(titleStyle.fontSize),
+                        badgeText: badges?.innerText || '',
+                    };
+                }"""
+            )
+            assert 10 <= detail_chrome_metrics["closeTopOffset"] <= 24
+            assert 12 <= detail_chrome_metrics["closeRightOffset"] <= 26
+            assert detail_chrome_metrics["titleFontSize"] >= 26
+            assert detail_chrome_metrics["badgeText"].strip().lower() == "fixed parallelism"
             page.screenshot(path=screenshot_dir / f"webui-details-{stamp}.png", full_page=True)
-            page.locator("#detail-close-button").click()
+            page.mouse.click(8, 8)
             page.wait_for_function("() => getComputedStyle(document.querySelector('#detail-overlay')).display === 'none'", timeout=5000)
             page.get_by_role("tab", name="1 Launch").click()
             page.get_by_label("Batch size").hover()
