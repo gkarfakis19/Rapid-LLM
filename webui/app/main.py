@@ -1054,7 +1054,7 @@ def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
         gap="sm",
         children=[
             dmc.Alert(
-                "Worst-case wall clock assumes every simulator invocation hits its own timeout. Expected runtime is often 30-70% of worst-case for small and medium launches, but it can rapidly approach worst-case on larger runs, especially beyond 256 GPUs. If final runtime lands close to worst-case, increase the timeout for higher result fidelity.",
+                "Worst-case wall clock assumes every simulator invocation hits its own timeout. Expected runtime is often 10-70% of worst-case for small and medium launches, but it can rapidly approach worst-case on larger runs, especially beyond 256 GPUs. If final runtime lands close to worst-case, increase the timeout for higher result fidelity.",
                 color="blue",
                 radius="lg",
                 className="preview-runtime-note",

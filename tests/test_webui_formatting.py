@@ -638,7 +638,7 @@ def test_layout_includes_nanocad_logo_asset_and_no_update_badge():
     assert "topbar-logo-slot" in class_names
     assert "brand-orb" not in class_names
     assert "Updates as settings change" not in texts
-    assert any("rapidly approach worst-case" in text and "beyond 256 GPUs" in text for text in texts)
+    assert any("10-70% of worst-case" in text and "rapidly approach worst-case" in text and "beyond 256 GPUs" in text for text in texts)
 
 
 def test_header_telemetry_pills_have_initial_display_text():
