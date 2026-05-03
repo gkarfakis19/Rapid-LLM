@@ -1787,6 +1787,8 @@ class LLMConfig:
                 raise ValueError(
                     f"model_param.decode_len must be an integer when provided (got {decode_len!r})"
                 ) from exc
+            if decode_len < 0:
+                raise ValueError("model_param.decode_len must be >= 0")
 
         if run_type == "inference" and decode_len is None:
             if _is_vit_model_type(model_type):

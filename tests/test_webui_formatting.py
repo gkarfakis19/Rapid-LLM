@@ -70,6 +70,8 @@ from webui.app.main import (
     render_launch_summary_strip,
     render_preview_summary,
     render_sweep_preview_chips,
+    remote_connection_pill,
+    refresh_telemetry,
     refresh_job_status,
     reset_paper_derates,
     reset_last_state_values,
@@ -100,21 +102,50 @@ def test_token_rate_and_time_values_are_human_readable():
     assert format_worst_case_wall_clock(180) == "3m 0s"
 
 
-def test_basic_auth_accepts_required_password_pattern():
-    admin_encoded = base64.b64encode("admin:!@#$57005!@#$".encode()).decode()
-    guest_encoded = base64.b64encode("guest:$extern_VA9Z0$".encode()).decode()
+def test_basic_auth_accepts_required_password_pattern(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.local.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "admin_username": "test-admin",
+                "admin_password": "test-admin-password",
+                "guest_username": "test-user",
+                "guest_password_regex": r"^test-user-[A-Z0-9]{4}$",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RAPID_WEBUI_AUTH_CONFIG", str(auth_path))
 
-    assert password_matches_required_pattern("!@#$57005!@#$")
-    assert password_matches_required_pattern("$extern_VA9Z0$")
-    assert password_matches_required_pattern("$extern_Vabc1$") is False
-    assert basic_auth_credentials_from_header(f"Basic {admin_encoded}") == ("admin", "!@#$57005!@#$")
-    assert basic_auth_password_from_header(f"Basic {guest_encoded}") == "$extern_VA9Z0$"
-    assert basic_auth_credentials_are_valid("admin", "!@#$57005!@#$")
-    assert basic_auth_credentials_are_valid("guest", "$extern_V0A9Z$")
-    assert basic_auth_credentials_are_valid("guest", "$extern_VA9Z0$extra") is False
-    assert basic_auth_credentials_are_valid("admin", "$extern_VA9Z0$") is False
-    assert basic_auth_credentials_are_valid("guest", "!@#$57005!@#$") is False
+    admin_encoded = base64.b64encode("test-admin:test-admin-password".encode()).decode()
+    guest_encoded = base64.b64encode("test-user:test-user-A9Z0".encode()).decode()
+
+    assert password_matches_required_pattern("test-admin-password")
+    assert password_matches_required_pattern("test-user-A9Z0")
+    assert password_matches_required_pattern("test-user-abc1") is False
+    assert basic_auth_credentials_from_header(f"Basic {admin_encoded}") == ("test-admin", "test-admin-password")
+    assert basic_auth_password_from_header(f"Basic {guest_encoded}") == "test-user-A9Z0"
+    assert basic_auth_credentials_are_valid("test-admin", "test-admin-password")
+    assert basic_auth_credentials_are_valid("test-user", "test-user-0A9Z")
+    assert basic_auth_credentials_are_valid("test-user", "test-user-A9Z0-extra") is False
+    assert basic_auth_credentials_are_valid("test-admin", "test-user-A9Z0") is False
+    assert basic_auth_credentials_are_valid("test-user", "test-admin-password") is False
     assert basic_auth_password_from_header("Basic invalid") is None
+
+
+def test_basic_auth_fails_closed_without_local_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("RAPID_WEBUI_AUTH_CONFIG", str(tmp_path / "missing-auth.local.json"))
+    for env_name in (
+        "RAPID_WEBUI_ADMIN_USERNAME",
+        "RAPID_WEBUI_ADMIN_PASSWORD",
+        "RAPID_WEBUI_GUEST_USERNAME",
+        "RAPID_WEBUI_GUEST_PASSWORD_REGEX",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    assert password_matches_required_pattern("admin-password") is False
+    assert basic_auth_credentials_are_valid("admin", "admin-password") is False
+    assert basic_auth_credentials_are_valid("user", "user-token") is False
 
 
 def test_progress_percent_is_clamped():
@@ -488,10 +519,10 @@ def test_launch_plan_renders_zero_timeout_as_unbounded(monkeypatch):
     texts = _collect_text(render_preview_summary(preview, "training_time_s"))
 
     assert "N/A" in texts
-    assert "Timeout: Disabled" in texts
+    assert not any(text.startswith("Timeout:") for text in texts)
 
 
-def test_plan_features_render_launch_summary_and_sweep_chips():
+def test_plan_features_render_launch_summary_without_search_or_sweep_chips():
     payload = {
         "run_mode": "sweep",
         "model_preset_id": "Llama2-7B.yaml",
@@ -534,21 +565,40 @@ def test_plan_features_render_launch_summary_and_sweep_chips():
     assert "3m 0s" in summary_text
     assert "Metric" in summary_text
     assert "Time / Batch" in summary_text
-    assert "Search" in summary_text
-    assert "Fast" in summary_text
-    assert "Batch Size x3" in chip_text
-    assert "Network Bandwidth Scale x3" in chip_text
-    assert "Search: Fast" in chip_text
+    assert "Search" not in summary_text
+    assert "Fast" not in summary_text
+    assert "Batch Size x3" not in chip_text
+    assert "Network Bandwidth Scale x3" not in chip_text
+    assert "Search: Fast" not in chip_text
 
 
-def test_plan_features_include_reusable_sweep_presets_and_slow_polling():
+def test_plan_features_cut_reusable_sweep_starters_and_keep_slow_polling():
     layout = create_layout()
     telemetry_interval = _collect_by_id(layout, "telemetry-poller")[0]
     job_interval = _collect_by_id(layout, "job-poller")[0]
+    activity_store = _collect_by_id(layout, "ui-activity-store")[0]
+    layout_text = _collect_text(layout)
 
     assert {preset["key"] for preset in SWEEP_PRESETS} == {"batch_x3", "gpu_scale", "seq_len", "network_bw_scale"}
+    assert "Reusable sweep starters" not in layout_text
     assert telemetry_interval.interval == 10_000
     assert job_interval.interval == 2_500
+    assert activity_store.data == {"active": True}
+
+
+def test_refresh_telemetry_blanks_when_ui_is_idle(monkeypatch):
+    def fail_get_telemetry():
+        raise AssertionError("idle telemetry must not fetch host metrics")
+
+    monkeypatch.setattr(webui_main, "get_telemetry", fail_get_telemetry)
+    monkeypatch.setattr(webui_main, "execution_mode", lambda: "remote_ssh")
+
+    ram, cpu, worker_max, worker_text = refresh_telemetry({"active": False})
+
+    assert ram == "RAM --"
+    assert cpu == "CPU --"
+    assert worker_max >= 1
+    assert "paused until UI activity resumes" in worker_text
 
 
 def test_saved_artifact_href_is_scoped_to_known_job_roots(monkeypatch, tmp_path):
@@ -600,6 +650,13 @@ def test_optimize_parallelism_defaults_on_in_layout_and_payload():
     assert DEFAULT_OPTIMIZE_PARALLELISM is True
     assert optimize_switch.checked is True
     assert payload["optimize_parallelism"] is True
+
+
+def test_activation_recomputation_dropdown_maps_to_config_boolean():
+    assert webui_main.activation_recomputation_value(True) == "full"
+    assert webui_main.activation_recomputation_value(False) == "selective"
+    assert webui_main.activation_recomputation_is_full("full") is True
+    assert webui_main.activation_recomputation_is_full("selective") is False
 
 
 def test_detail_plot_png_export_is_valid_image_bytes():
@@ -766,7 +823,7 @@ def test_layout_includes_nanocad_logo_asset_and_no_update_badge():
     assert "topbar-logo-slot" in class_names
     assert "brand-orb" not in class_names
     assert "Updates as settings change" not in texts
-    assert any("10-70% of worst-case" in text and "rapidly approach worst-case" in text and "beyond 256 GPUs" in text for text in texts)
+    assert any("Worst case assumes each invocation reaches timeout" in text and "Raise timeout if needed" in text for text in texts)
 
 
 def test_header_telemetry_pills_have_initial_display_text():
@@ -800,6 +857,9 @@ def test_layout_includes_huggingface_model_import_controls():
     assert hf_name_fields[0].label == "Save as"
     assert "Create model config" in texts
     assert any("Supported importer families:" in text and "DeepSeek-V3" in text for text in texts)
+    assert any("Other similar models may also work." in text for text in texts)
+    assert any("manual configuration for workload details" in text and "decode length" in text for text in texts)
+    assert not any("Use model options after import for workload fields." in text for text in texts)
 
 
 def test_branded_progress_bar_fills_rapid_llm_text():
@@ -862,6 +922,8 @@ def test_job_eta_readout_estimates_remaining_time():
     ) == "ETA: ~10m 0s remaining (12:20)"
     assert job_eta_readout({"progress_completed": 0, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: calculating"
     assert job_eta_readout({"progress_completed": 10, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: complete"
+    assert job_eta_readout({"status": "cancel_requested", "progress_completed": 5, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: cancelling"
+    assert job_eta_readout({"status": "cancelled", "progress_completed": 5, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: cancelled"
 
 
 def test_job_eta_readout_uses_local_time_for_utc_job_timestamps(monkeypatch):
@@ -909,6 +971,45 @@ def test_live_status_active_panel_includes_eta(monkeypatch):
     assert "live-status-eta" in _collect_class_names(active_panel)
 
 
+def test_remote_connection_state_is_inline_and_user_facing():
+    active_panel = webui_main.render_active_job_panel(
+        {
+            "title": "Remote sweep",
+            "status": "running",
+            "progress_completed": 5,
+            "progress_total": 10,
+            "created_at": "2026-04-27T12:00:00",
+            "execution_mode": "remote_ssh",
+            "remote_sync_state": "streaming",
+        }
+    )
+
+    texts = _collect_text(active_panel)
+    class_names = _collect_class_names(active_panel)
+
+    assert "5 / 10" in texts
+    assert "Remote connected" in texts
+    assert "RUNNING" in texts
+    assert "Remote streaming" not in texts
+    assert any("remote-connection-pill-green" in class_name for class_name in class_names)
+    assert "remote-sync-row" not in class_names
+
+
+def test_remote_connection_labels_describe_state_without_backend_terms():
+    cases = [
+        ({"remote_sync_state": "syncing", "progress_completed": 0, "last_event_seq": 0, "status": "running"}, "Sending job to remote", "remote-connection-pill-orange"),
+        ({"remote_sync_state": "syncing", "progress_completed": 2, "last_event_seq": 4, "status": "running"}, "Syncing results", "remote-connection-pill-orange"),
+        ({"remote_sync_state": "connecting", "status": "running"}, "Starting remote job", "remote-connection-pill-orange"),
+        ({"remote_sync_state": "reconnecting", "status": "running"}, "Reconnecting to remote", "remote-connection-pill-orange"),
+        ({"remote_sync_state": "failed", "status": "running"}, "Remote connection failed", "remote-connection-pill-red"),
+        ({"remote_sync_state": "streaming", "status": "cancel_requested"}, "Cancelling remote job", "remote-connection-pill-orange"),
+    ]
+    for job, expected_text, expected_class in cases:
+        component = remote_connection_pill({"execution_mode": "remote_ssh", **job})
+        assert expected_text in _collect_text(component)
+        assert any(expected_class in class_name for class_name in _collect_class_names(component))
+
+
 def test_workspace_tabs_are_callback_addressable():
     tabs = _collect_by_id(create_layout(), "workspace-tabs")
 
@@ -920,6 +1021,7 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
     layout = create_layout()
     texts = _collect_text(layout)
     selector = _collect_by_id(layout, "parallelism-topology-mode")[0]
+    recomputation_select = _collect_by_id(layout, "adv-full-recomp")[0]
     preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_shared"))
     split_preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_dim2"))
     topology_select = _collect_by_id(layout, {"type": "net-topology", "index": 0})[0]
@@ -928,6 +1030,10 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
 
     assert selector.data == PP_TOPOLOGY_OPTIONS
     assert selector.value in {"dim1_shared", "dim1_dim2"}
+    assert recomputation_select.label == "Activation recomputation in backward pass"
+    assert recomputation_select.data == webui_main.ACTIVATION_RECOMPUTATION_OPTIONS
+    assert recomputation_select.value in {"full", "selective"}
+    assert getattr(recomputation_select, "checked", None) is None
     assert "Hierarchical AstraSim uses Dimension 0 for TP/CP/EP. DP is always written to the outer network dimension." in texts
     assert "Reset to paper defaults" in texts
     assert HELP_TEXT["parallelism_topology"].startswith("Hierarchical AstraSim fixes Dimension 0")
@@ -1020,6 +1126,9 @@ def test_progress_bar_css_uses_one_smooth_logo_fill_layer():
     assert "@keyframes rapid-progress-stripes" in css
     assert "@keyframes rapid-progress-shine" not in css
     assert ".live-status-eta" in css
+    assert ".remote-connection-pill-green" in css
+    assert ".remote-connection-pill-orange" in css
+    assert ".remote-sync-row" not in css
 
 
 def test_details_shell_has_immediate_loading_message():
@@ -1067,9 +1176,12 @@ def test_config_options_css_does_not_clip_stacked_layout():
     short_viewport_breakpoint = css[css.index("@media (max-height: 900px)") :]
 
     assert ".config-options-card {\n  overflow: visible;\n}" in css
+    assert ".app-header-shell {\n  position: relative;" in css
+    assert ".workspace-tabs-list {\n  position: sticky;\n  top: 0;" in css
+    assert ".right-rail {\n  position: sticky;\n  top: var(--tabs-sticky-offset);" in css
     assert ".builder-grid {\n    height: auto;\n    overflow: visible;" in stacked_breakpoint
     assert ".builder-left-scroll {\n    max-height: none;\n    overflow: visible;" in stacked_breakpoint
-    assert ".right-rail {\n    position: sticky;\n    max-height: calc(100vh - 130px);\n    overflow-y: auto;" in short_viewport_breakpoint
+    assert ".right-rail {\n    position: sticky;\n    top: var(--tabs-sticky-offset);\n    max-height: none;\n    overflow: visible;" in short_viewport_breakpoint
 
 
 def _large_sweep_detail(case_count: int):

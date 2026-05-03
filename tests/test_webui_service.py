@@ -844,6 +844,85 @@ def test_optimized_single_value_total_gpu_sweep_has_nonzero_invocations(monkeypa
     ]
 
 
+def test_batch_size_one_is_valid_with_matching_fixed_parallelism(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["batch_size"] = 1
+    payload["simple"]["tp"] = 8
+    payload["simple"]["dp"] = 1
+    payload["optimize_parallelism"] = False
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["top_level_case_count"] == 1
+    assert preview["invalid_cases"] == []
+    assert preview["top_level_cases"][0]["model"]["model_param"]["global_batch_size"] == 1
+
+
+def test_zero_batch_size_is_rejected_explicitly(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["batch_size"] = 0
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is False
+    assert preview["invalid_cases"]
+    assert "model_param.global_batch_size must be >= 1" in preview["invalid_cases"][0]["error"]
+
+
+def test_negative_decode_length_is_rejected_explicitly(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["run_type"] = "inference"
+    payload["simple"]["decode_len"] = -1
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is False
+    assert preview["invalid_cases"]
+    assert "model_param.decode_len must be >= 0" in preview["invalid_cases"][0]["error"]
+
+
+def test_optimized_batch_size_one_sweep_is_not_pruned_by_stale_fixed_dp(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["optimize_parallelism"] = True
+    payload["dimensions"] = [
+        {
+            "field_key": "model.global_batch_size",
+            "mode": "list",
+            "list_text": "1, 2",
+        }
+    ]
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["invalid_cases"] == []
+    assert [case["dimension_values"]["model.global_batch_size"] for case in preview["top_level_cases"]] == [1, 2]
+    batch_one_case = preview["top_level_cases"][0]
+    assert batch_one_case["parallelism_candidates"]
+    assert all(candidate["dp"] == 1 for candidate in batch_one_case["parallelism_candidates"])
+    assert any(item.get("pruned_count", 0) > 0 for item in preview["candidate_breakdown"])
+
+
+def test_optimized_simple_batch_size_one_uses_candidate_validation(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["batch_size"] = 1
+    payload["optimize_parallelism"] = True
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["top_level_case_count"] == 1
+    assert preview["invalid_cases"] == []
+    assert preview["candidate_breakdown"][0]["count"] == len(preview["top_level_cases"][0]["parallelism_candidates"])
+    assert all(candidate["dp"] == 1 for candidate in preview["top_level_cases"][0]["parallelism_candidates"])
+
+
 def test_optimized_total_gpu_sweep_invocations_scale_per_top_level_case(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
@@ -1308,6 +1387,33 @@ def test_worker_cases_run_from_case_directory_with_repo_pythonpath(monkeypatch, 
     assert Path(captured["cmd"][captured["cmd"].index("--hardware-config") + 1]).is_absolute()
     assert Path(captured["cmd"][captured["cmd"].index("--result-json") + 1]).is_absolute()
     assert str(core.ROOT) in captured["env"]["PYTHONPATH"].split(core.os.pathsep)
+
+
+def test_worker_case_reports_cancelled_when_cancel_event_is_set(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    manager = core.RunManager()
+    job_root = tmp_path / "job"
+
+    class FakeProcess:
+        def wait(self, timeout=None):
+            del timeout
+            manager._cancel_event.set()
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(core.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    result = manager._execute_worker_case(
+        job_root,
+        "case-0001",
+        {"model_param": {"mode": "LLM", "run_type": "training"}},
+        {"parallelism": {"tp": 1, "cp": 1, "pp": 1, "ep": 1, "dp": 1}},
+        0,
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["error"] == "Cancelled by request."
 
 
 def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path):

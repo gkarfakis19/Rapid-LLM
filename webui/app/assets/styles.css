@@ -1,4 +1,5 @@
 :root {
+  --tabs-sticky-offset: 72px;
   --bg: #f5f8fb;
   --bg-soft: #eef5fb;
   --panel: #ffffff;
@@ -41,8 +42,7 @@ body {
 }
 
 .app-header-shell {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 50;
   width: 100%;
   max-width: 100vw;
@@ -76,12 +76,16 @@ body {
 
 .workspace-tabs-list {
   position: sticky;
-  top: 104px;
+  top: 0;
   z-index: 42;
+  padding: 8px 0;
+  background: rgba(245, 248, 251, 0.96);
+  backdrop-filter: blur(10px);
 }
 
 .builder-grid {
-  min-height: calc(100vh - 176px);
+  height: calc(100vh - var(--tabs-sticky-offset));
+  min-height: 620px;
   overflow: visible;
   align-items: flex-start;
 }
@@ -91,7 +95,7 @@ body {
 }
 
 .builder-left-scroll {
-  max-height: calc(100vh - 176px);
+  max-height: calc(100vh - var(--tabs-sticky-offset) - 18px);
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
@@ -236,15 +240,12 @@ body {
 
 .right-rail {
   position: sticky;
-  top: 132px;
+  top: var(--tabs-sticky-offset);
   align-self: flex-start;
   width: 100%;
-  max-height: calc(100vh - 150px);
-  overflow-y: auto;
-  overflow-x: hidden;
+  max-height: none;
+  overflow: visible;
   padding: 0 2px 4px 0;
-  scrollbar-width: thin;
-  scrollbar-color: #9cc9e4 #eef5fb;
 }
 
 .right-rail > * {
@@ -381,7 +382,7 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
 }
 
 .rapid-progress-meta-pill {
@@ -398,8 +399,39 @@ body {
 }
 
 .rapid-progress-meta-status {
+  margin-left: auto;
   background: #e7f6fb;
   color: var(--ucla-blue);
+}
+
+.remote-connection-pill {
+  background: #eef8f1;
+  border-color: #b9dfc3;
+  color: #146c2e;
+}
+
+.remote-connection-pill-green {
+  background: #eef8f1;
+  border-color: #b9dfc3;
+  color: #146c2e;
+}
+
+.remote-connection-pill-orange {
+  background: #fff6df;
+  border-color: #f0d084;
+  color: #8a5a00;
+}
+
+.remote-connection-pill-red {
+  background: #ffecec;
+  border-color: #f1b4b4;
+  color: #9b1c1c;
+}
+
+.remote-connection-pill-gray {
+  background: #eef1f4;
+  border-color: #d5dde5;
+  color: #52616f;
 }
 
 .live-status-eta {
@@ -490,20 +522,60 @@ body {
 
 .preview-card {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.launch-plan-header {
+  flex-wrap: wrap;
+}
+
+.launch-plan-actions {
+  flex: 0 0 auto;
+}
+
+.launch-plan-controls {
+  width: 100%;
+  flex-wrap: nowrap;
+}
+
+.launch-plan-controls > .mantine-Tooltip-root {
+  flex: 0 0 min(300px, 42%);
+  min-width: 220px;
 }
 
 .preview-card .stat-card {
-  min-height: 78px;
+  min-height: 60px;
+  padding: 10px 12px !important;
 }
 
 .preview-card .mantine-ThemeIcon-root {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
 }
 
 .preview-runtime-note {
-  padding: 10px 12px;
+  flex: 1 1 auto;
+  line-height: 1.35;
+  padding-bottom: 6px;
+}
+
+.stat-card-content {
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.stat-card-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.stat-card-copy .mantine-Text-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat-card-icon {
+  flex: 0 0 auto;
 }
 
 .dimension-card,
@@ -1240,7 +1312,16 @@ body {
   }
 
   .workspace-tabs-list {
-    top: 98px;
+    top: 0;
+  }
+
+  .launch-plan-controls {
+    flex-wrap: wrap;
+  }
+
+  .launch-plan-controls > .mantine-Tooltip-root {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 
   .builder-grid {
@@ -1341,21 +1422,36 @@ body {
 
 @media (max-height: 900px) and (min-width: 75.01em) {
   .builder-grid {
-    height: auto;
+    height: calc(100vh - var(--tabs-sticky-offset));
     overflow: visible;
-    align-items: stretch;
+    align-items: flex-start;
   }
 
   .builder-left-scroll {
-    max-height: none;
-    overflow: visible;
+    max-height: calc(100vh - var(--tabs-sticky-offset) - 18px);
+    overflow-y: auto;
     padding-right: 0;
   }
 
   .right-rail {
     position: sticky;
-    max-height: calc(100vh - 130px);
-    overflow-y: auto;
-    overflow-x: hidden;
+    top: var(--tabs-sticky-offset);
+    max-height: none;
+    overflow: visible;
   }
+}
+
+.remote-mode-badge {
+  white-space: nowrap;
+}
+
+.remote-freshness-panel {
+  width: min(1120px, calc(100% - 32px));
+  margin: 12px auto 0;
+  position: relative;
+  z-index: 5;
+}
+
+.remote-update-message {
+  margin-top: 4px;
 }

@@ -24,6 +24,17 @@ import psutil
 import yaml
 
 import config as rapid_config
+from webui.service.remote import (
+    REMOTE_ACTIVE_JOB_FILENAME,
+    RemoteSshConfig,
+    RemoteSshExecutor,
+    RemoteTelemetryMonitor,
+    compare_git_freshness,
+    is_remote_mode,
+    load_execution_config,
+    local_git_ref,
+    remote_config_errors,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -236,6 +247,71 @@ def ensure_workspace() -> None:
     _seed_editable_configs()
     if not SCHEMA_VERSION_PATH.exists():
         SCHEMA_VERSION_PATH.write_text(json.dumps({"schema_version": 1}, indent=2))
+
+
+_REMOTE_EXECUTOR: RemoteSshExecutor | None = None
+_REMOTE_EXECUTOR_KEY: tuple[Any, ...] | None = None
+_REMOTE_TELEMETRY_MONITOR: RemoteTelemetryMonitor | None = None
+
+
+def execution_config() -> RemoteSshConfig:
+    return load_execution_config()
+
+
+def execution_mode() -> str:
+    return execution_config().mode
+
+
+def remote_active_job_path() -> Path:
+    return WORKSPACE_ROOT / REMOTE_ACTIVE_JOB_FILENAME
+
+
+def _remote_executor_key(config: RemoteSshConfig) -> tuple[Any, ...]:
+    return (config.mode, config.host, config.user, config.repo, config.workspace, config.python, config.branch, tuple(sorted(config.remote_env.items())))
+
+
+def get_remote_executor(config: RemoteSshConfig | None = None) -> RemoteSshExecutor:
+    global _REMOTE_EXECUTOR, _REMOTE_EXECUTOR_KEY, _REMOTE_TELEMETRY_MONITOR
+    config = config or execution_config()
+    key = _remote_executor_key(config)
+    if _REMOTE_EXECUTOR is None or _REMOTE_EXECUTOR_KEY != key:
+        _REMOTE_EXECUTOR = RemoteSshExecutor(config)
+        _REMOTE_EXECUTOR_KEY = key
+        _REMOTE_TELEMETRY_MONITOR = None
+    return _REMOTE_EXECUTOR
+
+
+def get_remote_freshness() -> Dict[str, Any]:
+    config = execution_config()
+    if not is_remote_mode(config):
+        frontend = local_git_ref(ROOT)
+        return compare_git_freshness(frontend, frontend, config.branch)
+    errors = remote_config_errors(config)
+    if errors:
+        frontend = local_git_ref(ROOT)
+        return compare_git_freshness(frontend, {"ok": False, "error": " ".join(errors)}, config.branch)
+    return get_remote_executor(config).freshness(ROOT)
+
+
+def remote_launch_blocker() -> str | None:
+    config = execution_config()
+    errors = remote_config_errors(config)
+    if errors:
+        return " ".join(errors)
+    if not is_remote_mode(config):
+        return None
+    freshness = get_remote_freshness()
+    if freshness.get("can_launch"):
+        return None
+    return str(freshness.get("message") or "Remote backend freshness check failed.")
+
+
+def update_frontend_and_remote() -> Dict[str, Any]:
+    config = execution_config()
+    errors = remote_config_errors(config)
+    if errors:
+        return {"ok": False, "message": " ".join(errors), "freshness": get_remote_freshness()}
+    return get_remote_executor(config).update_both(ROOT)
 
 
 def _yaml_cache_key(path: Path) -> tuple[Path, int, int]:
@@ -617,6 +693,13 @@ def _is_truthy_flag(value: Any) -> bool:
     return False
 
 
+def _is_full_recomputation(value: Any, default: Any = False) -> bool:
+    candidate = default if value in (None, "") else value
+    if isinstance(candidate, str):
+        return candidate.strip().lower() in {"full", "true", "yes", "on", "1"}
+    return bool(candidate)
+
+
 def validate_huggingface_import_features(hf_config: Dict[str, Any], alias: str | None) -> None:
     lang_cfg = _hf_language_config(hf_config)
     if alias == "phi3":
@@ -993,7 +1076,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
         "advanced": {
             "model_mode": get_model_mode(model),
             "model_type": get_model_type(model),
-            "full_recomputation": bool(hardware.get("sw_param", {}).get("full_recomputation", False)),
+            "full_recomputation": _is_full_recomputation(hardware.get("sw_param", {}).get("full_recomputation", False)),
             "dp_zero_stage": int(hardware.get("sw_param", {}).get("dp_zero_stage", 0) or 0),
             "tensor_format": str(precision.get("tensor_format", "bf16")),
             "precision_kv_cache": str(precision.get("kv_cache", "as_tensor_format")),
@@ -1101,7 +1184,7 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
     run_type = str(simple.get("run_type") or "training").lower()
     sw_param = hardware.setdefault("sw_param", {})
     precision = sw_param.setdefault("precision", {})
-    sw_param["full_recomputation"] = bool(advanced.get("full_recomputation", sw_param.get("full_recomputation", False)))
+    sw_param["full_recomputation"] = _is_full_recomputation(advanced.get("full_recomputation"), sw_param.get("full_recomputation", False))
     sw_param["dp_zero_stage"] = _safe_int(advanced.get("dp_zero_stage"), _safe_int(sw_param.get("dp_zero_stage"), 0))
     if advanced.get("tensor_format"):
         precision["tensor_format"] = advanced["tensor_format"]
@@ -1312,6 +1395,8 @@ def _parse_dimension_values(dim: Dict[str, Any]) -> List[Any]:
 
 
 def _scale_parallelism_to_total_gpus(hardware: Dict[str, Any], run_type: str, target_total_gpus: int) -> None:
+    if target_total_gpus < 1:
+        raise ValueError("Total GPUs must be at least 1.")
     parallelism = hardware.setdefault("parallelism", {})
     tp = _safe_int(parallelism.get("tp"), 1)
     cp = _safe_int(parallelism.get("cp"), 1)
@@ -1404,6 +1489,8 @@ def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], fie
         return
     if field_key == "hardware.total_gpus":
         target_total_gpus = int(value)
+        if target_total_gpus < 1:
+            raise ValueError("Total GPUs must be at least 1.")
         case_meta["target_total_gpus"] = target_total_gpus
         if not optimize_parallelism:
             _scale_parallelism_to_total_gpus(hardware, get_model_run_type(model), target_total_gpus)
@@ -1527,8 +1614,22 @@ def apply_parallelism_candidate(hardware_dict: Dict[str, Any], candidate: Dict[s
     return updated
 
 
+def generate_valid_parallelism_candidates(model_dict: Dict[str, Any], hardware_dict: Dict[str, Any], run_type: str, target_total_gpus: int, preset_name: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    valid_candidates: List[Dict[str, Any]] = []
+    rejected_candidates: List[Dict[str, Any]] = []
+    for candidate in generate_parallelism_candidates(hardware_dict, run_type, target_total_gpus, preset_name):
+        candidate_hw = apply_parallelism_candidate(hardware_dict, candidate)
+        try:
+            _validate_pair(model_dict, candidate_hw)
+        except Exception as exc:  # noqa: BLE001
+            rejected_candidates.append({"candidate": candidate, "error": str(exc)})
+        else:
+            valid_candidates.append(candidate)
+    return valid_candidates, rejected_candidates
+
+
 def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
-    model, hardware, base_errors = build_configs_from_payload(payload)
+    model, hardware, base_errors = build_editable_configs_from_payload(payload)
     if model is None or hardware is None:
         return {"ok": False, "errors": base_errors, "warnings": [], "top_level_cases": []}
     run_mode = str(payload.get("run_mode") or "sweep").lower()
@@ -1596,16 +1697,28 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
                         _apply_hardware_overrides(case_hw, payload)
                 else:
                     _apply_scalar_dimension(case_model, case_hw, field_key, value, case_meta, optimize, dim)
-            _validate_pair(case_model, case_hw)
-            top_level_cases.append({
+            case_run_type = get_model_run_type(case_model)
+            if int(case_meta["target_total_gpus"]) < 1:
+                raise ValueError("Total GPUs must be at least 1.")
+            case_record = {
                 "case_id": f"case-{combo_index + 1:04d}",
                 "label": build_case_label(case_meta["dimension_values"], payload.get("model_preset_id"), payload.get("hardware_preset_id")),
                 "model": case_model,
                 "hardware": case_hw,
-                "run_type": get_model_run_type(case_model),
+                "run_type": case_run_type,
                 "target_total_gpus": int(case_meta["target_total_gpus"]),
                 "dimension_values": case_meta["dimension_values"],
-            })
+            }
+            if optimize:
+                candidates, rejected_candidates = generate_valid_parallelism_candidates(case_model, case_hw, case_run_type, int(case_meta["target_total_gpus"]), payload.get("optimizer_preset") or "Fast")
+                if not candidates:
+                    reason = rejected_candidates[0]["error"] if rejected_candidates else "No candidate matched the target GPU count."
+                    raise ValueError(f"Parallelism optimization found no valid candidates for Total GPUs={int(case_meta['target_total_gpus'])}. {reason}")
+                case_record["parallelism_candidates"] = candidates
+                case_record["pruned_parallelism_candidate_count"] = len(rejected_candidates)
+            else:
+                _validate_pair(case_model, case_hw)
+            top_level_cases.append(case_record)
         except Exception as exc:  # noqa: BLE001
             invalid_cases.append({"label": build_case_label(case_meta["dimension_values"], payload.get("model_preset_id"), payload.get("hardware_preset_id")), "error": str(exc)})
     if invalid_cases:
@@ -1620,13 +1733,25 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
     timeout_s = max(0, _safe_int(payload.get("timeout_seconds"), 180))
     workers = _safe_int(payload.get("worker_count"), default_worker_count())
     total_invocations, candidate_breakdown = 0, []
+    pruned_parallelism_candidate_count = 0
     if optimize:
         for case in top_level_cases:
-            candidates = generate_parallelism_candidates(case["hardware"], case["run_type"], case["target_total_gpus"], payload.get("optimizer_preset") or "Fast")
-            candidate_breakdown.append({"case_id": case["case_id"], "count": len(candidates)})
+            candidates = list(case.get("parallelism_candidates") or [])
+            if not candidates:
+                candidates, rejected_candidates = generate_valid_parallelism_candidates(case["model"], case["hardware"], case["run_type"], case["target_total_gpus"], payload.get("optimizer_preset") or "Fast")
+                case["parallelism_candidates"] = candidates
+                case["pruned_parallelism_candidate_count"] = len(rejected_candidates)
+            pruned_count = int(case.get("pruned_parallelism_candidate_count") or 0)
+            pruned_parallelism_candidate_count += pruned_count
+            breakdown_item = {"case_id": case["case_id"], "count": len(candidates)}
+            if pruned_count:
+                breakdown_item["pruned_count"] = pruned_count
+            candidate_breakdown.append(breakdown_item)
             total_invocations += len(candidates)
         if total_invocations == 0 and top_level_cases:
             warnings.append("Parallelism optimization produced zero feasible candidates across all cases.")
+        if pruned_parallelism_candidate_count:
+            warnings.append(f"Pruned {pruned_parallelism_candidate_count} invalid optimized parallelism candidate(s) before launch.")
     else:
         total_invocations = len(top_level_cases)
     return {
@@ -1649,8 +1774,17 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_telemetry() -> Dict[str, Any]:
+    global _REMOTE_TELEMETRY_MONITOR
+    config = execution_config()
+    if is_remote_mode(config):
+        if remote_config_errors(config):
+            return {"available_ram_gb": None, "used_percent": None, "cpu_percent": None, "cpu_count": None, "source": "remote", "host": config.host, "stale": True}
+        executor = get_remote_executor(config)
+        if _REMOTE_TELEMETRY_MONITOR is None:
+            _REMOTE_TELEMETRY_MONITOR = RemoteTelemetryMonitor(executor.client)
+        return _REMOTE_TELEMETRY_MONITOR.get()
     vm = psutil.virtual_memory()
-    return {"available_ram_gb": round(vm.available / (1024**3), 1), "used_percent": round(vm.percent, 1), "cpu_percent": round(psutil.cpu_percent(interval=None), 1)}
+    return {"available_ram_gb": round(vm.available / (1024**3), 1), "used_percent": round(vm.percent, 1), "cpu_percent": round(psutil.cpu_percent(interval=None), 1), "cpu_count": os.cpu_count() or 1, "source": "local", "stale": False}
 
 
 def _detail_root(job_kind: str) -> Path:
@@ -1905,6 +2039,8 @@ class RunManager:
 
     def active_job(self) -> Optional[Dict[str, Any]]:
         with self._lock:
+            if not self._active_job:
+                self._maybe_recover_remote_job_locked()
             return copy.deepcopy(self._active_job)
 
     def last_finished_job(self) -> Optional[Dict[str, Any]]:
@@ -1927,6 +2063,49 @@ class RunManager:
             return record
         ACTIVE_JOB_LOCK.unlink(missing_ok=True)
         return None
+
+    def _maybe_recover_remote_job_locked(self) -> None:
+        config = execution_config()
+        if not is_remote_mode(config):
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        active_path = remote_active_job_path()
+        if not active_path.exists():
+            return
+        try:
+            record = json.loads(active_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            active_path.unlink(missing_ok=True)
+            return
+        local_root = Path(str(record.get("local_job_root") or ""))
+        if not local_root.exists():
+            active_path.unlink(missing_ok=True)
+            return
+        status_record = _json_load(local_root / "status.json") if (local_root / "status.json").exists() else {}
+        if status_record.get("status") in {"completed", "failed", "partial", "cancelled", "timed_out"}:
+            active_path.unlink(missing_ok=True)
+            return
+        request_record = _json_load(local_root / "request.json") if (local_root / "request.json").exists() else {}
+        self._cancel_event.clear()
+        self._active_job = {
+            "id": record.get("job_id") or local_root.name,
+            "kind": record.get("kind") or request_record.get("kind") or ("sweep" if local_root.parent.name == "sweeps" else "run"),
+            "root": str(local_root),
+            "status": status_record.get("status", "running"),
+            "title": request_record.get("title") or local_root.name,
+            "created_at": status_record.get("created_at") or request_record.get("created_at"),
+            "updated_at": status_record.get("updated_at"),
+            "progress_completed": status_record.get("progress_completed", 0),
+            "progress_total": status_record.get("progress_total", 0),
+            "execution_mode": "remote_ssh",
+            "remote_host": record.get("host"),
+            "remote_job_root": record.get("remote_path"),
+            "remote_sync_state": "reconnecting",
+            "last_event_seq": record.get("last_event_seq", 0),
+        }
+        self._thread = threading.Thread(target=self._resume_remote_job_thread, args=(record,), daemon=True)
+        self._thread.start()
 
     def _write_expanded_cases(self, job_root: Path, preview: Dict[str, Any]) -> None:
         case_lines = []
@@ -1970,8 +2149,12 @@ class RunManager:
             existing_lock = self._existing_active_lock()
             if existing_lock:
                 return False, f"Another job appears active from process {existing_lock.get('pid')}."
+            blocker = remote_launch_blocker()
+            if blocker:
+                return False, blocker
             self._cancel_event.clear()
             self._last_finished_job = None
+            config = execution_config()
             job_kind = "sweep" if preview.get("top_level_case_count", 0) > 1 or preview.get("optimizer_enabled") else "run"
             job_id = f"{job_kind}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
             job_root = _detail_root(job_kind) / job_id
@@ -1992,8 +2175,12 @@ class RunManager:
             if job_kind == "sweep":
                 _json_dump(job_root / "launch_preview.json", request_record["preview"])
             ACTIVE_JOB_LOCK.write_text(json.dumps({"job_id": job_id, "kind": job_kind, "pid": os.getpid(), "created_at": utc_now()}))
-            self._active_job = {"id": job_id, "kind": job_kind, "root": str(job_root), "status": "queued", "title": request_record["title"], "created_at": request_record["created_at"], "updated_at": request_record["created_at"], "progress_completed": 0, "progress_total": preview.get("total_invocations", 0)}
-            self._thread = threading.Thread(target=self._run_job_thread, args=(job_root, payload, preview), daemon=True)
+            self._active_job = {"id": job_id, "kind": job_kind, "root": str(job_root), "status": "queued", "title": request_record["title"], "created_at": request_record["created_at"], "updated_at": request_record["created_at"], "progress_completed": 0, "progress_total": preview.get("total_invocations", 0), "execution_mode": config.mode}
+            if is_remote_mode(config):
+                self._active_job.update({"remote_host": config.host, "remote_sync_state": "connecting"})
+                self._thread = threading.Thread(target=self._run_remote_job_thread, args=(job_root, payload, preview, config), daemon=True)
+            else:
+                self._thread = threading.Thread(target=self._run_job_thread, args=(job_root, payload, preview), daemon=True)
             self._thread.start()
             return True, job_id
 
@@ -2004,6 +2191,12 @@ class RunManager:
             self._cancel_event.set()
             self._active_job["status"] = "cancel_requested"
             self._write_status(Path(self._active_job["root"]), status="cancel_requested")
+            if self._active_job.get("execution_mode") == "remote_ssh":
+                remote_root = self._active_job.get("remote_job_root")
+                if not remote_root:
+                    return True, "Cancellation requested; waiting for remote job metadata."
+                ok, message = get_remote_executor().cancel(str(remote_root))
+                return ok, message
             processes = list(self._processes.values())
         for active in processes:
             try:
@@ -2012,6 +2205,63 @@ class RunManager:
             except Exception:
                 pass
         return True, "Cancellation requested."
+
+    def _run_remote_job_thread(self, job_root: Path, payload: Dict[str, Any], preview: Dict[str, Any], config: RemoteSshConfig) -> None:
+        try:
+            executor = get_remote_executor(config)
+            summary = executor.run_job(
+                job_root=job_root,
+                job_kind="sweep" if job_root.parent == SWEEPS_ROOT else "run",
+                payload=payload,
+                preview=preview,
+                local_root=ROOT,
+                active_record_path=remote_active_job_path(),
+                status_writer=self._write_status,
+                cancel_event=self._cancel_event,
+            )
+            status_record = _json_load(job_root / "status.json") if (job_root / "status.json").exists() else {}
+            final_status = status_record.get("status") or summary.get("status") or "completed"
+            self._write_status(job_root, status=final_status, remote_sync_state="synced")
+            if not (job_root / "summary.json").exists():
+                _json_dump(job_root / "summary.json", summary)
+            self._write_artifacts_manifest(job_root)
+        except Exception as exc:  # noqa: BLE001
+            _json_dump(job_root / "summary.json", {"status": "failed", "error": str(exc)})
+            self._write_status(job_root, status="failed", error=str(exc), remote_sync_state="failed", remote_error=str(exc))
+            self._write_artifacts_manifest(job_root)
+        finally:
+            ACTIVE_JOB_LOCK.unlink(missing_ok=True)
+            remote_active_job_path().unlink(missing_ok=True)
+            with self._lock:
+                self._processes.clear()
+                if self._active_job:
+                    finished_job = copy.deepcopy(self._active_job)
+                    status_record = _json_load(job_root / "status.json") if (job_root / "status.json").exists() else {}
+                    finished_job["status"] = status_record.get("status", finished_job.get("status"))
+                    finished_job["updated_at"] = status_record.get("updated_at", finished_job.get("updated_at"))
+                    finished_job["progress_completed"] = status_record.get("progress_completed", finished_job.get("progress_completed"))
+                    finished_job["progress_total"] = status_record.get("progress_total", finished_job.get("progress_total"))
+                    self._last_finished_job = finished_job
+                self._active_job = None
+
+    def _resume_remote_job_thread(self, record: Dict[str, Any]) -> None:
+        job_root = Path(str(record.get("local_job_root")))
+        try:
+            summary = get_remote_executor().resume_job(active_record=record, active_record_path=remote_active_job_path(), status_writer=self._write_status)
+            status_record = _json_load(job_root / "status.json") if (job_root / "status.json").exists() else {}
+            self._write_status(job_root, status=status_record.get("status") or summary.get("status") or "completed", remote_sync_state="synced")
+            self._write_artifacts_manifest(job_root)
+        except Exception as exc:  # noqa: BLE001
+            _json_dump(job_root / "summary.json", {"status": "failed", "error": str(exc)})
+            self._write_status(job_root, status="failed", error=str(exc), remote_sync_state="failed", remote_error=str(exc))
+            self._write_artifacts_manifest(job_root)
+        finally:
+            ACTIVE_JOB_LOCK.unlink(missing_ok=True)
+            remote_active_job_path().unlink(missing_ok=True)
+            with self._lock:
+                if self._active_job:
+                    self._last_finished_job = copy.deepcopy(self._active_job)
+                self._active_job = None
 
     def _run_job_thread(self, job_root: Path, payload: Dict[str, Any], preview: Dict[str, Any]) -> None:
         self._write_status(job_root, status="running")
@@ -2025,7 +2275,9 @@ class RunManager:
                 summary = self._run_plain_sweep(job_root, preview)
             else:
                 summary = self._run_single(job_root, preview)
-            final_status = "cancelled" if self._cancel_event.is_set() else summary.get("status", "completed")
+            if self._cancel_event.is_set():
+                summary = {**summary, "status": "cancelled", "error": summary.get("error") or "Cancelled by request."}
+            final_status = summary.get("status", "completed")
             self._write_status(job_root, status=final_status)
             _json_dump(job_root / "summary.json", summary)
             self._write_artifacts_manifest(job_root)
@@ -2039,8 +2291,13 @@ class RunManager:
                 self._processes.clear()
                 if self._active_job:
                     finished_job = copy.deepcopy(self._active_job)
+                    status_record = _json_load(job_root / "status.json") if (job_root / "status.json").exists() else {}
+                    finished_job["status"] = status_record.get("status", finished_job.get("status"))
+                    finished_job["updated_at"] = status_record.get("updated_at", finished_job.get("updated_at"))
+                    finished_job["progress_completed"] = status_record.get("progress_completed", finished_job.get("progress_completed"))
+                    finished_job["progress_total"] = status_record.get("progress_total", finished_job.get("progress_total"))
                     total = _safe_int(finished_job.get("progress_total"), 0)
-                    if total > 0:
+                    if finished_job.get("status") == "completed" and total > 0:
                         finished_job["progress_completed"] = total
                     self._last_finished_job = finished_job
                 self._active_job = None
@@ -2056,6 +2313,7 @@ class RunManager:
             result["primary_metric_value"] = result["metrics"][selected_metric]
         _json_dump(job_root / "result.json", result)
         _json_dump(job_root / "metrics.json", result.get("metrics", {}))
+        self._write_status(job_root, progress_total=1, progress_completed=1)
         return {
             "title": "Single Launch",
             "status": result.get("status"),
@@ -2071,7 +2329,9 @@ class RunManager:
     def _run_optimized_sweep(self, job_root: Path, payload: Dict[str, Any], preview: Dict[str, Any]) -> Dict[str, Any]:
         case_plans = []
         for case in preview["top_level_cases"]:
-            candidates = generate_parallelism_candidates(case["hardware"], case["run_type"], case["target_total_gpus"], payload.get("optimizer_preset") or "Fast")
+            candidates = list(case.get("parallelism_candidates") or [])
+            if not candidates:
+                candidates, _ = generate_valid_parallelism_candidates(case["model"], case["hardware"], case["run_type"], case["target_total_gpus"], payload.get("optimizer_preset") or "Fast")
             for idx, candidate in enumerate(candidates):
                 case_plans.append({"top_case": case, "candidate": candidate, "candidate_index": idx})
         return self._execute_case_set(job_root, case_plans, preview["metric"], True, preview["timeout_seconds"], preview["worker_count"])
@@ -2149,6 +2409,8 @@ class RunManager:
             finally:
                 with self._lock:
                     self._processes.pop(case_id, None)
+        if self._cancel_event.is_set():
+            return {"case_id": case_id, "top_case_id": top_case_id or case_id, "label": case_label or case_id, "status": "cancelled", "error": "Cancelled by request.", "candidate": candidate, "metrics": {}, "warnings": [], "dimension_values": dimension_values or {}}
         worker_result = _json_load(result_path) if result_path.exists() else {"success": False, "error": "Worker did not produce a result file.", "metrics": {}}
         return {
             "case_id": case_id,
@@ -2164,7 +2426,21 @@ class RunManager:
             "primary_metric_value": worker_result.get("primary_metric_value"),
         }
 
-    def _write_status(self, job_root: Path, *, status: Optional[str] = None, error: Optional[str] = None, progress_total: Optional[int] = None, progress_completed: Optional[int] = None) -> None:
+    def _write_status(
+        self,
+        job_root: Path,
+        *,
+        status: Optional[str] = None,
+        error: Optional[str] = None,
+        progress_total: Optional[int] = None,
+        progress_completed: Optional[int] = None,
+        remote_sync_state: Optional[str] = None,
+        remote_host: Optional[str] = None,
+        remote_job_root: Optional[str] = None,
+        remote_pid: Optional[int] = None,
+        remote_error: Optional[str] = None,
+        last_event_seq: Optional[int] = None,
+    ) -> None:
         path = job_root / "status.json"
         record = _json_load(path) if path.exists() else {}
         if status is not None:
@@ -2175,13 +2451,35 @@ class RunManager:
             record["progress_total"] = progress_total
         if progress_completed is not None:
             record["progress_completed"] = progress_completed
+        if remote_sync_state is not None:
+            record["remote_sync_state"] = remote_sync_state
+        if remote_host is not None:
+            record["remote_host"] = remote_host
+        if remote_job_root is not None:
+            record["remote_job_root"] = remote_job_root
+        if remote_pid is not None:
+            record["remote_pid"] = remote_pid
+        if remote_error is not None:
+            record["remote_error"] = remote_error
+        if last_event_seq is not None:
+            record["last_event_seq"] = last_event_seq
         record["updated_at"] = utc_now()
         if "created_at" not in record:
             record["created_at"] = record["updated_at"]
         _json_dump(path, record)
         with self._lock:
             if self._active_job and str(job_root) == self._active_job.get("root"):
-                self._active_job.update({"status": record.get("status"), "created_at": record.get("created_at"), "progress_total": record.get("progress_total"), "progress_completed": record.get("progress_completed"), "updated_at": record.get("updated_at")})
+                updates = {
+                    "status": record.get("status"),
+                    "created_at": record.get("created_at"),
+                    "progress_total": record.get("progress_total"),
+                    "progress_completed": record.get("progress_completed"),
+                    "updated_at": record.get("updated_at"),
+                }
+                for key in ["remote_sync_state", "remote_host", "remote_job_root", "remote_pid", "remote_error", "last_event_seq"]:
+                    if key in record:
+                        updates[key] = record.get(key)
+                self._active_job.update(updates)
 
 
 RUN_MANAGER = RunManager()

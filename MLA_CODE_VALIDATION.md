@@ -46,14 +46,14 @@ The validator intentionally avoids heavy instrumentation.
 
 Primary artifacts:
 
-- validator: [validation_scripts/mla_code_validation.py](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/validation_scripts/mla_code_validation.py)
-- validator output: [tmp/mla_code_validation/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_code_validation/results.json)
-- practical smoke output: [tmp/mla_pt1_smoke/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_pt1_smoke/results.json)
+- validator: [validation_scripts/mla_code_validation.py](validation_scripts/mla_code_validation.py)
+- validator output: [tmp/mla_code_validation/results.json](tmp/mla_code_validation/results.json)
+- practical smoke output: [tmp/mla_pt1_smoke/results.json](tmp/mla_pt1_smoke/results.json)
 
 Latest validator summary:
 
 - validator counts come from the canonical machine-readable output in
-  [tmp/mla_code_validation/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_code_validation/results.json)
+  [tmp/mla_code_validation/results.json](tmp/mla_code_validation/results.json)
 
 ## Reference code facts used
 
@@ -155,7 +155,7 @@ Covered toy cases:
 - inference analytical latent-cache: `tp=2 cp=2`
 - inference hierarchical latent-cache: `tp=2 cp=2`
 
-Key sanity outcomes from [tmp/mla_pt1_smoke/results.json](/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/tmp/mla_pt1_smoke/results.json):
+Key sanity outcomes from [tmp/mla_pt1_smoke/results.json](tmp/mla_pt1_smoke/results.json):
 
 - all cases executed without MLA-specific runtime failures
 - latent-cache inference KV-cache sizing matches the expected vLLM-style compressed storage contract

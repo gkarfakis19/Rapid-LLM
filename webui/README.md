@@ -21,6 +21,21 @@ Optional port override:
 RAPID_WEBUI_PORT=8051 ./.venv/bin/python -m webui.app.main
 ```
 
+## Auth Config
+
+Admin and user credentials must come from an untracked local config file or environment variables. Create `webui/auth.local.json` before running the app:
+
+```json
+{
+  "admin_username": "admin-name",
+  "admin_password": "admin-password",
+  "guest_username": "user-name",
+  "guest_password_regex": "^user-token-[A-Z0-9]{4}$"
+}
+```
+
+`webui/auth.local.json` and `webui/auth.*.local.json` are ignored by git. Set `RAPID_WEBUI_AUTH_CONFIG` to use another ignored path. `RAPID_WEBUI_ADMIN_USERNAME`, `RAPID_WEBUI_ADMIN_PASSWORD`, `RAPID_WEBUI_GUEST_USERNAME`, and `RAPID_WEBUI_GUEST_PASSWORD_REGEX` override the file.
+
 ## Tests
 
 Service, formatting, and worker checks:

@@ -133,9 +133,22 @@ def test_webui_layout_and_visual_health(tmp_path):
     sync_api = pytest.importorskip("playwright.sync_api")
     port = _free_port()
     workspace = tmp_path / "workspace"
+    auth_path = tmp_path / "auth.local.json"
+    admin_username = "browser-admin"
+    admin_password = "browser-admin-password"
+    _write_json(
+        auth_path,
+        {
+            "admin_username": admin_username,
+            "admin_password": admin_password,
+            "guest_username": "browser-user",
+            "guest_password_regex": r"^browser-user-[A-Z0-9]{4}$",
+        },
+    )
     _seed_completed_sweep(workspace)
     env = {
         **os.environ,
+        "RAPID_WEBUI_AUTH_CONFIG": str(auth_path),
         "RAPID_WEBUI_PORT": str(port),
         "RAPID_WEBUI_WORKSPACE_ROOT": str(workspace),
         "RAPID_WEBUI_PYTHON_BIN": ".venv/bin/python",
@@ -157,7 +170,7 @@ def test_webui_layout_and_visual_health(tmp_path):
         with sync_api.sync_playwright() as playwright:
             browser = _launch_browser(playwright)
             context = browser.new_context(
-                http_credentials={"username": "admin", "password": "!@#$57005!@#$"},
+                http_credentials={"username": admin_username, "password": admin_password},
                 viewport={"width": 1440, "height": 1100},
             )
             page = context.new_page()
@@ -233,18 +246,30 @@ def test_webui_layout_and_visual_health(tmp_path):
                         hoverHelpColor: getComputedStyle(document.querySelector('.flow-hover-copy')).color,
                         telemetryBackdrop: getComputedStyle(document.querySelector('.telemetry-pills')).backgroundColor,
                         hasSettingsBadge: text.includes('Updates as settings change'),
-                        hasRuntimeScalingCopy: text.includes('10-70% of worst-case') && text.includes('rapidly approach worst-case') && text.includes('beyond 256 GPUs'),
+                        hasRuntimeScalingCopy: text.includes('Worst case assumes each invocation reaches timeout') && text.includes('Raise timeout if needed'),
+                        hasOldRuntimeScalingCopy: text.includes('10-70% of worst-case') || text.includes('rapidly approach worst-case') || text.includes('beyond 256 GPUs'),
+                        hasPreviewRamCard: text.includes('Available RAM') || text.includes('Remote RAM'),
+                        previewStatCount: document.querySelectorAll('.preview-card .stat-card').length,
+                        previewBubbleText: text.includes('Metric:') || text.includes('Workers:') || text.includes('Timeout:'),
                         hasEditorTabs: text.includes('Model') && text.includes('Hardware') && !!document.querySelector('.config-workbook-tab-list'),
                         hasFileActions: text.includes('Active file actions') && text.includes('New copy') && text.includes('Rename'),
                         hasDespisedRunSetupCopy: text.includes('Choose one hardware target and any number of models'),
+                        hasReusableSweepStarters: text.includes('Reusable sweep starters'),
+                        hasSearchChip: text.includes('Search: Fast') || text.includes('Search: Exhaustive'),
+                        hasVisibleSweepPreviewChip: Array.from(document.querySelectorAll('.sweep-preview-chip')).some((el) => el.getClientRects().length > 0),
                         hasParallelismSearch: text.includes('Parallelism search'),
                         hasOptimizerWarning: text.includes('WARNING: This may increase runtime dramatically.'),
                         hasUseAstraSim: text.includes('Use AstraSim'),
                         hasAdvancedBackendMode: text.includes('Execution backend') || text.includes('Execution mode') || text.includes('hybrid') || text.includes('flattened'),
                         hasWorkers: text.includes('Workers') && text.includes('CPU cores detected'),
                         hasWorkflowCaption: text.includes('Launch -> Run log -> Details'),
+                        hasWorkflowBox: text.includes('Workflow') || text.includes('Choose cases') || text.includes('Read results'),
                         hasPreviewButton: text.includes('Preview Launch'),
                         hasLiveLaunchButton: /Launch \\d+ runs?/.test(text),
+                        launchButtonInsidePreview: !!document.querySelector('.preview-card #run-button'),
+                        rightRailOverflow: getComputedStyle(document.querySelector('.right-rail')).overflowY,
+                        headerPosition: getComputedStyle(document.querySelector('.app-header-shell')).position,
+                        tabsStickyTop: getComputedStyle(document.querySelector('.workspace-tabs-list')).top,
                         hasRawOverride: text.includes('Use raw YAML override'),
                         hasReadOnlySeeds: text.includes('Read-only seeds'),
                         hasMetaReferences: /\\bv1\\b|prototype|deferred|future/i.test(text),
@@ -341,17 +366,29 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert desktop_metrics["telemetryBackdrop"] != "rgba(0, 0, 0, 0)"
             assert not desktop_metrics["hasSettingsBadge"]
             assert desktop_metrics["hasRuntimeScalingCopy"]
+            assert not desktop_metrics["hasOldRuntimeScalingCopy"]
+            assert not desktop_metrics["hasPreviewRamCard"]
+            assert desktop_metrics["previewStatCount"] == 3
+            assert not desktop_metrics["previewBubbleText"]
             assert desktop_metrics["hasEditorTabs"]
             assert desktop_metrics["hasFileActions"]
             assert not desktop_metrics["hasDespisedRunSetupCopy"]
+            assert not desktop_metrics["hasReusableSweepStarters"]
+            assert not desktop_metrics["hasSearchChip"]
+            assert not desktop_metrics["hasVisibleSweepPreviewChip"]
             assert not desktop_metrics["hasParallelismSearch"]
             assert not desktop_metrics["hasOptimizerWarning"]
             assert not desktop_metrics["hasUseAstraSim"]
             assert not desktop_metrics["hasAdvancedBackendMode"]
             assert desktop_metrics["hasWorkers"]
             assert not desktop_metrics["hasWorkflowCaption"]
+            assert not desktop_metrics["hasWorkflowBox"]
             assert not desktop_metrics["hasPreviewButton"]
             assert desktop_metrics["hasLiveLaunchButton"]
+            assert desktop_metrics["launchButtonInsidePreview"]
+            assert desktop_metrics["rightRailOverflow"] == "visible"
+            assert desktop_metrics["headerPosition"] == "relative"
+            assert desktop_metrics["tabsStickyTop"] == "0px"
             assert not desktop_metrics["hasRawOverride"]
             assert not desktop_metrics["hasReadOnlySeeds"]
             assert not desktop_metrics["hasMetaReferences"]

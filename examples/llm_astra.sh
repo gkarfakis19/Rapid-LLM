@@ -4,8 +4,11 @@
 # Setup model parameter in configs/model-config/Llama2-7B.yaml
 # Setup hardware parameters (incl. parallelism/network) in configs/hardware-config/a100_80GB.yaml
 
-HW_CONFIG="/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/configs/hardware-config/H100_SXM5_80GB.yaml"
-MODEL_CONFIG="/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/configs/model-config/Llama2-7B.yaml"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+HW_CONFIG="${REPO_ROOT}/configs/hardware-config/H100_SXM5_80GB.yaml"
+MODEL_CONFIG="${REPO_ROOT}/configs/model-config/Llama2-7B.yaml"
 
 if [[ -n "${RAPID_UV_RUN:-}" ]]; then
     run_cmd=(uv run run_perf.py)

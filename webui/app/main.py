@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import csv
+import hmac
 import json
 import os
 import re
@@ -47,9 +48,13 @@ from webui.service.core import (
     config_label,
     dimension_label,
     ensure_workspace,
+    execution_config,
+    execution_mode,
     get_default_metric_for_run_type,
     get_metric_options,
+    get_remote_freshness,
     get_telemetry,
+    update_frontend_and_remote,
     list_history,
     list_presets,
     load_last_ui_state,
@@ -151,10 +156,8 @@ DETAIL_TABLE_COLUMN_ORDER = [
 ]
 EARLY_TERMINATION_MILD_THRESHOLD = 35.0
 EARLY_TERMINATION_BIG_THRESHOLD = 70.0
-AUTH_ADMIN_USERNAME = "admin"
-AUTH_ADMIN_PASSWORD = "!@#$57005!@#$"
-AUTH_GUEST_USERNAME = "guest"
-AUTH_GUEST_PASSWORD_RE = re.compile(r"^\$extern_V[A-Z0-9]{4}\$")
+DEFAULT_AUTH_CONFIG_PATH = Path(__file__).resolve().parents[1] / "auth.local.json"
+TELEMETRY_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 FLOP_COUNT_KEYS = {"total_flops"}
 FLOP_RATE_KEYS = {"achieved_flops", "achieved_flops_per_gpu", "peak_flops_per_gpu", "peak_system_flops"}
 TOKEN_RATE_KEYS = {"decode_throughput_tok_s"}
@@ -199,6 +202,10 @@ ZERO_STAGE_OPTIONS = [
     {"value": "1", "label": "1 (optimizer shard)"},
     {"value": "2", "label": "2 (optimizer+grad shard)"},
     {"value": "3", "label": "3 (FSDP/full shard)"},
+]
+ACTIVATION_RECOMPUTATION_OPTIONS = [
+    {"value": "full", "label": "Full"},
+    {"value": "selective", "label": "Selective"},
 ]
 PP_TOPOLOGY_OPTIONS = [
     {"value": "dim1_shared", "label": "Dimension 1 | Dimension 2: PP+DP | None"},
@@ -254,8 +261,8 @@ SWEEP_PRESET_BY_KEY = {preset["key"]: preset for preset in SWEEP_PRESETS}
 HELP_TEXT = {
     "app_title": "RAPID-LLM launch workspace for editing YAML configs, previewing run size, launching jobs, and reviewing saved results.",
     "app_flow": "Basic flow: configure in Launch, start the run, open Run log, then click Details. Hover controls, metrics, and table columns for explanations.",
-    "telemetry_ram": "Available host memory reported by psutil.",
-    "telemetry_cpu": "Current host CPU utilization reported by psutil.",
+    "telemetry_ram": "Available memory reported by the active execution host.",
+    "telemetry_cpu": "Current CPU utilization reported by the active execution host.",
     "telemetry_job": "Current job state.",
     "models_to_run": "Select model YAML files to include as run cases.",
     "hardware_to_run": "Select hardware YAML files to include as run cases.",
@@ -300,7 +307,7 @@ HELP_TEXT = {
     "network_bandwidth": "Per-link or dimension bandwidth, such as 100 GB.",
     "network_latency": "Per-hop latency for this network dimension in seconds.",
     "network_util": "Utilization multiplier for this network dimension.",
-    "full_recomp": "Enable full activation recomputation to trade compute for memory.",
+    "full_recomp": "Choose whether backward-pass activation recomputation is full or selective.",
     "zero_stage": "ZeRO sharding stage for optimizer, gradient, and parameter state.",
     "tensor_format": "Default tensor precision used for activations and compute. Other precision fields can either match this value or override it.",
     "precision_kv_cache": "Precision for inference KV cache storage. Match tensor format keeps it tied to the Tensor format field.",
@@ -706,8 +713,40 @@ ensure_workspace()
 MODEL_PRESETS = list_presets("models")
 HW_PRESETS = list_presets("hardware")
 CPU_CORES = os.cpu_count() or 1
+REMOTE_WORKER_INPUT_MAX = 1024
 MODEL_LABELS = {item["id"]: item["label"] for item in MODEL_PRESETS}
 HW_LABELS = {item["id"]: item["label"] for item in HW_PRESETS}
+
+
+def initial_worker_input_max() -> int:
+    return REMOTE_WORKER_INPUT_MAX if execution_mode() == "remote_ssh" else CPU_CORES
+
+
+def worker_capacity_text(telemetry: Dict[str, Any] | None = None) -> str:
+    default = default_worker_count()
+    if telemetry is None and execution_mode() == "remote_ssh":
+        return f"Remote CPU cores: waiting for backend telemetry. Worker default: {default}."
+    telemetry = telemetry or get_telemetry()
+    if telemetry.get("source") == "remote":
+        cpu_count = telemetry.get("cpu_count")
+        if telemetry.get("stale") or not cpu_count:
+            return f"Remote CPU cores: waiting for backend telemetry. Worker default: {default}."
+        return f"Remote backend CPU cores detected: {int(cpu_count)}. Worker default: {default}."
+    cpu_count = telemetry.get("cpu_count") or CPU_CORES
+    return f"Local CPU cores detected: {int(cpu_count)}. Worker default: {default}."
+
+
+def ui_activity_is_active(activity: Dict[str, Any] | None) -> bool:
+    if not isinstance(activity, dict):
+        return True
+    return bool(activity.get("active", True))
+
+
+def idle_worker_capacity_text() -> str:
+    default = default_worker_count()
+    if execution_mode() == "remote_ssh":
+        return f"Remote telemetry paused until UI activity resumes. Worker default: {default}."
+    return f"Telemetry paused until UI activity resumes. Worker default: {default}."
 
 
 def preset_records(kind: str) -> List[Dict[str, Any]]:
@@ -748,8 +787,52 @@ app = Dash(__name__, title="RAPID-LLM Workbench", assets_folder=str(Path(__file_
 server = app.server
 
 
+def _auth_config_path() -> Path:
+    return Path(os.environ.get("RAPID_WEBUI_AUTH_CONFIG") or DEFAULT_AUTH_CONFIG_PATH).expanduser()
+
+
+def _load_auth_local_config() -> Dict[str, Any]:
+    path = _auth_config_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def auth_config() -> Dict[str, str]:
+    local_config = _load_auth_local_config()
+
+    def value(env_name: str, key: str) -> str:
+        if os.environ.get(env_name) is not None:
+            return str(os.environ.get(env_name) or "").strip()
+        return str(local_config.get(key) or "").strip()
+
+    return {
+        "admin_username": value("RAPID_WEBUI_ADMIN_USERNAME", "admin_username"),
+        "admin_password": value("RAPID_WEBUI_ADMIN_PASSWORD", "admin_password"),
+        "guest_username": value("RAPID_WEBUI_GUEST_USERNAME", "guest_username"),
+        "guest_password_regex": value("RAPID_WEBUI_GUEST_PASSWORD_REGEX", "guest_password_regex"),
+    }
+
+
+def _guest_password_re(config: Dict[str, str]) -> re.Pattern[str] | None:
+    pattern = config.get("guest_password_regex") or ""
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
+
+
 def password_matches_required_pattern(password: str) -> bool:
-    return password == AUTH_ADMIN_PASSWORD or bool(AUTH_GUEST_PASSWORD_RE.fullmatch(password or ""))
+    config = auth_config()
+    admin_password = config.get("admin_password") or ""
+    guest_re = _guest_password_re(config)
+    return bool(admin_password and hmac.compare_digest(password or "", admin_password)) or bool(guest_re and guest_re.fullmatch(password or ""))
 
 
 def basic_auth_credentials_from_header(header_value: str | None) -> tuple[str, str] | None:
@@ -771,11 +854,96 @@ def basic_auth_password_from_header(header_value: str | None) -> str | None:
 
 
 def basic_auth_credentials_are_valid(username: str, password: str) -> bool:
-    if username == AUTH_ADMIN_USERNAME:
-        return password == AUTH_ADMIN_PASSWORD
-    if username == AUTH_GUEST_USERNAME:
-        return bool(AUTH_GUEST_PASSWORD_RE.fullmatch(password or ""))
+    config = auth_config()
+    admin_username = config.get("admin_username") or ""
+    admin_password = config.get("admin_password") or ""
+    if admin_username and admin_password and hmac.compare_digest(username or "", admin_username):
+        return hmac.compare_digest(password or "", admin_password)
+    guest_username = config.get("guest_username") or ""
+    guest_re = _guest_password_re(config)
+    if guest_username and guest_re and username == guest_username:
+        return bool(guest_re.fullmatch(password or ""))
     return False
+
+
+def current_request_is_admin() -> bool:
+    try:
+        credentials = basic_auth_credentials_from_header(request.headers.get("Authorization"))
+    except RuntimeError:
+        return False
+    if not credentials:
+        return False
+    config = auth_config()
+    admin_username = config.get("admin_username") or ""
+    admin_password = config.get("admin_password") or ""
+    return bool(
+        admin_username
+        and admin_password
+        and hmac.compare_digest(credentials[0] or "", admin_username)
+        and hmac.compare_digest(credentials[1] or "", admin_password)
+    )
+
+
+def remote_freshness_row(label: str, record: Dict[str, Any]) -> dmc.Group:
+    branch = record.get("branch") or "unknown"
+    commit = record.get("short_commit") or (str(record.get("commit") or "")[:12] or "unknown")
+    dirty = "dirty" if record.get("dirty_tracked") else "clean"
+    ok = "ok" if record.get("ok") else "probe failed"
+    return dmc.Group(
+        gap="xs",
+        children=[
+            dmc.Badge(label, radius="xl", variant="light", color="blue"),
+            dmc.Text(f"{branch} @ {commit}", size="sm", fw=700),
+            dmc.Badge(dirty, radius="xl", variant="light", color="orange" if record.get("dirty_tracked") else "green"),
+            dmc.Badge(ok, radius="xl", variant="light", color="green" if record.get("ok") else "red"),
+        ],
+    )
+
+
+def render_remote_freshness_panel(freshness: Dict[str, Any] | None = None, update_result: Dict[str, Any] | None = None) -> Any:
+    config = execution_config()
+    if config.mode != "remote_ssh":
+        return html.Div()
+    freshness = freshness or get_remote_freshness()
+    if freshness.get("status") == "match" and freshness.get("can_launch") and not update_result:
+        return html.Div()
+    is_admin = current_request_is_admin()
+    color = "red" if not freshness.get("can_launch") else "yellow"
+    update_message = None
+    if update_result:
+        update_message = dmc.Alert(
+            str(update_result.get("message") or "Update attempted."),
+            color="green" if update_result.get("ok") else "red",
+            radius="md",
+            className="remote-update-message",
+        )
+    action_children: List[Any] = [
+        dmc.Badge(f"Expected branch: {freshness.get('expected_branch') or config.branch}", radius="xl", color="gray", variant="light"),
+    ]
+    if is_admin:
+        action_children.append(dmc.Button("Update both", id={"type": "remote-update-button", "scope": "main"}, size="xs", radius="xl", variant="light", leftSection=DashIconify(icon="solar:refresh-bold")))
+    else:
+        action_children.append(dmc.Badge("Admin required to update", radius="xl", color="gray", variant="light"))
+    if update_result and update_result.get("restart_required"):
+        action_children.append(dmc.Badge("Restart webserver required", radius="xl", color="orange", variant="light"))
+    return html.Div(
+        className="remote-freshness-panel",
+        children=dmc.Alert(
+            color=color,
+            radius="lg",
+            title="Remote backend mismatch",
+            children=dmc.Stack(
+                gap="xs",
+                children=[
+                    dmc.Text(str(freshness.get("message") or "Remote backend status needs attention."), size="sm"),
+                    remote_freshness_row("Frontend", freshness.get("frontend") or {}),
+                    remote_freshness_row("Backend", freshness.get("backend") or {}),
+                    dmc.Group(gap="xs", children=action_children),
+                    update_message or html.Div(),
+                ],
+            ),
+        ),
+    )
 
 
 @server.before_request
@@ -831,10 +999,11 @@ def stat_card(label: str, value: Any, icon: str, color: str) -> dmc.Paper:
         withBorder=True,
         className="stat-card",
         children=dmc.Group(
+            className="stat-card-content",
             justify="space-between",
             children=[
-                dmc.Stack(gap=2, children=[dmc.Text(label, size="sm", c="dimmed"), dmc.Text(str(value), fw=800, size="xl")]),
-                dmc.ThemeIcon(size=44, radius="xl", color=color, variant="light", children=DashIconify(icon=icon, width=24)),
+                dmc.Stack(className="stat-card-copy", gap=2, children=[dmc.Text(label, size="sm", c="dimmed"), dmc.Text(str(value), fw=800, size="xl")]),
+                dmc.ThemeIcon(className="stat-card-icon", size=44, radius="xl", color=color, variant="light", children=DashIconify(icon=icon, width=24)),
             ],
         ),
     )
@@ -864,6 +1033,20 @@ def _default_payload() -> Dict[str, Any]:
 
 def default_sweep_rows() -> List[Dict[str, Any]]:
     return [{"field": None, "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS), "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+
+
+def activation_recomputation_value(enabled: Any) -> str:
+    if isinstance(enabled, str):
+        text = enabled.strip().lower()
+        if text in {"full", "true", "yes", "on", "1"}:
+            return "full"
+        if text in {"selective", "partial", "false", "no", "off", "0"}:
+            return "selective"
+    return "full" if bool(enabled) else "selective"
+
+
+def activation_recomputation_is_full(value: Any) -> bool:
+    return activation_recomputation_value(value) == "full"
 
 
 def is_network_sweep_field(field_key: str | None) -> bool:
@@ -1209,13 +1392,18 @@ def clamp_percent(value: Any) -> float:
     return max(0.0, min(100.0, numeric))
 
 
-def branded_progress_bar(progress: Any, count_label: str, status_label: str, *, show_run_log_button: bool = False) -> html.Div:
+def branded_progress_bar(progress: Any, count_label: str, status_label: str, *, inline_meta: Any | None = None, show_run_log_button: bool = False) -> html.Div:
     percent = clamp_percent(progress)
     percent_text = f"{percent:.0f}%"
     meta_children = [
         html.Span(count_label, className="rapid-progress-meta-pill"),
-        html.Span(status_label, className="rapid-progress-meta-pill rapid-progress-meta-status"),
     ]
+    if inline_meta is not None:
+        if isinstance(inline_meta, list):
+            meta_children.extend(inline_meta)
+        else:
+            meta_children.append(inline_meta)
+    meta_children.append(html.Span(status_label, className="rapid-progress-meta-pill rapid-progress-meta-status"))
     if show_run_log_button:
         meta_children.append(
             html.Div(
@@ -1259,6 +1447,42 @@ def branded_progress_bar(progress: Any, count_label: str, status_label: str, *, 
     )
 
 
+def remote_connection_pill(job: Dict[str, Any]) -> Any | None:
+    if job.get("execution_mode") != "remote_ssh":
+        return None
+    state = str(job.get("remote_sync_state") or "").strip().lower()
+    status = str(job.get("status") or "").strip().lower()
+    if not state:
+        return None
+    if status == "cancel_requested":
+        label, tone = "Cancelling remote job", "orange"
+    elif status == "cancelled":
+        label, tone = "Remote cancelled", "gray"
+    elif state == "streaming":
+        label, tone = "Remote connected", "green"
+    elif state == "connecting":
+        label, tone = "Starting remote job", "orange"
+    elif state == "reconnecting":
+        label, tone = "Reconnecting to remote", "orange"
+    elif state == "syncing":
+        if status in {"completed", "failed", "partial", "timed_out"}:
+            label = "Syncing final results"
+        elif int(job.get("last_event_seq") or 0) <= 0 and int(job.get("progress_completed") or 0) <= 0:
+            label = "Sending job to remote"
+        else:
+            label = "Syncing results"
+        tone = "orange"
+    elif state == "stale":
+        label, tone = "Remote status stale", "orange"
+    elif state == "failed":
+        label, tone = "Remote connection failed", "red"
+    elif state == "synced":
+        label, tone = "Remote results synced", "green"
+    else:
+        label, tone = "Remote status pending", "orange"
+    return html.Span(label, className=f"rapid-progress-meta-pill remote-connection-pill remote-connection-pill-{tone}")
+
+
 def detail_loading_placeholder(selected_detail: Dict[str, Any] | None) -> dmc.Paper:
     label = "details" if not selected_detail else f"{selected_detail.get('kind', 'job')} details"
     return dmc.Paper(
@@ -1285,32 +1509,16 @@ def detail_loading_placeholder(selected_detail: Dict[str, Any] | None) -> dmc.Pa
 def render_preview_summary(preview: Dict[str, Any], metric: str) -> dmc.Stack:
     if not preview.get("ok"):
         return render_error_summary(preview.get("errors", []), preview)
-    telemetry = get_telemetry()
     return dmc.Stack(
         gap="sm",
         children=[
-            dmc.Alert(
-                "Worst-case wall clock assumes every simulator invocation hits its own timeout. Expected runtime is often 10-70% of worst-case for small and medium launches, but it can rapidly approach worst-case on larger runs, especially beyond 256 GPUs. If final runtime lands close to worst-case, increase the timeout for higher result fidelity.",
-                color="blue",
-                radius="lg",
-                className="preview-runtime-note",
-            ),
             dmc.SimpleGrid(
-                cols={"base": 1, "sm": 2, "lg": 4},
+                cols={"base": 1, "sm": 3},
                 spacing="sm",
                 children=[
                     stat_card("Top-level cases", format_metric_value(preview["top_level_case_count"], "case_count"), "solar:box-bold", "teal"),
                     stat_card("Simulator invocations", format_metric_value(preview["total_invocations"], "invocation_count"), "solar:play-bold", "blue"),
                     stat_card("Worst-case wall clock", format_worst_case_wall_clock(preview["worst_case_wall_clock_s"]), "solar:clock-circle-bold", "orange"),
-                    stat_card("Available RAM", format_metric_value(telemetry["available_ram_gb"], "available_ram_gb"), "solar:memory-bold", "grape"),
-                ],
-            ),
-            dmc.Group(
-                gap="sm",
-                children=[
-                    dmc.Badge(f"Metric: {METRIC_LABELS.get(metric, metric)}", radius="xl", color="teal", variant="light"),
-                    dmc.Badge(f"Workers: {format_metric_value(preview['worker_count'], 'worker_count')}", radius="xl", color="blue", variant="light"),
-                    dmc.Badge(f"Timeout: {format_metric_value(preview['timeout_seconds'], 'timeout_seconds')}", radius="xl", color="cyan", variant="light"),
                 ],
             ),
             dmc.Stack(children=[dmc.Alert(w, color="red", radius="lg") for w in preview.get("warnings", [])]) if preview.get("warnings") else html.Div(),
@@ -1349,9 +1557,6 @@ def render_launch_summary_strip(preview: Dict[str, Any] | None, payload: Dict[st
             icon=DashIconify(icon="solar:danger-triangle-bold", width=18),
         )
     metric = preview.get("metric") or payload.get("metric") or DEFAULT_METRIC
-    optimizer_text = "On" if preview.get("optimizer_enabled") else "Off"
-    if preview.get("optimizer_enabled"):
-        optimizer_text = str(preview.get("optimizer_preset") or "On")
     return html.Div(
         className="launch-summary-strip",
         children=[
@@ -1363,7 +1568,6 @@ def render_launch_summary_strip(preview: Dict[str, Any] | None, payload: Dict[st
             launch_summary_item("Workers", format_metric_value(preview.get("worker_count", 0), "worker_count"), "teal"),
             launch_summary_item("Timeout", format_metric_value(preview.get("timeout_seconds", 0), "timeout_seconds"), "orange"),
             launch_summary_item("Metric", METRIC_LABELS.get(metric, str(metric)), "blue"),
-            launch_summary_item("Search", optimizer_text, "violet" if preview.get("optimizer_enabled") else "gray"),
         ],
     )
 
@@ -1397,23 +1601,7 @@ def _dimension_value_count_from_preview(preview: Dict[str, Any], field_key: str)
 
 
 def render_sweep_preview_chips(preview: Dict[str, Any] | None, payload: Dict[str, Any] | None) -> Any:
-    payload = payload or {}
-    preview = preview or {}
-    if str(payload.get("run_mode") or "sweep").lower() == "single":
-        return dmc.Text("Single launch mode; sweep dimensions are ignored.", size="xs", c="dimmed")
-    dimensions = [dim for dim in payload.get("dimensions", []) or [] if dim.get("field_key")]
-    chips: List[Any] = []
-    for dim in dimensions:
-        field_key = str(dim["field_key"])
-        count = _dimension_value_count_from_preview(preview, field_key) or _dimension_value_count_from_inputs(dim)
-        chip_text = f"{dimension_label(field_key)} x{count}" if count else dimension_label(field_key)
-        chips.append(dmc.Badge(chip_text, radius="xl", color="blue", variant="light", className="sweep-preview-chip"))
-    if preview.get("optimizer_enabled"):
-        preset = str(preview.get("optimizer_preset") or "Search")
-        chips.append(dmc.Badge(f"Search: {preset}", radius="xl", color="violet", variant="light", className="sweep-preview-chip"))
-    if not chips:
-        chips.append(dmc.Badge("Base case only", radius="xl", color="gray", variant="light", className="sweep-preview-chip"))
-    return dmc.Group(gap="xs", className="sweep-chip-row", children=chips)
+    return html.Div(className="sweep-chip-row", children=[])
 
 
 def saved_artifact_status(prefix: str, path: str | Path) -> html.Div:
@@ -1465,6 +1653,13 @@ def _parse_job_timestamp(raw: Any) -> datetime | None:
 
 
 def job_eta_readout(job: Dict[str, Any], now: datetime | None = None) -> str:
+    status = str(job.get("status") or "").strip().lower()
+    if status == "cancel_requested":
+        return "ETA: cancelling"
+    if status == "cancelled":
+        return "ETA: cancelled"
+    if status in {"failed", "partial", "timed_out"}:
+        return "ETA: stopped"
     total = int(job.get("progress_total") or 0)
     completed = int(job.get("progress_completed") or 0)
     if total <= 0:
@@ -1526,40 +1721,6 @@ def network_sweep_target_grid(index: int, selected_targets: List[str]) -> dmc.Ch
                 for dim in range(3)
             ],
         ),
-    )
-
-
-def sweep_preset_buttons() -> dmc.Stack:
-    return dmc.Stack(
-        gap=6,
-        className="sweep-preset-block",
-        children=[
-            dmc.Group(
-                justify="space-between",
-                align="center",
-                gap="xs",
-                children=[
-                    dmc.Text("Reusable sweep starters", fw=800, size="sm"),
-                ],
-            ),
-            dmc.Group(
-                gap="xs",
-                className="sweep-preset-row",
-                children=[
-                    with_tip(
-                        dmc.Button(
-                            preset["label"],
-                            id={"type": "sweep-preset", "name": preset["key"]},
-                            variant="light",
-                            size="xs",
-                            leftSection=DashIconify(icon="solar:magic-stick-3-bold", width=15),
-                        ),
-                        preset["description"],
-                    )
-                    for preset in SWEEP_PRESETS
-                ],
-            ),
-        ],
     )
 
 
@@ -1751,6 +1912,22 @@ def network_editor(defaults: List[Dict[str, Any]], pp_dimension: str | None = No
 
 
 def build_header() -> html.Div:
+    config = execution_config()
+    telemetry_children: List[Any] = []
+    if config.mode == "remote_ssh":
+        telemetry_children.append(
+            with_tip(
+                dmc.Badge(f"Remote: {config.host}", id="remote-mode-badge", size="lg", radius="xl", color="orange", variant="light", className="telemetry-badge remote-mode-badge"),
+                "Jobs execute on the configured remote SSH backend.",
+            )
+        )
+    telemetry_children.extend(
+        [
+            with_tip(dmc.Badge("RAM --", id="telemetry-ram", size="lg", radius="xl", color="teal", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_ram"]),
+            with_tip(dmc.Badge("CPU --", id="telemetry-cpu", size="lg", radius="xl", color="cyan", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_cpu"]),
+            with_tip(dmc.Badge("Idle", id="telemetry-job", size="lg", radius="xl", color="blue", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_job"]),
+        ]
+    )
     return html.Div(
         className="app-header-shell",
         children=dmc.Container(
@@ -1793,11 +1970,7 @@ def build_header() -> html.Div:
                     dmc.Group(
                         className="telemetry-pills",
                         gap="sm",
-                        children=[
-                            with_tip(dmc.Badge("RAM --", id="telemetry-ram", size="lg", radius="xl", color="teal", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_ram"]),
-                            with_tip(dmc.Badge("CPU --", id="telemetry-cpu", size="lg", radius="xl", color="cyan", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_cpu"]),
-                            with_tip(dmc.Badge("Idle", id="telemetry-job", size="lg", radius="xl", color="blue", variant="light", className="telemetry-badge"), HELP_TEXT["telemetry_job"]),
-                        ],
+                        children=telemetry_children,
                     ),
                 ],
             ),
@@ -1816,11 +1989,14 @@ def create_layout() -> dmc.MantineProvider:
                 build_header(),
                 dcc.Interval(id="telemetry-poller", interval=10000, n_intervals=0),
                 dcc.Interval(id="job-poller", interval=2500, n_intervals=0),
+                dcc.Interval(id="remote-freshness-poller", interval=30000, n_intervals=0),
+                dcc.Store(id="ui-activity-store", data={"active": True}),
                 dcc.Store(id="preview-store"),
                 dcc.Store(id="selected-detail-store"),
                 dcc.Store(id="history-refresh-store"),
                 dcc.Download(id="plot-download"),
                 dcc.Download(id="table-download"),
+                html.Div(id="remote-freshness-panel"),
                 html.Div(
                     id="detail-overlay",
                     className="detail-overlay",
@@ -1943,7 +2119,7 @@ def builder_panel(metric_options: List[Dict[str, str]], state: Dict[str, Any] | 
         gutter="lg",
         children=[
             dmc.GridCol(span={"base": 12, "xl": 5}, children=left_column(metric_options, state)),
-            dmc.GridCol(span={"base": 12, "xl": 7}, children=right_column(state)),
+            dmc.GridCol(span={"base": 12, "xl": 7}, children=right_column(metric_options, state)),
         ],
     )
 
@@ -1961,7 +2137,6 @@ def left_column(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> 
                     justify="space-between",
                     children=[
                         dmc.Badge("Launch Builder", radius="xl", color="teal", variant="light"),
-                        dmc.Text("Local execution", size="sm", c="dimmed"),
                     ],
                 ),
                 html.H2("Launch runs, review log, inspect details", className="hero-heading"),
@@ -1980,12 +2155,11 @@ def left_column(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> 
             run_setup_card(state),
             config_options_card(state),
             html.Div(id="sweep-dimensions-section", children=dimensions_card(state)),
-            launch_controls_card(metric_options, state),
         ],
     )
 
 
-def right_column(state: Dict[str, Any]) -> dmc.Stack:
+def right_column(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> dmc.Stack:
     initial_preview = build_launch_preview(initial_payload_from_state(state))
     preview_card = dmc.Paper(
         radius="xl",
@@ -1995,8 +2169,38 @@ def right_column(state: Dict[str, Any]) -> dmc.Stack:
         children=dmc.Stack(
             gap="md",
             children=[
-                dmc.Title("Launch Plan", order=3),
-                html.Div(id="preview-summary", children=render_preview_summary(initial_preview, DEFAULT_METRIC)),
+                dmc.Group(
+                    justify="space-between",
+                    align="center",
+                    gap="sm",
+                    className="launch-plan-header",
+                    children=[
+                        dmc.Title("Launch Plan", order=3),
+                        dmc.Group(
+                            gap="xs",
+                            className="launch-plan-actions",
+                            children=[
+                                with_tip(dmc.Button("Launch 1 run", id="run-button", leftSection=DashIconify(icon="solar:rocket-bold")), HELP_TEXT["run_launch"]),
+                                with_tip(dmc.Button("Cancel Active Job", id="cancel-button", color="red", variant="light"), HELP_TEXT["cancel_job"]),
+                            ],
+                        ),
+                    ],
+                ),
+                dmc.Group(
+                    className="launch-plan-controls",
+                    align="flex-end",
+                    gap="sm",
+                    children=[
+                        with_tip(dmc.Select(id="metric-select", label="Metric", value=state["metric"], data=metric_options), HELP_TEXT["metric"]),
+                        dmc.Text(
+                            "Worst case assumes each invocation reaches timeout; large runs can approach it. Raise timeout if needed.",
+                            size="xs",
+                            c="dimmed",
+                            className="preview-runtime-note",
+                        ),
+                    ],
+                ),
+                html.Div(id="preview-summary", children=render_preview_summary(initial_preview, state["metric"])),
             ],
         ),
     )
@@ -2018,44 +2222,12 @@ def right_column(state: Dict[str, Any]) -> dmc.Stack:
             ],
         ),
     )
-    context_card = dmc.Paper(
-        radius="xl",
-        p="lg",
-        withBorder=True,
-        children=dmc.Stack(
-            gap="md",
-            children=[
-                dmc.Group(
-                    justify="space-between",
-                    children=[dmc.Title("Workflow", order=3)],
-                ),
-                dmc.SimpleGrid(
-                    cols={"base": 1, "sm": 2},
-                    children=[
-                        dmc.Alert(
-                            color="teal",
-                            radius="lg",
-                            title="Choose cases",
-                            children="Pick model and hardware YAML files above to define the launch cases.",
-                        ),
-                        dmc.Alert(
-                            color="violet",
-                            radius="lg",
-                            title="Read results",
-                            children="Open Details from the run log to compare timings, memory fit, FLOPS, and selected parallelism.",
-                        ),
-                    ],
-                ),
-            ],
-        ),
-    )
     return dmc.Stack(
         className="right-rail",
         gap="lg",
         children=[
             preview_card,
             status_card,
-            context_card,
         ],
     )
 
@@ -2083,11 +2255,11 @@ def run_setup_card(state: Dict[str, Any]) -> dmc.Paper:
                     cols={"base": 1, "sm": 2},
                     spacing="sm",
                     children=[
-                        with_tip(dmc.NumberInput(id="worker-count", label="Workers", min=1, max=CPU_CORES, value=state["worker_count"]), HELP_TEXT["worker_count"]),
+                        with_tip(dmc.NumberInput(id="worker-count", label="Workers", min=1, max=initial_worker_input_max(), value=state["worker_count"]), HELP_TEXT["worker_count"]),
                         with_tip(dmc.NumberInput(id="timeout-seconds", label="Timeout / candidate (s)", min=0, value=state["timeout_seconds"]), HELP_TEXT["timeout"]),
                     ],
                 ),
-                dmc.Text(f"CPU cores detected: {CPU_CORES}. Worker default: {default_worker_count()}.", size="xs", c="dimmed"),
+                dmc.Text(id="worker-count-capacity", children=worker_capacity_text(), size="xs", c="dimmed"),
                 dmc.Text(id="config-sync-status", size="xs", c="dimmed"),
             ],
         ),
@@ -2178,7 +2350,12 @@ def config_file_actions() -> html.Div:
                     align="center",
                     children=[
                         with_tip(dmc.Button("Create model config", id="import-hf-config-button", variant="light", leftSection=DashIconify(icon="solar:download-bold", width=18)), HELP_TEXT["hf_import"]),
-                        dmc.Text("Supported importer families: GPT/OPT/MPT, Llama/Qwen2/Phi3 without active sliding-window attention, DeepSeek-V3, and GLM-4 MoE. Use model options after import for workload fields.", size="xs", c="dimmed", className="hf-import-note"),
+                        dmc.Text(
+                            "Supported importer families: GPT/OPT/MPT, Llama/Qwen2/Phi3 without active sliding-window attention, DeepSeek-V3, and GLM-4 MoE. Other similar models may also work. Also needs manual configuration for workload details (e.g. decode length, sequence length, batch size) after import.",
+                            size="xs",
+                            c="dimmed",
+                            className="hf-import-note",
+                        ),
                     ],
                 ),
                 html.Div(id="hf-import-status"),
@@ -2362,7 +2539,16 @@ def hardware_options_pane(state: Dict[str, Any]) -> html.Div:
                         cols={"base": 1, "sm": 2},
                         spacing="sm",
                         children=[
-                            with_tip(dmc.Switch(id="adv-full-recomp", checked=defaults["advanced"]["full_recomputation"], label="Full recomputation"), HELP_TEXT["full_recomp"]),
+                            with_tip(
+                                dmc.Select(
+                                    id="adv-full-recomp",
+                                    label="Activation recomputation in backward pass",
+                                    value=activation_recomputation_value(defaults["advanced"]["full_recomputation"]),
+                                    data=ACTIVATION_RECOMPUTATION_OPTIONS,
+                                    clearable=False,
+                                ),
+                                HELP_TEXT["full_recomp"],
+                            ),
                             with_tip(dmc.Select(id="adv-dp-zero", label="ZeRO stage", value=str(defaults["advanced"]["dp_zero_stage"]), data=ZERO_STAGE_OPTIONS, clearable=False), HELP_TEXT["zero_stage"]),
                             with_tip(dmc.Select(id="adv-tensor-format", label="Tensor format", value=defaults["advanced"]["tensor_format"], data=TENSOR_FORMAT_OPTIONS), HELP_TEXT["tensor_format"]),
                             with_tip(dmc.Select(id="adv-precision-kv-cache", label="KV cache precision", value=defaults["advanced"]["precision_kv_cache"], data=PRECISION_FORMAT_OPTIONS), HELP_TEXT["precision_kv_cache"]),
@@ -2442,8 +2628,7 @@ def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
                     dmc.Text("Sweep workload size and hardware scaling. Select multiple model or hardware files in Launch Setup for config comparisons.", size="sm", c="dimmed"),
                     HELP_TEXT["sweep_dimensions"],
                 ),
-                sweep_preset_buttons(),
-                html.Div(id="sweep-preview-chips", children=render_sweep_preview_chips(initial_preview, initial_payload)),
+                html.Div(id="sweep-preview-chips", style={"display": "none"}, children=render_sweep_preview_chips(initial_preview, initial_payload)),
                 dmc.Text(id="last-state-status", size="xs", c="dimmed"),
                 dim_card(1, rows[0]),
                 dim_card(2, rows[1]),
@@ -2461,32 +2646,24 @@ def dimensions_card(state: Dict[str, Any]) -> dmc.Paper:
     )
 
 
-def launch_controls_card(metric_options: List[Dict[str, str]], state: Dict[str, Any]) -> dmc.Paper:
-    initial_payload = initial_payload_from_state(state)
-    initial_preview = build_launch_preview(initial_payload)
-    return dmc.Paper(
-        radius="xl",
-        p="lg",
-        withBorder=True,
-        children=dmc.Stack(
-            gap="md",
-            children=[
-                dmc.Title("Launch", order=3),
-                html.Div(id="launch-summary-strip", children=render_launch_summary_strip(initial_preview, initial_payload)),
-                with_tip(dmc.Select(id="metric-select", label="Metric", value=state["metric"], data=metric_options), HELP_TEXT["metric"]),
-                dmc.Group(
-                    justify="flex-end",
-                    children=[
-                        with_tip(dmc.Button("Launch 1 run", id="run-button", leftSection=DashIconify(icon="solar:rocket-bold")), HELP_TEXT["run_launch"]),
-                        with_tip(dmc.Button("Cancel Active Job", id="cancel-button", color="red", variant="light"), HELP_TEXT["cancel_job"]),
-                    ],
-                ),
-            ],
-        ),
-    )
-
-
 app.layout = create_layout
+
+
+app.clientside_callback(
+    f"""
+    function(n_intervals) {{
+        const now = Date.now();
+        const lastActive = window.rapidWebuiLastActivity || now;
+        return {{
+            active: (now - lastActive) <= {TELEMETRY_IDLE_TIMEOUT_MS},
+            last_active_ms: lastActive,
+            now_ms: now
+        }};
+    }}
+    """,
+    Output("ui-activity-store", "data"),
+    Input("telemetry-poller", "n_intervals"),
+)
 
 
 def collect_payload(model_preset_id: str, hardware_preset_id: str, run_mode: str, optimize_parallelism: bool, optimizer_preset: str, simple_values: Dict[str, Any], advanced_values: Dict[str, Any], network_rows: List[Dict[str, Any]], dimensions: List[Dict[str, Any]], metric: str, x_axis: str | None, series_axis: str | None, worker_count: int, timeout_seconds: int) -> Dict[str, Any]:
@@ -2520,7 +2697,7 @@ def collect_form_payload(
     simple_use_astrasim: bool,
     adv_model_type: str,
     adv_model_mode: str,
-    adv_full_recomp: bool,
+    adv_full_recomp: str | bool,
     adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
@@ -2562,7 +2739,7 @@ def collect_form_payload(
         optimize_parallelism,
         optimizer_preset,
         {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count if simple_run_type == "inference" else 1, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
-        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": adv_full_recomp, "dp_zero_stage": int(adv_dp_zero or 0), "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "pp_network_dimension": parallelism_topology_mode, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
+        {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": activation_recomputation_is_full(adv_full_recomp), "dp_zero_stage": int(adv_dp_zero or 0), "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "pp_network_dimension": parallelism_topology_mode, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
         _network_rows_from_callback(net_topologies, net_bandwidths, net_latencies, net_utils),
         dimensions,
         metric,
@@ -2747,7 +2924,7 @@ def import_huggingface_model_config(n_clicks: int | None, hf_reference: str | No
     Output("simple-use-astrasim", "checked"),
     Output("adv-model-type", "value"),
     Output("adv-model-mode", "value"),
-    Output("adv-full-recomp", "checked"),
+    Output("adv-full-recomp", "value"),
     Output("adv-dp-zero", "value"),
     Output("adv-tensor-format", "value"),
     Output("adv-precision-kv-cache", "value"),
@@ -2806,7 +2983,7 @@ def refresh_defaults(model_preset_id: str, hardware_preset_id: str):
         defaults["simple"]["use_astrasim"],
         defaults["advanced"]["model_type"],
         defaults["advanced"]["model_mode"],
-        defaults["advanced"]["full_recomputation"],
+        activation_recomputation_value(defaults["advanced"]["full_recomputation"]),
         str(defaults["advanced"]["dp_zero_stage"]),
         defaults["advanced"]["tensor_format"],
         defaults["advanced"]["precision_kv_cache"],
@@ -3322,7 +3499,7 @@ def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     Input("simple-use-astrasim", "checked"),
     Input("adv-model-type", "value"),
     Input("adv-model-mode", "value"),
-    Input("adv-full-recomp", "checked"),
+    Input("adv-full-recomp", "value"),
     Input("adv-dp-zero", "value"),
     Input("adv-tensor-format", "value"),
     Input("adv-precision-kv-cache", "value"),
@@ -3386,7 +3563,7 @@ def sync_config_files(
     simple_use_astrasim: bool,
     adv_model_type: str,
     adv_model_mode: str,
-    adv_full_recomp: bool,
+    adv_full_recomp: str | bool,
     adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
@@ -3504,7 +3681,6 @@ def sync_config_files(
     Output("preview-summary", "children"),
     Output("run-button", "children"),
     Output("sweep-preview-chips", "children"),
-    Output("launch-summary-strip", "children"),
     Input("model-preset", "value"),
     Input("hardware-preset", "value"),
     Input("model-run-configs", "value"),
@@ -3533,7 +3709,7 @@ def sync_config_files(
     Input("simple-use-astrasim", "checked"),
     Input("adv-model-type", "value"),
     Input("adv-model-mode", "value"),
-    Input("adv-full-recomp", "checked"),
+    Input("adv-full-recomp", "value"),
     Input("adv-dp-zero", "value"),
     Input("adv-tensor-format", "value"),
     Input("adv-precision-kv-cache", "value"),
@@ -3624,7 +3800,7 @@ def build_preview(
     simple_use_astrasim: bool,
     adv_model_type: str,
     adv_model_mode: str,
-    adv_full_recomp: bool,
+    adv_full_recomp: str | bool,
     adv_dp_zero: int | str,
     adv_tensor_format: str,
     adv_precision_kv_cache: str,
@@ -3687,7 +3863,7 @@ def build_preview(
     active_config_tab: str | None,
 ):
     if preview_rebuild_is_load_only(dash.ctx.triggered_prop_ids):
-        return no_update, no_update, no_update, no_update, no_update
+        return no_update, no_update, no_update, no_update
     sweep_rows = [
         {"field": dim1_field, "network_targets": dim1_network_targets, "network_apply": dim1_network_apply, "mode": dim1_mode, "list_text": dim1_list, "config_values": dim1_configs, "start": dim1_start, "end": dim1_end, "step_or_points": dim1_step_or_points},
         {"field": dim2_field, "network_targets": dim2_network_targets, "network_apply": dim2_network_apply, "mode": dim2_mode, "list_text": dim2_list, "config_values": dim2_configs, "start": dim2_start, "end": dim2_end, "step_or_points": dim2_step_or_points},
@@ -3782,14 +3958,12 @@ def build_preview(
             render_error_summary(preview.get("errors", []), preview),
             launch_button_label(preview),
             render_sweep_preview_chips(preview, payload),
-            render_launch_summary_strip(preview, payload),
         )
     return (
         {"payload": payload, "preview": preview},
         render_preview_summary(preview, metric),
         launch_button_label(preview),
         render_sweep_preview_chips(preview, payload),
-        render_launch_summary_strip(preview, payload),
     )
 
 
@@ -3928,6 +4102,7 @@ def export_current_detail_table(csv_clicks: int | None, json_clicks: int | None,
 def render_active_job_panel(active: Dict[str, Any] | None = None, finished: Dict[str, Any] | None = None) -> Any:
     if active:
         progress = ((active.get("progress_completed") or 0) / max(1, active.get("progress_total") or 1)) * 100
+        remote_meta = remote_connection_pill(active)
         return dmc.Stack(
             gap="md",
             children=[
@@ -3936,6 +4111,7 @@ def render_active_job_panel(active: Dict[str, Any] | None = None, finished: Dict
                     progress,
                     progress_count_label(active),
                     str(active["status"]).upper(),
+                    inline_meta=remote_meta,
                 ),
                 dmc.Text(job_eta_readout(active), size="sm", fw=800, className="live-status-eta"),
             ],
@@ -4027,6 +4203,8 @@ def job_status_signature(active: Dict[str, Any] | None, finished: Dict[str, Any]
             "status": source.get("status"),
             "progress_completed": source.get("progress_completed"),
             "progress_total": source.get("progress_total"),
+            "remote_sync_state": source.get("remote_sync_state"),
+            "last_event_seq": source.get("last_event_seq"),
             "updated_at": source.get("updated_at"),
         },
         sort_keys=True,
@@ -4036,11 +4214,40 @@ def job_status_signature(active: Dict[str, Any] | None, finished: Dict[str, Any]
 @callback(
     Output("telemetry-ram", "children"),
     Output("telemetry-cpu", "children"),
-    Input("telemetry-poller", "n_intervals"),
+    Output("worker-count", "max"),
+    Output("worker-count-capacity", "children"),
+    Input("ui-activity-store", "data"),
 )
-def refresh_telemetry(_: int):
+def refresh_telemetry(activity: Dict[str, Any] | None):
+    if not ui_activity_is_active(activity):
+        return "RAM --", "CPU --", initial_worker_input_max(), idle_worker_capacity_text()
     telemetry = get_telemetry()
-    return f"RAM {format_metric_value(telemetry['available_ram_gb'], 'available_ram_gb')} free", f"CPU {telemetry['cpu_percent']}%"
+    worker_max = int(telemetry.get("cpu_count") or initial_worker_input_max())
+    if telemetry.get("stale"):
+        label = "remote " if telemetry.get("source") == "remote" else ""
+        return f"RAM {label}stale", f"CPU {label}stale", worker_max, worker_capacity_text(telemetry)
+    return f"RAM {format_metric_value(telemetry['available_ram_gb'], 'available_ram_gb')} free", f"CPU {telemetry['cpu_percent']}%", worker_max, worker_capacity_text(telemetry)
+
+
+@callback(
+    Output("remote-freshness-panel", "children"),
+    Input("remote-freshness-poller", "n_intervals"),
+    Input({"type": "remote-update-button", "scope": ALL}, "n_clicks"),
+    State("ui-activity-store", "data"),
+)
+def refresh_remote_freshness(_: int, update_clicks: List[int] | None, activity: Dict[str, Any] | None):
+    if execution_mode() != "remote_ssh":
+        return html.Div()
+    if dash.ctx.triggered_id == "remote-freshness-poller" and not ui_activity_is_active(activity):
+        return no_update
+    update_result = None
+    if isinstance(dash.ctx.triggered_id, dict) and dash.ctx.triggered_id.get("type") == "remote-update-button" and any(update_clicks or []):
+        if current_request_is_admin():
+            update_result = update_frontend_and_remote()
+        else:
+            update_result = {"ok": False, "message": "Only the admin user can update frontend and backend."}
+    freshness = update_result.get("freshness") if isinstance(update_result, dict) and update_result.get("freshness") else get_remote_freshness()
+    return render_remote_freshness_panel(freshness, update_result)
 
 
 @callback(
