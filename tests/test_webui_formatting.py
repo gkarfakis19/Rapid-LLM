@@ -96,6 +96,7 @@ def test_flop_rate_values_use_engineering_units():
 def test_token_rate_and_time_values_are_human_readable():
     assert format_metric_value(1_234_567, "decode_throughput_tok_s") == "1.23 Mtok/s"
     assert format_metric_value(0.00123, "training_time_s") == "1.23 ms"
+    assert webui_main.format_sweep_preview_value(0.000005, "hardware.network.dim0.latency_s") == "5.00 us"
     assert format_metric_value(180, "timeout_seconds") == "3m 0s"
     assert format_metric_value(0, "timeout_seconds") == "Disabled"
     assert format_worst_case_wall_clock(None) == "N/A"
@@ -123,6 +124,7 @@ def test_basic_auth_accepts_required_password_pattern(monkeypatch, tmp_path):
     assert password_matches_required_pattern("test-admin-password")
     assert password_matches_required_pattern("test-user-A9Z0")
     assert password_matches_required_pattern("test-user-abc1") is False
+    assert password_matches_required_pattern("test-admin-password☃") is False
     assert basic_auth_credentials_from_header(f"Basic {admin_encoded}") == ("test-admin", "test-admin-password")
     assert basic_auth_password_from_header(f"Basic {guest_encoded}") == "test-user-A9Z0"
     assert basic_auth_credentials_are_valid("test-admin", "test-admin-password")
@@ -130,6 +132,8 @@ def test_basic_auth_accepts_required_password_pattern(monkeypatch, tmp_path):
     assert basic_auth_credentials_are_valid("test-user", "test-user-A9Z0-extra") is False
     assert basic_auth_credentials_are_valid("test-admin", "test-user-A9Z0") is False
     assert basic_auth_credentials_are_valid("test-user", "test-admin-password") is False
+    assert basic_auth_credentials_are_valid("wrong☃", "test-admin-password") is False
+    assert basic_auth_credentials_are_valid("test-admin", "wrong☃") is False
     assert basic_auth_password_from_header("Basic invalid") is None
 
 
@@ -169,6 +173,8 @@ def test_metric_labels_resolve_to_formatter_keys():
 
 def test_finished_job_badge_uses_completed_time():
     assert format_finished_job_badge({"status": "completed", "updated_at": "2026-04-27T12:25:53"}) == "Completed, 12:25"
+    assert format_finished_job_badge({"status": "completed", "updated_at": "2026-04-27T12:25:53+00:00"}) == "Completed, 05:25"
+    assert webui_main.compact_timestamp("2026-04-27T12:25:53+00:00") == "2026-04-27 05:25 PDT"
 
 
 def test_launch_success_leaves_launch_plan_unchanged(monkeypatch):
@@ -180,7 +186,9 @@ def test_launch_success_leaves_launch_plan_unchanged(monkeypatch):
 
     monkeypatch.setattr(webui_main, "RUN_MANAGER", FakeRunManager())
 
-    assert launch_job(1, {"preview": {"ok": True}, "payload": {"payload": True}}) is no_update
+    result = launch_job(1, {"preview": {"ok": True}, "payload": {"payload": True}})
+
+    assert result == (no_update, no_update, no_update, no_update, no_update)
 
 
 def test_launch_failure_still_reports_launch_plan_error(monkeypatch):
@@ -190,9 +198,23 @@ def test_launch_failure_still_reports_launch_plan_error(monkeypatch):
 
     monkeypatch.setattr(webui_main, "RUN_MANAGER", FakeRunManager())
 
-    alert = launch_job(1, {"preview": {"ok": True}, "payload": {}})
+    alert = launch_job(1, {"preview": {"ok": True, "total_invocations": 1}, "payload": {}})
 
-    assert any("Did not launch: Another job is already running." in text for text in _collect_text(alert))
+    assert any("Did not launch: Another job is already running." in text for text in _collect_text(alert[0]))
+    assert alert[1] == {"pending": False}
+    assert alert[2] is False
+    assert alert[3] is False
+    assert alert[4] == "Launch 1 run"
+
+
+def test_launch_pending_reset_restores_current_button_label():
+    result = webui_main.clear_launch_pending_after_job_status(
+        {"signature": "active"},
+        {"preview": {"ok": True, "total_invocations": 72}},
+        {"pending": True},
+    )
+
+    assert result == ({"pending": False}, False, False, "Launch 72 runs")
 
 
 def test_metric_options_follow_run_type_selection():
@@ -433,6 +455,7 @@ def test_layout_restores_last_saved_sweep_and_config_state(monkeypatch):
         "run_mode": "single",
         "optimize_parallelism": False,
         "optimizer_preset": "Exhaustive",
+        "simple_total_gpus": 32,
         "sweep_rows": [
             {"field": "model.global_batch_size", "mode": "range", "list_text": "", "config_values": [], "start": 64, "end": 256, "step_or_points": 64},
             {"field": "hardware.total_gpus", "mode": "values", "list_text": "8, 16", "config_values": [], "start": None, "end": None, "step_or_points": None},
@@ -456,6 +479,7 @@ def test_layout_restores_last_saved_sweep_and_config_state(monkeypatch):
     assert _collect_by_id(layout, "run-mode")[0].value == "single"
     assert _collect_by_id(layout, "optimize-switch")[0].checked is False
     assert _collect_by_id(layout, "optimizer-preset")[0].value == "Exhaustive"
+    assert _collect_by_id(layout, "simple-total-gpus")[0].value == 32
     assert _collect_by_id(layout, "dim-1-field")[0].value == "model.global_batch_size"
     assert _collect_by_id(layout, "dim-1-mode")[0].value == "range"
     assert _collect_by_id(layout, "dim-1-start")[0].value == 64
@@ -623,7 +647,7 @@ def test_reset_last_state_values_returns_default_scratchpad_controls():
     assert values[5] == config_tab_value("models", "Llama2-7B.yaml")
     assert values[6] == "sweep"
     assert values[7] is DEFAULT_OPTIMIZE_PARALLELISM
-    assert values[9:36] == tuple([None, webui_main.DEFAULT_NETWORK_SWEEP_TARGETS, "set", "values", "", [], None, None, None] * 3)
+    assert values[9:36] == tuple([None, webui_main.DEFAULT_NETWORK_SWEEP_TARGETS, "scale", "values", "", [], None, None, None] * 3)
 
 
 def test_optimize_parallelism_does_not_auto_replica_count_for_inference():
@@ -922,6 +946,7 @@ def test_job_eta_readout_estimates_remaining_time():
     ) == "ETA: ~10m 0s remaining (12:20)"
     assert job_eta_readout({"progress_completed": 0, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: calculating"
     assert job_eta_readout({"progress_completed": 10, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: complete"
+    assert job_eta_readout({"status": "running", "progress_completed": 10, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: finalizing"
     assert job_eta_readout({"status": "cancel_requested", "progress_completed": 5, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: cancelling"
     assert job_eta_readout({"status": "cancelled", "progress_completed": 5, "progress_total": 10, "created_at": "2026-04-27T12:00:00"}, now=datetime(2026, 4, 27, 12, 10, 0)) == "ETA: cancelled"
 
@@ -971,6 +996,35 @@ def test_live_status_active_panel_includes_eta(monkeypatch):
     assert "live-status-eta" in _collect_class_names(active_panel)
 
 
+def test_finished_progress_bar_falls_back_to_latest_history(monkeypatch):
+    class FakeRunManager:
+        def active_job(self):
+            return None
+
+        def last_finished_job(self):
+            return None
+
+    monkeypatch.setattr(webui_main, "RUN_MANAGER", FakeRunManager())
+    monkeypatch.setattr(webui_main, "list_history", lambda limit=5: [{
+        "id": "sweep-1",
+        "kind": "sweep",
+        "title": "Finished sweep",
+        "status": "completed",
+        "created_at": "2026-04-27T12:00:00+00:00",
+        "updated_at": "2026-04-27T12:25:00+00:00",
+        "progress_completed": 12,
+        "progress_total": 12,
+    }])
+
+    _, active_panel, _ = refresh_job_status(0, None)
+
+    texts = _collect_text(active_panel)
+    assert "Finished sweep" in texts
+    assert "100%" in texts
+    assert "12 / 12" in texts
+    assert "COMPLETED" in texts
+
+
 def test_remote_connection_state_is_inline_and_user_facing():
     active_panel = webui_main.render_active_job_panel(
         {
@@ -988,19 +1042,44 @@ def test_remote_connection_state_is_inline_and_user_facing():
     class_names = _collect_class_names(active_panel)
 
     assert "5 / 10" in texts
-    assert "Remote connected" in texts
+    assert "Connected to remote" in texts
     assert "RUNNING" in texts
     assert "Remote streaming" not in texts
     assert any("remote-connection-pill-green" in class_name for class_name in class_names)
     assert "remote-sync-row" not in class_names
 
 
+def test_running_job_at_total_progress_stays_in_finalizing_state():
+    active_panel = webui_main.render_active_job_panel(
+        {
+            "title": "Remote sweep",
+            "status": "running",
+            "progress_completed": 10,
+            "progress_total": 10,
+            "created_at": "2026-04-27T12:00:00",
+            "execution_mode": "remote_ssh",
+            "remote_sync_state": "syncing",
+        }
+    )
+
+    texts = _collect_text(active_panel)
+    track = _collect_by_class(active_panel, "rapid-progress-track")[0]
+    props = track.to_plotly_json()["props"]
+
+    assert "99%" in texts
+    assert "100%" not in texts
+    assert "10 / 10" in texts
+    assert "FINALIZING" in texts
+    assert props["style"]["--rapid-progress"] == "99.00%"
+
+
 def test_remote_connection_labels_describe_state_without_backend_terms():
     cases = [
-        ({"remote_sync_state": "syncing", "progress_completed": 0, "last_event_seq": 0, "status": "running"}, "Sending job to remote", "remote-connection-pill-orange"),
-        ({"remote_sync_state": "syncing", "progress_completed": 2, "last_event_seq": 4, "status": "running"}, "Syncing results", "remote-connection-pill-orange"),
-        ({"remote_sync_state": "connecting", "status": "running"}, "Starting remote job", "remote-connection-pill-orange"),
-        ({"remote_sync_state": "reconnecting", "status": "running"}, "Reconnecting to remote", "remote-connection-pill-orange"),
+        ({"remote_sync_state": "syncing", "progress_completed": 0, "last_event_seq": 0, "status": "running"}, "Syncing with remote", "remote-connection-pill-green"),
+        ({"remote_sync_state": "syncing", "progress_completed": 2, "last_event_seq": 4, "status": "running"}, "Syncing with remote", "remote-connection-pill-green"),
+        ({"remote_sync_state": "connecting", "status": "running"}, "Syncing with remote", "remote-connection-pill-green"),
+        ({"remote_sync_state": "reconnecting", "status": "running"}, "Connected to remote", "remote-connection-pill-green"),
+        ({"remote_sync_state": "reconnecting", "status": "running", "remote_error": "ssh timeout"}, "Reconnecting to remote", "remote-connection-pill-orange"),
         ({"remote_sync_state": "failed", "status": "running"}, "Remote connection failed", "remote-connection-pill-red"),
         ({"remote_sync_state": "streaming", "status": "cancel_requested"}, "Cancelling remote job", "remote-connection-pill-orange"),
     ]
@@ -1025,7 +1104,10 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
     preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_shared"))
     split_preview_text = _collect_text(webui_main.parallelism_topology_preview("dim1_dim2"))
     topology_select = _collect_by_id(layout, {"type": "net-topology", "index": 0})[0]
+    topology_select_dim1 = _collect_by_id(layout, {"type": "net-topology", "index": 1})[0]
+    topology_select_dim2 = _collect_by_id(layout, {"type": "net-topology", "index": 2})[0]
     latency_input = _collect_by_id(layout, {"type": "net-latency", "index": 0})[0]
+    superpod_leaf_input = _collect_by_id(layout, {"type": "net-superpod-leaf-size", "index": 1})[0]
     reset_button = _collect_by_id(layout, "reset-paper-derates-button")
 
     assert selector.data == PP_TOPOLOGY_OPTIONS
@@ -1047,8 +1129,13 @@ def test_hardware_layout_explains_parallelism_topology_mapping():
     assert "Dimension 1 off" not in split_preview_text
     assert {"value": "Mesh2D", "label": "Mesh2D"} in topology_select.data
     assert all(option["value"] != "SuperPOD" for option in topology_select.data)
-    assert latency_input.label == "Latency (s)"
-    assert "SuperPOD is not exposed because support is not reliable enough yet." in HELP_TEXT["network_topology"]
+    assert {"value": "SuperPOD", "label": "SuperPOD"} in topology_select_dim1.data
+    assert all(option["value"] != "SuperPOD" for option in topology_select_dim2.data)
+    assert latency_input.label == "Latency (us)"
+    assert latency_input.value == 5.0
+    assert superpod_leaf_input.value == 32
+    assert superpod_leaf_input.disabled is True
+    assert "SuperPOD is available only on Dimension 1" in HELP_TEXT["network_topology"]
     assert reset_button
 
 
@@ -1097,7 +1184,7 @@ def test_header_theme_uses_readable_dark_topbar():
     assert "margin-left: auto;" in css
     assert "min-width: 76px;" in css
     assert "RAPID-LLM Workbench" in texts
-    assert "v0.9, last updated 4/27/2026" in texts
+    assert "v0.96, last updated 5/12/2026" in texts
 
 
 def test_progress_bar_css_uses_one_smooth_logo_fill_layer():
@@ -1491,7 +1578,7 @@ def test_detail_rows_include_sequence_length_and_decode_length_only_for_inferenc
                 "label": "decode 128",
                 "status": "completed",
                 "dimension_values": {"model.seq_len": 8192, "model.decode_len": 128},
-                "metrics": {"prefill_time_s": 1.0},
+                "metrics": {"prefill_time_s": 1.0, "total_inference_time_s": 2.0, "decode_throughput_tok_s": 1234.0, "ttft_s": 0.25},
             },
             {
                 "case_id": "case-0002",
@@ -1515,5 +1602,7 @@ def test_detail_rows_include_sequence_length_and_decode_length_only_for_inferenc
 
     assert [row["model.decode_len"] for row in inference_rows] == [128, 64]
     assert [row["model.seq_len"] for row in inference_rows] == [8192, 4096]
+    inference_keys = webui_main.detail_table_keys(inference_rows)
+    assert inference_keys.index("decode_throughput_tok_s") == inference_keys.index("total_inference_time_s") + 1
     assert training_rows[0]["model.seq_len"] == 2048
     assert "model.decode_len" not in training_rows[0]

@@ -112,6 +112,50 @@ body {
   border-radius: 8px;
 }
 
+@media (min-width: 75.01em) {
+  html.rapid-launch-scroll-lock,
+  body.rapid-launch-scroll-lock {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body.rapid-launch-scroll-lock .app-shell {
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  body.rapid-launch-scroll-lock .app-main {
+    overflow: hidden;
+  }
+
+  body.rapid-launch-scroll-lock .builder-tabs-panel,
+  body.rapid-launch-scroll-lock .builder-grid {
+    height: var(--launch-panel-height, calc(100vh - var(--tabs-sticky-offset)));
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.rapid-launch-scroll-lock .builder-grid > .mantine-Grid-col {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.rapid-launch-scroll-lock .builder-left-scroll {
+    height: var(--launch-left-scroll-height, var(--launch-panel-height, calc(100vh - var(--tabs-sticky-offset))));
+    max-height: var(--launch-left-scroll-height, var(--launch-panel-height, calc(100vh - var(--tabs-sticky-offset))));
+    overflow-y: scroll;
+    overscroll-behavior: contain;
+  }
+
+  body.rapid-launch-scroll-lock .right-rail {
+    position: static;
+    max-height: 100%;
+    overflow: hidden;
+  }
+}
+
 .topbar {
   min-height: 78px;
   padding: 13px 0 15px;
@@ -531,6 +575,11 @@ body {
 
 .launch-plan-actions {
   flex: 0 0 auto;
+}
+
+.launch-run-button {
+  min-width: 132px;
+  font-weight: 900;
 }
 
 .launch-plan-controls {

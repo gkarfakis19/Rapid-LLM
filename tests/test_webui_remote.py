@@ -142,6 +142,58 @@ def test_rsync_upload_command_is_safe_and_path_constrained(monkeypatch, tmp_path
     assert calls[1] == ["rsync", "-a", "--delete", f"{local_dir.resolve()}/", "ssh.example.com:/repo/webui/workspace/runs/run-1/"]
 
 
+def test_rsync_pull_tolerates_vanished_live_artifact_files(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    config = remote.RemoteSshConfig(
+        mode="remote_ssh",
+        host="ssh.example.com",
+        user=None,
+        repo="/repo",
+        branch="remote_backend",
+        workspace="/repo/webui/workspace",
+        python="/repo/.venv/bin/python",
+    )
+    client = remote.RemoteSshClient(config)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rsync" if name == "rsync" else None)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        stage_dir = Path(argv[-1])
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "status.json").write_text(json.dumps({"status": "completed"}))
+        return SimpleNamespace(returncode=remote.RSYNC_VANISHED_FILES_CODE, stdout="", stderr="rsync warning: some files vanished")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+
+    client.pull_dir("/repo/webui/workspace/sweeps/sweep-1", tmp_path / "sweep-1")
+
+    assert calls[0][:-2] == ["rsync", "-a", *remote.REMOTE_RESULT_RSYNC_FILTERS]
+    assert calls[0][-2] == "ssh.example.com:/repo/webui/workspace/sweeps/sweep-1/"
+    assert Path(calls[0][-1]).name.startswith(".sweep-1.remote-sync-")
+    assert "--include=/cases.jsonl" in calls[0]
+    assert "--include=/case_failures.jsonl" in calls[0]
+    assert "--include=/result.json" in calls[0]
+    assert "--include=/artifacts/***" not in calls[0]
+    assert json.loads(((tmp_path / "sweep-1") / "status.json").read_text()) == {"status": "completed"}
+
+
+def test_filtered_remote_result_sync_requires_rsync(monkeypatch, tmp_path):
+    config = remote.RemoteSshConfig(
+        mode="remote_ssh",
+        host="ssh.example.com",
+        user=None,
+        repo="/repo",
+        branch="remote_backend",
+        workspace="/repo/webui/workspace",
+        python="/repo/.venv/bin/python",
+    )
+    client = remote.RemoteSshClient(config)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="rsync is required"):
+        client.pull_dir("/repo/webui/workspace/sweeps/sweep-1", tmp_path / "sweep-1")
+
+
 def test_remote_event_parser_handles_heartbeat_duplicates_and_malformed_json():
     state = remote.RemoteEventState()
 
@@ -154,6 +206,25 @@ def test_remote_event_parser_handles_heartbeat_duplicates_and_malformed_json():
     assert state.apply_line("{bad json") is None
     assert state.malformed_count == 1
     assert state.apply_line(json.dumps({"seq": 2, "type": "completed", "status": "completed"}))["type"] == "completed"
+
+
+def test_remote_runner_event_append_is_thread_safe(tmp_path):
+    job_root = tmp_path / "job"
+    job_root.mkdir()
+
+    threads = [
+        threading.Thread(target=remote_runner.append_event, args=(job_root, "case_completed"), kwargs={"case_id": f"case-{index:04d}"})
+        for index in range(80)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    events = [json.loads(line) for line in (job_root / "events.jsonl").read_text().splitlines()]
+    seqs = [event["seq"] for event in events]
+    assert len(seqs) == 80
+    assert seqs == list(range(1, 81))
 
 
 def test_remote_stream_exits_on_terminal_status_without_events(monkeypatch, tmp_path, capsys):
@@ -186,6 +257,38 @@ def test_remote_executor_treats_cancelled_heartbeat_as_terminal(tmp_path):
     assert terminal is True
     assert updates[-1][1]["status"] == "cancelled"
     assert updates[-1][1]["remote_sync_state"] == "streaming"
+
+
+def test_remote_executor_does_not_treat_completed_case_as_terminal(tmp_path):
+    executor = remote.RemoteSshExecutor.__new__(remote.RemoteSshExecutor)
+    pulls = []
+    updates = []
+
+    class FakeClient:
+        def pull_dir(self, remote_root, job_root, *, delete):
+            pulls.append((remote_root, job_root, delete))
+
+    executor.client = FakeClient()
+
+    terminal = executor._handle_event(
+        {
+            "type": "case_completed",
+            "status": "completed",
+            "progress_total": 2,
+            "progress_completed": 1,
+            "status_record": {"status": "running", "progress_total": 2, "progress_completed": 1},
+        },
+        tmp_path,
+        "/remote/job",
+        lambda job_root, **kwargs: updates.append((job_root, kwargs)),
+    )
+
+    assert terminal is False
+    assert pulls == [("/remote/job", tmp_path, False)]
+    assert updates[-1][1]["status"] == "running"
+    assert updates[-1][1]["remote_sync_state"] == "syncing"
+    assert "progress_completed" not in updates[-1][1]
+    assert "progress_total" not in updates[-1][1]
 
 
 def test_remote_run_job_cancel_after_upload_does_not_start_supervisor(tmp_path):

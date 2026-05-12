@@ -482,12 +482,19 @@ def generate_astrasim_configs_from_hw(
             "dp": int(active.get("dp", 1) or 1),
         }
     else:
+        active_run_type = str(getattr(hw_obj, "active_run_type", "") or getattr(hw_obj, "run_type", "") or "training").strip().lower()
+        if active_run_type == "inference":
+            ep = int(getattr(sch_config.inference, "moe_dp", 1))
+            dp = 1
+        else:
+            ep = int(sch_config.train.ep)
+            dp = int(sch_config.train.dp)
         axis_sizes_full = {
             "tp": int(sch_config.tp),
             "cp": int(sch_config.cp),
-            "ep": int(sch_config.train.ep),
+            "ep": ep,
             "pp": int(sch_config.pp),
-            "dp": int(sch_config.train.dp),
+            "dp": dp,
         }
     synthetic_only = axes_filter_normalized is not None and set(axes_filter_normalized) == {"synthetic2"}
     if synthetic_only:

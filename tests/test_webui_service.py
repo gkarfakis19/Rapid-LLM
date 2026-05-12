@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import config as rapid_config
@@ -23,9 +24,7 @@ def _isolate_workspace(monkeypatch, tmp_path: Path) -> Path:
     return workspace
 
 
-def _payload() -> dict:
-    model_id = "Llama2-7B.yaml"
-    hardware_id = "H100_SXM5_80GB.yaml"
+def _payload_for(model_id: str = "Llama2-7B.yaml", hardware_id: str = "H100_SXM5_80GB.yaml") -> dict:
     defaults = core.build_form_defaults(model_id, hardware_id)
     return {
         "model_preset_id": model_id,
@@ -46,6 +45,10 @@ def _payload() -> dict:
         "worker_count": 1,
         "timeout_seconds": 10,
     }
+
+
+def _payload() -> dict:
+    return _payload_for()
 
 
 def test_default_launch_preview_is_valid(monkeypatch, tmp_path):
@@ -171,6 +174,18 @@ def test_workspace_configs_are_seeded_as_editable_defaults(monkeypatch, tmp_path
     assert len(model_records) >= 20
 
 
+def test_remote_recovery_discards_active_record_without_local_root(monkeypatch, tmp_path):
+    workspace = _isolate_workspace(monkeypatch, tmp_path)
+    monkeypatch.setenv("RAPID_WEBUI_EXECUTION_MODE", "remote_ssh")
+    (workspace / core.REMOTE_ACTIVE_JOB_FILENAME).write_text(json.dumps({"local_job_root": None, "remote_path": "/remote/job"}))
+
+    manager = core.RunManager()
+
+    assert manager.active_job() is None
+    assert not (workspace / core.REMOTE_ACTIVE_JOB_FILENAME).exists()
+    assert not (Path.cwd() / "None").exists()
+
+
 def test_curated_hardware_defaults_use_calibrated_derates(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     expected = {
@@ -204,6 +219,7 @@ def test_last_ui_state_scratchpad_is_limited_and_clearable(monkeypatch, tmp_path
                 "run_mode": "sweep",
                 "optimize_parallelism": bool(index % 2),
                 "optimizer_preset": "Fast",
+                "simple_total_gpus": index + 8,
                 "sweep_rows": [
                     {"field": "model.global_batch_size", "mode": "range", "list_text": "1,2,3", "config_values": [], "start": index, "end": index + 4, "step_or_points": 2}
                 ],
@@ -220,6 +236,7 @@ def test_last_ui_state_scratchpad_is_limited_and_clearable(monkeypatch, tmp_path
 
     assert len(scratchpad["recent"]) == core.LAST_UI_STATE_LIMIT
     assert loaded["worker_count"] == core.LAST_UI_STATE_LIMIT + 2
+    assert loaded["simple_total_gpus"] == core.LAST_UI_STATE_LIMIT + 9
     assert loaded["sweep_rows"][0]["start"] == core.LAST_UI_STATE_LIMIT + 1
     assert len(loaded["sweep_rows"]) == 3
 
@@ -312,13 +329,20 @@ def test_superpod_workspace_topology_loads_as_supported_webui_choice(monkeypatch
 
     defaults = core.build_form_defaults("Llama2-7B.yaml", "H100_SXM5_80GB.yaml")
 
-    assert defaults["network_dimensions"][1]["topology_type"] == "Ring"
+    assert defaults["network_dimensions"][1]["topology_type"] == "SuperPOD"
+    assert defaults["network_dimensions"][1]["superpod_leaf_size"] == 32
+    assert defaults["network_dimensions"][1]["superpod_leaf_switches_per_su"] == 8
+    assert defaults["network_dimensions"][1]["superpod_spine_switches_per_su"] == 4
+    assert defaults["advanced"]["pp_network_dimension"] == "dim1_shared"
 
 
-def test_stale_superpod_payload_forces_h100_variant(monkeypatch, tmp_path):
+def test_stale_superpod_payload_writes_configurable_h100_defaults(monkeypatch, tmp_path):
     workspace = _isolate_workspace(monkeypatch, tmp_path)
     payload = _payload()
     payload["network_dimensions"][1]["topology_type"] = "SuperPOD"
+    payload["network_dimensions"][1]["superpod_leaf_size"] = 64
+    payload["network_dimensions"][1]["superpod_leaf_switches_per_su"] = 16
+    payload["network_dimensions"][1]["superpod_spine_switches_per_su"] = 8
 
     _, hardware, errors = core.save_config_edits_from_payload(payload)
 
@@ -328,7 +352,50 @@ def test_stale_superpod_payload_forces_h100_variant(monkeypatch, tmp_path):
     topology = hardware_yaml["network"]["dimensions"][1]["topology"]
     assert topology["type"] == "SuperPOD"
     assert topology["superpod_variant"] == "h100"
-    assert topology["leaf_size"] == 1
+    assert topology["leaf_size"] == 64
+    assert topology["leaf_switches_per_su"] == 16
+    assert topology["spine_switches_per_su"] == 8
+    assert topology["bandwidth"] == ["50 GB", "100 GB"]
+
+
+def test_superpod_payload_rejects_disallowed_dimension_and_pp_split(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["network_dimensions"][0]["topology_type"] = "SuperPOD"
+
+    model, hardware, errors = core.build_editable_configs_from_payload(payload)
+
+    assert model is None
+    assert hardware is None
+    assert "SuperPOD can only be selected for Network Dimension 1." in errors
+
+    payload = _payload()
+    payload["network_dimensions"][1]["topology_type"] = "SuperPOD"
+    payload["advanced"]["pp_network_dimension"] = "dim1_dim2"
+
+    model, hardware, errors = core.build_editable_configs_from_payload(payload)
+
+    assert model is None
+    assert hardware is None
+    assert "SuperPOD requires PP and DP to share Network Dimension 1." in errors
+
+
+def test_superpod_optimizer_candidates_obey_leaf_divisibility(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["total_gpus"] = 64
+    payload["network_dimensions"][1]["topology_type"] = "SuperPOD"
+    payload["network_dimensions"][1]["superpod_leaf_size"] = 32
+    payload["optimize_parallelism"] = True
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["candidate_breakdown"][0]["pruned_count"] > 0
+    candidates = preview["top_level_cases"][0]["parallelism_candidates"]
+    assert candidates
+    assert all((candidate["pp"] * candidate["dp"]) % 32 == 0 for candidate in candidates)
+    assert all((candidate["pp"] * candidate["dp"]) // 32 > 1 for candidate in candidates)
 
 
 def test_config_files_can_be_created_and_renamed(monkeypatch, tmp_path):
@@ -1021,8 +1088,82 @@ def test_inference_parallelism_optimizer_preserves_replica_count(monkeypatch, tm
     assert candidates
     assert {candidate["replica_count"] for candidate in candidates} == {2}
     assert all(candidate["tp"] * candidate["cp"] * candidate["pp"] * candidate["ep"] * candidate["replica_count"] == 16 for candidate in candidates)
-    optimized = core.apply_parallelism_candidate(case["hardware"], candidates[0])
+    ep_candidate = next(candidate for candidate in candidates if candidate["ep"] > 1)
+    optimized = core.apply_parallelism_candidate(case["hardware"], ep_candidate, "inference")
     assert optimized["parallelism"]["inference"]["replica_count"] == 2
+    assert optimized["parallelism"]["inference"]["moe_dp"] == ep_candidate["ep"]
+    assert optimized["parallelism"]["train"]["ep"] == 1
+    assert core.get_total_gpu_count(optimized, "inference") == 16
+
+
+def test_inference_fixed_ep_maps_to_moe_dp(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload_for("DeepSeekV3_inf_16k.yaml")
+    payload["simple"]["total_gpus"] = 16
+    payload["simple"]["tp"] = 4
+    payload["simple"]["cp"] = 1
+    payload["simple"]["pp"] = 1
+    payload["simple"]["ep"] = 4
+    payload["simple"]["replica_count"] = 1
+    payload["optimize_parallelism"] = False
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    hardware = preview["top_level_cases"][0]["hardware"]
+    assert hardware["parallelism"]["inference"]["moe_dp"] == 4
+    assert hardware["parallelism"]["train"]["ep"] == 1
+    assert core.get_total_gpu_count(hardware, "inference") == 16
+
+
+def test_fast_inference_parallelism_search_includes_low_gpu_shapes(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload_for("DeepSeekV3_inf_16k.yaml")
+    payload["simple"]["total_gpus"] = 4
+    payload["simple"]["replica_count"] = 1
+    payload["optimize_parallelism"] = True
+    payload["optimizer_preset"] = "Fast"
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    assert preview["candidate_breakdown"] == [{"case_id": "case-0001", "count": 9}]
+    candidates = preview["top_level_cases"][0]["parallelism_candidates"]
+    assert any(candidate["tp"] > 1 for candidate in candidates)
+    assert any(candidate["pp"] == 4 for candidate in candidates)
+    assert any(candidate["cp"] > 1 for candidate in candidates)
+    assert any(candidate["ep"] > 1 for candidate in candidates)
+
+
+def test_full_parallelism_search_skips_short_context_cp_and_non_moe_ep(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload()
+    payload["simple"]["total_gpus"] = 8
+    payload["optimize_parallelism"] = True
+    payload["optimizer_preset"] = "Exhaustive"
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    candidates = preview["top_level_cases"][0]["parallelism_candidates"]
+    assert candidates
+    assert all(candidate["cp"] == 1 for candidate in candidates)
+    assert all(candidate["ep"] == 1 for candidate in candidates)
+
+
+def test_full_parallelism_search_keeps_cp_and_ep_for_long_context_moe(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    payload = _payload_for("DeepSeekV3_inf_16k.yaml")
+    payload["simple"]["total_gpus"] = 4
+    payload["optimize_parallelism"] = True
+    payload["optimizer_preset"] = "Exhaustive"
+
+    preview = core.build_launch_preview(payload)
+
+    assert preview["ok"] is True
+    candidates = preview["top_level_cases"][0]["parallelism_candidates"]
+    assert any(candidate["cp"] > 1 for candidate in candidates)
+    assert any(candidate["ep"] > 1 for candidate in candidates)
 
 
 def test_raw_parallelism_axis_sweeps_are_rejected(monkeypatch, tmp_path):
@@ -1349,6 +1490,94 @@ def test_sweep_execution_writes_one_cases_jsonl_file(monkeypatch, tmp_path):
     assert json.loads(lines[0])["case_id"] == "case-0001"
 
 
+def test_status_progress_is_monotonic(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    job_root = core.SWEEPS_ROOT / "progress-sweep"
+    job_root.mkdir(parents=True)
+    manager = core.RunManager()
+
+    manager._write_status(job_root, status="running", progress_total=10, progress_completed=5)
+    manager._write_status(job_root, progress_total=8, progress_completed=3)
+    status = json.loads((job_root / "status.json").read_text())
+
+    assert status["progress_total"] == 10
+    assert status["progress_completed"] == 5
+
+    manager._write_status(job_root, progress_total=10, progress_completed=12)
+    status = json.loads((job_root / "status.json").read_text())
+
+    assert status["progress_total"] == 10
+    assert status["progress_completed"] == 10
+
+
+def test_active_job_reconciles_terminal_status_from_disk(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    job_root = core.SWEEPS_ROOT / "terminal-sweep"
+    job_root.mkdir(parents=True)
+    manager = core.RunManager()
+    manager._active_job = {
+        "id": "terminal-sweep",
+        "kind": "sweep",
+        "root": str(job_root),
+        "status": "running",
+        "title": "Terminal sweep",
+        "created_at": "2026-05-04T05:00:00+00:00",
+        "updated_at": "2026-05-04T05:00:30+00:00",
+        "progress_completed": 8,
+        "progress_total": 8,
+        "execution_mode": "remote_ssh",
+        "remote_sync_state": "syncing",
+    }
+    core.ACTIVE_JOB_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    core.ACTIVE_JOB_LOCK.write_text(json.dumps({"job_id": "terminal-sweep", "kind": "sweep", "pid": 999999}))
+    core.remote_active_job_path().write_text(json.dumps({"job_id": "terminal-sweep", "local_job_root": str(job_root)}))
+    (job_root / "status.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "updated_at": "2026-05-04T05:01:00+00:00",
+                "progress_completed": 8,
+                "progress_total": 8,
+                "remote_sync_state": "synced",
+            }
+        )
+    )
+
+    assert manager.active_job() is None
+    finished = manager.last_finished_job()
+
+    assert finished["status"] == "completed"
+    assert finished["progress_completed"] == 8
+    assert finished["remote_sync_state"] == "synced"
+    assert not core.ACTIVE_JOB_LOCK.exists()
+    assert not core.remote_active_job_path().exists()
+
+
+def test_status_writes_tolerate_concurrent_progress_updates(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    job_root = core.SWEEPS_ROOT / "concurrent-progress-sweep"
+    job_root.mkdir(parents=True)
+    manager = core.RunManager()
+    errors = []
+
+    def write_progress(value: int) -> None:
+        try:
+            manager._write_status(job_root, status="running", progress_total=80, progress_completed=value)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write_progress, args=(index,)) for index in range(80)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    status = json.loads((job_root / "status.json").read_text())
+
+    assert errors == []
+    assert status["progress_total"] == 80
+    assert status["progress_completed"] == 79
+
+
 def test_worker_cases_run_from_case_directory_with_repo_pythonpath(monkeypatch, tmp_path):
     _isolate_workspace(monkeypatch, tmp_path)
     manager = core.RunManager()
@@ -1414,6 +1643,132 @@ def test_worker_case_reports_cancelled_when_cancel_event_is_set(monkeypatch, tmp
 
     assert result["status"] == "cancelled"
     assert result["error"] == "Cancelled by request."
+    failure_record = json.loads((job_root / core.CASE_FAILURES_JSONL).read_text().splitlines()[0])
+    assert failure_record["case_id"] == "case-0001"
+    assert failure_record["status"] == "cancelled"
+
+
+def test_worker_case_logs_failed_missing_result_with_log_tails(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    manager = core.RunManager()
+    job_root = tmp_path / "job"
+
+    class FakeProcess:
+        def wait(self, timeout=None):
+            del timeout
+
+        def poll(self):
+            return 0
+
+    def fake_popen(cmd, cwd, stdout, stderr, env):
+        del cmd, cwd, env
+        stdout.write("worker stdout context\n")
+        stderr.write("worker stderr context\n")
+        return FakeProcess()
+
+    monkeypatch.setattr(core.subprocess, "Popen", fake_popen)
+
+    result = manager._execute_worker_case(
+        job_root,
+        "case-0001",
+        {"model_param": {"mode": "LLM", "run_type": "training"}},
+        {"parallelism": {"tp": 1, "cp": 1, "pp": 1, "ep": 1, "dp": 1}},
+        0,
+        candidate={"tp": 1, "cp": 1, "pp": 1, "dp": 1, "ep": 1, "replica_count": 1},
+        dimension_values={"model.global_batch_size": 128},
+    )
+
+    assert result["status"] == "failed"
+    failure_record = json.loads((job_root / core.CASE_FAILURES_JSONL).read_text().splitlines()[0])
+    assert failure_record["case_id"] == "case-0001"
+    assert failure_record["status"] == "failed"
+    assert failure_record["error"] == "Worker did not produce a result file."
+    assert failure_record["candidate"]["tp"] == 1
+    assert failure_record["dimension_values"] == {"model.global_batch_size": 128}
+    assert "worker stdout context" in failure_record["stdout_tail"]
+    assert "worker stderr context" in failure_record["stderr_tail"]
+    assert failure_record["result_path"] == "artifacts/case-0001/result.json"
+
+
+def test_worker_case_does_not_log_memory_exceeded_as_failure(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    manager = core.RunManager()
+    job_root = tmp_path / "job"
+
+    class FakeProcess:
+        def wait(self, timeout=None):
+            del timeout
+            result_arg = captured["cmd"][captured["cmd"].index("--result-json") + 1]
+            Path(result_arg).write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "metrics": {"training_time_s": 1.0, "memory_exceeded": True, "memory_violation_gb": 7.5},
+                        "warnings": ["over capacity"],
+                    }
+                )
+            )
+
+        def poll(self):
+            return 0
+
+    captured = {}
+
+    def fake_popen(cmd, cwd, stdout, stderr, env):
+        del cwd, stdout, stderr, env
+        captured["cmd"] = cmd
+        return FakeProcess()
+
+    monkeypatch.setattr(core.subprocess, "Popen", fake_popen)
+
+    result = manager._execute_worker_case(
+        job_root,
+        "case-0001",
+        {"model_param": {"mode": "LLM", "run_type": "training"}},
+        {"parallelism": {"tp": 1, "cp": 1, "pp": 1, "ep": 1, "dp": 1}},
+        0,
+    )
+
+    assert result["status"] == "completed"
+    assert result["metrics"]["memory_exceeded"] is True
+    assert result["metrics"]["memory_violation_gb"] == 7.5
+    assert not (job_root / core.CASE_FAILURES_JSONL).exists()
+
+
+def test_case_set_logs_worker_future_exceptions(monkeypatch, tmp_path):
+    _isolate_workspace(monkeypatch, tmp_path)
+    manager = core.RunManager()
+    job_root = core.SWEEPS_ROOT / "exception-sweep"
+    job_root.mkdir(parents=True)
+    (job_root / "status.json").write_text(json.dumps({"status": "running"}))
+    case_plans = [
+        {
+            "top_case": {
+                "case_id": "case-0001",
+                "label": "Case 1",
+                "model": {},
+                "hardware": {},
+                "dimension_values": {"hardware.hbm_gb": 80},
+            },
+            "candidate": {"tp": 1, "cp": 1, "pp": 1, "dp": 1, "ep": 1, "replica_count": 1},
+            "candidate_index": 0,
+        }
+    ]
+
+    def fake_execute(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("worker thread exploded")
+
+    monkeypatch.setattr(manager, "_execute_worker_case", fake_execute)
+
+    summary = manager._execute_case_set(job_root, case_plans, "training_time_s", True, 0, 1)
+
+    assert summary["status"] == "failed"
+    failure_record = json.loads((job_root / core.CASE_FAILURES_JSONL).read_text().splitlines()[0])
+    assert failure_record["case_id"] == "case-0001"
+    assert failure_record["candidate"]["tp"] == 1
+    assert failure_record["dimension_values"] == {"hardware.hbm_gb": 80}
+    assert failure_record["error"] == "worker thread exploded"
 
 
 def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path):
@@ -1427,6 +1782,10 @@ def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path
         case_root = job_root / "artifacts" / case_id
         case_root.mkdir(parents=True)
         (case_root / "stdout.log").write_text("ok\n")
+        (case_root / "astra_cache").mkdir()
+        (case_root / "astra_cache" / "cache.json").write_text("{}")
+        (case_root / "log").mkdir()
+        (case_root / "log" / "log.log").write_text("scratch\n")
         return {
             "case_id": case_id,
             "top_case_id": case_id,
@@ -1450,3 +1809,5 @@ def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path
     assert "hardware_resolved.yaml" in artifact_paths
     assert "metrics.json" in artifact_paths
     assert "artifacts/case-0001/stdout.log" in artifact_paths
+    assert "artifacts/case-0001/astra_cache/cache.json" not in artifact_paths
+    assert "artifacts/case-0001/log/log.log" not in artifact_paths

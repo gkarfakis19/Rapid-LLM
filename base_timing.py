@@ -386,6 +386,7 @@ class TimeCalculation:
 
         axis_sizes = _active_axis_sizes(hw_config, run_type)
         setattr(hw_config, "active_parallelism", dict(axis_sizes))
+        setattr(hw_config, "active_run_type", run_type)
         refreshed_layout = _refresh_network_layout(hw_config, axis_sizes)
         if refreshed_layout is not None:
             hw_config.network_layout = refreshed_layout
@@ -545,13 +546,10 @@ class TimeCalculation:
         sch = getattr(hw_config, "sch_config", None)
         if sch is None:
             return 1
-        total = (
-            max(1, int(sch.train.dp))
-            * max(1, int(sch.train.ep))
-            * max(1, int(sch.pp))
-            * max(1, int(sch.tp))
-            * max(1, int(sch.cp))
-        )
+        axis_sizes = _active_axis_sizes(hw_config, getattr(self, "run_type", "training"))
+        total = 1
+        for axis in ("dp", "pp", "tp", "cp", "ep"):
+            total *= max(1, int(axis_sizes.get(axis, 1) or 1))
         return max(1, total)
    
 

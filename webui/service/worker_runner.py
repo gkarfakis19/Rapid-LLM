@@ -98,7 +98,7 @@ def training_num_gpus(hw_cfg) -> int:
 
 def inference_num_gpus(hw_cfg) -> int:
     p = hw_cfg.sch_config
-    return int(p.tp) * int(p.cp) * int(p.pp) * int(p.inference.replica_count) * int(p.train.ep)
+    return int(p.tp) * int(p.cp) * int(p.pp) * int(p.inference.replica_count) * int(p.inference.moe_dp)
 
 
 def run_training(hw_cfg, model_cfg, mode: str, output_dir: str) -> Dict[str, Any]:
