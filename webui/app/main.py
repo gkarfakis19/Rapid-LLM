@@ -12,6 +12,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import dash
 import dash_mantine_components as dmc
@@ -37,6 +38,7 @@ from webui.service.core import (
     RUN_MANAGER,
     RUNS_ROOT,
     SWEEPS_ROOT,
+    SUPERPOD_ALLOWED_DIMENSION_INDEX,
     build_form_defaults,
     build_case_label,
     build_job_title,
@@ -90,6 +92,8 @@ NETWORK_SWEEP_GROUP_VALUE = "__network__"
 NETWORK_SWEEP_FIELD_KEYS = {item["value"] for item in NETWORK_SWEEP_FIELD_OPTIONS}
 DEFAULT_NETWORK_SWEEP_FIELD = NETWORK_SWEEP_FIELD_OPTIONS[0]["value"]
 DEFAULT_NETWORK_SWEEP_TARGETS = [DEFAULT_NETWORK_SWEEP_FIELD]
+DEFAULT_NETWORK_APPLY_MODE = "scale"
+LATENCY_DISPLAY_SCALE_US = 1_000_000.0
 NETWORK_SWEEP_TARGET_BY_VALUE = {target["value"]: target for target in NETWORK_SWEEP_TARGETS}
 NETWORK_SWEEP_TARGET_BY_SLUG = {target["slug"]: target for target in NETWORK_SWEEP_TARGETS}
 SWEEP_FIELD_OPTIONS = FIELD_OPTIONS + [{"value": NETWORK_SWEEP_GROUP_VALUE, "label": "Network"}]
@@ -99,6 +103,7 @@ NETWORK_TOPOLOGY_OPTIONS = [
     {"value": "Mesh2D", "label": "Mesh2D"},
     {"value": "Torus2D", "label": "Torus2D"},
 ]
+SUPERPOD_TOPOLOGY_OPTION = {"value": "SuperPOD", "label": "SuperPOD"}
 METRIC_KEY_BY_LABEL: Dict[str, str] = {}
 for metric_key, metric_label in METRIC_LABELS.items():
     METRIC_KEY_BY_LABEL.setdefault(metric_label, metric_key)
@@ -141,6 +146,7 @@ DETAIL_TABLE_COLUMN_ORDER = [
     "prefill_time_s",
     "decode_time_s",
     "total_inference_time_s",
+    "decode_throughput_tok_s",
     "ttft_s",
     "num_gpus",
     "approx_mfu",
@@ -157,6 +163,7 @@ DETAIL_TABLE_COLUMN_ORDER = [
 EARLY_TERMINATION_MILD_THRESHOLD = 35.0
 EARLY_TERMINATION_BIG_THRESHOLD = 70.0
 DEFAULT_AUTH_CONFIG_PATH = Path(__file__).resolve().parents[1] / "auth.local.json"
+LA_TIMEZONE = ZoneInfo("America/Los_Angeles")
 TELEMETRY_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 FLOP_COUNT_KEYS = {"total_flops"}
 FLOP_RATE_KEYS = {"achieved_flops", "achieved_flops_per_gpu", "peak_flops_per_gpu", "peak_system_flops"}
@@ -218,7 +225,7 @@ SWEEP_PRESETS = [
         "description": "Sweep common global batch sizes.",
         "field": "model.global_batch_size",
         "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
-        "network_apply": "set",
+        "network_apply": DEFAULT_NETWORK_APPLY_MODE,
         "mode": "values",
         "list_text": "8, 16, 32",
     },
@@ -228,7 +235,7 @@ SWEEP_PRESETS = [
         "description": "Sweep target GPU counts for scaling studies.",
         "field": "hardware.total_gpus",
         "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
-        "network_apply": "set",
+        "network_apply": DEFAULT_NETWORK_APPLY_MODE,
         "mode": "values",
         "list_text": "8, 16, 32",
     },
@@ -238,7 +245,7 @@ SWEEP_PRESETS = [
         "description": "Sweep short, medium, and long input contexts.",
         "field": "model.seq_len",
         "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS),
-        "network_apply": "set",
+        "network_apply": DEFAULT_NETWORK_APPLY_MODE,
         "mode": "values",
         "list_text": "4096, 8192, 16384",
     },
@@ -303,10 +310,13 @@ HELP_TEXT = {
     "reset_paper_derates": "Restore compute, memory, and communication derates from the calibrated paper defaults for this hardware target.",
     "parallelism_topology": "Hierarchical AstraSim fixes Dimension 0 to TP, CP, and EP. Choose whether PP shares the active outer dimension with DP or gets a separate middle dimension.",
     "pp_topology_dimension": "Select how PP and DP map to Dimensions 1 and 2. The PP+DP option disables Dimension 2 and leaves its YAML parallelisms list empty.",
-    "network_topology": "Collective topology model for this network dimension. SuperPOD is not exposed because support is not reliable enough yet.",
+    "network_topology": "Collective topology model for this network dimension. SuperPOD is available only on Dimension 1 and requires PP+DP on that dimension.",
     "network_bandwidth": "Per-link or dimension bandwidth, such as 100 GB.",
-    "network_latency": "Per-hop latency for this network dimension in seconds.",
+    "network_latency": "Per-hop latency for this network dimension in microseconds; the YAML is saved in seconds.",
     "network_util": "Utilization multiplier for this network dimension.",
+    "superpod_leaf_size": "DGX systems per SuperPOD scalable unit. The value is configurable but not a native sweep field.",
+    "superpod_leaf_switches": "InfiniBand leaf switches per SuperPOD scalable unit. The value is configurable but not a native sweep field.",
+    "superpod_spine_switches": "InfiniBand spine switches per SuperPOD scalable unit. The value is configurable but not a native sweep field.",
     "full_recomp": "Choose whether backward-pass activation recomputation is full or selective.",
     "zero_stage": "ZeRO sharding stage for optimizer, gradient, and parameter state.",
     "tensor_format": "Default tensor precision used for activations and compute. Other precision fields can either match this value or override it.",
@@ -473,6 +483,20 @@ def _format_gb(value: float) -> str:
     return _format_scaled(value, ["GB", "TB", "PB", "EB"])
 
 
+def latency_seconds_to_display_us(value: Any) -> float:
+    try:
+        return float(value or 0.0) * LATENCY_DISPLAY_SCALE_US
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def latency_display_us_to_seconds(value: Any) -> float:
+    try:
+        return float(value or 0.0) / LATENCY_DISPLAY_SCALE_US
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def format_metric_value(value: Any, metric_key: str | None = None) -> str:
     if value is None:
         return "n/a"
@@ -510,6 +534,8 @@ def format_metric_value(value: Any, metric_key: str | None = None) -> str:
 
 
 def format_sweep_preview_value(value: float, field_key: str | None) -> str:
+    if str(field_key or "").endswith(".latency_s"):
+        return format_metric_value(value, field_key)
     kind = FIELD_TYPES.get(field_key or "", {}).get("kind")
     if kind == "int":
         return f"{int(round(value)):,}"
@@ -552,10 +578,24 @@ def format_primary_metric(result: Dict[str, Any]) -> str:
     return format_metric_value(result.get("primary_metric_value"))
 
 
-def compact_timestamp(raw: str | None) -> str:
+def parse_display_timestamp(raw: str | None) -> datetime | None:
     if not raw:
-        return ""
-    return raw.replace("T", " ").replace("+00:00", " UTC")
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(LA_TIMEZONE)
+    return parsed
+
+
+def compact_timestamp(raw: str | None) -> str:
+    parsed = parse_display_timestamp(raw)
+    if not parsed:
+        return "" if not raw else str(raw).replace("T", " ")
+    suffix = f" {parsed.tzname()}" if parsed.tzinfo is not None else ""
+    return f"{parsed:%Y-%m-%d %H:%M}{suffix}"
 
 
 def format_finished_job_badge(job: Dict[str, Any]) -> str:
@@ -563,13 +603,10 @@ def format_finished_job_badge(job: Dict[str, Any]) -> str:
     raw_time = job.get("updated_at") or job.get("created_at")
     if not raw_time:
         return status
-    try:
-        parsed = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone()
+    parsed = parse_display_timestamp(str(raw_time))
+    if parsed:
         return f"{status}, {parsed:%H:%M}"
-    except ValueError:
-        return status
+    return status
 
 
 def to_local_datetime(value: datetime) -> datetime:
@@ -828,11 +865,15 @@ def _guest_password_re(config: Dict[str, str]) -> re.Pattern[str] | None:
         return None
 
 
+def constant_time_equal(value: str | None, expected: str | None) -> bool:
+    return hmac.compare_digest((value or "").encode("utf-8"), (expected or "").encode("utf-8"))
+
+
 def password_matches_required_pattern(password: str) -> bool:
     config = auth_config()
     admin_password = config.get("admin_password") or ""
     guest_re = _guest_password_re(config)
-    return bool(admin_password and hmac.compare_digest(password or "", admin_password)) or bool(guest_re and guest_re.fullmatch(password or ""))
+    return bool(admin_password and constant_time_equal(password, admin_password)) or bool(guest_re and guest_re.fullmatch(password or ""))
 
 
 def basic_auth_credentials_from_header(header_value: str | None) -> tuple[str, str] | None:
@@ -857,8 +898,8 @@ def basic_auth_credentials_are_valid(username: str, password: str) -> bool:
     config = auth_config()
     admin_username = config.get("admin_username") or ""
     admin_password = config.get("admin_password") or ""
-    if admin_username and admin_password and hmac.compare_digest(username or "", admin_username):
-        return hmac.compare_digest(password or "", admin_password)
+    if admin_username and admin_password and constant_time_equal(username, admin_username):
+        return constant_time_equal(password, admin_password)
     guest_username = config.get("guest_username") or ""
     guest_re = _guest_password_re(config)
     if guest_username and guest_re and username == guest_username:
@@ -879,8 +920,8 @@ def current_request_is_admin() -> bool:
     return bool(
         admin_username
         and admin_password
-        and hmac.compare_digest(credentials[0] or "", admin_username)
-        and hmac.compare_digest(credentials[1] or "", admin_password)
+        and constant_time_equal(credentials[0], admin_username)
+        and constant_time_equal(credentials[1], admin_password)
     )
 
 
@@ -1032,7 +1073,7 @@ def _default_payload() -> Dict[str, Any]:
 
 
 def default_sweep_rows() -> List[Dict[str, Any]]:
-    return [{"field": None, "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS), "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
+    return [{"field": None, "network_targets": list(DEFAULT_NETWORK_SWEEP_TARGETS), "network_apply": DEFAULT_NETWORK_APPLY_MODE, "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None} for _ in range(3)]
 
 
 def activation_recomputation_value(enabled: Any) -> str:
@@ -1085,7 +1126,7 @@ def selected_network_apply_mode(row: Dict[str, Any] | None) -> str:
     row = row or {}
     if row.get("network_apply") not in {"set", "scale"} and is_network_bundle_field(row.get("field")):
         return "scale" if ".scale." in str(row.get("field")) else "set"
-    return str(row.get("network_apply")) if row.get("network_apply") in {"set", "scale"} else "set"
+    return str(row.get("network_apply")) if row.get("network_apply") in {"set", "scale"} else DEFAULT_NETWORK_APPLY_MODE
 
 
 def _network_target_slug(field_key: str) -> str:
@@ -1137,6 +1178,11 @@ def initial_ui_state(*, ignore_saved: bool = False) -> Dict[str, Any]:
     model_run_configs = _valid_config_list("models", saved.get("model_run_configs"), model_preset)
     hardware_run_configs = _valid_config_list("hardware", saved.get("hardware_run_configs"), hardware_preset)
     defaults = build_form_defaults(model_preset, hardware_preset)
+    if saved.get("simple_total_gpus") is not None:
+        try:
+            defaults["simple"]["total_gpus"] = max(1, int(saved["simple_total_gpus"]))
+        except (TypeError, ValueError):
+            pass
     active_tab = saved.get("active_config_tab")
     kind, config_id = parse_config_tab(active_tab)
     if kind == "models" and config_id not in model_run_configs:
@@ -1452,6 +1498,7 @@ def remote_connection_pill(job: Dict[str, Any]) -> Any | None:
         return None
     state = str(job.get("remote_sync_state") or "").strip().lower()
     status = str(job.get("status") or "").strip().lower()
+    abnormal = bool(job.get("remote_error") or job.get("error"))
     if not state:
         return None
     if status == "cancel_requested":
@@ -1459,25 +1506,23 @@ def remote_connection_pill(job: Dict[str, Any]) -> Any | None:
     elif status == "cancelled":
         label, tone = "Remote cancelled", "gray"
     elif state == "streaming":
-        label, tone = "Remote connected", "green"
+        label, tone = "Connected to remote", "green"
     elif state == "connecting":
-        label, tone = "Starting remote job", "orange"
+        label, tone = "Syncing with remote", "green"
     elif state == "reconnecting":
-        label, tone = "Reconnecting to remote", "orange"
+        label, tone = ("Reconnecting to remote", "orange") if abnormal else ("Connected to remote", "green")
     elif state == "syncing":
         if status in {"completed", "failed", "partial", "timed_out"}:
-            label = "Syncing final results"
-        elif int(job.get("last_event_seq") or 0) <= 0 and int(job.get("progress_completed") or 0) <= 0:
-            label = "Sending job to remote"
+            label = "Syncing with remote"
         else:
-            label = "Syncing results"
-        tone = "orange"
+            label = "Syncing with remote"
+        tone = "green"
     elif state == "stale":
         label, tone = "Remote status stale", "orange"
     elif state == "failed":
         label, tone = "Remote connection failed", "red"
     elif state == "synced":
-        label, tone = "Remote results synced", "green"
+        label, tone = ("Remote results synced", "green") if status in TERMINAL_JOB_STATUSES else ("Connected to remote", "green")
     else:
         label, tone = "Remote status pending", "orange"
     return html.Span(label, className=f"rapid-progress-meta-pill remote-connection-pill remote-connection-pill-{tone}")
@@ -1626,6 +1671,46 @@ def launch_button_label(preview: Dict[str, Any] | None) -> str:
 
 
 PREVIEW_LOAD_ONLY_TRIGGER_IDS = {"config-editor-tabs", "model-preset", "hardware-preset"}
+TERMINAL_JOB_STATUSES = {"completed", "failed", "partial", "cancelled", "timed_out"}
+
+
+def job_is_terminal(job: Dict[str, Any]) -> bool:
+    return str((job or {}).get("status") or "").strip().lower() in TERMINAL_JOB_STATUSES
+
+
+def job_progress_percent(job: Dict[str, Any], *, terminal: bool | None = None) -> float:
+    total = int(job.get("progress_total") or 0)
+    completed = int(job.get("progress_completed") or 0)
+    percent = (completed / max(1, total or 1)) * 100
+    if terminal is None:
+        terminal = job_is_terminal(job)
+    if not terminal and total > 0 and completed >= total:
+        return min(99.0, percent)
+    return percent
+
+
+def job_status_label(job: Dict[str, Any]) -> str:
+    total = int(job.get("progress_total") or 0)
+    completed = int(job.get("progress_completed") or 0)
+    if not job_is_terminal(job) and total > 0 and completed >= total:
+        return "FINALIZING"
+    return str(job.get("status") or "").upper()
+
+
+def latest_finished_job_from_history() -> Dict[str, Any] | None:
+    for item in list_history(limit=5):
+        if str(item.get("status") or "").strip().lower() in TERMINAL_JOB_STATUSES:
+            return {
+                "id": item.get("id"),
+                "kind": item.get("kind"),
+                "title": item.get("title") or item.get("id") or "Finished job",
+                "status": item.get("status"),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+                "progress_completed": item.get("progress_completed"),
+                "progress_total": item.get("progress_total"),
+            }
+    return None
 
 
 def preview_rebuild_is_load_only(triggered_prop_ids: Dict[str, Any] | None) -> bool:
@@ -1665,7 +1750,7 @@ def job_eta_readout(job: Dict[str, Any], now: datetime | None = None) -> str:
     if total <= 0:
         return "ETA: unavailable"
     if completed >= total:
-        return "ETA: complete"
+        return "ETA: finalizing" if status and not job_is_terminal(job) else "ETA: complete"
     if completed <= 0:
         return "ETA: calculating"
     started_at = _parse_job_timestamp(job.get("created_at") or job.get("updated_at"))
@@ -1764,7 +1849,7 @@ def dim_card(index: int, row: Dict[str, Any] | None = None) -> dmc.Paper:
                                             id=f"dim-{index}-network-apply",
                                             size="xs",
                                             value=network_apply,
-                                            data=[{"label": "Set values", "value": "set"}, {"label": "Scale baseline", "value": "scale"}],
+                                            data=[{"label": "Scale baseline", "value": "scale"}, {"label": "Set values", "value": "set"}],
                                         ),
                                         HELP_TEXT["network_sweep_apply"],
                                     ),
@@ -1872,11 +1957,27 @@ def disabled_network_dimension_indices(pp_dimension: str | None) -> set[int]:
     return set()
 
 
+def network_topology_options_for_dimension(index: int) -> List[Dict[str, str]]:
+    options = list(NETWORK_TOPOLOGY_OPTIONS)
+    if index == SUPERPOD_ALLOWED_DIMENSION_INDEX:
+        options.append(SUPERPOD_TOPOLOGY_OPTION)
+    return options
+
+
+def superpod_controls_disabled(index: int, topology_type: Any, dimension_disabled: bool = False) -> bool:
+    return (
+        bool(dimension_disabled)
+        or index != SUPERPOD_ALLOWED_DIMENSION_INDEX
+        or str(topology_type or "").strip().lower() != "superpod"
+    )
+
+
 def network_editor(defaults: List[Dict[str, Any]], pp_dimension: str | None = None) -> List[dmc.Paper]:
     rows: List[dmc.Paper] = []
     disabled_indices = disabled_network_dimension_indices(pp_dimension)
     for idx, row in enumerate(defaults):
         disabled = idx in disabled_indices
+        superpod_disabled = superpod_controls_disabled(idx, row.get("topology_type"), disabled)
         rows.append(
             dmc.Paper(
                 radius="lg",
@@ -1898,10 +1999,19 @@ def network_editor(defaults: List[Dict[str, Any]], pp_dimension: str | None = No
                             cols={"base": 1, "sm": 4},
                             spacing="sm",
                             children=[
-                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=NETWORK_TOPOLOGY_OPTIONS, disabled=disabled), HELP_TEXT["network_topology"]),
+                                with_tip(dmc.Select(id={"type": "net-topology", "index": idx}, label="Topology", value=row["topology_type"], data=network_topology_options_for_dimension(idx), disabled=disabled), HELP_TEXT["network_topology"]),
                                 with_tip(dmc.TextInput(id={"type": "net-bandwidth", "index": idx}, label="Bandwidth", value=str(row["bandwidth"]), disabled=disabled), HELP_TEXT["network_bandwidth"]),
-                                with_tip(dmc.NumberInput(id={"type": "net-latency", "index": idx}, label="Latency (s)", min=0, step=0.000001, decimalScale=9, value=float(row.get("latency", 0.0) or 0.0), disabled=disabled), HELP_TEXT["network_latency"]),
+                                with_tip(dmc.NumberInput(id={"type": "net-latency", "index": idx}, label="Latency (us)", min=0, step=0.1, decimalScale=3, value=latency_seconds_to_display_us(row.get("latency", 0.0)), disabled=disabled), HELP_TEXT["network_latency"]),
                                 with_tip(dmc.NumberInput(id={"type": "net-util", "index": idx}, label="Utilization", min=0, max=1, step=0.01, decimalScale=3, value=float(row["util"]), disabled=disabled), HELP_TEXT["network_util"]),
+                            ],
+                        ),
+                        dmc.SimpleGrid(
+                            cols={"base": 1, "sm": 3},
+                            spacing="sm",
+                            children=[
+                                with_tip(dmc.NumberInput(id={"type": "net-superpod-leaf-size", "index": idx}, label="Leaf size", min=1, step=1, value=int(row.get("superpod_leaf_size", 32) or 32), disabled=superpod_disabled), HELP_TEXT["superpod_leaf_size"]),
+                                with_tip(dmc.NumberInput(id={"type": "net-superpod-leaf-switches", "index": idx}, label="Leaf switches/SU", min=1, step=1, value=int(row.get("superpod_leaf_switches_per_su", 8) or 8), disabled=superpod_disabled), HELP_TEXT["superpod_leaf_switches"]),
+                                with_tip(dmc.NumberInput(id={"type": "net-superpod-spine-switches", "index": idx}, label="Spine switches/SU", min=1, step=1, value=int(row.get("superpod_spine_switches_per_su", 4) or 4), disabled=superpod_disabled), HELP_TEXT["superpod_spine_switches"]),
                             ],
                         ),
                     ],
@@ -1950,7 +2060,7 @@ def build_header() -> html.Div:
                                             className="topbar-title-block",
                                             children=[
                                                 dmc.Title("RAPID-LLM Workbench", order=2, c="#ffffff", className="topbar-title"),
-                                                dmc.Text("v0.9, last updated 4/27/2026", className="topbar-version"),
+                                                dmc.Text("v0.96, last updated 5/12/2026", className="topbar-version"),
                                             ],
                                         ),
                                         HELP_TEXT["app_title"],
@@ -1992,6 +2102,7 @@ def create_layout() -> dmc.MantineProvider:
                 dcc.Interval(id="remote-freshness-poller", interval=30000, n_intervals=0),
                 dcc.Store(id="ui-activity-store", data={"active": True}),
                 dcc.Store(id="preview-store"),
+                dcc.Store(id="launch-pending-store", data={"pending": False}),
                 dcc.Store(id="selected-detail-store"),
                 dcc.Store(id="history-refresh-store"),
                 dcc.Download(id="plot-download"),
@@ -2100,7 +2211,7 @@ def create_layout() -> dmc.MantineProvider:
                                         dmc.TabsTab("2 Run log", value="history", leftSection=DashIconify(icon="solar:clock-circle-bold")),
                                     ],
                                 ),
-                                dmc.TabsPanel(value="builder", children=builder_panel(metric_options, state)),
+                                dmc.TabsPanel(value="builder", className="builder-tabs-panel", children=builder_panel(metric_options, state)),
                                 dmc.TabsPanel(value="history", children=html.Div(id="history-panel", children=render_history_panel())),
                             ],
                         )
@@ -2180,7 +2291,18 @@ def right_column(metric_options: List[Dict[str, str]], state: Dict[str, Any]) ->
                             gap="xs",
                             className="launch-plan-actions",
                             children=[
-                                with_tip(dmc.Button("Launch 1 run", id="run-button", leftSection=DashIconify(icon="solar:rocket-bold")), HELP_TEXT["run_launch"]),
+                                with_tip(
+                                    dmc.Button(
+                                        "Launch 1 run",
+                                        id="run-button",
+                                        className="launch-run-button",
+                                        leftSection=DashIconify(icon="solar:rocket-bold"),
+                                        loading=False,
+                                        disabled=False,
+                                        loaderProps={"type": "oval", "color": "white", "size": "sm"},
+                                    ),
+                                    HELP_TEXT["run_launch"],
+                                ),
                                 with_tip(dmc.Button("Cancel Active Job", id="cancel-button", color="red", variant="light"), HELP_TEXT["cancel_job"]),
                             ],
                         ),
@@ -2666,6 +2788,26 @@ app.clientside_callback(
 )
 
 
+app.clientside_callback(
+    """
+    function(nClicks, previewStore) {
+        const noUpdate = window.dash_clientside.no_update;
+        if (!nClicks || !previewStore || !previewStore.preview || !previewStore.preview.ok) {
+            return [noUpdate, noUpdate, noUpdate, noUpdate];
+        }
+        return [{pending: true, click: nClicks, started_at_ms: Date.now()}, true, true, "Starting..."];
+    }
+    """,
+    Output("launch-pending-store", "data", allow_duplicate=True),
+    Output("run-button", "loading", allow_duplicate=True),
+    Output("run-button", "disabled", allow_duplicate=True),
+    Output("run-button", "children", allow_duplicate=True),
+    Input("run-button", "n_clicks"),
+    State("preview-store", "data"),
+    prevent_initial_call=True,
+)
+
+
 def collect_payload(model_preset_id: str, hardware_preset_id: str, run_mode: str, optimize_parallelism: bool, optimizer_preset: str, simple_values: Dict[str, Any], advanced_values: Dict[str, Any], network_rows: List[Dict[str, Any]], dimensions: List[Dict[str, Any]], metric: str, x_axis: str | None, series_axis: str | None, worker_count: int, timeout_seconds: int) -> Dict[str, Any]:
     return {"model_preset_id": model_preset_id, "hardware_preset_id": hardware_preset_id, "run_mode": run_mode, "optimize_parallelism": optimize_parallelism, "optimizer_preset": optimizer_preset, "use_raw_yaml": False, "model_yaml_text": "", "hardware_yaml_text": "", "simple": simple_values, "advanced": advanced_values, "network_dimensions": network_rows, "dimensions": dimensions, "metric": metric, "x_axis": x_axis, "series_axis": series_axis, "worker_count": worker_count, "timeout_seconds": timeout_seconds}
 
@@ -2724,6 +2866,9 @@ def collect_form_payload(
     net_bandwidths: List[str],
     net_latencies: List[float],
     net_utils: List[float],
+    net_superpod_leaf_sizes: List[int] | None,
+    net_superpod_leaf_switches: List[int] | None,
+    net_superpod_spine_switches: List[int] | None,
     parallelism_topology_mode: str,
     dimensions: List[Dict[str, Any]],
     metric: str,
@@ -2740,7 +2885,7 @@ def collect_form_payload(
         optimizer_preset,
         {"run_type": simple_run_type, "seq_len": simple_seq_len, "decode_len": simple_decode_len, "batch_size": simple_batch_size, "grad_accum": 1 if simple_run_type == "inference" else simple_grad_accum, "total_gpus": simple_total_gpus, "tp": simple_tp, "cp": simple_cp, "pp": simple_pp, "dp": simple_dp, "ep": simple_ep, "replica_count": simple_replica_count if simple_run_type == "inference" else 1, "hbm_gb": simple_hbm_gb, "compute_derate": simple_compute_derate, "memory_derate": simple_memory_derate, "network_derate": simple_network_derate, "gpu_clock_ghz": simple_gpu_clock, "memory_bw_gbs": simple_memory_bw, "use_astrasim": bool(simple_use_astrasim)},
         {"model_type": adv_model_type, "model_mode": adv_model_mode, "full_recomputation": activation_recomputation_is_full(adv_full_recomp), "dp_zero_stage": int(adv_dp_zero or 0), "tensor_format": adv_tensor_format, "precision_kv_cache": adv_precision_kv_cache, "precision_parameters": adv_precision_parameters, "precision_gradients": adv_precision_gradients, "precision_grad_communication": adv_precision_grad_communication, "precision_optimizer_states": adv_precision_optimizer_states, "precision_stats": adv_precision_stats, "precision_master_parameters": adv_precision_master_parameters, "pp_network_dimension": parallelism_topology_mode, "tied_embeddings": adv_tied_embeddings, "hidden_dim": adv_hidden_dim, "intermediate_size": adv_intermediate_size, "num_layers": adv_num_layers, "vocab_size": adv_vocab_size, "attention_type": adv_attention_type, "num_heads": adv_num_heads, "use_flashattention": adv_use_flash, "attention_tile_size": adv_attn_tile, "num_experts": adv_num_experts, "top_k": adv_top_k, "moe_intermediate_size": adv_moe_intermediate_size, "expert_imbalance_factor": adv_imbalance},
-        _network_rows_from_callback(net_topologies, net_bandwidths, net_latencies, net_utils),
+        _network_rows_from_callback(net_topologies, net_bandwidths, net_latencies, net_utils, net_superpod_leaf_sizes, net_superpod_leaf_switches, net_superpod_spine_switches),
         dimensions,
         metric,
         x_axis,
@@ -3048,11 +3193,15 @@ def refresh_parallelism_topology_preview(pp_dimension: str | None):
     Output({"type": "net-bandwidth", "index": ALL}, "disabled"),
     Output({"type": "net-latency", "index": ALL}, "disabled"),
     Output({"type": "net-util", "index": ALL}, "disabled"),
+    Output({"type": "net-superpod-leaf-size", "index": ALL}, "disabled"),
+    Output({"type": "net-superpod-leaf-switches", "index": ALL}, "disabled"),
+    Output({"type": "net-superpod-spine-switches", "index": ALL}, "disabled"),
     Input("parallelism-topology-mode", "value"),
+    Input({"type": "net-topology", "index": ALL}, "value"),
     State({"type": "net-topology", "index": ALL}, "id"),
     prevent_initial_call=True,
 )
-def toggle_network_dimension_controls(pp_dimension: str | None, topology_ids: List[Dict[str, Any]]):
+def toggle_network_dimension_controls(pp_dimension: str | None, topologies: List[str], topology_ids: List[Dict[str, Any]]):
     mode = str(pp_dimension or "dim1_shared")
     if mode == "dim1":
         mode = "dim1_dim2"
@@ -3060,7 +3209,34 @@ def toggle_network_dimension_controls(pp_dimension: str | None, topology_ids: Li
         mode = "dim1_dim2"
     disabled_indices = disabled_network_dimension_indices(mode)
     disabled = [item.get("index") in disabled_indices for item in topology_ids]
-    return disabled, disabled, disabled, disabled
+    superpod_disabled = [
+        superpod_controls_disabled(
+            int(item.get("index", idx)),
+            (topologies or [None])[idx] if idx < len(topologies or []) else None,
+            disabled[idx] if idx < len(disabled) else False,
+        )
+        for idx, item in enumerate(topology_ids)
+    ]
+    return disabled, disabled, disabled, disabled, superpod_disabled, superpod_disabled, superpod_disabled
+
+
+@callback(
+    Output("parallelism-topology-mode", "value", allow_duplicate=True),
+    Input({"type": "net-topology", "index": ALL}, "value"),
+    prevent_initial_call=True,
+)
+def force_superpod_to_shared_dimension(topologies: List[str]):
+    if len(topologies or []) > SUPERPOD_ALLOWED_DIMENSION_INDEX and str(topologies[SUPERPOD_ALLOWED_DIMENSION_INDEX]).strip().lower() == "superpod":
+        return "dim1_shared"
+    return no_update
+
+
+@callback(
+    Output("parallelism-topology-mode", "disabled"),
+    Input({"type": "net-topology", "index": ALL}, "value"),
+)
+def disable_pp_split_when_superpod(topologies: List[str]):
+    return len(topologies or []) > SUPERPOD_ALLOWED_DIMENSION_INDEX and str(topologies[SUPERPOD_ALLOWED_DIMENSION_INDEX]).strip().lower() == "superpod"
 
 
 @callback(
@@ -3445,15 +3621,44 @@ def apply_sweep_preset(n_clicks: List[int] | None):
     )
 
 
-def _network_rows_from_callback(topologies: List[str], bandwidths: List[str], latencies: List[float], utils: List[float]) -> List[Dict[str, Any]]:
+@callback(
+    Output("dim-1-network-apply", "value", allow_duplicate=True),
+    Output("dim-2-network-apply", "value", allow_duplicate=True),
+    Output("dim-3-network-apply", "value", allow_duplicate=True),
+    Input("dim-1-field", "value"),
+    Input("dim-2-field", "value"),
+    Input("dim-3-field", "value"),
+    prevent_initial_call=True,
+)
+def default_network_apply_when_network_selected(field1: str | None, field2: str | None, field3: str | None):
+    outputs = [no_update, no_update, no_update]
+    triggered = dash.ctx.triggered_id
+    for idx, field in enumerate([field1, field2, field3], start=1):
+        if triggered == f"dim-{idx}-field" and field == NETWORK_SWEEP_GROUP_VALUE:
+            outputs[idx - 1] = DEFAULT_NETWORK_APPLY_MODE
+    return tuple(outputs)
+
+
+def _network_rows_from_callback(
+    topologies: List[str],
+    bandwidths: List[str],
+    latencies: List[float],
+    utils: List[float],
+    superpod_leaf_sizes: List[int] | None = None,
+    superpod_leaf_switches: List[int] | None = None,
+    superpod_spine_switches: List[int] | None = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for idx, topology in enumerate(topologies or []):
         rows.append(
             {
                 "topology_type": topology,
                 "bandwidth": (bandwidths or [""])[idx] if idx < len(bandwidths or []) else "",
-                "latency": (latencies or [0.0])[idx] if idx < len(latencies or []) else 0.0,
+                "latency": latency_display_us_to_seconds((latencies or [0.0])[idx] if idx < len(latencies or []) else 0.0),
                 "util": (utils or [1.0])[idx] if idx < len(utils or []) else 1.0,
+                "superpod_leaf_size": (superpod_leaf_sizes or [32])[idx] if idx < len(superpod_leaf_sizes or []) else 32,
+                "superpod_leaf_switches_per_su": (superpod_leaf_switches or [8])[idx] if idx < len(superpod_leaf_switches or []) else 8,
+                "superpod_spine_switches_per_su": (superpod_spine_switches or [4])[idx] if idx < len(superpod_spine_switches or []) else 4,
             }
         )
     return rows
@@ -3526,6 +3731,9 @@ def _dimensions_from_inputs(raw_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
     Input({"type": "net-latency", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
+    Input({"type": "net-superpod-leaf-size", "index": ALL}, "value"),
+    Input({"type": "net-superpod-leaf-switches", "index": ALL}, "value"),
+    Input({"type": "net-superpod-spine-switches", "index": ALL}, "value"),
     Input("parallelism-topology-mode", "value"),
     State("model-preset", "value"),
     State("hardware-preset", "value"),
@@ -3590,6 +3798,9 @@ def sync_config_files(
     net_bandwidths: List[str],
     net_latencies: List[float],
     net_utils: List[float],
+    net_superpod_leaf_sizes: List[int],
+    net_superpod_leaf_switches: List[int],
+    net_superpod_spine_switches: List[int],
     parallelism_topology_mode: str,
     model_preset: str,
     hardware_preset: str,
@@ -3658,6 +3869,9 @@ def sync_config_files(
         net_bandwidths,
         net_latencies,
         net_utils,
+        net_superpod_leaf_sizes,
+        net_superpod_leaf_switches,
+        net_superpod_spine_switches,
         parallelism_topology_mode,
         [],
         metric or get_default_metric_for_run_type(simple_run_type),
@@ -3736,6 +3950,9 @@ def sync_config_files(
     Input({"type": "net-bandwidth", "index": ALL}, "value"),
     Input({"type": "net-latency", "index": ALL}, "value"),
     Input({"type": "net-util", "index": ALL}, "value"),
+    Input({"type": "net-superpod-leaf-size", "index": ALL}, "value"),
+    Input({"type": "net-superpod-leaf-switches", "index": ALL}, "value"),
+    Input({"type": "net-superpod-spine-switches", "index": ALL}, "value"),
     Input("parallelism-topology-mode", "value"),
     Input("dim-1-field", "value"),
     Input("dim-1-network-targets", "value"),
@@ -3827,6 +4044,9 @@ def build_preview(
     net_bandwidths: List[str],
     net_latencies: List[float],
     net_utils: List[float],
+    net_superpod_leaf_sizes: List[int],
+    net_superpod_leaf_switches: List[int],
+    net_superpod_spine_switches: List[int],
     parallelism_topology_mode: str,
     dim1_field: str,
     dim1_network_targets: List[str],
@@ -3925,6 +4145,9 @@ def build_preview(
         net_bandwidths,
         net_latencies,
         net_utils,
+        net_superpod_leaf_sizes,
+        net_superpod_leaf_switches,
+        net_superpod_spine_switches,
         parallelism_topology_mode,
         dimensions,
         metric,
@@ -3943,6 +4166,7 @@ def build_preview(
             "run_mode": run_mode,
             "optimize_parallelism": optimize_parallelism,
             "optimizer_preset": optimizer_preset,
+            "simple_total_gpus": simple_total_gpus,
             "sweep_rows": sweep_rows,
             "metric": metric,
             "x_axis": x_axis,
@@ -3967,17 +4191,47 @@ def build_preview(
     )
 
 
-@callback(Output("preview-summary", "children", allow_duplicate=True), Input("run-button", "n_clicks"), State("preview-store", "data"), prevent_initial_call=True)
+def launch_button_reset(preview_store: Dict[str, Any] | None) -> tuple[Dict[str, bool], bool, bool, str]:
+    preview = (preview_store or {}).get("preview") if isinstance(preview_store, dict) else None
+    return {"pending": False}, False, False, launch_button_label(preview)
+
+
+@callback(
+    Output("preview-summary", "children", allow_duplicate=True),
+    Output("launch-pending-store", "data", allow_duplicate=True),
+    Output("run-button", "loading", allow_duplicate=True),
+    Output("run-button", "disabled", allow_duplicate=True),
+    Output("run-button", "children", allow_duplicate=True),
+    Input("run-button", "n_clicks"),
+    State("preview-store", "data"),
+    prevent_initial_call=True,
+)
 def launch_job(_: int, preview_store: Dict[str, Any] | None):
     if not preview_store:
-        return dmc.Alert("The launch plan is still loading. Try again in a moment.", color="red", radius="lg")
+        return dmc.Alert("The launch plan is still loading. Try again in a moment.", color="red", radius="lg"), *launch_button_reset(preview_store)
     preview, payload = preview_store["preview"], preview_store["payload"]
     if not preview.get("ok"):
-        return dmc.Alert("Cannot run until preview errors are fixed.", color="red", radius="lg")
+        return dmc.Alert("Cannot run until preview errors are fixed.", color="red", radius="lg"), *launch_button_reset(preview_store)
     ok, message = RUN_MANAGER.start_job(payload, preview)
     if ok:
-        return no_update
-    return dmc.Alert(f"Did not launch: {message}", color="red", radius="lg")
+        return no_update, no_update, no_update, no_update, no_update
+    return dmc.Alert(f"Did not launch: {message}", color="red", radius="lg"), *launch_button_reset(preview_store)
+
+
+@callback(
+    Output("launch-pending-store", "data", allow_duplicate=True),
+    Output("run-button", "loading", allow_duplicate=True),
+    Output("run-button", "disabled", allow_duplicate=True),
+    Output("run-button", "children", allow_duplicate=True),
+    Input("history-refresh-store", "data"),
+    State("preview-store", "data"),
+    State("launch-pending-store", "data"),
+    prevent_initial_call=True,
+)
+def clear_launch_pending_after_job_status(_: Dict[str, Any] | None, preview_store: Dict[str, Any] | None, pending_state: Dict[str, Any] | None):
+    if not isinstance(pending_state, dict) or not pending_state.get("pending"):
+        return no_update, no_update, no_update, no_update
+    return launch_button_reset(preview_store)
 
 
 @callback(Output("preview-summary", "children", allow_duplicate=True), Input("cancel-button", "n_clicks"), prevent_initial_call=True)
@@ -4101,16 +4355,15 @@ def export_current_detail_table(csv_clicks: int | None, json_clicks: int | None,
 
 def render_active_job_panel(active: Dict[str, Any] | None = None, finished: Dict[str, Any] | None = None) -> Any:
     if active:
-        progress = ((active.get("progress_completed") or 0) / max(1, active.get("progress_total") or 1)) * 100
         remote_meta = remote_connection_pill(active)
         return dmc.Stack(
             gap="md",
             children=[
                 dmc.Text(active["title"], fw=700, size="lg"),
                 branded_progress_bar(
-                    progress,
+                    job_progress_percent(active),
                     progress_count_label(active),
-                    str(active["status"]).upper(),
+                    job_status_label(active),
                     inline_meta=remote_meta,
                 ),
                 dmc.Text(job_eta_readout(active), size="sm", fw=800, className="live-status-eta"),
@@ -4181,7 +4434,7 @@ def render_history_panel() -> dmc.Stack:
                             children=[
                                 history_title_component(item),
                                 dmc.Group(gap="xs", children=summary_badges),
-                                dmc.Text(compact_timestamp(item.get("created_at")), size="xs", c="dimmed"),
+                                dmc.Text(compact_timestamp(item.get("updated_at") or item.get("created_at")), size="xs", c="dimmed"),
                             ],
                         ),
                         with_tip(dmc.Button("Details", id={"type": "open-detail", "job_kind": item["kind"], "job_id": item["id"]}, variant="light", radius="xl", leftSection=DashIconify(icon="solar:arrow-right-up-bold")), HELP_TEXT["load_details"]),
@@ -4265,6 +4518,8 @@ def refresh_job_status(_: int, current_signature_record: Dict[str, Any] | None):
         finished = None
     else:
         finished = RUN_MANAGER.last_finished_job()
+        if not finished:
+            finished = latest_finished_job_from_history()
         if finished:
             active_panel = render_active_job_panel(finished=finished)
             job_badge = format_finished_job_badge(finished)

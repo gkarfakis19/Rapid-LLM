@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from webui.service import core
-from webui.service.worker_runner import gpu_peak_flops
+from webui.service.worker_runner import gpu_peak_flops, inference_num_gpus
 
 
 def test_worker_runner_executes_tiny_training_case(tmp_path):
@@ -55,6 +55,7 @@ def test_worker_runner_executes_tiny_training_case(tmp_path):
     dimensions = hardware.get("network", {}).get("dimensions", []) or []
     if dimensions:
         dimensions[0]["size"] = 1
+        dimensions[0].setdefault("topology", {})["type"] = "Ring"
         dimensions[0]["parallelisms"] = ["tp", "cp", "ep", "pp", "dp"]
         hardware["network"]["dimensions"] = [dimensions[0]]
 
@@ -115,6 +116,20 @@ def test_a100_peak_flops_is_per_gpu_tensor_peak_not_system_pflops():
     peak = gpu_peak_flops(hw_cfg)
 
     assert 2.0e14 < peak < 4.0e14
+
+
+def test_inference_num_gpus_uses_moe_dp_not_training_ep():
+    hw_cfg = SimpleNamespace(
+        sch_config=SimpleNamespace(
+            tp=2,
+            cp=1,
+            pp=2,
+            train=SimpleNamespace(ep=1),
+            inference=SimpleNamespace(replica_count=2, moe_dp=4),
+        )
+    )
+
+    assert inference_num_gpus(hw_cfg) == 32
 
 
 def test_h100_peak_flops_and_system_peak_are_consistent_for_eight_gpus():

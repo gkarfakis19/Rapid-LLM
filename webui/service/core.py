@@ -27,6 +27,7 @@ import yaml
 import config as rapid_config
 from webui.service.remote import (
     REMOTE_ACTIVE_JOB_FILENAME,
+    REMOTE_TERMINAL_STATUSES,
     RemoteSshConfig,
     RemoteSshExecutor,
     RemoteTelemetryMonitor,
@@ -129,6 +130,15 @@ METRIC_LABELS = {
 }
 INNER_HIERARCHICAL_AXES = ["tp", "cp", "ep"]
 PP_TOPOLOGY_DIMENSIONS = {"dim1_shared", "dim1_dim2", "dim1", "dim2", "dim2_shared"}
+SUPERPOD_ALLOWED_DIMENSION_INDEX = 1
+SUPERPOD_ALLOWED_PARALLELISMS = {"pp", "dp"}
+SUPERPOD_H100_DEFAULTS = {
+    "superpod_variant": "h100",
+    "leaf_size": 32,
+    "leaf_switches_per_su": 8,
+    "spine_switches_per_su": 4,
+    "bandwidth": ["50 GB", "100 GB"],
+}
 PAPER_DERATE_DEFAULTS = {
     "A100_PCIe_80GB.yaml": {"compute": 0.60, "memory": 0.70, "communication": 0.85},
     "A100_SXM4_80GB.yaml": {"compute": 0.90, "memory": 0.70, "communication": 0.80},
@@ -441,6 +451,7 @@ def sanitize_last_ui_state(state: Dict[str, Any] | None) -> Dict[str, Any]:
         "run_mode": state.get("run_mode") if state.get("run_mode") in {"sweep", "single"} else "sweep",
         "optimize_parallelism": bool(state.get("optimize_parallelism")),
         "optimizer_preset": _trim_text(state.get("optimizer_preset"), 64) or "Fast",
+        "simple_total_gpus": _trim_number(state.get("simple_total_gpus")),
         "sweep_rows": _sanitize_dimension_controls(state.get("sweep_rows")),
         "metric": _trim_text(state.get("metric"), 128),
         "x_axis": _trim_text(state.get("x_axis"), 128),
@@ -850,6 +861,46 @@ def _coerce_network_bandwidth(raw: Any) -> Any:
     return raw
 
 
+def _is_superpod_topology(topology_type: Any) -> bool:
+    return str(topology_type or "").strip().lower() == "superpod"
+
+
+def _superpod_int(raw: Any, default: int) -> int:
+    value = _safe_int(raw, default)
+    return value if value > 0 else default
+
+
+def _superpod_form_fields(topology: Dict[str, Any] | None = None) -> Dict[str, int]:
+    topology = topology or {}
+    return {
+        "superpod_leaf_size": _superpod_int(topology.get("leaf_size"), int(SUPERPOD_H100_DEFAULTS["leaf_size"])),
+        "superpod_leaf_switches_per_su": _superpod_int(topology.get("leaf_switches_per_su"), int(SUPERPOD_H100_DEFAULTS["leaf_switches_per_su"])),
+        "superpod_spine_switches_per_su": _superpod_int(topology.get("spine_switches_per_su"), int(SUPERPOD_H100_DEFAULTS["spine_switches_per_su"])),
+    }
+
+
+def _network_has_dim1_superpod(hardware: Dict[str, Any]) -> bool:
+    dimensions = hardware.get("network", {}).get("dimensions", []) or []
+    if len(dimensions) <= SUPERPOD_ALLOWED_DIMENSION_INDEX:
+        return False
+    topology = dimensions[SUPERPOD_ALLOWED_DIMENSION_INDEX].get("topology", {}) or {}
+    return _is_superpod_topology(topology.get("type"))
+
+
+def _validate_superpod_payload_dimension(
+    *,
+    dim_index: int,
+    topology_type: Any,
+    pp_dimension: Any,
+) -> None:
+    if not _is_superpod_topology(topology_type):
+        return
+    if dim_index != SUPERPOD_ALLOWED_DIMENSION_INDEX:
+        raise ValueError("SuperPOD can only be selected for Network Dimension 1.")
+    if _normalize_pp_topology_dimension(pp_dimension) != "dim1_shared":
+        raise ValueError("SuperPOD requires PP and DP to share Network Dimension 1.")
+
+
 def parse_bandwidth_to_gbs(raw: Any) -> float:
     if isinstance(raw, (int, float)):
         return float(raw) / 1e9
@@ -1073,8 +1124,9 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
     for idx, dim in enumerate(hardware.get("network", {}).get("dimensions", []) or []):
         topology = dim.get("topology", {}) or {}
         topology_type = str(topology.get("type", "Ring"))
-        if topology_type.strip().lower() == "superpod":
+        if _is_superpod_topology(topology_type) and idx != SUPERPOD_ALLOWED_DIMENSION_INDEX:
             topology_type = "Ring"
+        superpod_fields = _superpod_form_fields(topology)
         dimensions.append(
             {
                 "id": dim.get("id") or f"dim{idx}",
@@ -1084,6 +1136,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
                 "latency": float(topology.get("latency", 0.0) or 0.0),
                 "util": float(topology.get("util", 1.0) or 1.0),
                 "parallelisms": [str(axis).upper() for axis in dim.get("parallelisms", []) or []],
+                **superpod_fields,
             }
         )
     precision = hardware.get("sw_param", {}).get("precision", {}) or {}
@@ -1124,7 +1177,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "precision_optimizer_states": str(precision.get("optimizer_states", "fp32")),
             "precision_stats": str(precision.get("stats", "fp32")),
             "precision_master_parameters": "0" if str(precision.get("master_parameters", 0.0)).strip().lower() in {"0", "0.0"} else str(precision.get("master_parameters", 0.0)),
-            "pp_network_dimension": infer_pp_topology_dimension(hardware),
+            "pp_network_dimension": "dim1_shared" if _network_has_dim1_superpod(hardware) else infer_pp_topology_dimension(hardware),
             "execution_backend": str(hardware.get("execution_backend", {}).get("model", "analytical")),
             "execution_mode": str(hardware.get("execution_backend", {}).get("astra", {}).get("mode", "full_astrasim_hierarchical")),
             "tied_embeddings": bool(model.get("model_param", {}).get("tied_embeddings", False)),
@@ -1271,18 +1324,32 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
             continue
         topology = dimensions[idx].setdefault("topology", {})
         if row.get("topology_type"):
-            topology["type"] = row["topology_type"]
+            _validate_superpod_payload_dimension(
+                dim_index=idx,
+                topology_type=row["topology_type"],
+                pp_dimension=advanced.get("pp_network_dimension"),
+            )
+            topology["type"] = "SuperPOD" if _is_superpod_topology(row["topology_type"]) else row["topology_type"]
             topology_type = str(row["topology_type"]).strip().lower()
             if topology_type != "ring":
                 uses_astra_only_topology = True
             if topology_type == "superpod":
                 topology["superpod_variant"] = "h100"
-                topology["leaf_size"] = 1
+                topology["leaf_size"] = _superpod_int(row.get("superpod_leaf_size"), int(SUPERPOD_H100_DEFAULTS["leaf_size"]))
+                topology["leaf_switches_per_su"] = _superpod_int(row.get("superpod_leaf_switches_per_su"), int(SUPERPOD_H100_DEFAULTS["leaf_switches_per_su"]))
+                topology["spine_switches_per_su"] = _superpod_int(row.get("superpod_spine_switches_per_su"), int(SUPERPOD_H100_DEFAULTS["spine_switches_per_su"]))
+            else:
+                topology.pop("superpod_variant", None)
+                topology.pop("leaf_size", None)
+                topology.pop("leaf_switches_per_su", None)
+                topology.pop("spine_switches_per_su", None)
         if row.get("bandwidth") not in (None, ""):
             bandwidth = _coerce_network_bandwidth(row["bandwidth"])
             if str(topology.get("type", "")).strip().lower() == "superpod" and not isinstance(bandwidth, (list, tuple)):
-                bandwidth = [bandwidth, bandwidth]
+                bandwidth = list(SUPERPOD_H100_DEFAULTS["bandwidth"])
             topology["bandwidth"] = bandwidth
+        elif str(topology.get("type", "")).strip().lower() == "superpod":
+            topology["bandwidth"] = list(SUPERPOD_H100_DEFAULTS["bandwidth"])
         if row.get("latency") not in (None, ""):
             topology["latency"] = _safe_float(row.get("latency"), _safe_float(topology.get("latency"), 0.0))
         topology["util"] = _safe_float(row.get("util"), network_derate)
@@ -1329,7 +1396,10 @@ def build_editable_configs_from_payload(payload: Dict[str, Any]) -> Tuple[Option
         hardware = load_preset("hardware", hardware_preset_id)
     except (FileNotFoundError, ValueError) as exc:
         return None, None, [str(exc)]
-    _apply_form_overrides(model, hardware, payload)
+    try:
+        _apply_form_overrides(model, hardware, payload)
+    except (TypeError, ValueError) as exc:
+        return None, None, [str(exc)]
     return model, hardware, []
 
 
@@ -2141,8 +2211,12 @@ class RunManager:
 
     def active_job(self) -> Optional[Dict[str, Any]]:
         with self._lock:
+            if self._active_job:
+                self._reconcile_active_job_locked()
             if not self._active_job:
                 self._maybe_recover_remote_job_locked()
+                if self._active_job:
+                    self._reconcile_active_job_locked()
             return copy.deepcopy(self._active_job)
 
     def last_finished_job(self) -> Optional[Dict[str, Any]]:
@@ -2252,6 +2326,8 @@ class RunManager:
 
     def start_job(self, payload: Dict[str, Any], preview: Dict[str, Any]) -> Tuple[bool, str]:
         with self._lock:
+            if self._active_job:
+                self._reconcile_active_job_locked()
             if self._active_job and self._active_job.get("status") in {"queued", "running", "cancel_requested"}:
                 return False, "Another job is already running."
             existing_lock = self._existing_active_lock()
@@ -2294,6 +2370,8 @@ class RunManager:
 
     def cancel(self) -> Tuple[bool, str]:
         with self._lock:
+            if self._active_job:
+                self._reconcile_active_job_locked()
             if not self._active_job:
                 return False, "No active job."
             self._cancel_event.set()
@@ -2313,6 +2391,44 @@ class RunManager:
             except Exception:
                 pass
         return True, "Cancellation requested."
+
+    def _reconcile_active_job_locked(self) -> None:
+        if not self._active_job:
+            return
+        raw_root = self._active_job.get("root")
+        if not raw_root:
+            return
+        job_root = Path(str(raw_root))
+        status_path = job_root / "status.json"
+        if not status_path.exists():
+            return
+        status_record = _json_load(status_path)
+        if not status_record:
+            return
+        for key in [
+            "status",
+            "updated_at",
+            "progress_completed",
+            "progress_total",
+            "remote_sync_state",
+            "remote_host",
+            "remote_job_root",
+            "remote_pid",
+            "remote_error",
+            "last_event_seq",
+        ]:
+            if key in status_record:
+                self._active_job[key] = status_record.get(key)
+        if str(status_record.get("status") or "").strip().lower() not in REMOTE_TERMINAL_STATUSES:
+            return
+        finished_job = copy.deepcopy(self._active_job)
+        total = _safe_int(finished_job.get("progress_total"), 0)
+        if finished_job.get("status") == "completed" and total > 0:
+            finished_job["progress_completed"] = total
+        self._last_finished_job = finished_job
+        self._active_job = None
+        ACTIVE_JOB_LOCK.unlink(missing_ok=True)
+        remote_active_job_path().unlink(missing_ok=True)
 
     def _run_remote_job_thread(self, job_root: Path, payload: Dict[str, Any], preview: Dict[str, Any], config: RemoteSshConfig) -> None:
         try:

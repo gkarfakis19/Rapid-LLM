@@ -393,6 +393,10 @@ class NetworkPowerConfig:
         )
 
 
+SUPERPOD_ALLOWED_DIMENSION_INDEX = 1
+SUPERPOD_ALLOWED_PARALLELISMS = {"pp", "dp"}
+
+
 @dataclass(frozen=True)
 class NetworkDimensionLayout:
     id: str
@@ -612,6 +616,18 @@ class NetworkDimensionLayout:
             normalized = name.lower()
             normalized_parallelisms.append(normalized)
             alias_map[normalized] = name
+
+        if is_superpod:
+            if index != SUPERPOD_ALLOWED_DIMENSION_INDEX:
+                raise ValueError(
+                    f"network dimension '{label}' SuperPOD is only supported on Dimension {SUPERPOD_ALLOWED_DIMENSION_INDEX}"
+                )
+            if set(normalized_parallelisms) != SUPERPOD_ALLOWED_PARALLELISMS:
+                readable = [alias_map.get(name, name) for name in normalized_parallelisms]
+                raise ValueError(
+                    f"network dimension '{label}' SuperPOD must be assigned exactly to PP and DP parallelisms "
+                    f"(got {readable})"
+                )
 
         computed_product: Optional[int] = None
         auto_product: Optional[int] = None

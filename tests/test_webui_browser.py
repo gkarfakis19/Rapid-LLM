@@ -267,6 +267,7 @@ def test_webui_layout_and_visual_health(tmp_path):
                         hasPreviewButton: text.includes('Preview Launch'),
                         hasLiveLaunchButton: /Launch \\d+ runs?/.test(text),
                         launchButtonInsidePreview: !!document.querySelector('.preview-card #run-button'),
+                        launchScrollLockActive: document.body.classList.contains('rapid-launch-scroll-lock'),
                         rightRailOverflow: getComputedStyle(document.querySelector('.right-rail')).overflowY,
                         headerPosition: getComputedStyle(document.querySelector('.app-header-shell')).position,
                         tabsStickyTop: getComputedStyle(document.querySelector('.workspace-tabs-list')).top,
@@ -386,7 +387,8 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert not desktop_metrics["hasPreviewButton"]
             assert desktop_metrics["hasLiveLaunchButton"]
             assert desktop_metrics["launchButtonInsidePreview"]
-            assert desktop_metrics["rightRailOverflow"] == "visible"
+            assert desktop_metrics["launchScrollLockActive"]
+            assert desktop_metrics["rightRailOverflow"] == "hidden"
             assert desktop_metrics["headerPosition"] == "relative"
             assert desktop_metrics["tabsStickyTop"] == "0px"
             assert not desktop_metrics["hasRawOverride"]
@@ -432,7 +434,7 @@ def test_webui_layout_and_visual_health(tmp_path):
             assert stacked_config_metrics["actionsVisible"]
 
             page.get_by_role("tab", name="2 Run log").click()
-            page.get_by_text("Detail Smoke").wait_for(timeout=5000)
+            page.get_by_label("Run log").get_by_text("Detail Smoke").wait_for(timeout=5000)
             page.locator("button").filter(has_text="Details").first.click()
             page.get_by_role("dialog").wait_for(timeout=5000)
             page.wait_for_function("() => document.activeElement?.id === 'detail-close-button'", timeout=5000)
