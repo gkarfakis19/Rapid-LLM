@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,6 +21,7 @@ from webui.service.remote import RUNNER_PROTOCOL_VERSION, REMOTE_TERMINAL_STATUS
 
 
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+EVENT_APPEND_LOCK = threading.Lock()
 
 
 def utc_now() -> str:
@@ -35,9 +38,16 @@ def remote_workspace() -> Path:
 
 def json_dump(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    tmp_path.replace(path)
+    tmp_handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent), mode="w", delete=False)
+    tmp_path = Path(tmp_handle.name)
+    try:
+        with tmp_handle:
+            tmp_handle.write(json.dumps(payload, indent=2, sort_keys=True))
+            tmp_handle.flush()
+            os.fsync(tmp_handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def json_load(path: Path) -> Dict[str, Any]:
@@ -92,12 +102,20 @@ def next_event_seq(job_root: Path) -> int:
 
 
 def append_event(job_root: Path, event_type: str, **payload: Any) -> Dict[str, Any]:
-    event = {"seq": next_event_seq(job_root), "type": event_type, "created_at": utc_now(), **payload}
+    job_root.mkdir(parents=True, exist_ok=True)
     path = job_root / "events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
-        handle.flush()
+    lock_path = job_root / "events.lock"
+    with EVENT_APPEND_LOCK:
+        with lock_path.open("a") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            try:
+                event = {"seq": next_event_seq(job_root), "type": event_type, "created_at": utc_now(), **payload}
+                with path.open("a") as handle:
+                    handle.write(json.dumps(event, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
     return event
 
 

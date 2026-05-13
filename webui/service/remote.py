@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,23 @@ REMOTE_TERMINAL_STATUSES = {"completed", "failed", "partial", "cancelled", "time
 REMOTE_TRANSIENT_STATES = {"connecting", "streaming", "reconnecting", "syncing", "stale", "failed"}
 DEFAULT_REMOTE_BRANCH = "remote_backend"
 DEFAULT_REMOTE_CONFIG_PATH = Path(__file__).resolve().parents[1] / "remote_backend.local.json"
+RSYNC_VANISHED_FILES_CODE = 24
+REMOTE_RESULT_RSYNC_FILTERS = [
+    "--include=/status.json",
+    "--include=/summary.json",
+    "--include=/request.json",
+    "--include=/cases.jsonl",
+    "--include=/case_failures.jsonl",
+    "--include=/result.json",
+    "--include=/metrics.json",
+    "--include=/model_resolved.yaml",
+    "--include=/hardware_resolved.yaml",
+    "--include=/remote_supervisor.stdout.log",
+    "--include=/remote_supervisor.stderr.log",
+    "--include=/plots/***",
+    "--include=/exports/***",
+    "--exclude=*",
+]
 
 
 @dataclass(frozen=True)
@@ -262,10 +280,27 @@ class RemoteSshClient:
     def popen_runner(self, args: Iterable[str]) -> subprocess.Popen:
         return subprocess.Popen(self.runner_ssh_argv(args), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
 
-    def _run_transfer(self, argv: list[str], *, timeout: float | None = None) -> None:
+    def _run_transfer(self, argv: list[str], *, timeout: float | None = None, allowed_returncodes: set[int] | None = None) -> None:
         completed = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)  # noqa: S603
-        if completed.returncode != 0:
+        allowed = {0, *(allowed_returncodes or set())}
+        if completed.returncode not in allowed:
             raise RuntimeError((completed.stderr or completed.stdout or "transfer failed").strip())
+
+    def _copy_staged_result_files(self, stage_dir: Path, local_dir: Path) -> None:
+        for source in sorted(stage_dir.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(stage_dir)
+            target = local_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_handle = tempfile.NamedTemporaryFile(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent), delete=False)
+            tmp_target = Path(tmp_handle.name)
+            tmp_handle.close()
+            try:
+                shutil.copy2(source, tmp_target)
+                tmp_target.replace(target)
+            finally:
+                tmp_target.unlink(missing_ok=True)
 
     def ensure_remote_dir(self, remote_dir: str) -> None:
         remote_dir = validate_remote_path(remote_dir, under=self.config.workspace)
@@ -281,16 +316,26 @@ class RemoteSshClient:
         parent = str(PurePosixPath(remote_dir).parent)
         self._run_transfer(["scp", "-r", str(local_dir), f"{self.config.target}:{parent}/"])
 
-    def pull_dir(self, remote_dir: str, local_dir: Path, *, delete: bool = False) -> None:
+    def pull_dir(self, remote_dir: str, local_dir: Path, *, delete: bool = False, result_files_only: bool = True) -> None:
         remote_dir = validate_remote_path(remote_dir, under=self.config.workspace)
         local_dir.mkdir(parents=True, exist_ok=True)
         if shutil.which("rsync"):
             argv = ["rsync", "-a"]
             if delete:
                 argv.append("--delete")
+            if result_files_only:
+                argv.extend(REMOTE_RESULT_RSYNC_FILTERS)
+                with tempfile.TemporaryDirectory(prefix=f".{local_dir.name}.remote-sync-", dir=str(local_dir.parent)) as stage_name:
+                    stage_dir = Path(stage_name)
+                    argv.extend([f"{self.config.target}:{remote_dir}/", f"{stage_dir.resolve()}/"])
+                    self._run_transfer(argv, allowed_returncodes={RSYNC_VANISHED_FILES_CODE})
+                    self._copy_staged_result_files(stage_dir, local_dir)
+                return
             argv.extend([f"{self.config.target}:{remote_dir}/", f"{local_dir.resolve()}/"])
-            self._run_transfer(argv)
+            self._run_transfer(argv, allowed_returncodes={RSYNC_VANISHED_FILES_CODE})
             return
+        if result_files_only:
+            raise RuntimeError("rsync is required for filtered remote result sync.")
         parent = local_dir.parent
         self._run_transfer(["scp", "-r", f"{self.config.target}:{remote_dir}", str(parent)])
 
@@ -480,7 +525,10 @@ class RemoteSshExecutor:
         return self._stream_and_sync(job_root=job_root, remote_root=remote_root, active_record_path=active_record_path, status_writer=status_writer, start_seq=0)
 
     def resume_job(self, *, active_record: Dict[str, Any], active_record_path: Path, status_writer: StatusWriter) -> Dict[str, Any]:
-        job_root = Path(str(active_record["local_job_root"]))
+        raw_local_root = active_record.get("local_job_root")
+        if not raw_local_root:
+            raise RuntimeError("Remote active job record is missing local_job_root.")
+        job_root = Path(str(raw_local_root))
         remote_root = str(active_record["remote_path"])
         start_seq = int(active_record.get("last_event_seq") or 0)
         return self._stream_and_sync(job_root=job_root, remote_root=remote_root, active_record_path=active_record_path, status_writer=status_writer, start_seq=start_seq)
@@ -492,7 +540,7 @@ class RemoteSshExecutor:
         attempts = 0
         while not terminal and attempts < 4:
             sync_state = "streaming" if attempts == 0 else "reconnecting"
-            status_writer(job_root, remote_sync_state=sync_state, remote_host=self.config.host, remote_job_root=remote_root, last_event_seq=state.last_seq)
+            status_writer(job_root, remote_sync_state=sync_state, remote_host=self.config.host, remote_job_root=remote_root, remote_error="" if attempts == 0 else None, last_event_seq=state.last_seq)
             proc: subprocess.Popen | None = None
             try:
                 proc = self.client.popen_runner(["stream", "--job-root", remote_root, "--from-seq", str(state.last_seq), "--heartbeat-interval", str(self.config.heartbeat_interval_s)])
@@ -533,17 +581,20 @@ class RemoteSshExecutor:
     def _handle_event(self, event: Dict[str, Any], job_root: Path, remote_root: str, status_writer: StatusWriter) -> bool:
         event_type = str(event.get("type") or "")
         status_record = event.get("status_record") if isinstance(event.get("status_record"), dict) else {}
-        status = event.get("status") or status_record.get("status")
+        if event_type in {"case_completed", "case_failed", "artifact"}:
+            status = status_record.get("status") or "running"
+        else:
+            status = event.get("status") or status_record.get("status")
         progress_total = event.get("progress_total", status_record.get("progress_total"))
         progress_completed = event.get("progress_completed", status_record.get("progress_completed"))
         if event_type in {"case_completed", "artifact"}:
-            status_writer(job_root, remote_sync_state="syncing", status=status, progress_total=progress_total, progress_completed=progress_completed)
+            status_writer(job_root, remote_sync_state="syncing", status=status, remote_error="")
             self.client.pull_dir(remote_root, job_root, delete=False)
         elif event_type == "heartbeat":
-            status_writer(job_root, status=status, progress_total=progress_total, progress_completed=progress_completed, remote_sync_state="streaming")
+            status_writer(job_root, status=status, progress_total=progress_total, progress_completed=progress_completed, remote_sync_state="streaming", remote_error="")
         else:
-            status_writer(job_root, status=status, progress_total=progress_total, progress_completed=progress_completed, remote_sync_state="streaming")
-        return event_type in {"completed", "failed", "cancelled"} or str(status) in REMOTE_TERMINAL_STATUSES
+            status_writer(job_root, status=status, progress_total=progress_total, progress_completed=progress_completed, remote_sync_state="streaming", remote_error="")
+        return event_type in {"completed", "failed", "cancelled"} or (event_type in {"status", "heartbeat"} and str(status) in REMOTE_TERMINAL_STATUSES)
 
     def _update_active_record(self, active_record_path: Path, **updates: Any) -> None:
         try:
@@ -555,10 +606,13 @@ class RemoteSshExecutor:
         active_record_path.write_text(json.dumps(record, indent=2, sort_keys=True))
 
     def _verify_final_sync(self, job_root: Path) -> None:
-        required = ["status.json", "summary.json", "request.json", "artifacts.json"]
+        required = ["status.json", "summary.json", "request.json"]
         missing = [name for name in required if not (job_root / name).exists()]
         if missing:
             raise RuntimeError(f"Remote final sync missing expected file(s): {', '.join(missing)}")
+        summary = self._load_json(job_root / "summary.json")
+        if summary.get("case_count") is not None and str(summary.get("status")) in {"completed", "partial"} and not (job_root / "cases.jsonl").exists():
+            raise RuntimeError("Remote final sync missing expected file(s): cases.jsonl")
 
     @staticmethod
     def _load_json(path: Path) -> Dict[str, Any]:

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from bisect import insort
@@ -53,6 +54,8 @@ ACTIVE_JOB_LOCK = LOCKS_ROOT / "active_job.lock"
 SCHEMA_VERSION_PATH = WORKSPACE_ROOT / "schema_version.json"
 WORKER_MODULE = "webui.service.worker_runner"
 SWEEP_CASES_JSONL = "cases.jsonl"
+CASE_FAILURES_JSONL = "case_failures.jsonl"
+CASE_FAILURE_LOG_TAIL_CHARS = 4000
 LAST_UI_STATE_FILENAME = "last_ui_state.json"
 LAST_UI_STATE_LIMIT = 5
 LAST_UI_STATE_MAX_TEXT = 2048
@@ -105,7 +108,7 @@ NETWORK_SWEEP_TARGETS: List[Dict[str, str]] = [
     for idx in range(3)
     for target in (
         {"value": f"hardware.network.dim{idx}.bandwidth_gbs", "slug": f"d{idx}bw", "kind": "bandwidth", "dim": str(idx), "label": f"Dimension {idx} Bandwidth (GB/s)", "short_label": f"D{idx} BW"},
-        {"value": f"hardware.network.dim{idx}.latency_s", "slug": f"d{idx}lat", "kind": "latency", "dim": str(idx), "label": f"Dimension {idx} Latency (s)", "short_label": f"D{idx} Latency"},
+        {"value": f"hardware.network.dim{idx}.latency_s", "slug": f"d{idx}lat", "kind": "latency", "dim": str(idx), "label": f"Dimension {idx} Latency", "short_label": f"D{idx} Latency"},
     )
 ]
 NETWORK_SWEEP_FIELD_OPTIONS: List[Dict[str, str]] = [{"value": target["value"], "label": target["label"]} for target in NETWORK_SWEEP_TARGETS]
@@ -164,7 +167,7 @@ PRECISION_OVERRIDE_FIELDS = [
 OPTIMIZER_PRESETS = {
     "Fast": {
         "training": {
-            "tp": [4, 8, 16],
+            "tp": [1, 2, 4, 8, 16],
             "cp": [1, 2, 4],
             "dp": [1, 2, 4, 8, 16],
             "pp": [1, 2, 4, 8, 16],
@@ -173,9 +176,9 @@ OPTIMIZER_PRESETS = {
             "tp_cp_max": 512,
         },
         "inference": {
-            "tp": [8, 16],
+            "tp": [1, 2, 4, 8, 16],
             "cp": [1, 2, 3, 4, 5],
-            "pp": [1, 2, 3],
+            "pp": [1, 2, 3, 4],
             "ep": [1, 2, 4],
             "tp_cp_min": 1,
             "tp_cp_max": 512,
@@ -343,11 +346,24 @@ def _yaml_write_if_changed(path: Path, data: Dict[str, Any]) -> None:
 
 def _json_dump(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    tmp_handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent), mode="w", delete=False)
+    tmp_path = Path(tmp_handle.name)
+    try:
+        with tmp_handle:
+            tmp_handle.write(json.dumps(payload, indent=2, sort_keys=True))
+            tmp_handle.flush()
+            os.fsync(tmp_handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _json_load(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _last_ui_state_path() -> Path:
@@ -400,7 +416,7 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
                 "field": _trim_text(row.get("field"), 128),
                 "network_field": _trim_text(row.get("network_field"), 128),
                 "network_targets": _trim_string_list(row.get("network_targets"), 6),
-                "network_apply": row.get("network_apply") if row.get("network_apply") in {"set", "scale"} else "set",
+                "network_apply": row.get("network_apply") if row.get("network_apply") in {"set", "scale"} else "scale",
                 "mode": mode,
                 "list_text": _trim_text(row.get("list_text"), LAST_UI_STATE_MAX_TEXT) or "",
                 "config_values": _trim_string_list(row.get("config_values"), 24),
@@ -410,7 +426,7 @@ def _sanitize_dimension_controls(rows: Any) -> List[Dict[str, Any]]:
             }
         )
     while len(sanitized) < 3:
-        sanitized.append({"field": None, "network_field": None, "network_targets": [], "network_apply": "set", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
+        sanitized.append({"field": None, "network_field": None, "network_targets": [], "network_apply": "scale", "mode": "values", "list_text": "", "config_values": [], "start": None, "end": None, "step_or_points": None})
     return sanitized
 
 
@@ -511,6 +527,16 @@ def _path_artifact_type(path: Path) -> str:
     if suffix in {".png", ".jpg", ".jpeg", ".svg", ".html"}:
         return "visual"
     return "file"
+
+
+def _is_internal_artifact_path(path: Path, job_root: Path) -> bool:
+    parts = path.relative_to(job_root).parts
+    return any(
+        part in {"astra_cache", "memory-summary"}
+        or part.startswith("astrasim_")
+        or (part == "log" and index >= 2 and parts[index - 2] == "artifacts")
+        for index, part in enumerate(parts)
+    )
 
 
 def prettify_name(stem: str) -> str:
@@ -856,16 +882,28 @@ def is_vit_model(model_dict: Dict[str, Any]) -> bool:
     return get_model_type(model_dict) in VIT_MODEL_TYPES
 
 
+def model_uses_moe(model_dict: Dict[str, Any]) -> bool:
+    model_param = model_dict.get("model_param", {}) or {}
+    moe = model_param.get("moe", {}) or {}
+    num_experts = _safe_int(moe.get("num_experts"), 1)
+    return num_experts > 1 or "moe" in get_model_type(model_dict)
+
+
+def model_sequence_length(model_dict: Dict[str, Any]) -> int:
+    return _safe_int((model_dict.get("model_param", {}) or {}).get("seq_len"), 0)
+
+
 def get_total_gpu_count(hw_dict: Dict[str, Any], run_type: str) -> int:
     parallelism = hw_dict.get("parallelism", {})
     tp = int(parallelism.get("tp", 1) or 1)
     cp = int(parallelism.get("cp", 1) or 1)
     pp = int(parallelism.get("pp", 1) or 1)
     train_block = parallelism.get("train", {}) or {}
-    ep = int(train_block.get("ep", 1) or 1)
     if run_type == "inference":
         replica_count = int((parallelism.get("inference", {}) or {}).get("replica_count", 1) or 1)
+        ep = int((parallelism.get("inference", {}) or {}).get("moe_dp", train_block.get("ep", 1)) or 1)
         return max(1, tp * cp * pp * ep * replica_count)
+    ep = int(train_block.get("ep", 1) or 1)
     dp = int(train_block.get("dp", 1) or 1)
     return max(1, tp * cp * pp * ep * dp)
 
@@ -1063,7 +1101,7 @@ def build_form_defaults(model_preset_id: str, hardware_preset_id: str) -> Dict[s
             "cp": int(parallelism.get("cp", 1) or 1),
             "pp": int(parallelism.get("pp", 1) or 1),
             "dp": int(train_block.get("dp", 1) or 1),
-            "ep": int(train_block.get("ep", 1) or 1),
+            "ep": int((inference_block.get("moe_dp") if run_type == "inference" else train_block.get("ep", 1)) or 1),
             "replica_count": int(inference_block.get("replica_count", 1) or 1) if run_type == "inference" else 1,
             "hbm_gb": parse_size_to_gb(hardware.get("tech_param", {}).get("DRAM", {}).get("size", "0 GB")),
             "compute_derate": float(hardware.get("tech_param", {}).get("core", {}).get("util", 1.0) or 1.0),
@@ -1212,8 +1250,13 @@ def _apply_hardware_overrides(hardware: Dict[str, Any], payload: Dict[str, Any])
     train_block = parallelism.setdefault("train", {})
     inference_block = parallelism.setdefault("inference", {})
     train_block["dp"] = _safe_int(simple.get("dp"), _safe_int(train_block.get("dp"), 1))
-    train_block["ep"] = _safe_int(simple.get("ep"), _safe_int(train_block.get("ep"), 1))
-    inference_block["replica_count"] = _safe_int(simple.get("replica_count"), _safe_int(inference_block.get("replica_count"), 1)) if run_type == "inference" else 1
+    if run_type == "inference":
+        inference_block["moe_dp"] = _safe_int(simple.get("ep"), _safe_int(inference_block.get("moe_dp"), _safe_int(train_block.get("ep"), 1)))
+        train_block["ep"] = 1
+        inference_block["replica_count"] = _safe_int(simple.get("replica_count"), _safe_int(inference_block.get("replica_count"), 1))
+    else:
+        train_block["ep"] = _safe_int(simple.get("ep"), _safe_int(train_block.get("ep"), 1))
+        inference_block["replica_count"] = 1
     execution_backend = hardware.setdefault("execution_backend", {})
     execution_backend["model"] = "astra" if bool(simple.get("use_astrasim", False)) else "analytical"
     astra = execution_backend.setdefault("astra", {})
@@ -1402,7 +1445,8 @@ def _scale_parallelism_to_total_gpus(hardware: Dict[str, Any], run_type: str, ta
     cp = _safe_int(parallelism.get("cp"), 1)
     pp = _safe_int(parallelism.get("pp"), 1)
     train_block = parallelism.setdefault("train", {})
-    ep = _safe_int(train_block.get("ep"), 1)
+    inference_block = parallelism.setdefault("inference", {})
+    ep = _safe_int(inference_block.get("moe_dp"), _safe_int(train_block.get("ep"), 1)) if run_type == "inference" else _safe_int(train_block.get("ep"), 1)
     fixed_product = max(1, tp * cp * pp * ep)
     if target_total_gpus % fixed_product != 0:
         raise ValueError(
@@ -1411,7 +1455,7 @@ def _scale_parallelism_to_total_gpus(hardware: Dict[str, Any], run_type: str, ta
         )
     scaled_axis = max(1, target_total_gpus // fixed_product)
     if run_type == "inference":
-        parallelism.setdefault("inference", {})["replica_count"] = scaled_axis
+        inference_block["replica_count"] = scaled_axis
     else:
         train_block["dp"] = scaled_axis
 
@@ -1441,6 +1485,18 @@ def _format_network_bandwidth_value(bandwidth_gbs: float) -> Any:
     if abs(bandwidth_gbs - round(bandwidth_gbs)) < 1e-9:
         return format_gb(bandwidth_gbs)
     return bandwidth_gbs * 1e9
+
+
+def _format_latency_seconds(value: Any) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(seconds) < 1e-3:
+        return f"{seconds * 1e6:.2f} us"
+    if abs(seconds) < 1:
+        return f"{seconds * 1e3:.2f} ms"
+    return f"{seconds:.3f} s"
 
 
 def _apply_network_target_dimension(hardware: Dict[str, Any], target: str, value: Any, apply_mode: str) -> None:
@@ -1507,6 +1563,8 @@ def _apply_scalar_dimension(model: Dict[str, Any], hardware: Dict[str, Any], fie
 def _format_case_dimension(key: str, value: Any) -> str:
     if key in {"model_config", "hardware_config"}:
         return config_label(value)
+    if key.endswith(".latency_s"):
+        return f"{dimension_label(key)} {_format_latency_seconds(value)}"
     return f"{dimension_label(key)} {value}"
 
 
@@ -1571,6 +1629,20 @@ def _fallback_parallelism_candidate(run_type: str, target_total_gpus: int, repli
     return {"tp": target_total_gpus // replica_count, "cp": 1, "pp": 1, "dp": 1, "ep": 1, "replica_count": replica_count}
 
 
+def _is_full_parallelism_preset(preset_name: str) -> bool:
+    return str(preset_name or "").strip().lower() in {"exhaustive", "full"}
+
+
+def _candidate_allowed_for_parallelism_preset(model_dict: Dict[str, Any], candidate: Dict[str, Any], preset_name: str) -> bool:
+    if not _is_full_parallelism_preset(preset_name):
+        return True
+    if _safe_int(candidate.get("ep"), 1) > 1 and not model_uses_moe(model_dict):
+        return False
+    if _safe_int(candidate.get("cp"), 1) > 1 and model_sequence_length(model_dict) < 8192:
+        return False
+    return True
+
+
 def generate_parallelism_candidates(hardware_dict: Dict[str, Any], run_type: str, target_total_gpus: int, preset_name: str) -> List[Dict[str, Any]]:
     preset = OPTIMIZER_PRESETS.get(preset_name, OPTIMIZER_PRESETS["Fast"])[run_type]
     candidates = []
@@ -1580,6 +1652,8 @@ def generate_parallelism_candidates(hardware_dict: Dict[str, Any], run_type: str
     pp_values = _candidate_axis_values(preset["pp"], target_total_gpus)
     ep_values = _candidate_axis_values(preset["ep"], target_total_gpus)
     for tp, cp, pp, ep in itertools.product(tp_values, cp_values, pp_values, ep_values):
+        if cp > 1 and ep > 1:
+            continue
         tp_cp = tp * cp
         if preset["tp_cp_min"] is not None and tp_cp < preset["tp_cp_min"]:
             continue
@@ -1602,15 +1676,23 @@ def generate_parallelism_candidates(hardware_dict: Dict[str, Any], run_type: str
     return candidates
 
 
-def apply_parallelism_candidate(hardware_dict: Dict[str, Any], candidate: Dict[str, int]) -> Dict[str, Any]:
+def apply_parallelism_candidate(hardware_dict: Dict[str, Any], candidate: Dict[str, int], run_type: str | None = None) -> Dict[str, Any]:
     updated = copy.deepcopy(hardware_dict)
     parallelism = updated.setdefault("parallelism", {})
     parallelism["tp"] = candidate["tp"]
     parallelism["cp"] = candidate["cp"]
     parallelism["pp"] = candidate["pp"]
-    parallelism.setdefault("train", {})["dp"] = candidate["dp"]
-    parallelism.setdefault("train", {})["ep"] = candidate["ep"]
-    parallelism.setdefault("inference", {})["replica_count"] = candidate.get("replica_count", 1)
+    train_block = parallelism.setdefault("train", {})
+    inference_block = parallelism.setdefault("inference", {})
+    if str(run_type or "").lower() == "inference":
+        train_block["dp"] = 1
+        train_block["ep"] = 1
+        inference_block["moe_dp"] = candidate["ep"]
+        inference_block["replica_count"] = candidate.get("replica_count", 1)
+    else:
+        train_block["dp"] = candidate["dp"]
+        train_block["ep"] = candidate["ep"]
+        inference_block["replica_count"] = candidate.get("replica_count", 1)
     return updated
 
 
@@ -1618,7 +1700,9 @@ def generate_valid_parallelism_candidates(model_dict: Dict[str, Any], hardware_d
     valid_candidates: List[Dict[str, Any]] = []
     rejected_candidates: List[Dict[str, Any]] = []
     for candidate in generate_parallelism_candidates(hardware_dict, run_type, target_total_gpus, preset_name):
-        candidate_hw = apply_parallelism_candidate(hardware_dict, candidate)
+        if not _candidate_allowed_for_parallelism_preset(model_dict, candidate, preset_name):
+            continue
+        candidate_hw = apply_parallelism_candidate(hardware_dict, candidate, run_type)
         try:
             _validate_pair(model_dict, candidate_hw)
         except Exception as exc:  # noqa: BLE001
@@ -1751,13 +1835,13 @@ def build_launch_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
         if total_invocations == 0 and top_level_cases:
             warnings.append("Parallelism optimization produced zero feasible candidates across all cases.")
         if pruned_parallelism_candidate_count:
-            warnings.append(f"Pruned {pruned_parallelism_candidate_count} invalid optimized parallelism candidate(s) before launch.")
+            warnings.append(f"Skipped {pruned_parallelism_candidate_count} unsupported optimized parallelism candidate(s) before launch.")
     else:
         total_invocations = len(top_level_cases)
     return {
         "ok": not errors,
         "errors": errors,
-        "warnings": warnings + (["This launch is large. Expect long wall-clock time and heavy local resource usage."] if total_invocations > 256 else []),
+        "warnings": warnings,
         "run_type": run_type,
         "metric": metric,
         "optimizer_enabled": optimize,
@@ -1801,6 +1885,11 @@ def _job_summary_from_dir(path: Path, job_kind: str) -> Dict[str, Any]:
         "status": status.get("status", "unknown"),
         "created_at": status.get("created_at") or request.get("created_at"),
         "updated_at": status.get("updated_at") or status.get("created_at"),
+        "progress_completed": status.get("progress_completed"),
+        "progress_total": status.get("progress_total"),
+        "execution_mode": status.get("execution_mode") or status.get("remote_execution_mode"),
+        "remote_host": status.get("remote_host"),
+        "remote_sync_state": status.get("remote_sync_state"),
         "title": request.get("title") or summary.get("title") or path.name,
         "metric": summary.get("best_metric_label") or summary.get("primary_metric_label"),
         "metric_value": summary.get("best_metric_value") or summary.get("primary_metric_value"),
@@ -1983,6 +2072,19 @@ def result_memory_exceeded(result: Dict[str, Any]) -> bool:
     return exceeded or violation_gb > 0
 
 
+def should_log_case_failure(result: Dict[str, Any]) -> bool:
+    return result.get("status") != "completed" or bool(result.get("error"))
+
+
+def _text_tail(path: Optional[Path], limit: int = CASE_FAILURE_LOG_TAIL_CHARS) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
 def pick_best_optimized_result(results: List[Dict[str, Any]], metric: str) -> Dict[str, Any]:
     memory_fitting = [item for item in results if not result_memory_exceeded(item)]
     if memory_fitting:
@@ -2078,7 +2180,11 @@ class RunManager:
         except (OSError, json.JSONDecodeError):
             active_path.unlink(missing_ok=True)
             return
-        local_root = Path(str(record.get("local_job_root") or ""))
+        raw_local_root = record.get("local_job_root")
+        if not raw_local_root:
+            active_path.unlink(missing_ok=True)
+            return
+        local_root = Path(str(raw_local_root))
         if not local_root.exists():
             active_path.unlink(missing_ok=True)
             return
@@ -2129,6 +2235,8 @@ class RunManager:
         entries = []
         for path in sorted(job_root.rglob("*")):
             if not path.is_file() or path.name == "artifacts.json":
+                continue
+            if _is_internal_artifact_path(path, job_root):
                 continue
             rel_path = path.relative_to(job_root).as_posix()
             entries.append(
@@ -2245,7 +2353,11 @@ class RunManager:
                 self._active_job = None
 
     def _resume_remote_job_thread(self, record: Dict[str, Any]) -> None:
-        job_root = Path(str(record.get("local_job_root")))
+        raw_local_root = record.get("local_job_root")
+        if not raw_local_root:
+            remote_active_job_path().unlink(missing_ok=True)
+            return
+        job_root = Path(str(raw_local_root))
         try:
             summary = get_remote_executor().resume_job(active_record=record, active_record_path=remote_active_job_path(), status_writer=self._write_status)
             status_record = _json_load(job_root / "status.json") if (job_root / "status.json").exists() else {}
@@ -2336,6 +2448,51 @@ class RunManager:
                 case_plans.append({"top_case": case, "candidate": candidate, "candidate_index": idx})
         return self._execute_case_set(job_root, case_plans, preview["metric"], True, preview["timeout_seconds"], preview["worker_count"])
 
+    def _append_case_failure_log(
+        self,
+        job_root: Path,
+        result: Dict[str, Any],
+        *,
+        result_path: Optional[Path] = None,
+        stdout_path: Optional[Path] = None,
+        stderr_path: Optional[Path] = None,
+    ) -> None:
+        if not should_log_case_failure(result):
+            return
+
+        def rel(path: Optional[Path]) -> Optional[str]:
+            if path is None:
+                return None
+            try:
+                return path.relative_to(job_root).as_posix()
+            except ValueError:
+                return str(path)
+
+        record = {
+            "created_at": utc_now(),
+            "case_id": result.get("case_id"),
+            "top_case_id": result.get("top_case_id") or result.get("case_id"),
+            "label": result.get("label"),
+            "status": result.get("status"),
+            "error": result.get("error"),
+            "warnings": result.get("warnings") or [],
+            "candidate": result.get("candidate"),
+            "dimension_values": result.get("dimension_values") or {},
+            "metrics": result.get("metrics") or {},
+            "result_path": rel(result_path),
+            "stdout_path": rel(stdout_path),
+            "stderr_path": rel(stderr_path),
+        }
+        stdout_tail = _text_tail(stdout_path)
+        stderr_tail = _text_tail(stderr_path)
+        if stdout_tail:
+            record["stdout_tail"] = stdout_tail
+        if stderr_tail:
+            record["stderr_tail"] = stderr_tail
+        with self._lock:
+            with (job_root / CASE_FAILURES_JSONL).open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
     def _execute_case_set(self, job_root: Path, case_plans: List[Dict[str, Any]], metric: str, optimize: bool, timeout_seconds: int, workers: int) -> Dict[str, Any]:
         results_by_top_case: Dict[str, List[Dict[str, Any]]] = {}
         progress_total, completed = len(case_plans), 0
@@ -2345,7 +2502,7 @@ class RunManager:
             if self._cancel_event.is_set():
                 return {"status": "cancelled", "top_case_id": plan["top_case"]["case_id"]}
             top_case = plan["top_case"]
-            hardware = apply_parallelism_candidate(top_case["hardware"], plan["candidate"]) if plan.get("candidate") else top_case["hardware"]
+            hardware = apply_parallelism_candidate(top_case["hardware"], plan["candidate"], top_case.get("run_type")) if plan.get("candidate") else top_case["hardware"]
             case_id = top_case["case_id"] if not optimize else f"{top_case['case_id']}-cand-{plan['candidate_index']:03d}"
             return self._execute_worker_case(job_root, case_id, top_case["model"], hardware, timeout_seconds, top_case_id=top_case["case_id"], candidate=plan.get("candidate"), case_label=top_case["label"], dimension_values=top_case.get("dimension_values", {}))
 
@@ -2357,7 +2514,18 @@ class RunManager:
                 try:
                     result = future.result()
                 except Exception as exc:
-                    result = {"status": "failed", "error": str(exc), "top_case_id": plan["top_case"]["case_id"], "case_id": plan["top_case"]["case_id"], "label": plan["top_case"]["label"]}
+                    result = {
+                        "status": "failed",
+                        "error": str(exc),
+                        "top_case_id": plan["top_case"]["case_id"],
+                        "case_id": plan["top_case"]["case_id"],
+                        "label": plan["top_case"]["label"],
+                        "candidate": plan.get("candidate"),
+                        "metrics": {},
+                        "warnings": [],
+                        "dimension_values": plan["top_case"].get("dimension_values", {}),
+                    }
+                    self._append_case_failure_log(job_root, result)
                 results_by_top_case.setdefault(result["top_case_id"], []).append(result)
                 self._write_status(job_root, progress_total=progress_total, progress_completed=completed)
                 if self._cancel_event.is_set():
@@ -2397,34 +2565,58 @@ class RunManager:
         model_path.write_text(_yaml_dump(model_dict))
         hardware_path.write_text(_yaml_dump(hardware_dict))
         cmd = [str(PYTHON_BIN), "-m", WORKER_MODULE, "--model-config", str(model_path), "--hardware-config", str(hardware_path), "--result-json", str(result_path), "--output-dir", str(case_root)]
-        with stdout_path.open("w") as stdout_handle, stderr_path.open("w") as stderr_handle:
-            process = subprocess.Popen(cmd, cwd=str(case_root), stdout=stdout_handle, stderr=stderr_handle, env=worker_subprocess_env())  # noqa: S603
-            with self._lock:
-                self._processes[case_id] = ActiveProcess(process=process, log_path=stdout_path, err_path=stderr_path)
-            try:
-                process.wait(timeout=float(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                return {"case_id": case_id, "top_case_id": top_case_id or case_id, "label": case_label or case_id, "status": "timed_out", "error": f"Timed out after {timeout_seconds}s", "candidate": candidate, "metrics": {}, "warnings": [], "dimension_values": dimension_values or {}}
-            finally:
+
+        def base_result(**updates: Any) -> Dict[str, Any]:
+            result = {
+                "case_id": case_id,
+                "top_case_id": top_case_id or case_id,
+                "label": case_label or case_id,
+                "candidate": candidate,
+                "metrics": {},
+                "warnings": [],
+                "dimension_values": dimension_values or {},
+            }
+            result.update(updates)
+            return result
+
+        def finish(result: Dict[str, Any]) -> Dict[str, Any]:
+            self._append_case_failure_log(job_root, result, result_path=result_path, stdout_path=stdout_path, stderr_path=stderr_path)
+            return result
+
+        try:
+            timeout_result: Optional[Dict[str, Any]] = None
+            with stdout_path.open("w") as stdout_handle, stderr_path.open("w") as stderr_handle:
+                process = subprocess.Popen(cmd, cwd=str(case_root), stdout=stdout_handle, stderr=stderr_handle, env=worker_subprocess_env())  # noqa: S603
                 with self._lock:
-                    self._processes.pop(case_id, None)
-        if self._cancel_event.is_set():
-            return {"case_id": case_id, "top_case_id": top_case_id or case_id, "label": case_label or case_id, "status": "cancelled", "error": "Cancelled by request.", "candidate": candidate, "metrics": {}, "warnings": [], "dimension_values": dimension_values or {}}
-        worker_result = _json_load(result_path) if result_path.exists() else {"success": False, "error": "Worker did not produce a result file.", "metrics": {}}
-        return {
-            "case_id": case_id,
-            "top_case_id": top_case_id or case_id,
-            "label": case_label or case_id,
-            "status": "completed" if worker_result.get("success") else "failed",
-            "candidate": candidate,
-            "metrics": worker_result.get("metrics", {}),
-            "warnings": worker_result.get("warnings", []),
-            "error": worker_result.get("error"),
-            "dimension_values": dimension_values or worker_result.get("dimension_values", {}),
-            "primary_metric_label": worker_result.get("primary_metric_label"),
-            "primary_metric_value": worker_result.get("primary_metric_value"),
-        }
+                    self._processes[case_id] = ActiveProcess(process=process, log_path=stdout_path, err_path=stderr_path)
+                try:
+                    process.wait(timeout=float(timeout_seconds) if timeout_seconds and timeout_seconds > 0 else None)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    timeout_result = base_result(status="timed_out", error=f"Timed out after {timeout_seconds}s")
+                finally:
+                    with self._lock:
+                        self._processes.pop(case_id, None)
+            if timeout_result is not None:
+                return finish(timeout_result)
+            if self._cancel_event.is_set():
+                return finish(base_result(status="cancelled", error="Cancelled by request."))
+            worker_result = _json_load(result_path) if result_path.exists() else {"success": False, "error": "Worker did not produce a result file.", "metrics": {}}
+            return finish(
+                base_result(
+                    status="completed" if worker_result.get("success") else "failed",
+                    metrics=worker_result.get("metrics", {}),
+                    warnings=worker_result.get("warnings", []),
+                    error=worker_result.get("error"),
+                    dimension_values=dimension_values or worker_result.get("dimension_values", {}),
+                    primary_metric_label=worker_result.get("primary_metric_label"),
+                    primary_metric_value=worker_result.get("primary_metric_value"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._processes.pop(case_id, None)
+            return finish(base_result(status="failed", error=str(exc)))
 
     def _write_status(
         self,
@@ -2442,32 +2634,38 @@ class RunManager:
         last_event_seq: Optional[int] = None,
     ) -> None:
         path = job_root / "status.json"
-        record = _json_load(path) if path.exists() else {}
-        if status is not None:
-            record["status"] = status
-        if error is not None:
-            record["error"] = error
-        if progress_total is not None:
-            record["progress_total"] = progress_total
-        if progress_completed is not None:
-            record["progress_completed"] = progress_completed
-        if remote_sync_state is not None:
-            record["remote_sync_state"] = remote_sync_state
-        if remote_host is not None:
-            record["remote_host"] = remote_host
-        if remote_job_root is not None:
-            record["remote_job_root"] = remote_job_root
-        if remote_pid is not None:
-            record["remote_pid"] = remote_pid
-        if remote_error is not None:
-            record["remote_error"] = remote_error
-        if last_event_seq is not None:
-            record["last_event_seq"] = last_event_seq
-        record["updated_at"] = utc_now()
-        if "created_at" not in record:
-            record["created_at"] = record["updated_at"]
-        _json_dump(path, record)
         with self._lock:
+            record = _json_load(path) if path.exists() else {}
+            if status is not None:
+                record["status"] = status
+            if error is not None:
+                record["error"] = error
+            if progress_total is not None:
+                existing_total = _safe_int(record.get("progress_total"), 0)
+                incoming_total = _safe_int(progress_total, existing_total)
+                record["progress_total"] = max(existing_total, incoming_total)
+            if progress_completed is not None:
+                existing_completed = _safe_int(record.get("progress_completed"), 0)
+                incoming_completed = _safe_int(progress_completed, existing_completed)
+                completed_value = max(existing_completed, incoming_completed)
+                total_value = _safe_int(record.get("progress_total"), 0)
+                record["progress_completed"] = min(completed_value, total_value) if total_value > 0 else completed_value
+            if remote_sync_state is not None:
+                record["remote_sync_state"] = remote_sync_state
+            if remote_host is not None:
+                record["remote_host"] = remote_host
+            if remote_job_root is not None:
+                record["remote_job_root"] = remote_job_root
+            if remote_pid is not None:
+                record["remote_pid"] = remote_pid
+            if remote_error is not None:
+                record["remote_error"] = remote_error
+            if last_event_seq is not None:
+                record["last_event_seq"] = last_event_seq
+            record["updated_at"] = utc_now()
+            if "created_at" not in record:
+                record["created_at"] = record["updated_at"]
+            _json_dump(path, record)
             if self._active_job and str(job_root) == self._active_job.get("root"):
                 updates = {
                     "status": record.get("status"),

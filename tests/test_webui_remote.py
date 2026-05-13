@@ -142,6 +142,40 @@ def test_rsync_upload_command_is_safe_and_path_constrained(monkeypatch, tmp_path
     assert calls[1] == ["rsync", "-a", "--delete", f"{local_dir.resolve()}/", "ssh.example.com:/repo/webui/workspace/runs/run-1/"]
 
 
+def test_filtered_remote_pull_stages_and_copies_result_files(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    config = remote.RemoteSshConfig(
+        mode="remote_ssh",
+        host="ssh.example.com",
+        user=None,
+        repo="/repo",
+        branch="remote_backend",
+        workspace="/repo/webui/workspace",
+        python="/repo/.venv/bin/python",
+    )
+    client = remote.RemoteSshClient(config)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rsync" if name == "rsync" else None)
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        stage_dir = Path(argv[-1])
+        (stage_dir / "status.json").write_text(json.dumps({"status": "running"}))
+        (stage_dir / "plots").mkdir()
+        (stage_dir / "plots" / "summary.png").write_text("plot")
+        return SimpleNamespace(returncode=24, stdout="", stderr="")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    local_dir = tmp_path / "job"
+
+    client.pull_dir("/repo/webui/workspace/runs/run-1", local_dir)
+
+    assert (local_dir / "status.json").exists()
+    assert (local_dir / "plots" / "summary.png").read_text() == "plot"
+    assert "--include=/case_failures.jsonl" in calls[0]
+    assert "--exclude=*" in calls[0]
+    assert calls[0][-2] == "ssh.example.com:/repo/webui/workspace/runs/run-1/"
+
+
 def test_remote_event_parser_handles_heartbeat_duplicates_and_malformed_json():
     state = remote.RemoteEventState()
 

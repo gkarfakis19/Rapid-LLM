@@ -1021,8 +1021,43 @@ def test_inference_parallelism_optimizer_preserves_replica_count(monkeypatch, tm
     assert candidates
     assert {candidate["replica_count"] for candidate in candidates} == {2}
     assert all(candidate["tp"] * candidate["cp"] * candidate["pp"] * candidate["ep"] * candidate["replica_count"] == 16 for candidate in candidates)
-    optimized = core.apply_parallelism_candidate(case["hardware"], candidates[0])
+    optimized = core.apply_parallelism_candidate(case["hardware"], candidates[0], "inference")
     assert optimized["parallelism"]["inference"]["replica_count"] == 2
+
+
+def test_inference_gpu_count_uses_moe_dp_not_training_ep():
+    hardware = {
+        "parallelism": {
+            "tp": 2,
+            "cp": 1,
+            "pp": 2,
+            "train": {"dp": 8, "ep": 99},
+            "inference": {"replica_count": 3, "moe_dp": 4},
+        }
+    }
+
+    assert core.get_total_gpu_count(hardware, "inference") == 2 * 1 * 2 * 4 * 3
+
+
+def test_apply_inference_parallelism_candidate_writes_moe_dp_not_train_ep():
+    hardware = {
+        "parallelism": {
+            "tp": 1,
+            "cp": 1,
+            "pp": 1,
+            "train": {"dp": 16, "ep": 16},
+            "inference": {"replica_count": 1, "moe_dp": 1},
+        }
+    }
+    candidate = {"tp": 2, "cp": 1, "pp": 2, "dp": 1, "ep": 4, "replica_count": 3}
+
+    optimized = core.apply_parallelism_candidate(hardware, candidate, "inference")
+
+    assert optimized["parallelism"]["train"]["dp"] == 1
+    assert optimized["parallelism"]["train"]["ep"] == 1
+    assert optimized["parallelism"]["inference"]["moe_dp"] == 4
+    assert optimized["parallelism"]["inference"]["replica_count"] == 3
+    assert core.get_total_gpu_count(optimized, "inference") == 2 * 1 * 2 * 4 * 3
 
 
 def test_raw_parallelism_axis_sweeps_are_rejected(monkeypatch, tmp_path):
@@ -1414,6 +1449,53 @@ def test_worker_case_reports_cancelled_when_cancel_event_is_set(monkeypatch, tmp
 
     assert result["status"] == "cancelled"
     assert result["error"] == "Cancelled by request."
+
+
+def test_write_status_keeps_progress_monotonic(tmp_path):
+    manager = core.RunManager()
+    job_root = tmp_path / "job"
+
+    manager._write_status(job_root, status="running", progress_total=10, progress_completed=8)
+    manager._write_status(job_root, progress_total=5, progress_completed=2)
+
+    status = json.loads((job_root / "status.json").read_text())
+    assert status["progress_total"] == 10
+    assert status["progress_completed"] == 8
+
+
+def test_case_failure_log_captures_failed_case_tails(tmp_path):
+    manager = core.RunManager()
+    job_root = tmp_path / "job"
+    case_root = job_root / "case-0001"
+    case_root.mkdir(parents=True)
+    stdout_path = case_root / "stdout.log"
+    stderr_path = case_root / "stderr.log"
+    result_path = case_root / "result.json"
+    stdout_path.write_text("worker stdout\n")
+    stderr_path.write_text("worker stderr\n")
+
+    manager._append_case_failure_log(
+        job_root,
+        {
+            "case_id": "case-0001",
+            "top_case_id": "case-0001",
+            "label": "Case 1",
+            "status": "failed",
+            "error": "boom",
+            "metrics": {},
+            "warnings": [],
+            "dimension_values": {"model.global_batch_size": 1},
+        },
+        result_path=result_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    records = [json.loads(line) for line in (job_root / core.CASE_FAILURES_JSONL).read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["case_id"] == "case-0001"
+    assert records[0]["stderr_tail"] == "worker stderr\n"
+    assert records[0]["stdout_path"] == "case-0001/stdout.log"
 
 
 def test_single_run_writes_snapshots_and_artifact_manifest(monkeypatch, tmp_path):
