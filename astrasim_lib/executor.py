@@ -1613,6 +1613,26 @@ def convert_rapid_llm_graph_to_chakra_et(
                         comm_name = tp_collective_labels[task]
                     else:
                         comm_name = f"{task.name}_{task.op_id}_dp{dp_idx}"
+
+                    # Single-member communicator groups are semantically no-ops
+                    # (nothing to exchange) and AstraSim's native ring collectives
+                    # never terminate for 1-node rings (stream_count == 0, so the
+                    # exit condition is unreachable and the sim deadlocks). This
+                    # happens e.g. for MoE + dp > 1, where the ep-axis component
+                    # of the dense-grad all-reduce projects onto the pipeline
+                    # graph as a per-rank singleton group. Emit a zero-duration
+                    # compute node instead to keep dependency chains intact.
+                    if task in tp_collective_labels:
+                        label = tp_collective_labels[task]
+                        gid = _TP_LABEL_DP_TO_ID.get((label, dp_idx))
+                        members = _LAST_TP_GROUPS.get(gid) if gid else None
+                        if members is not None and len(members) <= 1:
+                            noop_node = new_comp_node(node_id, f"{comm_name}_noop", 0)
+                            noop_node.ctrl_deps.extend(unique_deps)
+                            trace.append_node(noop_node)
+                            collective_et_ids[(task, rank)] = node_id
+                            continue
+
                     comm_node = new_comm_node(
                         node_id,
                         comm_name,

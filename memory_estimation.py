@@ -548,7 +548,12 @@ class MemoryEstimator:
                 moe_scale = 1.0
                 if tokens_owner > 0:
                     tokens_dispatched = tokens_owner * float(getattr(tc, "moe_top_k", 1))
-                    tokens_local = math.ceil(tokens_dispatched / float(max(1, moe_group)))
+                    # Training EP ranks own distinct tokens: balanced routing means
+                    # each rank receives as many routed tokens as it dispatches, so
+                    # no division applies. Inference pools tp*moe_dp ranks over the
+                    # same owner tokens (see TimeCalculationLLM._moe_local_share_divisor).
+                    share_divisor = 1 if mode == "training" else max(1, moe_group)
+                    tokens_local = math.ceil(tokens_dispatched / float(share_divisor))
                     if mode != "training":
                         experts_per_rank = int(
                             max(1, float(getattr(tc, "moe_num_experts", 1)) / float(max(1, moe_group)))

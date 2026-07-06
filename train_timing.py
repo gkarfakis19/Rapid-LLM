@@ -432,6 +432,22 @@ class TimeCalculationLLM(TimeCalculation):
             return max(1, int(self.tp) * int(self.ep))
         return max(1, int(self.ep))
 
+    def _moe_local_share_divisor(self) -> int:
+        """Number of ranks sharing one owner's dispatched routed tokens.
+
+        In training every EP rank owns a distinct microbatch: with balanced
+        routing each rank receives as many routed tokens as it dispatches
+        (tokens_owner * top_k), because the other ep-1 ranks' dispatches fill
+        in what this rank sends away. The local expert workload is therefore
+        the full per-rank dispatch and no division applies. In inference the
+        pooled tp * moe_dp group serves the *same* owner tokens, so the
+        dispatched work is split across the pool.
+        """
+        run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
+        if run_type == "inference":
+            return max(1, self._moe_routing_group())
+        return 1
+
     def _moe_allow_padding(self) -> bool:
         run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
         return run_type == "inference"
@@ -644,8 +660,8 @@ class TimeCalculationLLM(TimeCalculation):
         return max(tokens_local, inflated_tokens)
 
     def _moe_tokens_local(self, tokens_dispatched: int) -> int:
-        moe_group = self._moe_routing_group()
-        tokens_local = int(math.ceil(float(tokens_dispatched) / float(max(1, moe_group))))
+        share_divisor = self._moe_local_share_divisor()
+        tokens_local = int(math.ceil(float(tokens_dispatched) / float(max(1, share_divisor))))
         experts_per_rank = self.experts_per_gpu
         if experts_per_rank > 0:
             return self._moe_apply_expert_imbalance(tokens_local, experts_per_rank)
@@ -660,20 +676,20 @@ class TimeCalculationLLM(TimeCalculation):
     ) -> Tuple[int, int, int, int, int]:
         tokens_owner = self._moe_tokens_owner(batch_size, seq_len)
         tokens_dispatched = self._moe_tokens_dispatched(tokens_owner)
-        moe_group = self._moe_routing_group()
-        if moe_group <= 0:
-            moe_group = 1
+        share_divisor = self._moe_local_share_divisor()
+        if share_divisor <= 0:
+            share_divisor = 1
         if allow_padding:
-            tokens_dispatched = int(math.ceil(float(tokens_dispatched) / float(moe_group)) * moe_group)
+            tokens_dispatched = int(math.ceil(float(tokens_dispatched) / float(share_divisor)) * share_divisor)
         else:
-            if tokens_dispatched % moe_group != 0:
+            if tokens_dispatched % share_divisor != 0:
                 raise ValueError(
                     "MoE routed tokens must divide evenly across the MoE routing group for batched expert GEMMs. "
-                    f"tokens_dispatched={tokens_dispatched}, moe_group={moe_group}, "
+                    f"tokens_dispatched={tokens_dispatched}, share_divisor={share_divisor}, "
                     f"tp={self.tp}, ep={self.ep}, tokens_owner={tokens_owner}, "
                     f"batch_size={batch_size}, seq_len={seq_len}, top_k={self.moe_top_k}, cp={self.cp}."
                 )
-        tokens_local = tokens_dispatched // moe_group
+        tokens_local = tokens_dispatched // share_divisor
         experts_per_rank = self.experts_per_gpu
         if experts_per_rank <= 0:
             raise ValueError(
@@ -686,13 +702,13 @@ class TimeCalculationLLM(TimeCalculation):
                 tokens_local = int(
                     math.ceil(float(tokens_local) / float(experts_per_rank)) * experts_per_rank
                 )
-                tokens_dispatched = tokens_local * moe_group
+                tokens_dispatched = tokens_local * share_divisor
         else:
             if tokens_local % experts_per_rank != 0:
                 raise ValueError(
                     "MoE routed tokens per rank must divide evenly across experts for batched expert GEMMs. "
                     f"tokens_local={tokens_local}, experts_per_rank={experts_per_rank} "
-                    f"(moe_num_experts={self.moe_num_experts}, moe_group={moe_group}). "
+                    f"(moe_num_experts={self.moe_num_experts}, moe_group={self._moe_routing_group()}). "
                     f"tokens_owner={tokens_owner}, tokens_dispatched={tokens_dispatched}, "
                     f"batch_size={batch_size}, seq_len={seq_len}, top_k={self.moe_top_k}, cp={self.cp}."
                 )
@@ -717,9 +733,9 @@ class TimeCalculationLLM(TimeCalculation):
             seq_len,
             allow_padding=allow_padding,
         )
-        moe_group = max(1, self._moe_routing_group())
+        share_divisor = max(1, self._moe_local_share_divisor())
         tokens_local = self._moe_apply_expert_imbalance(tokens_local_balanced, experts_per_rank)
-        tokens_dispatched = tokens_local * moe_group
+        tokens_dispatched = tokens_local * share_divisor
         # For experts_per_rank > 1 this is just an effective average used by
         # legacy reporting paths; routed expert compute uses a separate
         # hot/cold bucket split in get_moe_ffn_f/get_moe_ffn_b.

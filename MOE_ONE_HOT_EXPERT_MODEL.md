@@ -164,6 +164,25 @@ Hot-rank convention in inference:
 - the first rank in the pooled `tp * moe_dp` group is the hot rank
 - equivalently, for fixed `cp_idx`, the hot rank is `tp_idx = 0, ep_idx = 0`
 
+### Local Token Accounting (training vs inference)
+
+The per-rank routed workload (`tokens_local`) is derived differently for the
+two run types (`_moe_local_share_divisor` in `train_timing.py`):
+
+- **Training**: every EP rank owns a *distinct* microbatch
+  (`mini_batch = batch / (dp * ep)`). With balanced routing each rank
+  receives as many routed tokens as it dispatches — the other `ep - 1`
+  ranks' dispatches fill in what this rank sends away. So
+  `tokens_local = tokens_owner * top_k`, with **no division by the routing
+  group**. (An earlier version divided by `ep` here, which under-counted
+  routed expert compute by exactly `ep`×.)
+- **Inference**: the pooled `tp * moe_dp` group serves the *same* owner
+  tokens, so the dispatched work is split across the pool:
+  `tokens_local = tokens_owner * top_k / (tp * moe_dp)`.
+
+In both cases the all-to-all payload is sized from `tokens_owner * top_k`
+(what each rank sends), which is unaffected by this distinction.
+
 ## Compute Model
 
 The routed expert FFN compute path is where the one-hot-expert refinement
