@@ -399,6 +399,11 @@ class TimeCalculation:
         self.FMA_dims = self.core.FMA_dims  # (FMA_x, FMA_y)
         self.dataflow = self.core.dataflow
 
+        # Optional extended-roofline GEMM backend (RAPID_GEMM_BACKEND env);
+        # replaces per-GEMM kernel time only, everything else stays native.
+        import opmodel_adapter
+        self._opmodel_gemm_backend = opmodel_adapter.maybe_create(hw_config)
+
         self.memory_hierarchy = MemoryHierarchy(hw_config, core=self.core)
         self.num_levels = self.memory_hierarchy.num_levels
         self.mem_layer = self.memory_hierarchy.mem_layer
@@ -709,6 +714,20 @@ class TimeCalculation:
         # 2 -> inner 'n' (activation stationary)
         best_inner_code = best_choice[0]  # type: ignore[index]
         best_tile_dims = best_choice[1]  # type: ignore[index]
+
+        # Extended-roofline backend: replace the kernel time only. Tile choice
+        # and memory-access accounting above stay native. RAPID's core.util is
+        # applied as a residual global scale; launch overhead is added exactly
+        # as in the native path (opmodel runs with zero fixed overhead).
+        backend = getattr(self, "_opmodel_gemm_backend", None)
+        if backend is not None and not flashattn_enable:
+            latency = backend.gemm_latency_s(dim1, dim2, dim3, self.precision_bytes)
+            if latency is not None:
+                util = max(float(getattr(self.core, "util", 1.0) or 1.0), 1e-9)
+                best_time = latency / util
+                if not disable_overhead:
+                    best_time = best_time + self.O
+
         return best_time, best_inner_code, best_tile_dims, mem_access #, best_rw_access
     
     def get_tile_size(self, lid):
