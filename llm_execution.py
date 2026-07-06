@@ -1096,33 +1096,53 @@ class LLMExecutionDispatcher:
         axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "ep": ep_size, "pp": pp_size, "dp": dp_size}
         axis_order: List[str] = []
 
-        # Enforce axis ordering for hierarchical/hybrid modes: the first active
-        # dimension must contain exactly {'tp','cp','ep'} (or the active subset).
-        # Subsequent active
-        # dimensions may contain 'pp' (optionally combined with 'dp'). This
-        # matches the assumptions in the hierarchical graphs where a stage is a
-        # TP/CP/EP cluster replicated across PP (and potentially DP) axes.
+        # Enforce axis ordering for hierarchical/hybrid modes: the active
+        # {'tp','cp','ep'} axes must occupy the leading active network
+        # dimensions (one dim, or split across consecutive leading dims — e.g.
+        # dim0=[tp,cp] NVLink + dim1=[ep] inter-node), before any dimension
+        # carrying active 'pp'/'dp'. This matches the assumptions in the
+        # hierarchical graphs where a stage is a TP/CP/EP cluster replicated
+        # across PP (and potentially DP) axes; sub-graph simulations can only
+        # include whole network dimensions, never a slice of one.
         enforce_layout = self.time_calc.execution_mode in {
             ExecutionMode.HYBRID,
             ExecutionMode.FULL_ASTRASIM_HIERARCHICAL,
         }
-        first_active_checked = False
+        if enforce_layout:
+            cluster_axes = sorted(axis for axis in ("tp", "cp", "ep") if axis_sizes[axis] > 1)
+            covered: List[str] = []
+            for dim in dimensions:
+                if sorted(set(covered)) == cluster_axes:
+                    break
+                if int(getattr(dim, "size", 1)) <= 1:
+                    continue
+                dim_axes_l = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
+                cluster_here = [
+                    axis for axis in dim_axes_l if axis in ("tp", "cp", "ep") and axis_sizes[axis] > 1
+                ]
+                sched_here = [
+                    axis for axis in dim_axes_l if axis in ("pp", "dp") and axis_sizes[axis] > 1
+                ]
+                if sched_here:
+                    raise ValueError(
+                        "For hierarchical/hybrid AstraSim modes, the active TP/CP/EP axes must "
+                        "occupy the leading active network dimensions (before any dimension "
+                        "carrying active PP/DP) to represent the transformer cluster. "
+                        f"Dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' carries "
+                        f"{sched_here} while the cluster axes {cluster_axes} are not yet fully mapped "
+                        f"(covered so far: {sorted(set(covered))})."
+                    )
+                covered.extend(cluster_here)
+            if cluster_axes and sorted(set(covered)) != cluster_axes:
+                raise ValueError(
+                    "For hierarchical/hybrid AstraSim modes, the leading active network dimensions "
+                    f"must jointly carry the active TP/CP/EP axes {cluster_axes} "
+                    f"(found only {sorted(set(covered))})."
+                )
 
         for dim in dimensions:
             dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
             declared = int(getattr(dim, "size", 1))
-
-            axes_without_dp = [axis for axis in dim_axes if axis != "dp"]
-            if enforce_layout and declared > 1 and not first_active_checked and axes_without_dp:
-                active_axes = [axis for axis in ("tp", "cp", "ep") if axis_sizes[axis] > 1]
-                canon_active = sorted([axis for axis in axes_without_dp if axis_sizes[axis] > 1])
-                expected = sorted(active_axes)
-                if expected and canon_active != expected:
-                    raise ValueError(
-                        "For hierarchical/hybrid AstraSim modes, the first active network "
-                        "dimension must contain the active TP/CP/EP axes to represent the transformer cluster."
-                    )
-                first_active_checked = True
 
             for name in dim_axes:
                 if name not in axis_sizes:
@@ -1405,6 +1425,23 @@ class LLMExecutionDispatcher:
         if mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
             return self._run_full_astrasim_flattened()
 
+    def _pipeline_interleave_scale(self) -> float:
+        """Analytical interleaved-1F1B (virtual pipeline) bubble correction.
+
+        The pipeline graph is built with a GPipe-style schedule whose span is
+        (mb + pp - 1) uniform slots. Interleaving each rank's layers into v
+        virtual stages shrinks the bubble to (pp - 1) / v slots, so the total
+        scales by (mb + (pp - 1) / v) / (mb + pp - 1). This is exact under the
+        simulator's own uniform-stage-time assumption; the DP grad-sync tail
+        is scaled along with it, bounding the error by the (small) comm share.
+        """
+        v = int(getattr(self.time_calc, "pipeline_interleave", 1) or 1)
+        pp = int(getattr(self.time_calc, "pp", 1) or 1)
+        mb = int(getattr(self.time_calc, "mb", 1) or 1)
+        if v <= 1 or pp <= 1:
+            return 1.0
+        return (mb + (pp - 1) / float(v)) / float(mb + pp - 1)
+
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
         if declared_mode == ExecutionMode.HYBRID:
             if self.no_data_parallel:
@@ -1434,6 +1471,7 @@ class LLMExecutionDispatcher:
         # Persist timed root for any downstream consumer
         self.pipeline_root = timed_root
         total_time = self.pipeline_graph.simulate(timed_root)
+        total_time *= self._pipeline_interleave_scale()
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
@@ -1585,6 +1623,7 @@ class LLMExecutionDispatcher:
         self.time_calc.pipeline_astrasim_time = max_sec
         if max_sec <= 0:
             raise RuntimeError("AstraSim pipeline execution returned non-positive duration")
+        max_sec *= self._pipeline_interleave_scale()
         return ExecutionResult(total_time=max_sec, graph_root=self.pipeline_root, mode=ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
@@ -1694,7 +1733,7 @@ class LLMExecutionDispatcher:
         self.time_calc.flattened_astrasim_total = max_sec
 
         return ExecutionResult(
-            total_time=max_sec,
+            total_time=max_sec * self._pipeline_interleave_scale(),
             graph_root=flattened_root,
             mode=ExecutionMode.FULL_ASTRASIM_FLATTENED,
         )

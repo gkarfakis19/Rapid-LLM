@@ -1921,6 +1921,11 @@ class SWConfig:
     dp_microbatch: str
     const_mem_offset: float
     grad_acc_overhead: float
+    # Interleaved 1F1B (virtual pipeline) stages per rank. 1 = GPipe-style
+    # schedule (the graph's native shape). v > 1 analytically rescales the
+    # pipeline time by (mb + (pp-1)/v) / (mb + pp - 1), which is exact under
+    # the simulator's own uniform-stage-time assumption.
+    pipeline_interleave: int = 1
 
     @classmethod
     def from_dict(cls, sw_block: Dict[str, object]) -> "SWConfig":
@@ -1958,6 +1963,11 @@ class SWConfig:
                 raise ValueError(
                     f"sw_param.grad_acc_overhead must be a float-compatible value (got {grad_acc_overhead_raw!r})"
                 ) from exc
+        pipeline_interleave = _coerce_int(
+            sw_block.get("pipeline_interleave", 1),
+            "sw_param.pipeline_interleave",
+            min_value=1,
+        )
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
@@ -1967,6 +1977,7 @@ class SWConfig:
             dp_microbatch=dp_microbatch,
             const_mem_offset=const_mem_offset,
             grad_acc_overhead=grad_acc_overhead,
+            pipeline_interleave=pipeline_interleave,
         )
 
 
@@ -2471,6 +2482,18 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
         mini_batch = batch_size // dp_dense
         if mini_batch % mb != 0:
             raise ValueError(f"Batch size must be divisible by micro-batch size: {mini_batch} % {mb} != 0")
+
+        pipeline_interleave = int(
+            getattr(getattr(hw_config, "sw_config", None), "pipeline_interleave", 1) or 1
+        )
+        if pipeline_interleave > 1 and pp > 1:
+            num_layers = int(getattr(model, "num_layers", 0) or 0)
+            if num_layers % (pp * pipeline_interleave) != 0:
+                raise ValueError(
+                    "sw_param.pipeline_interleave requires num_layers to divide evenly into "
+                    f"pp * interleave virtual stages: num_layers={num_layers}, pp={pp}, "
+                    f"pipeline_interleave={pipeline_interleave}."
+                )
 
         if not model.use_moe and train_ep > 1:
             raise ValueError(

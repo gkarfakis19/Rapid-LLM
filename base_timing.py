@@ -375,6 +375,7 @@ class TimeCalculation:
         self.zero_stage = getattr(hw_config.sw_config, "dp_zero_stage", 0)
         self.full_recomputation = getattr(hw_config.sw_config, "full_recomputation", False)
         self.dp_microbatch = getattr(hw_config.sw_config, "dp_microbatch", "every_mb")
+        self.pipeline_interleave = int(getattr(hw_config.sw_config, "pipeline_interleave", 1) or 1)
         self.grad_acc_overhead = float(getattr(hw_config.sw_config, "grad_acc_overhead", 0.0) or 0.0)
         self.attached = True
 
