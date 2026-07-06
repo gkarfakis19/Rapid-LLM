@@ -1,0 +1,103 @@
+description: 'Golden H100_SXM5 calibration (train + inference pooled, 50:50 calibration:holdout).
+  Knobs: tech_param.core.util, tech_param.DRAM.util, network topology.util, sw_param.kernel_launch_overhead.
+  All numbers are real simulations on a pre-registered 35-combo axial+corner lattice;
+  no interpolation. Overlaps (tp, tp_sp, cp) fixed at 0.6. Golden = median-holdout
+  seed among stratified 50:50 candidates.'
+device: H100_SXM5
+generator: validation_scripts/device_testbench.py
+kind: stratified_50_4
+compute_util: 0.6
+dram_util: 0.8
+network_util: 0.85
+kernel_launch_overhead_s: 1.0e-06
+overlaps:
+  tp_overlap: 0.6
+  tp_sp_overlap: 0.6
+  cp_overlap: 0.6
+calib_mape_pct: 17.92
+holdout_mape_pct: 16.83
+pp_gt1_rows_cut: true
+calibration_points:
+- hf:job14113348
+- hf:job14113401
+- hf:job14113493
+- hf:job14113500
+- hf:job14113504
+- hf:job14113505
+- hf:job14113507
+- hf:job14113517
+- hf:job14113519
+- imec:h100_sxm5_Llama2-13B_tp1
+- imec:h100_sxm5_Llama2-13B_tp4
+- imec:h100_sxm5_Llama2-70B_tp4
+- imec:h100_sxm5_Llama2-7B_tp1
+- imec:h100_sxm5_Llama2-7B_tp2
+- imec:h100_sxm5_Llama2-7B_tp4
+- megatron:mixtral8x22b_g256
+- megatron:qwen2_57b_a14b_g1024
+- megatron:qwen2_57b_a14b_g128
+- megatron:qwen2_57b_a14b_g512
+- megatron:qwen2_57b_a14b_g64
+- nim:h100_sxm5_p1000_o1000_b1
+- nim:h100_sxm5_p200_o200_b25
+- nim:h100_sxm5_p200_o200_b5
+- nim:h100_sxm5_p2500_o300_b5
+- nim:h100_sxm5_p5000_o500_b1
+- nim:h100_sxm5_p5000_o500_b25
+- nim:h100_sxm5_p500_o2000_b1
+- nim:h100_sxm5_p500_o2000_b5
+holdout_points:
+- hf:job14113364
+- hf:job14113501
+- hf:job14113502
+- hf:job14113508
+- hf:job14113512
+- hf:job14113514
+- hf:job14113516
+- hf:job14113522
+- imec:h100_sxm5_Llama2-13B_tp2
+- imec:h100_sxm5_Llama2-13B_tp8
+- imec:h100_sxm5_Llama2-70B_tp2
+- imec:h100_sxm5_Llama2-70B_tp8
+- imec:h100_sxm5_Llama2-7B_tp8
+- megatron:mixtral8x22b_g1024
+- megatron:mixtral8x22b_g128
+- megatron:mixtral8x22b_g128_gbs256
+- megatron:mixtral8x22b_g512
+- megatron:qwen2_57b_a14b_g256
+- megatron:qwen2_57b_a14b_g64_gbs256
+- nim:h100_sxm5_p1000_o1000_b25
+- nim:h100_sxm5_p1000_o1000_b5
+- nim:h100_sxm5_p2000_o2000_b1
+- nim:h100_sxm5_p2000_o2000_b5
+- nim:h100_sxm5_p200_o200_b1
+- nim:h100_sxm5_p2500_o300_b1
+- nim:h100_sxm5_p2500_o300_b25
+- nim:h100_sxm5_p5000_o500_b5
+- nim:h100_sxm5_p500_o2000_b25
+report_only_points:
+- hf:job14097163
+- hf:job14098532
+- hf:job14098534
+- hf:job14098568
+- hf:job14098628
+- hf:job14113354
+- hf:job14113356
+- hf:job14113370
+- hf:job14113371
+- hf:job14113372
+- hf:job14113395
+- hf:job14113396
+- hf:job14113397
+- hf:job14113399
+- hf:job14113400
+- hf:job14280962
+- megatron:llama3_8x70b_g1024
+- megatron:llama3_8x70b_g256
+- megatron:llama3_8x70b_g512
+- megatron:mixtral8x22b_g128_gbs256_tpepdp
+- megatron:mixtral8x22b_g8t8_g1024
+- megatron:mixtral8x22b_g8t8_g128
+- megatron:mixtral8x22b_g8t8_g256
+- megatron:mixtral8x22b_g8t8_g512
+- megatron:qwen2_57b_a14b_g64_gbs256_tpepdp

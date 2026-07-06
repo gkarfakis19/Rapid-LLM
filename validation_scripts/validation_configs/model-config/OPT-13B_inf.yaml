@@ -1,0 +1,31 @@
+# OPT-13B (facebook/opt-13b, canonical published architecture) for UCI A100
+# inference validation. OPT is a dense GPT-style decoder (ReLU FFN, 4x hidden,
+# tied embeddings, vocab 50272) -> model_type "gpt" (2-matmul FFN).
+# Reconstructed 2026-07-06: uci_inf.py referenced this file but it was never
+# committed to the repo.
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true
+  model_type: "gpt"
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 128
+  hidden_dim: 5120
+  attention:
+    attention_type: "mha"
+    num_heads: 40
+    kv_heads: 40
+    use_flashattention: true
+    attention_tile_size: 128
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0
+  intermediate_size: 20480
+  vocab_size: 50272
+  num_layers: 40

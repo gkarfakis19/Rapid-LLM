@@ -1,0 +1,34 @@
+# Mixtral 8x22B (mistralai/Mixtral-8x22B-v0.1) — coarse-grained MoE.
+# For the MoE/EP training validation vs Megatron-Core measurements (arXiv:2504.14960).
+# Architecture verified against the HF config.json on 2026-07-05:
+#   hidden 6144, 56 layers, 48 heads / 8 KV (GQA, head_dim 128), 8 experts top-2,
+#   expert FFN 16384 (SwiGLU), vocab 32000 (HF; the source doc says 32768 — HF wins,
+#   impact on FLOPs ~0.01%), untied embeddings.
+# expert_imbalance_factor 1.0 = balanced routing (matches capacity-factor-1 token-drop training).
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: false
+  model_type: llama
+  global_batch_size: 1024
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  hidden_dim: 6144
+  attention:
+    attention_type: gqa
+    num_heads: 48
+    kv_heads: 8
+    head_dim: 128
+    use_flashattention: true
+    attention_tile_size: 128
+  intermediate_size: 16384
+  moe:
+    num_experts: 8
+    top_k: 2
+    moe_intermediate_size: 16384
+    n_shared_experts: 0
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0
+  vocab_size: 32000
+  num_layers: 56

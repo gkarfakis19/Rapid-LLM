@@ -1,0 +1,33 @@
+# Mixtral 8x22B "G8T8" fine-grained variant from arXiv:2504.14960 (Section 4.1):
+# identical to Mixtral 8x22B but with each expert split 8-ways —
+# 64 experts, top-8, expert FFN hidden 2048 (= 16384 / 8). Half the routed
+# compute of the base model (top-8 x 2048 vs top-2 x 16384 expert width);
+# stresses all-to-all with small per-expert GEMMs.
+# expert_imbalance_factor 1.0 = balanced routing (capacity-factor-1 token drop).
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: false
+  model_type: llama
+  global_batch_size: 1024
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  hidden_dim: 6144
+  attention:
+    attention_type: gqa
+    num_heads: 48
+    kv_heads: 8
+    head_dim: 128
+    use_flashattention: true
+    attention_tile_size: 128
+  intermediate_size: 16384
+  moe:
+    num_experts: 64
+    top_k: 8
+    moe_intermediate_size: 2048
+    n_shared_experts: 0
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0
+  vocab_size: 32000
+  num_layers: 56

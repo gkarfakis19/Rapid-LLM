@@ -1,0 +1,38 @@
+# Qwen2-57B-A14B (Qwen/Qwen2-57B-A14B) — fine-grained MoE with a shared expert.
+# For the MoE/EP training validation vs Megatron-Core measurements (arXiv:2504.14960).
+# Architecture verified against the HF config.json on 2026-07-05:
+#   hidden 3584, 28 layers, 28 heads / 4 KV (GQA, head_dim 128), 64 routed experts top-8,
+#   routed expert FFN 2560 (SwiGLU), shared expert FFN 20480 (always active),
+#   vocab 151936, decoder_sparse_step 1 (every layer is MoE), untied embeddings.
+# The always-active shared expert (FFN hidden 20480) is encoded as 8 shared experts of the
+# routed width (8 x 2560 = 20480): RAPID-LLM models shared experts as n_shared_experts
+# always-active experts of moe_intermediate_size, computed locally with no all-to-all,
+# which reproduces the shared-expert FLOPs and parameters exactly.
+# expert_imbalance_factor 1.0 = balanced routing (matches capacity-factor-1 token-drop training).
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: false
+  model_type: llama
+  global_batch_size: 1024
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  hidden_dim: 3584
+  attention:
+    attention_type: gqa
+    num_heads: 28
+    kv_heads: 4
+    head_dim: 128
+    use_flashattention: true
+    attention_tile_size: 128
+  intermediate_size: 18944
+  moe:
+    num_experts: 64
+    top_k: 8
+    moe_intermediate_size: 2560
+    n_shared_experts: 8
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0
+  vocab_size: 151936
+  num_layers: 28

@@ -1,0 +1,44 @@
+description: 'Golden A100_PCIe calibration (train + inference pooled, 50:50 calibration:holdout).
+  Knobs: tech_param.core.util, tech_param.DRAM.util, network topology.util, sw_param.kernel_launch_overhead.
+  All numbers are real simulations on a pre-registered 51-combo axial+corner lattice;
+  no interpolation. Overlaps (tp, tp_sp, cp) fixed at 0.6. Golden = median-holdout
+  seed among stratified 50:50 candidates.'
+device: A100_PCIe
+generator: validation_scripts/device_testbench.py
+kind: stratified_50_4
+compute_util: 0.6
+dram_util: 0.8
+network_util: 0.85
+kernel_launch_overhead_s: 1.2e-05
+overlaps:
+  tp_overlap: 0.6
+  tp_sp_overlap: 0.6
+  cp_overlap: 0.6
+calib_mape_pct: 19.11
+holdout_mape_pct: 15.83
+pp_gt1_rows_cut: false
+calibration_points:
+- uci_inf:opt-13b_tp2_default
+- uci_inf:opt-13b_tp4_default
+- uci_inf:opt-66b_tp2_12
+- uci_inf:opt-66b_tp2_default
+- uci_train:ddp_tp1_pp2_cp1_dp2
+- uci_train:ddp_tp1_pp4_cp1_dp1
+- uci_train:ddp_tp2_pp1_cp2_dp1
+- uci_train:ddp_tp2_pp2_cp1_dp1
+- uci_train:ddp_tp4_pp1_cp1_dp1
+- uci_train:fsdp_tp1_pp1_cp1_dp4
+- uci_train:fsdp_tp2_pp1_cp1_dp2
+holdout_points:
+- uci_inf:opt-13b_tp2_12
+- uci_inf:opt-30b_tp2_12
+- uci_inf:opt-30b_tp2_default
+- uci_inf:opt-30b_tp4_default
+- uci_inf:opt-66b_tp4_default
+- uci_train:ddp_tp1_pp1_cp1_dp4
+- uci_train:ddp_tp1_pp1_cp2_dp2
+- uci_train:ddp_tp1_pp1_cp4_dp1
+- uci_train:ddp_tp1_pp2_cp2_dp1
+- uci_train:ddp_tp2_pp1_cp1_dp2
+- uci_train:fsdp_tp1_pp1_cp2_dp2
+report_only_points: []

@@ -1,0 +1,79 @@
+description: 'Golden H100 training-time calibration/holdout split (50:50). Fit knob:
+  tech_param.core.util. All numbers are real simulations at the listed util (candidates
+  [0.6, 0.625, 0.65, 0.675, 0.7]; no interpolation). network.overlap.tp_sp_overlap
+  = 0.6 for all points. Megatron MoE points: sw_param.pipeline_interleave = layers-per-stage
+  (interleaved 1F1B assumption) + moe_ep_validation topology; HF/Nanotron points:
+  hf_network mode. HF rows with measured MFU < 8% excluded as degenerate; HF pp>1
+  sanity rows cut per protocol (>25% MAPE at f*). Selection rule: median-holdout-MAPE
+  seed among stratified 50:50 candidates (see split_report.md).'
+hf_network_mode: hf_network
+tp_sp_overlap: 0.6
+pipeline_interleave_policy: max
+f_candidates:
+- 0.6
+- 0.625
+- 0.65
+- 0.675
+- 0.7
+pp_gt1_rows_cut: true
+generator: validation_scripts/h100_testbench.py
+kind: stratified_50_2
+compute_util_fstar: 0.6
+calib_mape_pct: 12.36
+holdout_mape_pct: 7.47
+calibration_points:
+- hf:job14113401
+- hf:job14113501
+- hf:job14113504
+- hf:job14113505
+- hf:job14113508
+- hf:job14113512
+- hf:job14113514
+- hf:job14113516
+- hf:job14113522
+- megatron:mixtral8x22b_g1024
+- megatron:mixtral8x22b_g128_gbs256
+- megatron:mixtral8x22b_g256
+- megatron:qwen2_57b_a14b_g1024
+- megatron:qwen2_57b_a14b_g64
+holdout_points:
+- hf:job14113348
+- hf:job14113364
+- hf:job14113493
+- hf:job14113500
+- hf:job14113502
+- hf:job14113507
+- hf:job14113517
+- hf:job14113519
+- megatron:mixtral8x22b_g128
+- megatron:mixtral8x22b_g512
+- megatron:qwen2_57b_a14b_g128
+- megatron:qwen2_57b_a14b_g256
+- megatron:qwen2_57b_a14b_g512
+- megatron:qwen2_57b_a14b_g64_gbs256
+report_only_points:
+- hf:job14097163
+- hf:job14098532
+- hf:job14098534
+- hf:job14098568
+- hf:job14098628
+- hf:job14113354
+- hf:job14113356
+- hf:job14113370
+- hf:job14113371
+- hf:job14113372
+- hf:job14113395
+- hf:job14113396
+- hf:job14113397
+- hf:job14113399
+- hf:job14113400
+- hf:job14280962
+- megatron:llama3_8x70b_g1024
+- megatron:llama3_8x70b_g256
+- megatron:llama3_8x70b_g512
+- megatron:mixtral8x22b_g128_gbs256_tpepdp
+- megatron:mixtral8x22b_g8t8_g1024
+- megatron:mixtral8x22b_g8t8_g128
+- megatron:mixtral8x22b_g8t8_g256
+- megatron:mixtral8x22b_g8t8_g512
+- megatron:qwen2_57b_a14b_g64_gbs256_tpepdp

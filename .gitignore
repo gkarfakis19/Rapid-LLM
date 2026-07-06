@@ -43,6 +43,10 @@ validation_scripts/validation_configs/hardware-config/a100_80GB_uci_*
 # Rebuttal validation runs: keep the rebuttal_*.py scripts, ignore their generated output dirs
 validation_scripts/rebuttal_*/
 validation_scripts/train_validation_data/*.png
+# MoE/EP validation: keep moe_ep_validation.py, ignore its generated outputs
+validation_scripts/moe_ep_validation/
+validation_scripts/h100_testbench/
+validation_scripts/device_testbench/
 tools/parallelism_best_runtimes_*
 tools/scan_configs.py
 tools/add_interm_dim_from_configs.py

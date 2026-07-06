@@ -1,0 +1,33 @@
+# Llama3-8x70B upcycled MoE from arXiv:2504.14960 (Section 4.1):
+# Llama3-70B backbone (80 layers, hidden 8192, 64 heads / 8 KV, FFN 28672
+# SwiGLU, vocab 128256) with 8 experts per layer.
+# ⚠️ top_k is NOT stated in the paper; top-2 is the upcycling convention and is
+# an ASSUMPTION here — flag it wherever these points are reported.
+# expert_imbalance_factor 1.0 = balanced routing (capacity-factor-1 token drop).
+model_param:
+  mode: LLM
+  run_type: training
+  tied_embeddings: false
+  model_type: llama
+  global_batch_size: 1024
+  gradient_accumulation_steps: 1
+  seq_len: 4096
+  hidden_dim: 8192
+  attention:
+    attention_type: gqa
+    num_heads: 64
+    kv_heads: 8
+    head_dim: 128
+    use_flashattention: true
+    attention_tile_size: 128
+  intermediate_size: 28672
+  moe:
+    num_experts: 8
+    top_k: 2
+    moe_intermediate_size: 28672
+    n_shared_experts: 0
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0
+  vocab_size: 128256
+  num_layers: 80
