@@ -4,7 +4,31 @@ Initial overnight run 2026-07-05 → 06; **methodology fix + recalibration 2026-
 (commit 38c993f). Generator: `validation_scripts/device_testbench.py`. Golden factor sets
 canonized in `validation_scripts/validation_configs/{device}_golden_calib.yaml`.
 
-## TL;DR — the golden factor sets (post-methodology-fix)
+## PAPER-CANONICAL (2026-07-07): extended-roofline backend + merged factors
+
+The paper now uses the extended-roofline GEMM backend for EVERYTHING
+(`RAPID_GEMM_BACKEND=extended_roofline`, `RAPID_OPMODEL_PATH=../op-model`).
+Factor structure: per-device residual compute + ONE merged mem/net utilization
++ 6 µs launch. Fitted by `backend_merged_study.py` on the canonized splits,
+boundary-probed on the u axis (H100 u=0.90, A100 u=0.85 sampled and rejected):
+
+| Device | residual compute | merged u | launch | calib | holdout |
+|---|---|---|---|---|---|
+| **H100_SXM5** | **0.85** | **0.85** | 6 µs | 7.92% | **6.45%** |
+| **A100_SXM4** | **1.00** | **0.75** | 6 µs | 10.59% | **10.61%** |
+
+Canonized in `*_golden_calib_backend.yaml`, `harness_derates.yaml`, and the
+`.fitted.yaml` inference configs (commit 6a3985d). Paper figure numbers:
+inference 9.65% (26 rows, worst 23%), dense train 8.69% (7 rows), MoE 6.97%
+(11 rows, holdout half 8.08%, worst 13.6% — the shape model removes the
+flat-factor's systematic large-scale Qwen2 under-prediction). The residuals
+match published physics: H100 0.85 ≈ power-limited sustained-clock ratio;
+A100 1.00 = no throttling.
+
+The native-tile-model goldens below are RETAINED as the no-backend fallback
+and for reproducing the pre-backend analysis.
+
+## Native goldens (fallback; post-methodology-fix, pre-backend)
 
 | Device | compute util | DRAM util | network util | launch overhead | calib MAPE | holdout MAPE |
 |---|---|---|---|---|---|---|
