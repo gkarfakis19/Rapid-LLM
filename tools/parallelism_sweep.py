@@ -660,6 +660,43 @@ def make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=None):
 
     if hw_mutator:
         hw_mutator(updated)
+
+    # SuperPOD leaf_size adaptation (same convention as the MoE validation
+    # harness): at small scale the fixed leaf_size=32 makes every config
+    # invalid (N_boxes not divisible / single SU). Model a sub-populated
+    # leaf tier instead: the largest leaf <= configured size that divides
+    # N_boxes and leaves >= 2 scalable units. Genuinely too-small configs
+    # (N_boxes < 4) are left untouched and rejected by validation as before.
+    dims = updated.get("network", {}).get("dimensions", [])
+    dim_par = {d.get("id"): [str(x) for x in d.get("parallelisms", [])] for d in dims}
+    pb = updated.get("parallelism", {})
+    degrees = {
+        "tp": int(pb.get("tp", 1)), "cp": int(pb.get("cp", 1)),
+        "pp": int(pb.get("pp", 1)),
+        "dp": int(pb.get("train", {}).get("dp", 1)),
+        "ep": int(pb.get("train", {}).get("ep", 1)),
+    }
+    box = 1
+    for par in dim_par.get("dim0", []):
+        box *= degrees.get(par, 1)
+    total = 1
+    for v in degrees.values():
+        total *= v
+    n_boxes = total // box if box else 0
+    for d in dims:
+        topo = d.get("topology", {})
+        if str(topo.get("type", "")).lower() != "superpod":
+            continue
+        configured = int(topo.get("leaf_size", 32))
+        if n_boxes >= 4:
+            leaf = None
+            for cand in range(min(configured, n_boxes // 2), 0, -1):
+                if n_boxes % cand == 0 and n_boxes // cand >= 2:
+                    leaf = cand
+                    break
+            if leaf is not None and leaf != configured:
+                topo["leaf_size"] = leaf
+
     try:
         debug_yaml = yaml.safe_dump(updated, default_flow_style=False)
     except Exception:
