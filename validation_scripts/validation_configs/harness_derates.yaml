@@ -8,11 +8,17 @@ device_types:
     compute_util: 0.60
 
   A100_SXM4:
-    dram_util: 0.7
-    network_util: 0.8
-    compute_util: 0.9
+    # Backend-calibrated (extended_roofline GEMM model REQUIRED via
+    # RAPID_GEMM_BACKEND=extended_roofline): residual compute 1.00,
+    # merged mem/net utilization 0.75. Calib 10.59 / holdout 10.61 (2026-07-07).
+    dram_util: 0.75
+    network_util: 0.75
+    compute_util: 1.0
 
   H100_SXM5:
-    dram_util: 0.80
+    # Backend-calibrated (extended_roofline GEMM model REQUIRED via
+    # RAPID_GEMM_BACKEND=extended_roofline): residual compute 0.85,
+    # merged mem/net utilization 0.85. Calib 7.92 / holdout 6.45 (2026-07-07).
+    dram_util: 0.85
     network_util: 0.85
-    compute_util: 0.56
+    compute_util: 0.85

@@ -1,6 +1,7 @@
-# GENERATED from the golden calibration (device_testbench REPORT.md).
-# Factors: canonical golden set (commit 38c993f); hierarchical AstraSim;
-# physical NVLink; all overlaps 0.6. Do not hand-edit utils here.
+# GENERATED from the backend golden calibration (REPORT.md / *_golden_calib_backend.yaml).
+# REQUIRES RAPID_GEMM_BACKEND=extended_roofline (+RAPID_OPMODEL_PATH) — the residual
+# compute util is meaningless under the native tile model. Merged mem/net util;
+# hierarchical AstraSim; physical NVLink; overlaps 0.6. Do not hand-edit utils.
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 6.0e-06
@@ -27,13 +28,13 @@ tech_param:
     FMA_d1: 16
     FMA_d2: 8
     dataflow: best
-    util: 0.6
+    util: 0.85
   DRAM:
     size: 80 GB
     bandwidth: 3430 GB
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
-    util: 0.9
+    util: 0.85
   SRAM-L2:
     size: 50 MB
     bandwidth: 8138 GB
@@ -89,7 +90,7 @@ network:
       bandwidth: 450 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.7
+      util: 0.85
       optimize_2dmap: false
     collective_override: {}
     parallelisms:
@@ -103,7 +104,7 @@ network:
       bandwidth: 25 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.7
+      util: 0.85
     collective_override: {}
     parallelisms:
     - pp
@@ -116,7 +117,7 @@ network:
       bandwidth: 25 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.7
+      util: 0.85
     parallelisms: []
     collective_override: {}
   overlap:

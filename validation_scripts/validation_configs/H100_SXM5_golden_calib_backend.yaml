@@ -1,0 +1,68 @@
+description: 'PAPER-CANONICAL backend golden: requires RAPID_GEMM_BACKEND=extended_roofline
+  (+RAPID_OPMODEL_PATH). Residual compute + ONE merged mem/net utilization (write into both
+  dram_util and network_util); launch 6us. Fitted by backend_merged_study.py on the same canonized
+  50:50 splits as the native golden; boundary-probed on the u axis (H100 u=0.90 and A100 u=0.85
+  sampled and rejected).'
+compute_util: 0.85
+merged_mem_net_util: 0.85
+kernel_launch_overhead: 6.0e-06
+calib_mape_pct: 7.92
+holdout_mape_pct: 6.45
+calibration_points:
+- hf:job14113348
+- hf:job14113364
+- hf:job14113401
+- hf:job14113493
+- hf:job14113501
+- hf:job14113516
+- hf:job14113517
+- hf:job14113519
+- hf:job14113522
+- imec:h100_sxm5_Llama2-13B_tp2
+- imec:h100_sxm5_Llama2-13B_tp4
+- imec:h100_sxm5_Llama2-13B_tp8
+- imec:h100_sxm5_Llama2-70B_tp4
+- imec:h100_sxm5_Llama2-7B_tp2
+- imec:h100_sxm5_Llama2-7B_tp4
+- megatron:mixtral8x22b_g128_gbs256
+- megatron:mixtral8x22b_g256
+- megatron:mixtral8x22b_g512
+- megatron:qwen2_57b_a14b_g512
+- megatron:qwen2_57b_a14b_g64
+- nim:h100_sxm5_p1000_o1000_b1
+- nim:h100_sxm5_p2000_o2000_b1
+- nim:h100_sxm5_p200_o200_b1
+- nim:h100_sxm5_p200_o200_b5
+- nim:h100_sxm5_p2500_o300_b5
+- nim:h100_sxm5_p5000_o500_b1
+- nim:h100_sxm5_p5000_o500_b5
+- nim:h100_sxm5_p500_o2000_b5
+holdout_points:
+- hf:job14113500
+- hf:job14113502
+- hf:job14113504
+- hf:job14113505
+- hf:job14113507
+- hf:job14113508
+- hf:job14113512
+- hf:job14113514
+- imec:h100_sxm5_Llama2-13B_tp1
+- imec:h100_sxm5_Llama2-70B_tp2
+- imec:h100_sxm5_Llama2-70B_tp8
+- imec:h100_sxm5_Llama2-7B_tp1
+- imec:h100_sxm5_Llama2-7B_tp8
+- megatron:mixtral8x22b_g1024
+- megatron:mixtral8x22b_g128
+- megatron:qwen2_57b_a14b_g1024
+- megatron:qwen2_57b_a14b_g128
+- megatron:qwen2_57b_a14b_g256
+- megatron:qwen2_57b_a14b_g64_gbs256
+- nim:h100_sxm5_p1000_o1000_b25
+- nim:h100_sxm5_p1000_o1000_b5
+- nim:h100_sxm5_p2000_o2000_b5
+- nim:h100_sxm5_p200_o200_b25
+- nim:h100_sxm5_p2500_o300_b1
+- nim:h100_sxm5_p2500_o300_b25
+- nim:h100_sxm5_p5000_o500_b25
+- nim:h100_sxm5_p500_o2000_b1
+- nim:h100_sxm5_p500_o2000_b25

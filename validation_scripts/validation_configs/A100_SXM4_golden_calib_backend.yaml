@@ -1,0 +1,49 @@
+description: 'PAPER-CANONICAL backend golden: requires RAPID_GEMM_BACKEND=extended_roofline
+  (+RAPID_OPMODEL_PATH). Residual compute + ONE merged mem/net utilization (write into both
+  dram_util and network_util); launch 6us. Fitted by backend_merged_study.py on the same canonized
+  50:50 splits as the native golden; boundary-probed on the u axis (H100 u=0.90 and A100 u=0.85
+  sampled and rejected).'
+compute_util: 1.0
+merged_mem_net_util: 0.75
+kernel_launch_overhead: 6.0e-06
+calib_mape_pct: 10.59
+holdout_mape_pct: 10.61
+calibration_points:
+- imec:a100_sxm4_Llama2-13B_tp2
+- imec:a100_sxm4_Llama2-13B_tp4
+- imec:a100_sxm4_Llama2-13B_tp8
+- imec:a100_sxm4_Llama2-70B_tp4
+- imec:a100_sxm4_Llama2-7B_tp2
+- imec:a100_sxm4_Llama2-7B_tp4
+- nim:a100_sxm4_p1000_o1000_b1
+- nim:a100_sxm4_p20000_o2000_b5
+- nim:a100_sxm4_p200_o200_b1
+- nim:a100_sxm4_p200_o200_b25
+- nim:a100_sxm4_p5000_o500_b25
+- nim:a100_sxm4_p500_o2000_b1
+- nim:a100_sxm4_p500_o2000_b25
+- nim:a100_sxm4_p500_o2000_b5
+- nvtrain:A100_korthi_GPT175B_sel
+- nvtrain:A100_korthi_GPT1T_sel
+- nvtrain:A100_korthi_GPT22B_full
+- nvtrain:A100_korthi_GPT530B_sel
+- nvtrain:A100_selene_GPT1T_full
+- nvtrain:A100_selene_GPT530B_full
+holdout_points:
+- imec:a100_sxm4_Llama2-13B_tp1
+- imec:a100_sxm4_Llama2-70B_tp2
+- imec:a100_sxm4_Llama2-70B_tp8
+- imec:a100_sxm4_Llama2-7B_tp1
+- imec:a100_sxm4_Llama2-7B_tp8
+- nim:a100_sxm4_p1000_o1000_b25
+- nim:a100_sxm4_p1000_o1000_b5
+- nim:a100_sxm4_p20000_o2000_b1
+- nim:a100_sxm4_p20000_o2000_b25
+- nim:a100_sxm4_p200_o200_b5
+- nim:a100_sxm4_p5000_o500_b1
+- nim:a100_sxm4_p5000_o500_b5
+- nvtrain:A100_korthi_GPT175B_full
+- nvtrain:A100_korthi_GPT1T_full
+- nvtrain:A100_korthi_GPT22B_sel
+- nvtrain:A100_korthi_GPT530B_full
+- nvtrain:A100_selene_GPT310B_full
