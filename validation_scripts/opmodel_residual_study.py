@@ -45,11 +45,13 @@ C_AXIS = (0.80, 0.85, 0.90, 0.95, 1.00)
 C_MID = 0.90
 
 GOLDEN_DNL = {  # (dram, net, launch) from the native goldens
-    "H100_SXM5": (0.80, 0.85, 1.0e-6),
+    # Re-anchored 2026-07-07 to the post-methodology-fix goldens (physical
+    # NVLink, all-hierarchical inference; commit 38c993f).
+    "H100_SXM5": (0.90, 0.70, 6.0e-6),
     "A100_SXM4": (0.70, 0.80, 6.0e-6),
 }
 DNL_AXIALS = {  # lo/hi probes per knob
-    "H100_SXM5": {"dram": (0.70, 0.90), "net": (0.70, 1.00), "launch": (0.5e-6, 3.0e-6)},
+    "H100_SXM5": {"dram": (0.80, 1.00), "net": (0.60, 0.85), "launch": (3.0e-6, 12.0e-6)},
     "A100_SXM4": {"dram": (0.60, 0.80), "net": (0.65, 0.95), "launch": (3.0e-6, 12.0e-6)},
 }
 
