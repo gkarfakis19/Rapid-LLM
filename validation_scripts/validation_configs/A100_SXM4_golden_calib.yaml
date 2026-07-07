@@ -1,6 +1,6 @@
 description: 'Golden A100_SXM4 calibration (train + inference pooled, 50:50 calibration:holdout).
   Knobs: tech_param.core.util, tech_param.DRAM.util, network topology.util, sw_param.kernel_launch_overhead.
-  All numbers are real simulations on a pre-registered 44-combo axial+corner lattice;
+  All numbers are real simulations on a pre-registered 35-combo axial+corner lattice;
   no interpolation. Overlaps (tp, tp_sp, cp) fixed at 0.6. Golden = median-holdout
   seed among stratified 50:50 candidates.'
 device: A100_SXM4

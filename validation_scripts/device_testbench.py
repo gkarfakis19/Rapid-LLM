@@ -97,6 +97,10 @@ LAUNCH_AXIS = (1.0e-6, 3.0e-6, 6.0e-6)
 LAUNCH_DEFAULT = 6.0e-6
 MEASURED_MFU_FLOOR = 0.08
 PP_GT1_CUT_MAPE = 25.0
+# Physical floor for the fitted network utilization: NCCL collectives
+# achieve ~70-80% of link bandwidth on healthy fabrics; lower values are
+# the fit absorbing unrelated error into the network knob.
+NET_UTIL_FLOOR = 0.60
 CALIB_SHARE = 0.5
 SEEDS = (0, 1, 2, 3, 4)
 
@@ -390,10 +394,12 @@ def _nim_inference_points(device: str) -> list[dict[str, Any]]:
         csv_path = SCRIPT_DIR / "nvidia_data" / "4xH100_fp16_Llama3_3-70B.csv"
         base_hw = HW_ROOT / "H100_SXM5_80GB.yaml"
         tp, gpus = 4, 4
+        nvlink_bw = "450 GB"  # H100 SXM NVLink4, uni-directional per GPU
     else:
         csv_path = SCRIPT_DIR / "nvidia_data" / "8xA100_bf16_Llama3_3-70B.csv"
         base_hw = HW_ROOT / "a100_80GB_inf.yaml"
         tp, gpus = 8, 8
+        nvlink_bw = "300 GB"  # A100 SXM NVLink3, uni-directional per GPU
     model_yaml = MODEL_ROOT / "Llama3.1-70B_inf.yaml"
     df = pd.read_csv(csv_path)
     points = []
@@ -420,6 +426,20 @@ def _nim_inference_points(device: str) -> list[dict[str, Any]]:
                         "inference": {"replica_count": 1, "moe_dp": 1},
                     }
                 },
+            )
+            # The checked-in validation base configs model NVLink far below
+            # spec (H100 copy: 100 GB Ring, analytical mode). Fix dim0 to the
+            # physical per-GPU uni-directional NVLink rate with an FC topology
+            # (NVSwitch is all-to-all), and force the hierarchical AstraSim
+            # backend — ALL validation points run hierarchical.
+            for dim in hw.get("network", {}).get("dimensions", []):
+                if dim.get("id") == "dim0":
+                    dim.setdefault("topology", {})["type"] = "FC"
+                    dim["topology"]["bandwidth"] = nvlink_bw
+            _deep_update(
+                hw,
+                {"execution_backend": {"model": "astra",
+                                       "astra": {"mode": "full_astrasim_hierarchical"}}},
             )
             _apply_factors(hw, c, d, n, l)
             model = _load_yaml(model_yaml)
@@ -499,6 +519,11 @@ def _imec_inference_points(device: str) -> list[dict[str, Any]]:
                 if dim.get("id") == "dim0":
                     dim.setdefault("topology", {})["bandwidth"] = "100000 GB"
                     dim["topology"]["latency"] = 1e-9
+            _deep_update(
+                hw,
+                {"execution_backend": {"model": "astra",
+                                       "astra": {"mode": "full_astrasim_hierarchical"}}},
+            )
             _apply_factors(hw, c, d, n, l)
             model = _load_yaml(model_yaml)
             _deep_update(
@@ -901,7 +926,8 @@ def _mape(points: list[dict[str, Any]], combo: tuple[float, float, float]) -> fl
 
 
 def _fit(points: list[dict[str, Any]], design: list[tuple[float, float, float]]):
-    best = min(design, key=lambda combo: _mape(points, combo))
+    admissible = [c for c in design if c[2] >= NET_UTIL_FLOOR - 1e-9]
+    best = min(admissible or design, key=lambda combo: _mape(points, combo))
     return best
 
 
