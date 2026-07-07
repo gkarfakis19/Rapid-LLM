@@ -152,6 +152,12 @@ class ExtendedRooflineGemmBackend:
         m, k, n, batch = int(m), int(k), int(n), max(1, int(batch))
         if min(m, k, n) < 1:
             return None
+        # Skinny GEMV regime (decode): the extended roofline models CTA-tiled
+        # GEMM kernels; real decode kernels are weight-streaming GEMV/split-K
+        # and run near the DRAM roofline, which the native model captures
+        # better. Defer to the native path below the smallest CTA tile extent.
+        if min(m, n) < 128:
+            return None
         api = self._api
         dt = api["DType"].BF16
         role = api["TensorRole"]
