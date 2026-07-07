@@ -1,13 +1,13 @@
 description: 'PAPER-CANONICAL backend golden: requires RAPID_GEMM_BACKEND=extended_roofline
-  (+RAPID_OPMODEL_PATH). Residual compute + ONE merged mem/net utilization (write into both
-  dram_util and network_util); launch 6us. Fitted by backend_merged_study.py on the same canonized
-  50:50 splits as the native golden; boundary-probed on the u axis (H100 u=0.90 and A100 u=0.85
-  sampled and rejected).'
+  (+RAPID_OPMODEL_PATH). Residual compute + ONE GLOBAL merged mem/net utilization u=0.80 SHARED
+  ACROSS DEVICES (user decision 2026-07-07; per-device optima H100 u=0.85 / A100 u=0.75 differ
+  by <=0.25pp holdout, retained in backend_merged_study.py output as sensitivity). Launch 6us.
+  Fitted on the canonized 50:50 splits, all real simulations.'
 compute_util: 1.0
-merged_mem_net_util: 0.75
+merged_mem_net_util: 0.8
 kernel_launch_overhead: 6.0e-06
-calib_mape_pct: 10.59
-holdout_mape_pct: 10.61
+calib_mape_pct: 10.99
+holdout_mape_pct: 10.48
 calibration_points:
 - imec:a100_sxm4_Llama2-13B_tp2
 - imec:a100_sxm4_Llama2-13B_tp4
