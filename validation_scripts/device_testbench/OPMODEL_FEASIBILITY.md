@@ -125,7 +125,28 @@ it worse). Separately, the streaming-GEMV/decode path over-costs memory-bound
 ops 2-3x. Both are upstream fixes in extended_roofline.py — until then the
 backend must stay experimental and the H100 port is premature.
 
-## Final result: compute-derate elimination study (2026-07-06, commit 2ba3de6)
+## Final result (RE-ANCHORED 2026-07-07, post-methodology-fix)
+
+After the inference-methodology fix (commit 38c993f: physical NVLink,
+all-hierarchical, NET_UTIL_FLOOR) the residual study was re-anchored to the
+new native goldens (H100 d=0.90 n=0.70 l=6us; A100 unchanged). Result:
+
+| device | native golden (holdout) | backend result (holdout) |
+|---|---|---|
+| A100_SXM4 | compute = 1.00 (12.04%) | **compute = 1.00 (11.59%) — derate eliminated** |
+| H100_SXM5 | compute = 0.60 (6.94%) | **residual 0.85 (6.86%)** — megatron 7.1%, imec 6.3%, nim 4.5% |
+
+The 0.60-vs-1.00 flat-factor spread collapses to 0.85-vs-1.00 at equal-or-
+better holdout accuracy. The 0.85 H100 residual is corroborated by published
+physics (H100 SXM is power-clock-limited: cuBLAS plateaus at 0.73-0.80 of
+the 989.5 TF rating on ideal shapes; A100 SXM does not throttle), i.e. the
+shape model explains the workload-dependent part and the residual matches
+the sustained-clock ratio — it was never fitted to our data. The earlier
+concern that the backend win "rode" the NVLink comm bug is resolved: after
+the fix the backend still matches native holdout with a more physical
+decomposition.
+
+## Superseded: first residual study (2026-07-06, commit 2ba3de6, PRE-methodology-fix anchors)
 
 After fixing the SMEM-prologue serialization in extended_roofline (op-model
 commit 3025422: steady-state stage = max(smem, math) under multi-stage

@@ -1,6 +1,9 @@
+# GENERATED from the golden calibration (device_testbench REPORT.md).
+# Factors: canonical golden set (commit 38c993f); hierarchical AstraSim;
+# physical NVLink; all overlaps 0.6. Do not hand-edit utils here.
 sw_param:
   full_recomputation: false
-  kernel_launch_overhead: 5.43e-06
+  kernel_launch_overhead: 6.0e-06
   dp_zero_stage: 1
   precision:
     tensor_format: bf16
@@ -24,13 +27,13 @@ tech_param:
     FMA_d1: 8
     FMA_d2: 4
     dataflow: best
-    util: 0.971529516579381
+    util: 1.0
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB
     dynamic_energy_per_bit: 4.5e-12
     latency: 100e-9
-    util: 0.79016531231439
+    util: 0.7
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB
@@ -63,17 +66,18 @@ memory_hierarchy:
     type: DRAM
     scope: global
 parallelism:
-  tp: 2
-  tp_sp: false
-  cp: 2
-  pp: 4
+  auto: false
+  tp: 1
+  tp_sp: true
+  cp: 1
+  pp: 1
   mb: 1
   train:
-    dp: 2
+    dp: 1
     ep: 1
     tp_ep: true
   inference:
-    replica_count: 2
+    replica_count: 1
     moe_dp: 1
 network:
   dimensions:
@@ -81,11 +85,11 @@ network:
     label: torus2d_tp
     size: auto
     topology:
-      type: FullyConnected
-      bandwidth: 250 GB
+      type: FC
+      bandwidth: 300 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 0.846587354592159
+      util: 0.8
       optimize_2dmap: false
     collective_override: {}
     parallelisms:
@@ -100,7 +104,7 @@ network:
       bandwidth: 25 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 1.0
+      util: 0.8
     collective_override: {}
     parallelisms:
     - pp
@@ -113,13 +117,13 @@ network:
       bandwidth: 25 GB
       latency: 5e-6
       energy_per_bit: 8e-12
-      util: 1.0
+      util: 0.8
     parallelisms: []
     collective_override: {}
   overlap:
-    tp_sp_overlap: 0.03775607555883787
+    tp_sp_overlap: 0.6
     tp_overlap: 0.6
-    cp_overlap: 0.0
+    cp_overlap: 0.6
 execution_backend:
   model: astra
   astra:
