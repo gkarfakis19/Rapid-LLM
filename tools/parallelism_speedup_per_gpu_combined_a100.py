@@ -423,7 +423,7 @@ def _plot_model_speedups(ax, run_data, gpu_counts, palette):
     ax.set_xticks(range(len(gpu_counts)), [str(g) for g in gpu_counts])
     ax.set_xlabel("GPU count")
     ax.set_ylim(0.8, None)
-    ax.set_title(run_data["attention_label"])
+    ax.set_title("")  # single-model paper layout: no panel header
 
 
 def _plot_shared_base_speedups(ax, run_data, gpu_counts, shared_base_best, case_palette, metric_title: str):
@@ -614,13 +614,13 @@ def main():
 
         handles, labels = flat_axes[0].get_legend_handles_labels()
         fig.suptitle(
-            f"{context_title}: {metric_title} Speedup on A100 SXM4 by Attention Type"
+            "Llama3-70B Training Time Speedup on A100 DGX SuperPod Varying GPU Count"
         )
         fig.legend(
             handles,
             labels,
             loc="upper left",
-            bbox_to_anchor=(0.02, 0.98),
+            bbox_to_anchor=(0.09, 0.86),
             ncol=2,
             frameon=True,
             fontsize=9,

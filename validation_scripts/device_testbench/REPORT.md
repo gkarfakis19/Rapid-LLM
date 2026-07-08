@@ -9,21 +9,27 @@ canonized in `validation_scripts/validation_configs/{device}_golden_calib.yaml`.
 The paper now uses the extended-roofline GEMM backend for EVERYTHING
 (`RAPID_GEMM_BACKEND=extended_roofline`, `RAPID_OPMODEL_PATH=../op-model`).
 Factor structure: per-device residual compute + ONE merged mem/net utilization
-+ 6 µs launch. Fitted by `backend_merged_study.py` on the canonized splits,
-boundary-probed on the u axis (H100 u=0.90, A100 u=0.85 sampled and rejected):
++ 6 µs launch. USER DECISION 2026-07-07: the merged u is GLOBAL — **0.80 shared
+by both devices** — trading a small amount of per-device holdout for a
+single-constant presentation. Lattice from `backend_merged_study.py` on the
+canonized splits (boundary-probed on the u axis):
 
 | Device | residual compute | merged u | launch | calib | holdout |
 |---|---|---|---|---|---|
-| **H100_SXM5** | **0.85** | **0.85** | 6 µs | 7.92% | **6.45%** |
-| **A100_SXM4** | **1.00** | **0.75** | 6 µs | 10.59% | **10.61%** |
+| **H100_SXM5** | **0.85** | **0.80 (global)** | 6 µs | 8.54% | **6.70%** |
+| **A100_SXM4** | **1.00** | **0.80 (global)** | 6 µs | 10.99% | **10.48%** |
+
+Per-device optima retained as sensitivity (NOT canonical): H100 u=0.85 →
+holdout 6.45%; A100 u=0.75 → holdout 10.61%. The global-u cost is ≤0.25 pp
+on H100 and *improves* A100 holdout by 0.13 pp.
 
 Canonized in `*_golden_calib_backend.yaml`, `harness_derates.yaml`, and the
-`.fitted.yaml` inference configs (commit 6a3985d). Paper figure numbers:
-inference 9.65% (26 rows, worst 23%), dense train 8.69% (7 rows), MoE 6.97%
-(11 rows, holdout half 8.08%, worst 13.6% — the shape model removes the
-flat-factor's systematic large-scale Qwen2 under-prediction). The residuals
-match published physics: H100 0.85 ≈ power-limited sustained-clock ratio;
-A100 1.00 = no throttling.
+`.fitted.yaml` inference configs (commits 6a3985d → a10db3a for u=0.80).
+Paper figure numbers at u=0.80: inference 9.83% (26 rows, worst 24.9%),
+dense train 8.54% (7 rows), MoE 7.06% (11 rows, holdout half 8.29%, worst
+14.2% — the shape model removes the flat-factor's systematic large-scale
+Qwen2 under-prediction). The residuals match published physics: H100 0.85 ≈
+power-limited sustained-clock ratio; A100 1.00 = no throttling.
 
 The native-tile-model goldens below are RETAINED as the no-backend fallback
 and for reproducing the pre-backend analysis.
@@ -44,7 +50,7 @@ Each set is fitted **jointly on pooled training + inference points** for that de
 interpolation or surrogate models anywhere. Kernel-launch overhead resolves to the same
 6 µs on both devices and is no longer a differentiating knob.
 
-### Presentation-constrained alternative (pending decision)
+### Presentation-constrained alternative (native model; superseded)
 
 With the memory and network factors **merged into one utilization u** (real sims, same
 canonized splits; `presentable_factors_study.py`):
@@ -57,8 +63,9 @@ canonized splits; `presentable_factors_study.py`):
 The shared-u=0.80 table is *better on holdout than the granular optimum on both devices*
 (mild regularization win) and reduces the paper table to one compute column + two global
 constants. Raising H100 compute to 0.625/0.65 costs the Megatron MoE flagship subset
-(5.9% → 8.3%/11.3%) and is not recommended. Which set is canonical for the paper is an
-open decision; both are fully reproducible from the caches.
+(5.9% → 8.3%/11.3%) and is not recommended. RESOLVED 2026-07-07: the paper uses the
+extended-roofline backend with global u=0.80 (see PAPER-CANONICAL above); this native
+merged-u table is retained only as the no-backend fallback's presentable variant.
 
 ## Methodology fix (2026-07-06/07) — read this before comparing to older numbers
 
