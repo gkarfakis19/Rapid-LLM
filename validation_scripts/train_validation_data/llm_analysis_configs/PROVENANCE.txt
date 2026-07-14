@@ -1,0 +1,2 @@
+llm-analysis commit: d841e40aec8c84b9e76ba9cfbce67418adb172bd 2024-11-13 14:41:56 -0800
+run: train(model_name=<json>, gpu_name=a100-sxm-80gb, dtype_name=w16a16e16, batch_size_per_gpu=1, gradient_accumulation_steps=<mb>, dp/tp/pp per case, seq_len=2048, activation_recomputation={4:full,1:selective}, flops_efficiency=0.5 [README-documented large-scale training value], all other efficiencies at tool defaults). Patch zero3_gate.patch gates the ZeRO-3 parameter all-gather to sharded configs, matching the tool's own weight-sharding semantics (analysis.py:375).

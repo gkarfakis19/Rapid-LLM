@@ -1,0 +1,9 @@
+{
+ "name": "megatron-gpt-1t",
+ "max_seq_len": 2048,
+ "vocab_size": 51200,
+ "ffn_embed_dim": 102400,
+ "num_layers": 128,
+ "n_head": 160,
+ "hidden_dim": 25600
+}

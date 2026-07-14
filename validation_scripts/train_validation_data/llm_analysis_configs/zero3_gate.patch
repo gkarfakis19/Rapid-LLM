@@ -1,0 +1,16 @@
+diff --git a/llm_analysis/analysis.py b/llm_analysis/analysis.py
+index 4740aea..8849aae 100644
+--- a/llm_analysis/analysis.py
++++ b/llm_analysis/analysis.py
+@@ -1327,8 +1327,9 @@ class LLMAnalysis:
+             logger.warning(
+                 f'allgather communication time to unshard model weight {round(latency_fwd_per_layer_shared_dp_comm*1000, 3)} ms is larger than compute {round(latency_per_layer*1000, 3)} ms, thus cannot be fully overlapped.'
+             )
+-        latency_per_layer = max(latency_per_layer,
+-                                latency_fwd_per_layer_shared_dp_comm)
++        if ds_zero == DSZeRO.STAGE_3:
++            latency_per_layer = max(latency_per_layer,
++                                    latency_fwd_per_layer_shared_dp_comm)
+ 
+         logger.info(
+             f"latency_per_layer: {round(latency_per_layer*1000, 3)} ms (max(attn + mlp + 2*layernorm + 2*tp_comm, shared_dp_comm):"
