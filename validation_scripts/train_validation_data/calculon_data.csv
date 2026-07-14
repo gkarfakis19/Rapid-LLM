@@ -1,0 +1,8 @@
+label,tool,status,tool_seconds,model,batch,mb,dp,tp,pp,cp,tp_sp,recomputation,case,actual_time_s
+GPT 1T bs=512/mb=512 dp=1 tp=8 pp=64 cp=1 tp_sp=False recompute=full,calculon,ok,90.08,GPT 1T,512,512,1,8,64,1,False,full,korthi,87.9
+GPT 1T bs=512/mb=512 dp=1 tp=8 pp=64 cp=1 tp_sp=True recompute=selective,calculon,ok,66.04,GPT 1T,512,512,1,8,64,1,True,selective,korthi,69.1
+GPT 1T bs=3072/mb=512 dp=6 tp=8 pp=64 cp=1 tp_sp=False recompute=full,calculon,ok,90.26,GPT 1T,3072,512,6,8,64,1,False,full,selene,100.7
+GPT 310B bs=2160/mb=144 dp=15 tp=8 pp=16 cp=1 tp_sp=False recompute=full,calculon,ok,33.61,GPT 310B,2160,144,15,8,16,1,False,full,selene,34.1
+GPT 530B bs=2520/mb=280 dp=9 tp=8 pp=35 cp=1 tp_sp=False recompute=full,calculon,ok,50.06,GPT 530B,2520,280,9,8,35,1,False,full,selene,51.2
+GPT 175B bs=64/mb=64 dp=1 tp=8 pp=8 cp=1 tp_sp=False recompute=full,calculon,ok,18.03,GPT 175B,64,64,1,8,8,1,False,full,korthi,16.9
+GPT 175B bs=64/mb=64 dp=1 tp=8 pp=8 cp=1 tp_sp=True recompute=selective,calculon,ok,13.64,GPT 175B,64,64,1,8,8,1,True,selective,korthi,12.9
