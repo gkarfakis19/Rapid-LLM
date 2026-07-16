@@ -1673,7 +1673,7 @@ class LLMConfig:
 
         mode_raw = _parse_str_field("model_param", model_dict, "mode")
         mode = mode_raw.strip().upper()
-        if mode not in {"LLM", "VIT"}:
+        if str(mode).upper() not in {"LLM", "VIT"}:
             raise ValueError(
                 f"model_param.mode must be 'LLM' or 'ViT' for LLM-based configs (got {mode_raw!r})"
             )
@@ -2351,7 +2351,7 @@ def parse_config(filename, config_type):
     elif config_type == "GEMM":
         model_config = GEMMConfig.from_dict(config_dict["model_param"])
         config = ModelConfig(model_config=model_config, inference_config=None)
-    elif config_type in {"LLM", "VIT"}:
+    elif str(config_type).upper() in {"LLM", "VIT"}:
         model_config = LLMConfig.from_dict(config_dict["model_param"])
         inference_config = None
         if model_config.run_type == "inference":

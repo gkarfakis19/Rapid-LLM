@@ -470,7 +470,7 @@ class TimeCalculation:
             self.N = self.model.N
             self.gemm_shard_axis = self.model.gemm_shard_axis
 
-        if mode in {"LLM", "VIT"}:
+        if str(mode).upper() in {"LLM", "VIT"}:
             self.global_batch_size = self.model.global_batch_size
             self.gradient_accumulation_steps = self.model.gradient_accumulation_steps
             self.batch_size = self.global_batch_size // self.gradient_accumulation_steps
@@ -566,9 +566,10 @@ class TimeCalculation:
             "LLM": model_LLM,
             "VIT": model_LLM,
         }
-        if model_type not in model_classes:
+        key = str(model_type).upper()
+        if key not in model_classes:
             raise ValueError(f"Unsupported model type: {model_type}")
-        return model_classes[model_type]
+        return model_classes[key]
 
     def roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
         # print("Roofline: entered {}".format(name))

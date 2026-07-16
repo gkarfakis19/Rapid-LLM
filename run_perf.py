@@ -351,7 +351,7 @@ if __name__ == "__main__":
         shutil.rmtree(exp_dir)
     os.makedirs(exp_dir, exist_ok=True)
 
-    if mode in {"LLM", "VIT"}:
+    if str(mode).upper() in {"LLM", "VIT"}:
         run_LLM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,

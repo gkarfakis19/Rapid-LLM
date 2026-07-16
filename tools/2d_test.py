@@ -183,6 +183,11 @@ TRAIN_MODELS = (
         ),
         "axes": ("tp", "ep", "pp"),
     },
+    {
+        "label": "ViT7B",
+        "config": TRAIN_VIT7B_MODEL_CONFIG,
+        "axes": ("tp", "pp"),
+    },
     # {
     #     "label": "GPT175B",
     #     "config": TRAIN_GPT175B_MODEL_CONFIG,
@@ -199,6 +204,7 @@ INF_SHAPES = ((4, 5), (4, 6), (4, 8), (6, 6))
 INF_MODELS = (
     {"label": "70B", "config": INF_70B_MODEL_CONFIG},
     {"label": "GLM4.5_106B", "config": INF_GLM45_106B_MODEL_CONFIG},
+    {"label": "ViT7B", "config": INF_VIT7B_MODEL_CONFIG},
     # {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
 )
 
