@@ -92,7 +92,7 @@ hfval.CLEANUP_ASTRA_TMP = True
 # Compare these topologies against Mesh2D in plots/tables.
 COMPARE_TOPOLOGIES = ("Torus2D", "FullyConnected")
 # If True, scale FullyConnected per-link BW to match Mesh2D total injection.
-FC_FAIR = False
+FC_FAIR = True
 FC_FAIR_MESH_EDGES = 4
 
 TOPOLOGIES = ("Mesh2D",) + COMPARE_TOPOLOGIES
