@@ -3,10 +3,11 @@
 
 Rapid-LLM values: canonical u=0.80 extended-roofline runs
 (device_testbench/A100_SXM4_opmodel cache, key c1.000_d0.80_n0.80).
-llm-analysis values: github.com/cli99/llm-analysis @ d841e40, a100-sxm-80gb,
-w16a16e16, flops_efficiency=0.5 (its README-documented large-scale-training
-value), all other efficiencies at tool defaults, ZeRO-3 all-gather gated to
-sharded configs (see train_validation_data/llm_analysis_configs/).
+llm-analysis values: STOCK github.com/cli99/llm-analysis @ d841e40 (unmodified),
+a100-sxm-80gb, w16a16e16, flops_efficiency=0.5 (its README-documented
+large-scale-training value), all other efficiencies at tool defaults
+(see train_validation_data/llm_analysis_configs/). Its dp>1 cases are floored
+by an unconditional per-layer weight all-gather term (stock behavior).
 STAGE values: tool_seconds from train_validation_data/STAGE_data.csv (the
 original STAGE runs; 4/7 cases — 530B ran out of time/memory budget, and
 STAGE's recomputation flag is dead so selective rows are unsupported).
@@ -27,9 +28,9 @@ DISPLAY_LABELS = {"actual": "Actual", "rapid_llm": "Rapid-LLM", "llm_analysis": 
 ROWS = [
     ("GPT 1T tp8-cp1-pp64-dp1-recompute-full", 87.9, 98.70, 114.03, 18.24),
     ("GPT 1T tp8-cp1-pp64-dp1-recompute-selective", 69.1, 78.82, 87.93, None),
-    ("GPT 1T tp8-cp1-pp64-dp6-recompute-full", 100.7, 106.82, 114.03, 18.46),
-    ("GPT 310B tp8-cp1-pp16-dp15-recompute-full", 34.1, 31.26, 40.01, 6.16),
-    ("GPT 530B tp8-cp1-pp35-dp9-recompute-full", 51.2, 52.11, 60.34, None),
+    ("GPT 1T tp8-cp1-pp64-dp6-recompute-full", 100.7, 106.82, 231.17, 18.46),
+    ("GPT 310B tp8-cp1-pp16-dp15-recompute-full", 34.1, 31.26, 87.89, 6.16),
+    ("GPT 530B tp8-cp1-pp35-dp9-recompute-full", 51.2, 52.11, 128.24, None),
     ("GPT 175B tp8-cp1-pp8-dp1-recompute-full", 16.9, 15.90, 20.42, 8.13),
     ("GPT 175B tp8-cp1-pp8-dp1-recompute-selective", 12.9, 11.44, 17.24, None),
 ]
