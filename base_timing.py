@@ -399,10 +399,11 @@ class TimeCalculation:
         self.FMA_dims = self.core.FMA_dims  # (FMA_x, FMA_y)
         self.dataflow = self.core.dataflow
 
-        # Optional extended-roofline GEMM backend (RAPID_GEMM_BACKEND env);
-        # replaces per-GEMM kernel time only, everything else stays native.
+        # Extended-roofline GEMM backend; replaces per-GEMM kernel time only.
+        # The native tile model below still selects tiles, counts memory
+        # accesses, and prices ops the backend declines (skinny GEMV, non-bf16).
         import opmodel_adapter
-        self._opmodel_gemm_backend = opmodel_adapter.maybe_create(hw_config)
+        self._opmodel_gemm_backend = opmodel_adapter.create(hw_config)
 
         self.memory_hierarchy = MemoryHierarchy(hw_config, core=self.core)
         self.num_levels = self.memory_hierarchy.num_levels

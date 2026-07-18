@@ -1,15 +1,12 @@
-"""Optional extended-roofline GEMM backend (eyao600/op-model integration).
+"""Extended-roofline GEMM backend (the default kernel-time model).
 
-Experimental adapter that routes RAPID-LLM's per-GEMM kernel time through the
-`opmodel` extended-roofline model (shape-dependent effective utilization from
-CTA tiling, wave quantization, L2 reuse, and per-level bandwidth limits)
-instead of the native tile model. Everything else — tile selection, memory
-access accounting, launch overhead, communication, scheduling — stays native.
-
-Opt-in via environment variables (no config-schema change while experimental):
-
-    RAPID_GEMM_BACKEND=extended_roofline   enable the backend
-    RAPID_OPMODEL_PATH=/path/to/op-model   repo checkout (its src/ is imported)
+Routes RAPID-LLM's per-GEMM kernel time through the vendored `opmodel`
+extended-roofline model (shape-dependent effective utilization from CTA
+tiling, wave quantization, L2 reuse, and per-level bandwidth limits).
+Everything else — tile selection, memory access accounting, launch overhead,
+communication, scheduling — stays native. The `opmodel` package is vendored
+in-tree (from eyao600/op-model @ 3025422, which includes the SMEM-prologue
+pipelining fix); no external checkout or environment configuration is needed.
 
 Semantics:
 - The opmodel HardwareSpec is DERIVED from the RAPID hardware config (clock,
@@ -27,37 +24,17 @@ Semantics:
 
 from __future__ import annotations
 
-import os
-import sys
 import warnings
 from typing import Any, Optional
-
-_BACKEND_ENV = "RAPID_GEMM_BACKEND"
-_PATH_ENV = "RAPID_OPMODEL_PATH"
-
-
-def backend_requested() -> bool:
-    return os.environ.get(_BACKEND_ENV, "").strip().lower() == "extended_roofline"
 
 
 class ExtendedRooflineGemmBackend:
     """Per-TimeCalculation adapter instance (caches model + hardware spec)."""
 
     def __init__(self, hw_config: Any) -> None:
-        path = os.environ.get(_PATH_ENV, "").strip()
-        if path:
-            src = os.path.join(path, "src")
-            if os.path.isdir(src) and src not in sys.path:
-                sys.path.insert(0, src)
-        try:
-            from opmodel import DType, LocalOp, OpKind, Phase, TensorRole, TensorSpec
-            from opmodel.hardware import _parse_hardware
-            from opmodel.registry import create_model
-        except ImportError as exc:  # pragma: no cover - env dependent
-            raise RuntimeError(
-                f"{_BACKEND_ENV}=extended_roofline requires the opmodel package; "
-                f"set {_PATH_ENV} to an eyao600/op-model checkout."
-            ) from exc
+        from opmodel import DType, LocalOp, OpKind, Phase, TensorRole, TensorSpec
+        from opmodel.hardware import _parse_hardware
+        from opmodel.registry import create_model
 
         self._api = {
             "DType": DType,
@@ -185,8 +162,6 @@ class ExtendedRooflineGemmBackend:
         return latency
 
 
-def maybe_create(hw_config: Any) -> Optional[ExtendedRooflineGemmBackend]:
-    """Create the backend when requested via env; None otherwise."""
-    if not backend_requested():
-        return None
+def create(hw_config: Any) -> ExtendedRooflineGemmBackend:
+    """Create the extended-roofline GEMM backend."""
     return ExtendedRooflineGemmBackend(hw_config)

@@ -36,9 +36,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from validation_scripts import device_testbench as dtb  # noqa: E402
 
-assert os.environ.get("RAPID_GEMM_BACKEND") == "extended_roofline", (
-    "run with RAPID_GEMM_BACKEND=extended_roofline and RAPID_OPMODEL_PATH set"
-)
+# extended_roofline is the built-in default backend since the opmodel vendoring;
+# no environment configuration is required.
 
 DEVICES = ("A100_SXM4", "H100_SXM5")
 C_AXIS = (0.80, 0.85, 0.90, 0.95, 1.00)

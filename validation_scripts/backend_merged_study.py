@@ -15,8 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from validation_scripts import device_testbench as dtb
 
-assert os.environ.get("RAPID_GEMM_BACKEND") == "extended_roofline", (
-    "run with RAPID_GEMM_BACKEND=extended_roofline and RAPID_OPMODEL_PATH set")
+# extended_roofline is the built-in default backend since the opmodel vendoring;
+# no environment configuration is required.
 
 GRID = {
     # boundary-extension probes added after round 1 (optima sat on u edges)
