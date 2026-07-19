@@ -402,8 +402,8 @@ class TimeCalculation:
         # Extended-roofline GEMM backend; replaces per-GEMM kernel time only.
         # The native tile model below still selects tiles, counts memory
         # accesses, and prices ops the backend declines (skinny GEMV, non-bf16).
-        import opmodel_adapter
-        self._opmodel_gemm_backend = opmodel_adapter.create(hw_config)
+        import extended_timing
+        self._extended_gemm_backend = extended_timing.create(hw_config)
 
         self.memory_hierarchy = MemoryHierarchy(hw_config, core=self.core)
         self.num_levels = self.memory_hierarchy.num_levels
@@ -717,11 +717,12 @@ class TimeCalculation:
         best_inner_code = best_choice[0]  # type: ignore[index]
         best_tile_dims = best_choice[1]  # type: ignore[index]
 
-        # Extended-roofline backend: replace the kernel time only. Tile choice
-        # and memory-access accounting above stay native. RAPID's core.util is
-        # applied as a residual global scale; launch overhead is added exactly
-        # as in the native path (opmodel runs with zero fixed overhead).
-        backend = getattr(self, "_opmodel_gemm_backend", None)
+        # Extended-roofline backend (extended_timing.py): replace the kernel
+        # time only. Tile choice and memory-access accounting above stay
+        # native. RAPID's core.util is applied as a residual global scale;
+        # launch overhead is added exactly as in the native path (the backend
+        # runs with zero fixed overhead).
+        backend = getattr(self, "_extended_gemm_backend", None)
         if backend is not None and not flashattn_enable:
             latency = backend.gemm_latency_s(dim1, dim2, dim3, self.precision_bytes)
             if latency is not None:
