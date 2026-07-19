@@ -361,7 +361,7 @@ if GLM_MODE:
         MIN_ALLOWED_EP = 1
         MAX_ALLOWED_EP = 1
 else:
-    HARDWARE_CONFIG_PATH = "/tmp/claude-7923/-w-ee-00-puneet-karfakis-hmwrk-ee247/c038e1cb-cc19-4081-aa55-d5fd27dd7a23/scratchpad/a100_80GB_fault_u80.yaml"
+    HARDWARE_CONFIG_PATH = "outputs/fault_llama_u80_final/a100_80GB_fault_u80.yaml"
     MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
     NETWORK_CONFIG_PATH: Optional[str] = None
     TARGET_NUM_GPUS = 96

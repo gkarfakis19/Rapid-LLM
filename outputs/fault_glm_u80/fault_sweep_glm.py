@@ -330,7 +330,7 @@ def _one_dim_enabled() -> bool:
 
 if GLM_MODE:
     if GLM_TRAIN:
-        HARDWARE_CONFIG_PATH = "/tmp/claude-7923/-w-ee-00-puneet-karfakis-hmwrk-ee247/c038e1cb-cc19-4081-aa55-d5fd27dd7a23/scratchpad/a100_80GB_fault_u80.yaml"
+        HARDWARE_CONFIG_PATH = "outputs/fault_glm_u80/a100_80GB_fault_u80.yaml"
         MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_358B.yaml"
         NETWORK_CONFIG_PATH: Optional[str] = None
         # NETWORK_CONFIG_PATH: Optional[str] = "configs/hardware-config/a100_80GB.yaml"
