@@ -1188,10 +1188,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--activation-checkpointing-true-mode",
         choices=("full", "selective"),
-        default="selective",
+        default="full",
         help=(
             "Interpretation of CSV activation_checkpointing=True. "
-            "'full' maps to full recomputation; 'selective' maps to selective checkpointing."
+            "'full' maps to full recomputation; 'selective' maps to selective checkpointing. "
+            "Default 'full': LLM-foundry checkpoints whole transformer blocks, which is "
+            "full recomputation semantics (paper-canonical mapping; A/B vs 'selective' "
+            "shows ckpt=True rows at seq<=4096 collapse from ~-23% to +0.2% mean error)."
         ),
     )
     return parser.parse_args()
