@@ -2251,7 +2251,7 @@ def plot_fault_sensitivity_combined(
     ylabel = "Normalized runtime (fastest=1.0)" if normalize else "Runtime (s)"
     plt.ylabel(ylabel, fontsize=19)
     plt.title(
-        f"Soft vs Hard Fault Sensitivity (GLM4.7 358B), Num GPUs = {num_gpus}",
+        f"Soft vs Hard Fault Sensitivity (GLM-4.5 355B), Num GPUs = {num_gpus}",
         fontsize=18,
     )
     plt.grid(alpha=0.3, axis="y")
