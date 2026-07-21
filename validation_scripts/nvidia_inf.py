@@ -15,6 +15,7 @@
 
 import argparse
 import copy
+import json
 import math
 import os
 from functools import lru_cache
@@ -32,7 +33,7 @@ COMPARE_VIDUR = True
 COMPARE_GENZ = True
 COMPARE_FLATTENED = False
 
-RAPID_HIER_LABEL = "RAPID-LLM (hierarchical)"
+RAPID_HIER_LABEL = "RAPID-LLM"
 RAPID_FLAT_LABEL = "RAPID-LLM (flattened)"
 
 TOOL_COLORS = {
@@ -2188,6 +2189,8 @@ def run(
     specs, actual_lookup, base_model_path, hw_config_path = build_specs_for_device(
         device, network_ignored=network_ignored, models=models, fit_model=not test_model
     )
+    if emit_logs:
+        print(f"[nvidia_inf] IMEC suite device={device} hardware config: {hw_config_path}")
 
     validation_results = run_validation_suite(
         specs,
@@ -2346,6 +2349,8 @@ def run_nvidia(
     specs, actual_lookup, base_model_path, hw_config_path = build_nvidia_specs_for_device(
         device, network_ignored=network_ignored, models=models
     )
+    if emit_logs:
+        print(f"[nvidia_inf] NVIDIA suite device={device} hardware config: {hw_config_path}")
 
     validation_results = run_validation_suite(
         specs,
@@ -3727,6 +3732,139 @@ def _plot_combined_ratio_grids(
     return outpath
 
 
+def _plot_combined_ratio_grids_h100(
+    imec_rows: List[Dict[str, object]],
+    nvidia_rows: List[Dict[str, object]],
+    outdir: Path,
+) -> Optional[Path]:
+    """RAPID-only H100 ratio grid: left column = IMEC Llama2 TP sweeps (stacked),
+    right column = NVIDIA NIM Llama3-70B batch panels. Same style as the A100 grid."""
+    imec_rows = [row for row in imec_rows if row.get("device") == "H100"]
+    nvidia_rows = [row for row in nvidia_rows if row.get("device") == "H100"]
+    if not imec_rows or not nvidia_rows:
+        return None
+
+    model_order = {"Llama 2-7B": 0, "Llama 2-13B": 1, "Llama 2-70B": 2}
+    models = sorted(
+        {row.get("model") for row in imec_rows if row.get("model")},
+        key=lambda name: (model_order.get(name, 99), str(name)),
+    )
+    tps = sorted({int(row.get("tp")) for row in imec_rows if row.get("tp") is not None})
+    token_pairs = sorted(
+        {(
+            int(row.get("input_tokens")),
+            int(row.get("output_tokens")),
+        ) for row in nvidia_rows if row.get("input_tokens") is not None and row.get("output_tokens") is not None}
+    )
+    concurrencies = sorted(
+        {int(row.get("concurrency")) for row in nvidia_rows if row.get("concurrency") is not None}
+    )
+    if not models or not tps or not token_pairs or not concurrencies:
+        return None
+
+    imec_ratio: Dict[Tuple[object, object], float] = {}
+    for row in imec_rows:
+        imec_ratio[(row.get("model"), int(row.get("tp")))] = _safe_ratio(
+            row.get("inference_time_s"), row.get("actual_inference_time_s")
+        )
+    nvidia_ratio: Dict[Tuple[int, int, int], float] = {}
+    for row in nvidia_rows:
+        nvidia_ratio[(
+            int(row.get("input_tokens")),
+            int(row.get("output_tokens")),
+            int(row.get("concurrency")),
+        )] = _safe_ratio(row.get("inference_time_s"), row.get("actual_inference_time_s"))
+
+    rapid_color = TOOL_COLORS[RAPID_HIER_LABEL]
+    n_rows = max(len(models), len(concurrencies))
+    fig_w = 9.0
+    fig_h = 2.1 * n_rows + 1.4
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    gs = fig.add_gridspec(n_rows, 2, wspace=0.25, hspace=0.55)
+
+    bar_width = 0.6
+    group_gap = 1.3
+
+    def _finite(vals: Iterable[float]) -> List[float]:
+        return [v for v in vals if isinstance(v, (int, float)) and math.isfinite(v)]
+
+    left_vals = _finite(imec_ratio.values()) + [1.0]
+    left_span = max(max(left_vals) - min(left_vals), 0.1)
+    left_pad = 0.05 * left_span
+    left_limits = (min(left_vals) - left_pad, max(left_vals) + left_pad)
+
+    right_vals = _finite(nvidia_ratio.values()) + [1.0]
+    right_span = max(max(right_vals) - min(right_vals), 0.1)
+    right_pad = 0.05 * right_span
+    right_limits = (min(right_vals) - right_pad, max(right_vals) + right_pad)
+
+    def _draw_missing(ax, pos: float, limits: Tuple[float, float]) -> None:
+        ax.bar(
+            pos,
+            1.0,
+            bar_width,
+            color="#c9c9c9",
+            alpha=0.4,
+            edgecolor="#8a8a8a",
+            hatch="//",
+        )
+        y_mid = 0.5 * (limits[0] + limits[1])
+        ax.text(pos, y_mid, "x", ha="center", va="center", fontsize=10, color="#555555")
+
+    for row_idx, model in enumerate(models):
+        ax = fig.add_subplot(gs[row_idx, 0])
+        display_model = MODEL_DISPLAY.get(str(model), str(model))
+        x_positions = [idx * group_gap for idx in range(len(tps))]
+        for pos, tp in zip(x_positions, tps):
+            height = imec_ratio.get((model, tp), float("nan"))
+            if isinstance(height, (int, float)) and math.isfinite(height):
+                ax.bar(pos, height, bar_width, color=rapid_color)
+            else:
+                _draw_missing(ax, pos, left_limits)
+        ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
+        ax.set_ylim(*left_limits)
+        ax.set_title(display_model)
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([f"TP{tp}" for tp in tps], fontsize=8)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        ax.set_ylabel("Pred / Actual")
+
+    x_positions = [idx * group_gap for idx in range(len(token_pairs))]
+    x_labels = [f"{inp}/{out}" for inp, out in token_pairs]
+    for row_idx, concurrency in enumerate(concurrencies):
+        ax = fig.add_subplot(gs[row_idx, 1])
+        for pos, (inp, out) in zip(x_positions, token_pairs):
+            height = nvidia_ratio.get((inp, out, concurrency), float("nan"))
+            if isinstance(height, (int, float)) and math.isfinite(height):
+                ax.bar(pos, height, bar_width, color=rapid_color)
+            else:
+                _draw_missing(ax, pos, right_limits)
+        ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.0)
+        ax.set_ylim(*right_limits)
+        ax.set_title(f"batch size = {concurrency}")
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(x_labels, rotation=20, ha="right", fontsize=8)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    fig.suptitle("Normalized Inference Validation (H100 Systems)", y=0.985)
+    fig.text(0.71, 0.925, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=rapid_color)]
+    fig.legend(
+        handles,
+        [RAPID_HIER_LABEL],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.015),
+        ncol=1,
+    )
+    fig.subplots_adjust(bottom=0.13, top=0.88)
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / "inf_ratio_grid_combined_h100.png"
+    fig.savefig(outpath, dpi=200)
+    plt.close(fig)
+    return outpath
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run NVIDIA inference validation and comparison plots."
@@ -3752,39 +3890,60 @@ if __name__ == "__main__":
         default="ratio",
         help="Choose which combined plot to generate (default: both).",
     )
+    parser.add_argument(
+        "--cached-rows",
+        action="store_true",
+        help="Reuse per-device rows from the rows cache (skips re-running simulations).",
+    )
     args = parser.parse_args()
     _apply_compare_args(args)
 
-    imec_rows = None
-    imec_flattened_rows = None
-    nvidia_rows = None
-    nvidia_flattened_rows = None
+    rows_cache_path = Path(PROJECT_ROOT) / "output" / "validation" / "inf" / "rows_cache.json"
+    cached_rows: Dict[str, Dict[str, object]] = {}
+    if args.cached_rows and rows_cache_path.exists():
+        with open(rows_cache_path) as handle:
+            cached_rows = json.load(handle)
+        print(f"[nvidia_inf] Loaded rows cache: {rows_cache_path}")
+
+    device_rows: Dict[str, Dict[str, object]] = {}
+    for device_name in ("A100", "H100"):
+        entry = cached_rows.get(device_name) or {}
+        if entry.get("imec_rows") and entry.get("nvidia_rows"):
+            print(f"[nvidia_inf] Using cached rows for device={device_name}")
+            device_rows[device_name] = entry
+            continue
+        entry = {}
+        try:
+            # Only build combined plots below; skip per-device plots here.
+            result = run(network_ignored=False, device=device_name)
+            entry["imec_rows"] = result.get("rows")
+            entry["imec_flattened_rows"] = result.get("flattened_rows")
+        except FileNotFoundError:
+            pass
+        try:
+            result = run_nvidia(network_ignored=False, device=device_name)
+            entry["nvidia_rows"] = result.get("rows")
+            entry["nvidia_flattened_rows"] = result.get("flattened_rows")
+        except FileNotFoundError:
+            pass
+        device_rows[device_name] = entry
+
+    rows_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(rows_cache_path, "w") as handle:
+        json.dump(device_rows, handle, indent=1)
+    print(f"[nvidia_inf] Saved rows cache: {rows_cache_path}")
+
+    a100_entry = device_rows.get("A100", {})
+    imec_rows = a100_entry.get("imec_rows")
+    imec_flattened_rows = a100_entry.get("imec_flattened_rows")
+    nvidia_rows = a100_entry.get("nvidia_rows")
+    nvidia_flattened_rows = a100_entry.get("nvidia_flattened_rows")
     llmcompass_rows = None
     llmcompass_nvidia_rows = None
     vidur_rows = None
     vidur_nvidia_rows = None
     genz_nvidia_rows = None
     genz_rows = None
-    # for device_name in ("A100", "H100"):
-    for device_name in ("A100",):
-        try:
-            # Only build combined plots below; skip per-device plots here.
-            result = run(network_ignored=False, device=device_name)
-            if device_name == "A100":
-                imec_rows = result.get("rows")
-                imec_flattened_rows = result.get("flattened_rows")
-        except FileNotFoundError:
-            pass
-    # for device_name in ("A100", "H100"):
-    for device_name in ("A100",):
-        try:
-            # Only build combined plots below; skip per-device plots here.
-            result = run_nvidia(network_ignored=False, device=device_name)
-            if device_name == "A100":
-                nvidia_rows = result.get("rows")
-                nvidia_flattened_rows = result.get("flattened_rows")
-        except FileNotFoundError:
-            pass
     if imec_rows and nvidia_rows:
         out_dir = Path(PROJECT_ROOT) / "output" / "validation" / "inf"
         if COMPARE_LLMCOMPASS:
@@ -3828,3 +3987,40 @@ if __name__ == "__main__":
             )
             if combined_ratio is not None:
                 print(f"Saved: {combined_ratio}")
+
+    h100_entry = device_rows.get("H100", {})
+    h100_imec_rows = h100_entry.get("imec_rows")
+    h100_nvidia_rows = h100_entry.get("nvidia_rows")
+    if h100_imec_rows and h100_nvidia_rows and args.plot in ("ratio", "both"):
+        out_dir = Path(PROJECT_ROOT) / "output" / "validation" / "inf"
+        combined_ratio_h100 = _plot_combined_ratio_grids_h100(
+            h100_imec_rows,
+            h100_nvidia_rows,
+            out_dir,
+        )
+        if combined_ratio_h100 is not None:
+            print(f"Saved: {combined_ratio_h100}")
+
+    def _mape(rows: Optional[List[Dict[str, object]]]) -> Tuple[float, int]:
+        vals = [
+            float(row["pct_error"])
+            for row in (rows or [])
+            if row.get("pct_error") is not None and math.isfinite(float(row["pct_error"]))
+        ]
+        if not vals:
+            return float("nan"), 0
+        return sum(vals) / len(vals), len(vals)
+
+    print("\n=== MAPE summary ===")
+    for summary_device in ("A100", "H100"):
+        entry = device_rows.get(summary_device, {})
+        imec = entry.get("imec_rows") or []
+        nvidia = entry.get("nvidia_rows") or []
+        imec_mape, imec_n = _mape(imec)
+        nvidia_mape, nvidia_n = _mape(nvidia)
+        combined_mape, combined_n = _mape(list(imec) + list(nvidia))
+        print(
+            f"{summary_device}: IMEC MAPE {imec_mape:.2f}% ({imec_n} rows) | "
+            f"NIM MAPE {nvidia_mape:.2f}% ({nvidia_n} rows) | "
+            f"combined MAPE {combined_mape:.2f}% ({combined_n} rows)"
+        )
