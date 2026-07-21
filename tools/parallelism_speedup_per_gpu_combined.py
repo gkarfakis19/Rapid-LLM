@@ -40,12 +40,27 @@ H100_BASE_CONFIG = (
     / "H100_SXM5_80GB_base.yaml"
 )
 GENERATED_CASE_DIRNAME = "generated_hw_configs_h100"
+# Canonical harness derates (same source/application as tools/2d_test.py and the
+# A100 sibling driver): core util 0.85, DRAM util 0.8, network dim0 util 0.8,
+# kernel launch 6e-6. Applied to the base hardware config BEFORE the Case A-E
+# variants are generated, so Case A's +20% compute utilization means 0.85->1.02.
+DERATE_CONFIG_PATH = (
+    REPO_ROOT / "validation_scripts" / "validation_configs" / "harness_derates.yaml"
+)
+DERATE_DEVICE_TYPE = "H100_SXM5"
 
 GPU_COUNTS = [128, 256, 512, 1024, 2048] #, 256, 512, 1024, 2048
 INFERENCE_GPU_COUNTS = [4, 8, 16, 32, 64]
 INFERENCE_GPU_COUNT_MIN = 4
 INFERENCE_GPU_COUNT_MAX = 64
 INFERENCE_GLOBAL_BATCH_SIZES = [1, 2, 4]
+# Inference sweep-grid overrides passed to tools/parallelism_sweep.py. The SC-era
+# study swept low-TP mappings too (tp 2^0..2^6, pp up to 32); the narrowed
+# DeepSeek/GLM inference grid (tp=[8,16], pp=[1,2,3]) cannot express the
+# memory-capacity-constrained mappings that the Case B comparison depends on,
+# so this driver restores small-scale coverage for inference runs.
+INFERENCE_TP_VALUES = [1, 2, 4, 8, 16]
+INFERENCE_PP_VALUES = [1, 2, 3, 4]
 DEFAULT_MODEL_CONFIG = (
     REPO_ROOT
     / "validation_scripts"
@@ -514,7 +529,22 @@ def _scale_dimension_bandwidth(hw_dict: dict, dim_index: int, factor: float) -> 
 
 def _load_base_hardware_config() -> dict:
     with open(H100_BASE_CONFIG, "r") as handle:
-        return yaml.safe_load(handle) or {}
+        base_hw = yaml.safe_load(handle) or {}
+    derates = sweep._load_device_derates(str(DERATE_CONFIG_PATH), DERATE_DEVICE_TYPE)
+    sweep._apply_device_derates(base_hw, derates)
+    print(
+        "[derates] applied {} {}: kernel_launch_overhead={}, dram.util={}, "
+        "network.dim0.util={}, core.util={}".format(
+            DERATE_CONFIG_PATH.name,
+            DERATE_DEVICE_TYPE,
+            derates["kernel_launch_overhead_s"],
+            derates["dram_util"],
+            derates["network_util"],
+            derates["compute_util"],
+        ),
+        flush=True,
+    )
+    return base_hw
 
 
 def _force_zero_network_overlap(hw_dict: dict) -> None:
@@ -767,6 +797,13 @@ def run_sweep_for_cases(
             "--gpu-count-max",
             str(gpu_count_max),
         ]
+        if is_inference:
+            cmd += [
+                "--inference-tp-values",
+                ",".join(str(v) for v in INFERENCE_TP_VALUES),
+                "--inference-pp-values",
+                ",".join(str(v) for v in INFERENCE_PP_VALUES),
+            ]
         subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
         if case_d_use_case_c_best:
             case_lookup = {label: path for label, path in case_configs}

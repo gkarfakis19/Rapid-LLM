@@ -1096,6 +1096,24 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--inference-tp-values",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated TP values for the inference sweep grid. When unset, "
+            f"uses the built-in inference default ({','.join(str(v) for v in INFERENCE_PARALLELISM_SWEEP['tp'])})."
+        ),
+    )
+    parser.add_argument(
+        "--inference-pp-values",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated PP values for the inference sweep grid. When unset, "
+            f"uses the built-in inference default ({','.join(str(v) for v in INFERENCE_PARALLELISM_SWEEP['pp'])})."
+        ),
+    )
+    parser.add_argument(
         "--derate-config",
         type=str,
         default="",
@@ -1922,12 +1940,20 @@ def main():
 
     if model_run_type == "inference":
         gpu_option_map = dict(INFERENCE_PARALLELISM_SWEEP)
+        if str(args.inference_tp_values or "").strip():
+            gpu_option_map["tp"] = sorted(
+                {int(part.strip()) for part in str(args.inference_tp_values).split(",") if part.strip()}
+            )
+        if str(args.inference_pp_values or "").strip():
+            gpu_option_map["pp"] = sorted(
+                {int(part.strip()) for part in str(args.inference_pp_values).split(",") if part.strip()}
+            )
         other_option_map = dict(OTHER_PARALLELISM_OPTIONS)
         other_option_map["replica_count"] = [1]
         print(
             "Inference sweep mode: using bounded inference grid "
-            f"(tp={INFERENCE_PARALLELISM_SWEEP['tp']}, cp={INFERENCE_PARALLELISM_SWEEP['cp']}, "
-            f"pp={INFERENCE_PARALLELISM_SWEEP['pp']}, ep={active_ep_sweep}) and "
+            f"(tp={gpu_option_map['tp']}, cp={gpu_option_map['cp']}, "
+            f"pp={gpu_option_map['pp']}, ep={active_ep_sweep}) and "
             "fixing inference.replica_count=1."
         )
     else:
