@@ -3625,7 +3625,7 @@ def _plot_combined_ratio_grids(
         )
     top_span = max(max(top_all_vals) - min(top_all_vals), 0.1) if top_all_vals else 0.1
     top_pad = 0.05 * top_span
-    top_limits = (min(top_all_vals) - top_pad, max(top_all_vals) + top_pad) if top_all_vals else None
+    top_limits = (0.0, max(top_all_vals) + top_pad) if top_all_vals else None
 
     for col_idx, model in enumerate(models):
         ax = fig.add_subplot(top_gs[0, col_idx])
@@ -3681,7 +3681,7 @@ def _plot_combined_ratio_grids(
         )
     bottom_span = max(max(bottom_all_vals) - min(bottom_all_vals), 0.1) if bottom_all_vals else 0.1
     bottom_pad = 0.05 * bottom_span
-    bottom_limits = (min(bottom_all_vals) - bottom_pad, max(bottom_all_vals) + bottom_pad) if bottom_all_vals else None
+    bottom_limits = (0.0, max(bottom_all_vals) + bottom_pad) if bottom_all_vals else None
 
     group_gap = 1.3
     x = [idx * group_gap for idx in range(len(token_pairs))]
@@ -3799,12 +3799,12 @@ def _plot_combined_ratio_grids_h100(
     left_vals = _finite(imec_ratio.values()) + [1.0]
     left_span = max(max(left_vals) - min(left_vals), 0.1)
     left_pad = 0.05 * left_span
-    left_limits = (min(left_vals) - left_pad, max(left_vals) + left_pad)
+    left_limits = (0.0, max(left_vals) + left_pad)
 
     right_vals = _finite(nvidia_ratio.values()) + [1.0]
     right_span = max(max(right_vals) - min(right_vals), 0.1)
     right_pad = 0.05 * right_span
-    right_limits = (min(right_vals) - right_pad, max(right_vals) + right_pad)
+    right_limits = (0.0, max(right_vals) + right_pad)
 
     def _draw_missing(ax, pos: float, limits: Tuple[float, float]) -> None:
         ax.bar(
