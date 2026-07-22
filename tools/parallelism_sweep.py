@@ -1114,6 +1114,31 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--gpu-counts",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated list of exact total GPU counts to evaluate. When set, "
+            "only combinations whose tp*cp*dp*ep*pp product is in this list are evaluated "
+            "(applied after the --gpu-count-min/--gpu-count-max range filter)."
+        ),
+    )
+    parser.add_argument(
+        "--per-config-timeout-s",
+        type=float,
+        default=None,
+        help=(
+            "Optional wall-time limit (seconds) per config evaluation inside a worker "
+            f"(overrides PER_CONFIG_TIMEOUT_S={PER_CONFIG_TIMEOUT_S}). <=0 disables the limit."
+        ),
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help=f"Optional worker process cap (overrides MAX_WORKERS={MAX_WORKERS}).",
+    )
+    parser.add_argument(
         "--derate-config",
         type=str,
         default="",
@@ -1835,6 +1860,21 @@ def main():
     active_model_config_path = str(args.model_config or "").strip() or MODEL_CONFIG_PATH
     active_gpu_count_min = GPU_COUNT_MIN if args.gpu_count_min is None else int(args.gpu_count_min)
     active_gpu_count_max = GPU_COUNT_MAX if args.gpu_count_max is None else int(args.gpu_count_max)
+    active_exact_gpu_counts = None
+    if str(args.gpu_counts or "").strip():
+        active_exact_gpu_counts = {
+            int(part.strip()) for part in str(args.gpu_counts).split(",") if part.strip()
+        }
+        if not active_exact_gpu_counts:
+            raise ValueError("--gpu-counts must include at least one integer when provided.")
+    if args.per_config_timeout_s is not None:
+        global PER_CONFIG_TIMEOUT_S
+        PER_CONFIG_TIMEOUT_S = float(args.per_config_timeout_s)
+        print(f"Per-config evaluation timeout set to {PER_CONFIG_TIMEOUT_S:.1f}s.")
+    if args.max_workers is not None:
+        global MAX_WORKERS
+        MAX_WORKERS = int(args.max_workers)
+        print(f"Worker cap set to {MAX_WORKERS}.")
     model_run_type = determine_run_type(active_model_config_path)
     active_ep_sweep = list(INFERENCE_EP_SWEEP if model_run_type == "inference" else EP_SWEEP)
     if str(args.ep_values or "").strip():
@@ -1992,10 +2032,13 @@ def main():
             if TP_CP_PRODUCT_MAX is not None and tp_cp_prod > TP_CP_PRODUCT_MAX:
                 skipped_out_of_range += 1
                 continue
-        if active_gpu_count_min <= num_gpus <= active_gpu_count_max:
-            filtered_tasks.append(items)
-        else:
+        if not (active_gpu_count_min <= num_gpus <= active_gpu_count_max):
             skipped_out_of_range += 1
+            continue
+        if active_exact_gpu_counts is not None and num_gpus not in active_exact_gpu_counts:
+            skipped_out_of_range += 1
+            continue
+        filtered_tasks.append(items)
 
     if not filtered_tasks:
         print("No configurations within GPU count bounds.")

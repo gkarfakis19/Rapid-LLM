@@ -4289,7 +4289,12 @@ class TimeCalculationLLM(TimeCalculation):
         )
 
         linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(gemm=gemm_linear)
-        linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
+        # Inference builds execution graphs with include_transformer_backward=False,
+        # so the (very expensive at large batch*seq) unembedding backward GEMM time
+        # is never consumed. Skip it, mirroring the mla_include_backward gating above.
+        linear_softmax_b = (
+            self.get_linear_softmax_b(gemm=gemm_linear) if mla_include_backward else 0.0
+        )
         if self.disable_embedding_unembedding:
             linear_softmax_f = 0.0
             linear_softmax_b = 0.0

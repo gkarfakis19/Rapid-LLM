@@ -60,7 +60,12 @@ INFERENCE_GLOBAL_BATCH_SIZES = [1, 2, 4]
 # memory-capacity-constrained mappings that the Case B comparison depends on,
 # so this driver restores small-scale coverage for inference runs.
 INFERENCE_TP_VALUES = [1, 2, 4, 8, 16]
-INFERENCE_PP_VALUES = [1, 2, 3, 4]
+INFERENCE_PP_VALUES = [1, 2, 4]
+# Long-context MoE inference evaluations are expensive (the extended-roofline
+# GEMM walk scales with batch*seq), so give feasible configs more wall time
+# than the sweep's 180s default. Hopeless (memory-infeasible) low-TP mappings
+# at large batch still get cut off by this limit.
+INFERENCE_PER_CONFIG_TIMEOUT_S = 1800.0
 DEFAULT_MODEL_CONFIG = (
     REPO_ROOT
     / "validation_scripts"
@@ -76,6 +81,7 @@ CASE_LABELS = [
     "Case C",
     "Case D",
     "Case E",
+    "Case F",
 ]
 BASE_CASE_LABEL = CASE_LABELS[0]
 CASE_FILENAME_BY_LABEL = {
@@ -85,7 +91,12 @@ CASE_FILENAME_BY_LABEL = {
     "Case C": "case-C.yaml",
     "Case D": "case-D.yaml",
     "Case E": "case-E.yaml",
+    "Case F": "case-F.yaml",
 }
+# Case F sets network latency on the inter-node fabric dims (dim1, dim2 in the
+# H100 base config) while keeping the intra-node NVLink dim (dim0) at baseline.
+CASE_F_INTER_NODE_LATENCY_S = 20e-6
+CASE_F_INTRA_NODE_DIM_COUNT = 1
 
 OMITTED_PLOT_CASES = set()
 
@@ -366,6 +377,8 @@ def _speedup_figure_title(reference_model_path: Path, metric_title: str) -> str:
         workload = "Training"
     else:
         workload = "Run"
+    if "Throughput" in str(metric_title):
+        return f"{model_name} Decode Throughput Speedup on H100 SXM5 vs GPU Count"
     return f"{model_name} {workload} Time Speedup on H100 SXM5 Varying GPU Count"
 
 
@@ -527,6 +540,20 @@ def _scale_dimension_bandwidth(hw_dict: dict, dim_index: int, factor: float) -> 
         topology["bandwidth"] = _scale_quantity(bandwidth, factor)
 
 
+def _set_dimension_latency(hw_dict: dict, dim_index: int, latency_s: float) -> None:
+    dimensions = hw_dict.get("network", {}).get("dimensions", [])
+    if dim_index >= len(dimensions):
+        raise ValueError(f"Missing network.dimensions[{dim_index}] in generated case config")
+    topology = dimensions[dim_index].get("topology", {})
+    if "latency" not in topology:
+        raise ValueError(f"Missing topology.latency for network.dimensions[{dim_index}]")
+    topology["latency"] = float(latency_s)
+
+
+def _network_dimension_count(hw_dict: dict) -> int:
+    return len(hw_dict.get("network", {}).get("dimensions", []))
+
+
 def _load_base_hardware_config() -> dict:
     with open(H100_BASE_CONFIG, "r") as handle:
         base_hw = yaml.safe_load(handle) or {}
@@ -591,9 +618,14 @@ def _build_generated_case_dicts(base_hw: dict) -> dict[str, dict]:
     cases["Case D"] = case_d
 
     case_e = deepcopy(case_c)
-    _scale_dimension_bandwidth(case_e, dim_index=0, factor=2.0)
-    _scale_dimension_bandwidth(case_e, dim_index=1, factor=2.0)
+    for dim_index in range(_network_dimension_count(case_e)):
+        _scale_dimension_bandwidth(case_e, dim_index=dim_index, factor=2.0)
     cases["Case E"] = case_e
+
+    case_f = deepcopy(case_c)
+    for dim_index in range(CASE_F_INTRA_NODE_DIM_COUNT, _network_dimension_count(case_f)):
+        _set_dimension_latency(case_f, dim_index=dim_index, latency_s=CASE_F_INTER_NODE_LATENCY_S)
+    cases["Case F"] = case_f
 
     return cases
 
@@ -803,6 +835,10 @@ def run_sweep_for_cases(
                 ",".join(str(v) for v in INFERENCE_TP_VALUES),
                 "--inference-pp-values",
                 ",".join(str(v) for v in INFERENCE_PP_VALUES),
+                "--gpu-counts",
+                ",".join(str(count) for count in gpu_counts),
+                "--per-config-timeout-s",
+                str(INFERENCE_PER_CONFIG_TIMEOUT_S),
             ]
         subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
         if case_d_use_case_c_best:
@@ -1218,7 +1254,11 @@ def main():
         flat_axes = axes[0]
         for ax, item in zip(flat_axes, run_data):
             _plot_model_speedups(ax, item, gpu_counts, palette)
-        flat_axes[0].set_ylabel("Speedup / Base Runtime", fontsize=PLOT_YLABEL_FONT_SIZE)
+        if run_data and run_data[0].get("metric") == "decode_throughput":
+            ylabel = "Decode throughput speedup / Base"
+        else:
+            ylabel = "Speedup / Base Runtime"
+        flat_axes[0].set_ylabel(ylabel, fontsize=PLOT_YLABEL_FONT_SIZE)
 
         handles, labels = flat_axes[0].get_legend_handles_labels()
         fig.suptitle(figure_title, y=0.87, fontsize=PLOT_TITLE_FONT_SIZE)
