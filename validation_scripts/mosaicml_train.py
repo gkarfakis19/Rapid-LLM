@@ -884,7 +884,7 @@ def _plot_parity_combined_seq_len(
         )
         ax.set_xlim(lower_lim, upper_lim)
         ax.set_ylim(lower_lim, upper_lim)
-        ax.set_title("MPT Training Throughput (tokens/s) w/ H100 BF16", fontsize=IEEE_TITLE_SIZE_PT)
+        ax.set_title("MPT Training Throughput (tokens/s, H100 BF16)", fontsize=IEEE_TITLE_SIZE_PT)
         ax.set_xlabel("Actual", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
         ax.set_ylabel("Predicted", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
         sci_x = ScalarFormatter(useMathText=True)

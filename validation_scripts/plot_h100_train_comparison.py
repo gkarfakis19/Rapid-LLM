@@ -75,12 +75,12 @@ def main() -> None:
     ax.bar([i - width / 2 for i in x], [r[3] for r in inc], width=width,
            label="Actual (nanotron, pub.)", color=COLOR_MAP["actual"])
     ax.bar([i + width / 2 for i in x], [r[4] for r in inc], width=width,
-           label="Rapid-LLM", color=COLOR_MAP["rapid_llm"])
+           label="RAPID-LLM", color=COLOR_MAP["rapid_llm"])
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=40, ha="right", fontsize=9)
     ax.tick_params(axis="y", labelsize=12)
     ax.set_ylabel("Training time per batch (s)", fontsize=14)
-    ax.set_title("H100 dense training runtime comparison (nanotron sweep)", fontsize=15)
+    ax.set_title("Dense Training Runtime Comparison (H100 Nanotron Sweep)", fontsize=15)
     ax.legend(fontsize=12, loc="upper left")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     fig.tight_layout()

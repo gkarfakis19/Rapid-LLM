@@ -3776,11 +3776,19 @@ def _plot_combined_ratio_grids_h100(
         )] = _safe_ratio(row.get("inference_time_s"), row.get("actual_inference_time_s"))
 
     rapid_color = TOOL_COLORS[RAPID_HIER_LABEL]
-    n_rows = max(len(models), len(concurrencies))
-    fig_w = 9.0
-    fig_h = 2.1 * n_rows + 1.4
+    # Mirror the A100 combined grid geometry exactly (same figure size, 2 rows
+    # with models on top and Llama 3-70B batch panels below) so the two
+    # normalized-inference figures render harmoniously in the paper.
+    top_h = 3.4
+    bottom_h = 3.0
+    fig_w = 13.44
+    fig_h = 5
     fig = plt.figure(figsize=(fig_w, fig_h))
-    gs = fig.add_gridspec(n_rows, 2, wspace=0.25, hspace=0.55)
+    gs = fig.add_gridspec(2, 1, height_ratios=[top_h, bottom_h], hspace=0.7)
+    top_gs = gs[0].subgridspec(1, len(models), wspace=0.25)
+    bottom_ncols = min(3, max(1, len(concurrencies)))
+    bottom_nrows = math.ceil(len(concurrencies) / bottom_ncols) if concurrencies else 1
+    bottom_gs = gs[1].subgridspec(bottom_nrows, bottom_ncols, wspace=0.25, hspace=0.35)
 
     bar_width = 0.6
     group_gap = 1.3
@@ -3811,11 +3819,12 @@ def _plot_combined_ratio_grids_h100(
         y_mid = 0.5 * (limits[0] + limits[1])
         ax.text(pos, y_mid, "x", ha="center", va="center", fontsize=10, color="#555555")
 
-    for row_idx, model in enumerate(models):
-        ax = fig.add_subplot(gs[row_idx, 0])
+    for col_idx, model in enumerate(models):
+        ax = fig.add_subplot(top_gs[0, col_idx])
         display_model = MODEL_DISPLAY.get(str(model), str(model))
-        x_positions = [idx * group_gap for idx in range(len(tps))]
-        for pos, tp in zip(x_positions, tps):
+        model_tps = [tp for tp in tps if not (str(model) == "Llama 2-70B" and tp == 1)]
+        x_positions = [idx * group_gap for idx in range(len(model_tps))]
+        for pos, tp in zip(x_positions, model_tps):
             height = imec_ratio.get((model, tp), float("nan"))
             if isinstance(height, (int, float)) and math.isfinite(height):
                 ax.bar(pos, height, bar_width, color=rapid_color)
@@ -3825,14 +3834,17 @@ def _plot_combined_ratio_grids_h100(
         ax.set_ylim(*left_limits)
         ax.set_title(display_model)
         ax.set_xticks(x_positions)
-        ax.set_xticklabels([f"TP{tp}" for tp in tps], fontsize=8)
+        ax.set_xticklabels([f"TP{tp}" for tp in model_tps], fontsize=8)
         ax.grid(axis="y", linestyle="--", alpha=0.3)
-        ax.set_ylabel("Pred / Actual")
+        if col_idx == 0:
+            ax.set_ylabel("Pred / Actual")
 
     x_positions = [idx * group_gap for idx in range(len(token_pairs))]
     x_labels = [f"{inp}/{out}" for inp, out in token_pairs]
-    for row_idx, concurrency in enumerate(concurrencies):
-        ax = fig.add_subplot(gs[row_idx, 1])
+    for idx, concurrency in enumerate(concurrencies):
+        row_idx = idx // bottom_ncols
+        col_idx = idx % bottom_ncols
+        ax = fig.add_subplot(bottom_gs[row_idx, col_idx])
         for pos, (inp, out) in zip(x_positions, token_pairs):
             height = nvidia_ratio.get((inp, out, concurrency), float("nan"))
             if isinstance(height, (int, float)) and math.isfinite(height):
@@ -3845,18 +3857,25 @@ def _plot_combined_ratio_grids_h100(
         ax.set_xticks(x_positions)
         ax.set_xticklabels(x_labels, rotation=20, ha="right", fontsize=8)
         ax.grid(axis="y", linestyle="--", alpha=0.3)
+        if col_idx == 0:
+            ax.set_ylabel("Pred / Actual")
 
-    fig.suptitle("Normalized Inference Validation (H100 Systems)", y=0.985)
-    fig.text(0.71, 0.925, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
+    for j in range(len(concurrencies), bottom_nrows * bottom_ncols):
+        row_idx = j // bottom_ncols
+        col_idx = j % bottom_ncols
+        fig.add_subplot(bottom_gs[row_idx, col_idx]).axis("off")
+
+    fig.suptitle("Normalized Inference Validation (H100 Systems)", y=0.995)
     handles = [plt.Rectangle((0, 0), 1, 1, color=rapid_color)]
     fig.legend(
         handles,
         [RAPID_HIER_LABEL],
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.015),
+        bbox_to_anchor=(0.5, 0.03),
         ncol=1,
     )
-    fig.subplots_adjust(bottom=0.13, top=0.88)
+    fig.text(0.5, 0.48, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
+    fig.subplots_adjust(bottom=0.2, top=0.85)
 
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / "inf_ratio_grid_combined_h100.png"

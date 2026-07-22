@@ -27,7 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DATA = SCRIPT_DIR / "train_validation_data"
 
 COLOR_MAP = {"actual": "#4c566a", "rapid_llm": "#1f77b4", "llm_analysis": "#2ca02c", "stage": "#d62728"}
-DISPLAY_LABELS = {"actual": "Actual", "rapid_llm": "Rapid-LLM", "llm_analysis": "llm-analysis", "stage": "STAGE+AS"}
+DISPLAY_LABELS = {"actual": "Actual", "rapid_llm": "RAPID-LLM", "llm_analysis": "llm-analysis", "stage": "STAGE+AS"}
 
 # label -> (actual_s, rapid_u80_s, llm_analysis_s, stage_s or None)
 ROWS = [
@@ -65,7 +65,7 @@ def main() -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
     ax.set_ylabel("Training time (s)")
-    ax.set_title("Runtime comparison on large-scale system")
+    ax.set_title("GPT Dense Training Runtime Comparison (A100 Systems)")
     ax.legend(loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     fig.tight_layout()

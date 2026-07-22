@@ -381,9 +381,10 @@ def _speedup_figure_title(reference_model_path: Path, metric_title: str) -> str:
         workload = "Training"
     else:
         workload = "Run"
+    display_name = {"GLM-4.5-AIR-106B": "GLM-4.5-Air 106B"}.get(model_name, model_name)
     if "Throughput" in str(metric_title):
-        return f"{model_name} Decode Throughput Speedup on H100 SXM5 vs GPU Count"
-    return f"{model_name} {workload} Time Speedup on H100 SXM5 Varying GPU Count"
+        return f"{display_name} Decode Throughput Speedup (H100 SXM5)"
+    return f"{display_name} {workload} Time Speedup on H100 SXM5 Varying GPU Count"
 
 
 def _parse_model_configs(args) -> list[Path]:
@@ -1281,18 +1282,19 @@ def main():
         flat_axes[0].set_ylabel(ylabel, fontsize=PLOT_YLABEL_FONT_SIZE)
 
         handles, labels = flat_axes[0].get_legend_handles_labels()
-        fig.suptitle(figure_title, y=0.87, fontsize=PLOT_TITLE_FONT_SIZE)
+        fig.suptitle(figure_title, fontsize=PLOT_TITLE_FONT_SIZE)
         flat_axes[0].legend(
             handles,
             labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.84),
-            ncol=max(1, len(labels)),
+            loc="upper right",
+            ncol=3,
             frameon=True,
             fontsize=PLOT_LEGEND_FONT_SIZE,
             title_fontsize=PLOT_LEGEND_FONT_SIZE,
+            columnspacing=1.2,
+            handletextpad=0.6,
         )
-        fig.tight_layout(rect=(0, 0, 1, 0.88))
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(str(output_path), dpi=200)
     plt.close(fig)
     print(f"Saved plot to {output_path}")

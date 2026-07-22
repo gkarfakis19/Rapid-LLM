@@ -79,12 +79,12 @@ def main() -> None:
     ax.bar([i - width / 2 for i in x], mfu_ref, width=width,
            label="Actual (Megatron-Core, pub.)", color="#4c566a")
     ax.bar([i + width / 2 for i in x], mfu_pred, width=width,
-           label="Rapid-LLM", color="#1f77b4")
+           label="RAPID-LLM", color="#1f77b4")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10)
     ax.tick_params(axis="y", labelsize=12)
     ax.set_ylabel("MFU (%)", fontsize=14)
-    ax.set_title("MoE training MFU comparison on H100 systems", fontsize=15)
+    ax.set_title("MoE Training MFU Comparison (H100 Systems)", fontsize=15)
     ax.legend(fontsize=12, loc="upper right")
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     fig.tight_layout()
