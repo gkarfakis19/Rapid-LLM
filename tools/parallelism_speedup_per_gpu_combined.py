@@ -93,10 +93,14 @@ CASE_FILENAME_BY_LABEL = {
     "Case E": "case-E.yaml",
     "Case F": "case-F.yaml",
 }
-# Case F sets network latency on the inter-node fabric dims (dim1, dim2 in the
-# H100 base config) while keeping the intra-node NVLink dim (dim0) at baseline.
-CASE_F_INTER_NODE_LATENCY_S = 20e-6
-CASE_F_INTRA_NODE_DIM_COUNT = 1
+# Case F sets network latency on dim0 (the NVLink scale-up domain carrying
+# tp/cp/ep) while keeping the inter-node dims (dim1, dim2) at baseline.
+# Framing: co-packaged versus cable-attached NVLink-domain interconnect.
+# (An earlier variant put the latency on dims 1-2 instead, but winning
+# inference mappings are pp=1 with tp/cp/ep on dim0, so that latency never
+# reached the critical path and F degenerated to Case C.)
+CASE_F_NVLINK_DIM_LATENCY_S = 20e-6
+CASE_F_NVLINK_DIM_INDEX = 0
 
 OMITTED_PLOT_CASES = set()
 
@@ -603,11 +607,16 @@ def _build_generated_case_dicts(base_hw: dict) -> dict[str, dict]:
     case_b["tech_param"]["DRAM"]["size"] = _scale_quantity(case_b["tech_param"]["DRAM"]["size"], 2.0)
     cases["Case B"] = case_b
 
+    # Stacked-DRAM bandwidth multiplier for Case C (Case D layers the x0.73
+    # thermal throttle on top). Chosen at 3.0x (user's hard lower bound) so the
+    # Case D claw-back is resolvable in the decode-throughput metric: at the
+    # earlier 5.33x (and even 4x) decode is dominated by per-step collective
+    # latency + launch overhead and the throttle costs <4%.
     case_c = deepcopy(base_hw)
     _force_zero_network_overlap(case_c)
     case_c["tech_param"]["DRAM"]["size"] = _scale_quantity(case_c["tech_param"]["DRAM"]["size"], 2.0)
     case_c["tech_param"]["DRAM"]["bandwidth"] = _scale_quantity(
-        case_c["tech_param"]["DRAM"]["bandwidth"], 5.33
+        case_c["tech_param"]["DRAM"]["bandwidth"], 3.0
     )
     cases["Case C"] = case_c
 
@@ -623,8 +632,11 @@ def _build_generated_case_dicts(base_hw: dict) -> dict[str, dict]:
     cases["Case E"] = case_e
 
     case_f = deepcopy(case_c)
-    for dim_index in range(CASE_F_INTRA_NODE_DIM_COUNT, _network_dimension_count(case_f)):
-        _set_dimension_latency(case_f, dim_index=dim_index, latency_s=CASE_F_INTER_NODE_LATENCY_S)
+    _set_dimension_latency(
+        case_f,
+        dim_index=CASE_F_NVLINK_DIM_INDEX,
+        latency_s=CASE_F_NVLINK_DIM_LATENCY_S,
+    )
     cases["Case F"] = case_f
 
     return cases
@@ -996,6 +1008,7 @@ def _plot_model_speedups(ax, run_data, gpu_counts, palette):
     group_width = 0.85
     bar_width = group_width / max(1, len(plotted_cases))
 
+    min_speedup = None
     for li, (label, _) in enumerate(plotted_cases):
         xs = []
         ys = []
@@ -1010,6 +1023,8 @@ def _plot_model_speedups(ax, run_data, gpu_counts, palette):
             x_pos = idx - (group_width / 2) + bar_width * li + bar_width / 2
             xs.append(x_pos)
             ys.append(speedup)
+            if min_speedup is None or speedup < min_speedup:
+                min_speedup = speedup
         if xs:
             ax.bar(xs, ys, width=bar_width, label=label, color=palette[li % len(palette)])
 
@@ -1017,7 +1032,12 @@ def _plot_model_speedups(ax, run_data, gpu_counts, palette):
     ax.set_xticks(range(len(gpu_counts)), [str(g) for g in gpu_counts])
     ax.set_xlabel("GPU count", fontsize=PLOT_YLABEL_FONT_SIZE)
     _, y_max = ax.get_ylim()
-    ax.set_ylim(0.8, max(1.2, y_max * 1.30))
+    # Keep the historical 0.8 floor unless a case dips below it (e.g. a
+    # latency-penalty case slower than Base) - never clip bars silently.
+    y_floor = 0.8
+    if min_speedup is not None and min_speedup < y_floor:
+        y_floor = max(0.0, min_speedup - 0.1)
+    ax.set_ylim(y_floor, max(1.2, y_max * 1.30))
     ax.set_title("")
 
 
