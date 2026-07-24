@@ -215,16 +215,23 @@ def run_LLM(
         _emit_memory_summary(llm_run_type, summary)
         return
     if str(llm_run_type).lower() == "inference":
-        _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
-        return
+        return _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
 
-    _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode)
+    return _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode)
 
 
 def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "LLM_training_results.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
+    tc_llm.reset_idle_accounting()
     total_time = tc_llm.calc_time_llm()
+    idle_fraction = tc_llm.get_idle_fraction(total_time)
+    idle_breakdown = tc_llm.get_idle_breakdown_seconds()
+    layer_idle_time = float(idle_breakdown.get("layer", 0.0))
+    global_idle_time = float(idle_breakdown.get("global", 0.0))
+    num_layers = max(1, int(getattr(tc_llm, "num_layers", 1)))
+    thermal_idle_numerator = (layer_idle_time * num_layers) + global_idle_time
+    thermal_idle_fraction = 0.0 if total_time <= 0.0 else (thermal_idle_numerator / total_time)
     topology_lines = util.network_topology_summary_training(exp_hw_config)
 
     with open(output_file, "a+") as handle:
@@ -233,6 +240,10 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("==============================================\n")
         handle.write("Execution Mode: {}\n".format(tc_llm.execution_mode.value))
         handle.write("Total Time: {0:.8f}\n".format(total_time))
+        handle.write("GPU_time_frac_idle: {0:.8f}\n".format(idle_fraction))
+        handle.write("GPU_time_frac_idle_thermal: {0:.8f}\n".format(thermal_idle_fraction))
+        handle.write("Idle Time Layer: {0:.8f}s\n".format(layer_idle_time))
+        handle.write("Idle Time Global: {0:.8f}s\n".format(global_idle_time))
         handle.write("\n")
         handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh\n")
         handle.write("\n".join(topology_lines))
@@ -244,6 +255,7 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     warning_message = tc_llm.memory_capacity_warning()
     if warning_message:
         log_message(warning_message)
+    return total_time, idle_fraction
 
 
 def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
@@ -253,6 +265,14 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     # Get total inference time (prefill + decode)
     inference_timing = tc_inf.calc_total_inference_time()
     total_time = inference_timing["total_inference_time"]
+    idle_fraction = float(inference_timing.get("gpu_time_frac_idle", 0.0))
+    idle_fraction_thermal = float(inference_timing.get("gpu_time_frac_idle_thermal", idle_fraction))
+    prefill_idle_time = float(inference_timing.get("prefill_idle_time", 0.0))
+    decode_idle_time = float(inference_timing.get("decode_idle_time", 0.0))
+    prefill_idle_layer_time = float(inference_timing.get("prefill_idle_layer_time", 0.0))
+    prefill_idle_global_time = float(inference_timing.get("prefill_idle_global_time", 0.0))
+    decode_idle_layer_time = float(inference_timing.get("decode_idle_layer_time", 0.0))
+    decode_idle_global_time = float(inference_timing.get("decode_idle_global_time", 0.0))
     decode_rates = inference_timing.get("decode_tokens_per_s") or {}
 
     log_message(
@@ -312,8 +332,19 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("==============================================\n")
         handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
         handle.write(f"Inference Time for batch: {total_time:.2f}s\n")
-        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.3f}s\n")
-        handle.write(f"Decode Time: {inference_timing['decode_time']:.3f}s\n")
+        # NOTE: never emit a line starting "Total Inference Time:" here — the
+        # thermal_stco consumer picks its runtime from the LAST matching runtime
+        # regex, and such a line would silently take precedence.
+        handle.write(f"GPU_time_frac_idle: {idle_fraction:.8f}\n")
+        handle.write(f"GPU_time_frac_idle_thermal: {idle_fraction_thermal:.8f}\n")
+        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.8f}s\n")
+        handle.write(f"Decode Time: {inference_timing['decode_time']:.8f}s\n")
+        handle.write(f"Prefill Idle Time: {prefill_idle_time:.8f}s\n")
+        handle.write(f"Decode Idle Time: {decode_idle_time:.8f}s\n")
+        handle.write(f"Prefill Idle Layer Time: {prefill_idle_layer_time:.8f}s\n")
+        handle.write(f"Prefill Idle Global Time: {prefill_idle_global_time:.8f}s\n")
+        handle.write(f"Decode Idle Layer Time: {decode_idle_layer_time:.8f}s\n")
+        handle.write(f"Decode Idle Global Time: {decode_idle_global_time:.8f}s\n")
         if replica_count > 1:
             handle.write(f"Inference Replicas: {replica_count}\n")
         handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.3f}s\n")
@@ -335,6 +366,7 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     warning_message = tc_inf.memory_capacity_warning()
     if warning_message:
         log_message(warning_message)
+    return total_time, idle_fraction
 
 if __name__ == "__main__":
     args = parse_arguments()
