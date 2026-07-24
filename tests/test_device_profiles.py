@@ -166,7 +166,7 @@ def _write_yaml(tmp_path: Path, name: str, payload) -> Path:
 
 
 def _hw_with(tmp_path, name, *, device_profiles=None, parallelism=None, freq_mult=None,
-             hbm_bw_mult=None, network_patch=None, sw_patch=None):
+             hbm_bw_mult=None, l2_bw_mult=None, network_patch=None, sw_patch=None):
     raw = _base_hw_dict()
     if parallelism:
         raw["parallelism"].update(parallelism)
@@ -179,6 +179,9 @@ def _hw_with(tmp_path, name, *, device_profiles=None, parallelism=None, freq_mul
     if hbm_bw_mult is not None:
         # base config uses '1986 GB'; scale numerically in bytes
         raw["tech_param"]["DRAM"]["bandwidth"] = float(1986 * (1024 ** 3) * hbm_bw_mult)
+    if l2_bw_mult is not None:
+        # base config uses '7050 GB'; scale numerically in bytes
+        raw["tech_param"]["SRAM-L2"]["bandwidth"] = float(7050 * (1024 ** 3) * l2_bw_mult)
     if network_patch:
         raw["network"]["dimensions"][0].update(network_patch)
     if sw_patch:
@@ -396,10 +399,51 @@ class TestModeGates:
         hw = config.parse_config(str(hw_path), "hardware")
         model = config.parse_config(str(model_path), "LLM")
         # MoE + flattened is rejected at config validation, before profiles even
-        # come into play; the dispatcher carries a second MoE-specific gate for
-        # programmatic construction.
+        # come into play (pre-feature gate, still worth pinning) ...
         with pytest.raises(NotImplementedError, match="MoE"):
             config.validate_configs(hw, model)
+
+    def test_moe_rejected_by_dispatcher_gate(self, tmp_path, monkeypatch):
+        """The DISPATCHER profiles+MoE gate (A11) fires for programmatic construction.
+
+        The config-level rejection above predates device profiles, so it cannot
+        cover the profiles-specific gate: build a dense flattened tc WITH
+        profiles, then present it as MoE to the dispatcher. The error must name
+        device_profiles (not the generic flattened-MoE rejection).
+        """
+        _stub_collectives(monkeypatch)
+        hw_path = _hw_with(tmp_path, "hw.yaml", device_profiles=UNIFORM_BLOCK)
+        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
+        tc = _make_time_calc(hw_path, model_path, tmp_path / "out")
+        tc._build_training_graphs_and_memory_data()
+        from llm_execution import LLMExecutionDispatcher
+
+        def _dispatch(**extra):
+            return LLMExecutionDispatcher(
+                time_calc=tc,
+                pipeline_graph=tc.pipeline_graph,
+                pipeline_root=tc.pipeline_root,
+                interconnect_params=tc.pipeline_interconnect,
+                transformer_graph=tc.transformer_graph,
+                transformer_forward_root=tc.transformer_forward_root,
+                transformer_backward_root=tc.transformer_backward_root,
+                **extra,
+            )
+
+        # use_moe branch of the gate.
+        tc.use_moe = True
+        with pytest.raises(ValueError, match="device_profiles do not support MoE"):
+            _dispatch()
+        # moe_transformer_graph branch of the same gate.
+        tc.use_moe = False
+        with pytest.raises(ValueError, match="device_profiles do not support MoE"):
+            _dispatch(
+                moe_transformer_graph=tc.transformer_graph,
+                moe_transformer_forward_root=tc.transformer_forward_root,
+                moe_transformer_backward_root=tc.transformer_backward_root,
+            )
+        # Sanity: without MoE markers the same construction succeeds.
+        _dispatch()
 
     def test_optimize_2dmap_rejected(self, tmp_path, monkeypatch):
         import base_timing
@@ -677,7 +721,18 @@ class TestGraphLevelInjection:
 # device_metrics.json schema validator
 # ---------------------------------------------------------------------------
 
-def _validate_device_metrics_schema(metrics: dict):
+def _validate_device_metrics_schema(metrics: dict, *, expect_num_layers=None,
+                                    expect_pp_only=False):
+    """Validate device_metrics.json.
+
+    Beyond presence/type checks, this asserts VALUES:
+    - makespan/per-device busy+wall consistency with the weighted `runs` records,
+    - hosts_lm_head on exactly ONE device per dp replica,
+    - with `expect_num_layers`: layers_hosted matches the front-loaded
+      `_stage_for_layer` partition (base + 1 for the first `remainder` stages),
+    - with `expect_pp_only` (pp-and-dp-only topologies, tp=cp=ep=1): exact axis
+      coordinates per rank (pp == hw_id, dp == dp_idx, other axes 0).
+    """
     assert metrics["schema_version"] == 1
     assert metrics["execution_mode"] == "full_astrasim_flattened"
     assert metrics["run_type"] in ("training", "inference")
@@ -688,6 +743,13 @@ def _validate_device_metrics_schema(metrics: dict):
     assert metrics["pipeline_interleave_scale"] > 0.0
     assert isinstance(metrics["profiles"], dict)
     assert isinstance(metrics["runs"], list) and metrics["runs"]
+
+    # makespan is exactly the weighted sum of the per-run raw totals.
+    expected_makespan = sum(
+        float(run["weight"]) * float(run["total_raw_s"]) for run in metrics["runs"]
+    )
+    assert metrics["makespan_s"] == pytest.approx(expected_makespan, rel=1e-12)
+
     ranks = set()
     for device in metrics["devices"]:
         for key in (
@@ -707,9 +769,58 @@ def _validate_device_metrics_schema(metrics: dict):
         assert isinstance(device["coords"], dict) and "dp" in device["coords"]
         if metrics["profiles"]:
             assert device["profile"] in metrics["profiles"]
+
+        # Combined busy/wall are exactly the weighted per-run values.
+        expected_busy = 0.0
+        expected_wall = 0.0
+        for run in metrics["runs"]:
+            per_rank = {d["rank"]: d for d in run["devices"]}
+            assert device["rank"] in per_rank, (
+                f"run '{run['name']}' missing rank {device['rank']}"
+            )
+            expected_busy += float(run["weight"]) * per_rank[device["rank"]]["compute_busy_s"]
+            expected_wall += float(run["weight"]) * per_rank[device["rank"]]["wall_time_s"]
+        assert device["compute_busy_s"] == pytest.approx(expected_busy, rel=1e-12, abs=1e-15)
+        assert device["wall_time_s"] == pytest.approx(expected_wall, rel=1e-12, abs=1e-15)
+
+    # The lm head lands on exactly one hw_id — one device per dp replica (A8).
+    # (dp>1 flattened runs carry per-dp duration tuples on shared ranks, so the
+    # replica set is taken from the emitted dp_idx values, not dp_count.)
     lm_hosts = [d for d in metrics["devices"] if d["hosts_lm_head"]]
-    # The lm head lands on exactly one hw_id (one device per dp replica).
-    assert len({d["hw_id"] for d in lm_hosts}) <= 1
+    assert len({d["hw_id"] for d in lm_hosts}) == 1
+    for dp_idx in sorted({d["dp_idx"] for d in metrics["devices"]}):
+        replica_hosts = [d for d in lm_hosts if d["dp_idx"] == dp_idx]
+        assert len(replica_hosts) == 1, (
+            f"dp replica {dp_idx} must host the lm head on exactly one device, "
+            f"got {len(replica_hosts)}"
+        )
+
+    if expect_num_layers is not None:
+        # layers_hosted follows the front-loaded _stage_for_layer partition (A10).
+        stages = sorted({d["hw_id"] for d in metrics["devices"]})
+        pp = len(stages)
+        base, remainder = divmod(int(expect_num_layers), pp)
+        expected_per_stage = [base + (1 if s < remainder else 0) for s in range(pp)]
+        assert sum(expected_per_stage) == expect_num_layers
+        for device in metrics["devices"]:
+            stage = int(device["coords"].get("pp", 0))
+            assert device["layers_hosted"] == expected_per_stage[stage], (
+                f"rank {device['rank']} (pp={stage}) hosts {device['layers_hosted']} "
+                f"layers, expected {expected_per_stage[stage]} of {expected_per_stage}"
+            )
+
+    if expect_pp_only:
+        # pp/dp-only topology: hw_id IS the pp coordinate; all other axes are 0.
+        for device in metrics["devices"]:
+            coords = device["coords"]
+            assert coords["dp"] == device["dp_idx"]
+            assert coords.get("pp", 0) == device["hw_id"], (
+                f"rank {device['rank']}: pp coord {coords.get('pp')} != hw_id "
+                f"{device['hw_id']}"
+            )
+            for axis, value in coords.items():
+                if axis not in ("pp", "dp"):
+                    assert value == 0, f"axis {axis} expected 0, got {value}"
 
 
 # ---------------------------------------------------------------------------
@@ -725,15 +836,16 @@ class TestAstraEquivalence:
         return run_dir
 
     def test_uniform_profiles_equal_no_profiles(self, tmp_path):
-        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
+        # num_layers=5 on pp2 exercises the front-loaded remainder ([3, 2]).
+        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict(num_layers=5))
         hw_base = _hw_with(tmp_path, "hw_base.yaml")
         hw_unif = _hw_with(tmp_path, "hw_unif.yaml", device_profiles=UNIFORM_BLOCK)
         base_dir = self._run(tmp_path, "base", hw_base, model_path)
         unif_dir = self._run(tmp_path, "unif", hw_unif, model_path)
         base_metrics = _load_metrics(base_dir)
         unif_metrics = _load_metrics(unif_dir)
-        _validate_device_metrics_schema(base_metrics)
-        _validate_device_metrics_schema(unif_metrics)
+        _validate_device_metrics_schema(base_metrics, expect_num_layers=5, expect_pp_only=True)
+        _validate_device_metrics_schema(unif_metrics, expect_num_layers=5, expect_pp_only=True)
         assert abs(base_metrics["makespan_s"] - unif_metrics["makespan_s"]) <= RANK_WALL_TOL_S
         base_devices = {d["rank"]: d for d in base_metrics["devices"]}
         unif_devices = {d["rank"]: d for d in unif_metrics["devices"]}
@@ -741,6 +853,13 @@ class TestAstraEquivalence:
         for rank in base_devices:
             delta = abs(base_devices[rank]["wall_time_s"] - unif_devices[rank]["wall_time_s"])
             assert delta <= RANK_WALL_TOL_S, f"rank {rank} wall time drifted by {delta:.3e}s"
+            # Identity profiles must also reproduce the profile-free JSON
+            # kernel-idle values exactly (training analog of the inference
+            # identity test below).
+            for key in ("kernel_idle_layer_s", "kernel_idle_global_s", "kernel_idle_frac_thermal"):
+                assert unif_devices[rank][key] == pytest.approx(
+                    base_devices[rank][key], rel=1e-9, abs=1e-15
+                ), f"rank {rank} {key} differs between identity-profiles and no-profiles"
 
     def test_uniform_scale_equals_scaled_config(self, tmp_path):
         model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
@@ -762,6 +881,122 @@ class TestAstraEquivalence:
             delta = abs(prof_devices[rank]["wall_time_s"] - scaled_devices[rank]["wall_time_s"])
             assert delta <= RANK_WALL_TOL_S, f"rank {rank} wall time drifted by {delta:.3e}s"
 
+    def test_uniform_mixed_scales_equal_scaled_config(self, tmp_path):
+        """Invariant 3 beyond frequency_scale: a profile mixing frequency, HBM-BW
+        and L2-BW scales must equal the identically-scaled hardware config.
+
+        A bank regression that silently drops any of the non-frequency scales
+        (e.g. hbm_bandwidth_scale not applied to the profile hw variant) fails
+        this test; the frequency-only case cannot catch it.
+        """
+        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
+        freq, hbm_bw, l2_bw = 0.9, 0.8, 0.85
+        profile_block = {
+            "profiles": {
+                "throttled": {
+                    "frequency_scale": freq,
+                    "hbm_bandwidth_scale": hbm_bw,
+                    "l2_bandwidth_scale": l2_bw,
+                }
+            },
+            "devices": {"default": "throttled"},
+        }
+        hw_prof = _hw_with(tmp_path, "hw_prof.yaml", device_profiles=profile_block)
+        hw_scaled = _hw_with(
+            tmp_path, "hw_scaled.yaml", freq_mult=freq, hbm_bw_mult=hbm_bw, l2_bw_mult=l2_bw
+        )
+        prof_dir = self._run(tmp_path, "prof", hw_prof, model_path)
+        scaled_dir = self._run(tmp_path, "scaled", hw_scaled, model_path)
+        prof_metrics = _load_metrics(prof_dir)
+        scaled_metrics = _load_metrics(scaled_dir)
+        _validate_device_metrics_schema(prof_metrics, expect_num_layers=4, expect_pp_only=True)
+        assert abs(prof_metrics["makespan_s"] - scaled_metrics["makespan_s"]) <= RANK_WALL_TOL_S
+        prof_devices = {d["rank"]: d for d in prof_metrics["devices"]}
+        scaled_devices = {d["rank"]: d for d in scaled_metrics["devices"]}
+        assert sorted(prof_devices) == sorted(scaled_devices)
+        for rank in prof_devices:
+            delta = abs(prof_devices[rank]["wall_time_s"] - scaled_devices[rank]["wall_time_s"])
+            assert delta <= RANK_WALL_TOL_S, f"rank {rank} wall time drifted by {delta:.3e}s"
+        # Guard against the degenerate all-knobs-dropped case: the throttled run
+        # must actually be slower than an unthrottled baseline would be — check
+        # against the profile-free base config makespan.
+        hw_base = _hw_with(tmp_path, "hw_base.yaml")
+        base_dir = self._run(tmp_path, "base", hw_base, model_path)
+        base_metrics = _load_metrics(base_dir)
+        assert prof_metrics["makespan_s"] > base_metrics["makespan_s"] * 1.01
+
+    def test_cli_device_profiles_override_end_to_end(self, tmp_path):
+        """--device_profiles must REPLACE the hw-YAML block through the real CLI.
+
+        The hw config embeds the hot/nominal block; the CLI passes the uniform
+        override. The run's JSON profiles echo must show ONLY the override's
+        profiles, proving argparse -> run_LLM -> _apply_device_profiles_override
+        end-to-end.
+        """
+        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
+        hw_path = _hw_with(tmp_path, "hw.yaml", device_profiles=HOT_ALL_BLOCK)
+        run_dir = tmp_path / "cli"
+        run_dir.mkdir()
+        result = _run_perf(
+            run_dir, hw_path, model_path, env=_ASTRA_ENV,
+            device_profiles=PROFILE_UNIFORM_FILE,
+        )
+        assert "REPLACES" in (result.stdout + result.stderr)
+        metrics = _load_metrics(run_dir)
+        _validate_device_metrics_schema(metrics, expect_num_layers=4, expect_pp_only=True)
+        # The hot block is gone; only the override's nominal profile remains.
+        assert sorted(metrics["profiles"]) == ["nominal"]
+        for device in metrics["devices"]:
+            assert device["profile"] == "nominal"
+
+    def test_inference_identity_profiles_json_kernel_idle_matches_no_profiles(self, tmp_path):
+        """Regression: profiles-ON inference JSON must keep the PREFILL kernel idle.
+
+        The prefill re-pricing bank is cleared by the decode-shaped memory
+        estimation pass; the writer must use the prefill snapshot instead.
+        Identity profiles therefore must reproduce the profiles-OFF JSON
+        kernel-idle values exactly: profiles-ON = prefill per-profile idle +
+        integrated decode per-profile idle.
+        """
+        import re
+
+        model_path = _write_yaml(
+            tmp_path, "model.yaml", _tiny_model_dict(run_type="inference")
+        )
+        hw_base = _hw_with(tmp_path, "hw_base.yaml")
+        hw_unif = _hw_with(tmp_path, "hw_unif.yaml", device_profiles=UNIFORM_BLOCK)
+        base_dir = self._run(tmp_path, "base", hw_base, model_path)
+        unif_dir = self._run(tmp_path, "unif", hw_unif, model_path)
+        base_metrics = _load_metrics(base_dir)
+        unif_metrics = _load_metrics(unif_dir)
+        _validate_device_metrics_schema(base_metrics, expect_num_layers=4, expect_pp_only=True)
+        _validate_device_metrics_schema(unif_metrics, expect_num_layers=4, expect_pp_only=True)
+        assert base_metrics["run_type"] == unif_metrics["run_type"] == "inference"
+
+        # Non-vacuity: this workload has real prefill idle, so equality cannot
+        # be satisfied by BOTH sides dropping the prefill term.
+        text = (unif_dir / "output" / "LLM" / "LLM_inference_results.txt").read_text()
+        prefill_layer = float(re.findall(r"Prefill Idle Layer Time:\s*([\d.eE+-]+)s", text)[-1])
+        decode_layer = float(re.findall(r"Decode Idle Layer Time:\s*([\d.eE+-]+)s", text)[-1])
+        assert prefill_layer > 0.0
+
+        base_devices = {d["rank"]: d for d in base_metrics["devices"]}
+        unif_devices = {d["rank"]: d for d in unif_metrics["devices"]}
+        assert sorted(base_devices) == sorted(unif_devices)
+        for rank in base_devices:
+            for key in ("kernel_idle_layer_s", "kernel_idle_global_s", "kernel_idle_frac_thermal"):
+                assert unif_devices[rank][key] == pytest.approx(
+                    base_devices[rank][key], rel=1e-9, abs=1e-15
+                ), f"rank {rank} {key}: identity-profiles != no-profiles"
+
+        # And the values decompose as prefill + integrated decode: summed over
+        # ranks, per-layer idle * layers_hosted totals (prefill+decode) * L.
+        num_layers = 4
+        total_layer_json = sum(d["kernel_idle_layer_s"] for d in unif_metrics["devices"])
+        assert total_layer_json == pytest.approx(
+            (prefill_layer + decode_layer) * num_layers, rel=1e-6
+        ), "JSON kernel_idle_layer_s does not decompose as prefill + integrated decode"
+
     def test_hetero_sanity_and_schema(self, tmp_path):
         model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict())
         hw_base = _hw_with(tmp_path, "hw_base.yaml")
@@ -774,7 +1009,7 @@ class TestAstraEquivalence:
         hot_dir = self._run(tmp_path, "hot", hw_hot, model_path)
         base_metrics = _load_metrics(base_dir)
         hot_metrics = _load_metrics(hot_dir)
-        _validate_device_metrics_schema(hot_metrics)
+        _validate_device_metrics_schema(hot_metrics, expect_num_layers=4, expect_pp_only=True)
 
         # Slowing one device gates the makespan.
         assert hot_metrics["makespan_s"] > base_metrics["makespan_s"] * 1.01
@@ -812,7 +1047,7 @@ class TestAstraEquivalence:
 
         prof_metrics = _load_metrics(prof_dir)
         scaled_metrics = _load_metrics(scaled_dir)
-        _validate_device_metrics_schema(prof_metrics)
+        _validate_device_metrics_schema(prof_metrics, expect_num_layers=4, expect_pp_only=True)
         assert prof_metrics["run_type"] == "inference"
 
         # Prefill per-rank walls are single-run values: <= 1 us per rank.
@@ -846,27 +1081,43 @@ class TestAstraEquivalence:
         assert abs(prof_decode_t - scaled_decode_t) <= decode_tol
 
     def test_grad_accum_records_both_runs(self, tmp_path):
-        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict(ga_steps=2))
+        # GA=3 on purpose: GA=2 makes (GA-1)=1, where the weighted A5 formulas
+        # are indistinguishable from unweighted sums and a weight-dropping
+        # regression would pass unnoticed.
+        ga_steps = 3
+        model_path = _write_yaml(tmp_path, "model.yaml", _tiny_model_dict(ga_steps=ga_steps))
         # ZeRO-2 rejects GA>1; run this case with plain DDP sharding.
         hw_hot = _hw_with(
             tmp_path, "hw.yaml", device_profiles=HOT_ALL_BLOCK, sw_patch={"dp_zero_stage": 0}
         )
         run_dir = self._run(tmp_path, "ga", hw_hot, model_path)
         metrics = _load_metrics(run_dir)
-        _validate_device_metrics_schema(metrics)
+        _validate_device_metrics_schema(metrics, expect_num_layers=4, expect_pp_only=True)
+        assert metrics["gradient_accumulation_steps"] == ga_steps
         runs = {r["name"]: r for r in metrics["runs"]}
         assert set(runs) == {"no_dp", "final"}
-        assert runs["no_dp"]["weight"] == 1.0  # GA-1
+        assert runs["no_dp"]["weight"] == float(ga_steps - 1) == 2.0  # GA-1
         assert runs["final"]["weight"] == 1.0
-        expected = runs["no_dp"]["total_raw_s"] + runs["final"]["total_raw_s"]
+        # Combined makespan is the WEIGHTED sum: no_dp*(GA-1) + final. Both run
+        # totals are nonzero, so an unweighted-sum regression cannot pass.
+        assert runs["no_dp"]["total_raw_s"] > 0.0
+        assert runs["final"]["total_raw_s"] > 0.0
+        expected = 2.0 * runs["no_dp"]["total_raw_s"] + runs["final"]["total_raw_s"]
+        unweighted = runs["no_dp"]["total_raw_s"] + runs["final"]["total_raw_s"]
         assert metrics["makespan_s"] == pytest.approx(expected, rel=1e-12)
+        assert metrics["makespan_s"] > unweighted * (1.0 + 1e-9)
         for device in metrics["devices"]:
-            per_run = [
-                next(d for d in runs[name]["devices"] if d["rank"] == device["rank"])
+            per_run = {
+                name: next(d for d in runs[name]["devices"] if d["rank"] == device["rank"])
                 for name in ("no_dp", "final")
-            ]
-            combined_busy = per_run[0]["compute_busy_s"] + per_run[1]["compute_busy_s"]
+            }
+            # busy = no_dp*2 + final (A5).
+            combined_busy = 2.0 * per_run["no_dp"]["compute_busy_s"] + per_run["final"]["compute_busy_s"]
+            assert per_run["no_dp"]["compute_busy_s"] > 0.0
             assert device["compute_busy_s"] == pytest.approx(combined_busy, rel=1e-12)
+            assert device["compute_busy_s"] > (
+                per_run["no_dp"]["compute_busy_s"] + per_run["final"]["compute_busy_s"]
+            ) * (1.0 + 1e-9)
 
 
 # ---------------------------------------------------------------------------

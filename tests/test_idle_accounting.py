@@ -19,8 +19,8 @@ Covers:
   (a) training run_perf run emits all idle lines and satisfies the thermal_stco
       consumer regexes,
   (b) inference run_perf run emits all idle lines (incl. the fallback pair),
-  (c) zero behavior change: Total Time / Inference Time for batch are
-      bit-identical to the pre-instrumentation baseline,
+  (c) zero behavior change: Total Time (.8f) and the inference Prefill/Decode
+      Time lines (.8f) are bit-identical to the pre-instrumentation baseline,
   (d) record_idle_from_gemm edge cases (zero throughput, non-finite inputs,
       bucket routing, reset).
 """
@@ -57,6 +57,13 @@ RE_DECODE_IDLE = rf"Decode Idle Time:\s*{NUMBER}s"
 # formatted values must stay bit-identical.
 BASELINE_TRAIN_TOTAL_TIME_LINE = "Total Time: 0.21964824"
 BASELINE_INFERENCE_TIME_LINE = "Inference Time for batch: 22.01s"
+# The batch line above is .2f (~5 ms resolution) — far too coarse to pin the
+# computation. The .8f phase lines below carry the real resolution; they were
+# verified equal to the 82d0df7 pre-instrumentation computation (the baseline
+# format only offered .3f, so the constants were captured from the verified
+# bit-identical instrumented run).
+BASELINE_INFERENCE_PREFILL_TIME_LINE = "Prefill Time: 0.83283196s"
+BASELINE_INFERENCE_DECODE_TIME_LINE = "Decode Time: 21.17230971s"
 
 TRAIN_HW = REPO_ROOT / "configs" / "hardware-config" / "a100_80GB_legacy_thermal_port.yaml"
 TRAIN_MODEL = REPO_ROOT / "configs" / "model-config" / "Llama2-7B_train_2048_thermal.yaml"
@@ -190,7 +197,10 @@ def test_inference_idle_values_and_fallback_reconstruction(inference_results_tex
 
 
 def test_inference_time_bit_identical_to_baseline(inference_results_text):
-    # (c) zero behavior change.
+    # (c) zero behavior change. The .8f Prefill/Decode lines are the real
+    # resolution guard (the .2f batch line tolerates ~5 ms drift on its own).
+    assert BASELINE_INFERENCE_PREFILL_TIME_LINE in inference_results_text
+    assert BASELINE_INFERENCE_DECODE_TIME_LINE in inference_results_text
     assert BASELINE_INFERENCE_TIME_LINE in inference_results_text
 
 
