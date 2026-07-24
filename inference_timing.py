@@ -751,6 +751,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self._prefill_idle_global_time_s = 0.0
         # Per-layer-type split of the prefill layer-bucket idle (MoE models only).
         self._prefill_idle_layer_split = None
+        # Per-profile prefill kernel idle, snapshotted from the prefill
+        # re-pricing bank before prepare_decode_graphs clears it (profiles only).
+        self._prefill_profile_idle = None
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
@@ -927,6 +930,23 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self._prefill_idle_layer_time_s = float(prefill_idle_breakdown.get("layer", 0.0))
             self._prefill_idle_global_time_s = float(prefill_idle_breakdown.get("global", 0.0))
             self._prefill_idle_layer_split = self.get_idle_layer_split()
+            # Same hazard for the per-profile PREFILL kernel idle: the prefill
+            # re-pricing bank (built during the prefill dispatcher run) is
+            # cleared by prepare_decode_graphs when it records the decode
+            # pricing context. Snapshot its per-profile idle entries here so
+            # device_metrics.json keeps the prefill term.
+            prefill_bank = self.get_device_profile_bank(build=False)
+            if prefill_bank is not None:
+                self._prefill_profile_idle = {
+                    "layer": {
+                        name: float(entry.idle_layer_s)
+                        for name, entry in prefill_bank.entries.items()
+                    },
+                    "global": {
+                        name: float(entry.idle_global_s)
+                        for name, entry in prefill_bank.entries.items()
+                    },
+                }
 
             prefill_memory_data = mem_estimator.build_memory_data(
                 mode="inference",

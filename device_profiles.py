@@ -507,15 +507,36 @@ def apply_profiles_to_flattened_root(
 # device_metrics.json
 # ---------------------------------------------------------------------------
 
-def _device_coords(hw_id: int, dp_idx: int, rank_layout: Mapping[str, Any]) -> Dict[str, int]:
-    """Decode per-device axis coordinates from the flattened rank layout."""
+# Warn once per process when the rank-layout decode fails: every device in the
+# run hits the identical failure, so per-device repeats would only flood the log.
+_layout_decode_warning_emitted = False
+
+
+def _device_coords(hw_id: int, dp_idx: int, rank_layout: Mapping[str, Any]) -> Optional[Dict[str, int]]:
+    """Decode per-device axis coordinates from the flattened rank layout.
+
+    Returns None when the layout cannot be decoded. Consumers must treat the
+    placement as UNKNOWN (the JSON carries null coords/layers_hosted) — never
+    silently default the device to pipeline stage 0.
+    """
+    global _layout_decode_warning_emitted
     try:
         from astrasim_lib.layout_utils import axis_layout_from_descriptor, decode_axis_coordinates
 
         layout = axis_layout_from_descriptor(rank_layout)
         coords = {axis: int(value) for axis, value in decode_axis_coordinates(int(hw_id), layout)}
-    except Exception:
-        coords = {}
+    except Exception as exc:
+        if not _layout_decode_warning_emitted:
+            _layout_decode_warning_emitted = True
+            log_message(
+                "[device-metrics] WARNING: failed to decode device axis coordinates "
+                f"from the flattened rank layout ({exc!r}). device_metrics.json will "
+                "carry null coords/layers_hosted/kernel_idle_layer_s/"
+                "kernel_idle_frac_thermal so consumers can distinguish 'placement "
+                "unknown' from 'stage 0'.",
+                category="results",
+            )
+        return None
     coords["dp"] = int(dp_idx)
     return coords
 
@@ -598,13 +619,17 @@ def write_device_metrics_json(
                     entry = bank.entry_for(profile_name)
                     layer_s, global_s = entry.idle_layer_s, entry.idle_global_s
             else:
-                # prefill bank (if prefill ran) + integrated decode per-profile idle
-                if bank is not None and profile_name is not None:
-                    entry = bank.entry_for(profile_name)
-                    layer_s += entry.idle_layer_s
-                    global_s += entry.idle_global_s
+                # prefill per-profile idle (if prefill ran) + integrated decode
+                # per-profile idle. The prefill term comes from the snapshot
+                # taken right after the prefill dispatcher run — the live bank
+                # on the instance is cleared by prepare_decode_graphs when the
+                # decode-shaped memory-estimation graph records its own pricing
+                # context, so reading it here would silently drop prefill.
+                prefill_idle = getattr(time_calc, "_prefill_profile_idle", None) or {}
                 decode_totals = getattr(time_calc, "_decode_per_device_totals", None) or {}
                 if profile_name is not None:
+                    layer_s += float((prefill_idle.get("layer") or {}).get(profile_name, 0.0))
+                    global_s += float((prefill_idle.get("global") or {}).get(profile_name, 0.0))
                     layer_s += float((decode_totals.get("profile_idle_layer_s") or {}).get(profile_name, 0.0))
                     global_s += float((decode_totals.get("profile_idle_global_s") or {}).get(profile_name, 0.0))
             return layer_s, global_s
@@ -626,11 +651,17 @@ def write_device_metrics_json(
         hw_id = int(meta.get("stage", rank))
         dp_idx = int(meta.get("dp", 0))
         coords = _device_coords(hw_id, dp_idx, rank_layout)
-        pp_coord = int(coords.get("pp", 0))
-        if layers_per_stage and 0 <= pp_coord < len(layers_per_stage):
-            layers_hosted = int(layers_per_stage[pp_coord])
+        if coords is None:
+            # Layout decode failed: placement is unknown. Emit nulls rather than
+            # guessing stage 0 (which would assign stage-0 layer counts — and
+            # therefore wrong kernel idle — to every device).
+            layers_hosted = None
         else:
-            layers_hosted = 0
+            pp_coord = int(coords.get("pp", 0))
+            if layers_per_stage and 0 <= pp_coord < len(layers_per_stage):
+                layers_hosted = int(layers_per_stage[pp_coord])
+            else:
+                layers_hosted = 0
         hosts_lm_head = lm_head_hw_id is not None and hw_id == int(lm_head_hw_id)
         profile_name = profiles_cfg.resolve(hw_id, dp_idx) if profiles_cfg is not None else None
         busy_s = _combined(rank, "per_rank_busy_s")
@@ -640,11 +671,17 @@ def write_device_metrics_json(
         else:
             sched_idle_frac = 0.0
         idle_layer_unit_s, idle_global_unit_s = _kernel_idle_components(profile_name)
-        kernel_idle_layer_s = idle_layer_unit_s * layers_hosted
         kernel_idle_global_s = idle_global_unit_s if hosts_lm_head else 0.0
-        kernel_idle_frac_thermal = (
-            (kernel_idle_layer_s + kernel_idle_global_s) / makespan_s if makespan_s > 0.0 else 0.0
-        )
+        if layers_hosted is None:
+            kernel_idle_layer_s = None
+            kernel_idle_frac_thermal = None
+        else:
+            kernel_idle_layer_s = idle_layer_unit_s * layers_hosted
+            kernel_idle_frac_thermal = (
+                (kernel_idle_layer_s + kernel_idle_global_s) / makespan_s
+                if makespan_s > 0.0
+                else 0.0
+            )
         devices.append(
             {
                 "rank": int(rank),
