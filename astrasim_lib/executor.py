@@ -716,7 +716,7 @@ def convert_rapid_llm_graph_to_chakra_et(
     graph_root,
     dp_size: int,
     output_dir: str,
-) -> Tuple[str, List[int], str]:
+) -> Tuple[str, List[int], str, Dict[str, Dict[int, Any]]]:
     """Convert RAPID-LLM graph to AstraSim ET format by scheduling per stage and DP rank.
     This means converting the single RAPID-LLM DAG into a set of different AstraSim ET files.
 
@@ -724,9 +724,12 @@ def convert_rapid_llm_graph_to_chakra_et(
     data-parallel replication degree. ``output_dir`` is where ET traces + metadata
     should be written.
 
-    OUTPUTS: returns ``(et_prefix, rank_ids, manifest_path)``. ``et_prefix`` is the
-    file prefix for ``llm_graph.<rank>.et``. ``rank_ids`` is the list of produced rank
-    IDs, and ``manifest_path`` points to the per-rank summary JSON.
+    OUTPUTS: returns ``(et_prefix, rank_ids, manifest_path, rank_stats)``. ``et_prefix``
+    is the file prefix for ``llm_graph.<rank>.et``. ``rank_ids`` is the list of produced
+    rank IDs, ``manifest_path`` points to the per-rank summary JSON, and ``rank_stats``
+    carries ``{"busy_sec": {rank: float}, "rank_meta": {rank: {"stage", "dp"}}}`` where
+    busy is the per-rank sum of PRE-rounding float compute durations (the ET files
+    themselves quantize to integer microseconds).
 
     CONCEPTS: a *stage* is a unique ``hw_id`` (flattened hardware coordinate) of the
     compute graph. Each (stage, DP replica) pair becomes an AstraSim rank. The function
@@ -795,6 +798,11 @@ def convert_rapid_llm_graph_to_chakra_et(
             os.makedirs(os.path.dirname(path), exist_ok=True)
             rank_traces[rank] = _RankTrace(stage, rank, path)
             stage_to_ranks[stage].append(rank)
+
+    # Per-rank compute-busy accumulator (pre-rounding float seconds). The
+    # synthetic single-rank duplicate created later by file copy never passes
+    # through the emission loop, so it never appears here.
+    rank_compute_busy_sec: Dict[int, float] = {rank: 0.0 for rank in rank_traces}
 
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
@@ -1671,6 +1679,7 @@ def convert_rapid_llm_graph_to_chakra_et(
                             unique_deps.append(dep)
 
                     duration_sec = _compute_duration_seconds(task, dp_idx)
+                    rank_compute_busy_sec[rank] += float(duration_sec or 0.0)
                     duration_micros = int(round(duration_sec * 1e6)) if duration_sec else 0
                     node_id = trace.next_id
                     comp_node = new_comp_node(
@@ -1827,7 +1836,11 @@ def convert_rapid_llm_graph_to_chakra_et(
         print(f"[AstraSim] Wrote graph manifest to {manifest_path}")
     except Exception as exc:
         print(f"[WARN] Failed to write manifest: {exc}")
-    return et_prefix, rank_ids, manifest_path
+    rank_stats = {
+        "busy_sec": dict(rank_compute_busy_sec),
+        "rank_meta": {rank: dict(meta) for rank, meta in rank_meta.items()},
+    }
+    return et_prefix, rank_ids, manifest_path, rank_stats
 
 def run_astra_simulation_only_onepath(
     fwdbwd_root,
@@ -1870,11 +1883,20 @@ def run_astra_simulation_only_onepath(
         user_dp = max(1, getattr(time_calc_obj, "dp", 1))
         run_type = getattr(getattr(time_calc_obj, "model", None), "run_type", "")
         dp_count = dp_override if dp_override is not None else user_dp
-        fwd_et_prefix, rank_ids, fwd_manifest = convert_rapid_llm_graph_to_chakra_et(
+        fwd_et_prefix, rank_ids, fwd_manifest, rank_stats = convert_rapid_llm_graph_to_chakra_et(
             fwdbwd_root,
             dp_count,
             work_dir,
         )
+        # Attach per-rank compute-busy (pre-rounding floats) and rank metadata
+        # to the time_calc object. The return shape of this function is
+        # deliberately unchanged (4 call sites rely on it); flattened callers
+        # read these attributes immediately after this call (A7).
+        try:
+            time_calc_obj.last_astrasim_per_rank_busy = dict(rank_stats.get("busy_sec", {}))
+            time_calc_obj.last_astrasim_rank_meta = dict(rank_stats.get("rank_meta", {}))
+        except Exception:
+            pass
         rank_count = len(rank_ids)
         # Astrasim doesn't play well with only 1 rank.
         # When that happens, let's duplicate to 2 ranks. No collectives exist between the two so this should not have an effect.

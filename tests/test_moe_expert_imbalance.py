@@ -563,7 +563,7 @@ def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
         root = graph.construct_transformer_graph(direction="forward")
-        _, rank_ids, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
+        _, rank_ids, _, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
 
@@ -645,7 +645,7 @@ def test_inference_hierarchical_et_blocks_cold_local_join_on_residual_send():
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
         root = graph.construct_transformer_graph(direction="forward")
-        _, rank_ids, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
+        _, rank_ids, _, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
 

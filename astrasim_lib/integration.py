@@ -201,9 +201,14 @@ def ensure_cache_file_exists(cache_path: str = "./astra_cache/cache.json") -> No
 
 
 def get_remote_memory_path() -> str:
-    """Return the bundled remote-memory configuration shipped with AstraSim."""
+    """Return the bundled remote-memory configuration shipped with AstraSim.
 
-    return os.path.join(
+    When the repo-local astra-sim submodule is absent but ``RAPID_ASTRASIM_BINARY``
+    points at an external build, resolve the config relative to that astra-sim
+    tree (binary lives at <astra-sim>/build/astra_analytical/build/bin/...).
+    """
+
+    local_path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "astra-sim",
         "examples",
@@ -211,6 +216,19 @@ def get_remote_memory_path() -> str:
         "analytical",
         "no_memory_expansion.json",
     )
+    if os.path.exists(local_path):
+        return local_path
+    env_binary = os.environ.get("RAPID_ASTRASIM_BINARY")
+    if env_binary:
+        astra_root = os.path.abspath(
+            os.path.join(os.path.dirname(env_binary), "..", "..", "..", "..")
+        )
+        candidate = os.path.join(
+            astra_root, "examples", "remote_memory", "analytical", "no_memory_expansion.json"
+        )
+        if os.path.exists(candidate):
+            return candidate
+    return local_path
 
 
 def generate_workload_et(
@@ -271,8 +289,15 @@ def generate_concurrent_collectives_et(
 
 
 def _astrasim_binary_path() -> str:
-    """Return the default AstraSim analytical binary path relative to the repo root."""
+    """Return the AstraSim analytical binary path.
 
+    Honors the ``RAPID_ASTRASIM_BINARY`` environment override so checkouts
+    without a built astra-sim submodule can point at an external binary.
+    """
+
+    env_override = os.environ.get("RAPID_ASTRASIM_BINARY")
+    if env_override:
+        return env_override
     return os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -323,17 +348,17 @@ def run_astrasim_analytical(
     if proc.returncode != 0:
         raise RuntimeError(f"AstraSim execution failed with code {proc.returncode}:\n{output}")
 
-    times_cycles: List[int] = []
+    # Key wall times by the printed sys[<rank>] index instead of print order so
+    # per-rank attribution stays correct even if AstraSim reports ranks out of
+    # order. The returned list is ordered by ascending rank id.
+    times_by_rank: Dict[int, int] = {}
     for line in output.splitlines():
         wall_match = re.search(r"sys\[(\d+)\],\s*Wall time:\s*(\d+)", line)
         if wall_match:
-            times_cycles.append(int(wall_match.group(2)))
+            times_by_rank[int(wall_match.group(1))] = int(wall_match.group(2))
             continue
-        # finish_match = re.search(r"sys\[(\d+)\] finished,\s*(\d+) cycles", line)
-        # if finish_match:
-        #     times_cycles.append(int(finish_match.group(2)))
 
-    per_node_sec = [t * 1e-9 for t in times_cycles]
+    per_node_sec = [times_by_rank[rank] * 1e-9 for rank in sorted(times_by_rank)]
     max_sec = max(per_node_sec) if per_node_sec else 0.0
     return per_node_sec, max_sec
 
