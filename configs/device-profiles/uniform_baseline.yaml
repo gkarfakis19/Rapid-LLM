@@ -1,0 +1,25 @@
+# Device-profile override file: uniform baseline (no throttling).
+#
+# Usage:
+#   python run_perf.py --hardware_config <hw.yaml> --model_config <model.yaml> \
+#       --device_profiles configs/device-profiles/uniform_baseline.yaml
+#
+# The same schema can be embedded directly in the hardware YAML as a top-level
+# `device_profiles:` block (the primary surface); this file, when passed via
+# --device_profiles, REPLACES any block found in the hardware YAML.
+#
+# Requires execution_backend.model: astra and
+# execution_backend.astra.mode: full_astrasim_flattened.
+#
+# All scale fields default to 1.0; each must be finite and > 0.
+# Available fields per profile:
+#   frequency_scale           # x tech_param.core.operating_frequency
+#   hbm_bandwidth_scale       # x tech_param.DRAM.bandwidth
+#   hbm_latency_scale         # x tech_param.DRAM.latency
+#   l2_bandwidth_scale        # x tech_param.SRAM-L2.bandwidth
+#   l1_bandwidth_scale        # x tech_param.SRAM-L1.bandwidth
+#   register_bandwidth_scale  # x tech_param.SRAM-R.bandwidth
+profiles:
+  nominal: {}          # all scales 1.0 — must reproduce the profile-free run exactly
+devices:
+  default: nominal     # every flattened hw_id resolves to `nominal`

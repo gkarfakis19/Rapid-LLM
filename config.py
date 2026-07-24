@@ -2134,6 +2134,229 @@ class InferenceHWConfig:
         return cls(kvcache_type=str(inference_dict.get("kvcache_type", "hbm_only")))
 
 
+class DeviceProfileError(ValueError):
+    """Raised for malformed or unresolvable device_profiles configuration."""
+
+
+# The six per-device hardware throttle knobs, in canonical order.
+# Each maps a profile YAML key to the tech_param field it scales.
+DEVICE_PROFILE_SCALE_FIELDS: Tuple[str, ...] = (
+    "frequency_scale",           # x tech_param.core.operating_frequency
+    "hbm_bandwidth_scale",       # x tech_param.DRAM.bandwidth
+    "hbm_latency_scale",         # x tech_param.DRAM.latency
+    "l2_bandwidth_scale",        # x tech_param.SRAM-L2.bandwidth
+    "l1_bandwidth_scale",        # x tech_param.SRAM-L1.bandwidth
+    "register_bandwidth_scale",  # x tech_param.SRAM-R.bandwidth
+)
+
+
+@dataclass(frozen=True)
+class DeviceProfileSpec:
+    """A named set of multiplicative hardware throttle scales (all default 1.0)."""
+
+    name: str
+    frequency_scale: float = 1.0
+    hbm_bandwidth_scale: float = 1.0
+    hbm_latency_scale: float = 1.0
+    l2_bandwidth_scale: float = 1.0
+    l1_bandwidth_scale: float = 1.0
+    register_bandwidth_scale: float = 1.0
+
+    def scale_tuple(self) -> Tuple[float, ...]:
+        return tuple(float(getattr(self, field_name)) for field_name in DEVICE_PROFILE_SCALE_FIELDS)
+
+    def is_identity(self) -> bool:
+        return all(value == 1.0 for value in self.scale_tuple())
+
+    def as_dict(self) -> Dict[str, float]:
+        return {field_name: float(getattr(self, field_name)) for field_name in DEVICE_PROFILE_SCALE_FIELDS}
+
+
+@dataclass(frozen=True)
+class DeviceProfilesConfig:
+    """Parsed `device_profiles:` hardware-YAML block.
+
+    Profile resolution order for a device ``(hw_id, dp_idx)``:
+    ``dp_devices[(hw_id, dp_idx)]`` -> ``devices[hw_id]`` -> ``default_profile`` -> error.
+    ``hw_id`` is the flattened hardware id (the dp=0 slice device id used by
+    ``full_astrasim_flattened`` execution).
+    """
+
+    profiles: Dict[str, DeviceProfileSpec]
+    devices: Dict[int, str]
+    default_profile: Optional[str]
+    dp_devices: Dict[Tuple[int, int], str]
+
+    def resolve(self, hw_id: int, dp_idx: int = 0) -> str:
+        name = self.dp_devices.get((int(hw_id), int(dp_idx)))
+        if name is None:
+            name = self.devices.get(int(hw_id))
+        if name is None:
+            name = self.default_profile
+        if name is None:
+            raise DeviceProfileError(
+                f"device_profiles: no profile resolves for device hw_id={hw_id}, dp_idx={dp_idx}. "
+                "Add an explicit `devices: {" + str(hw_id) + ": <profile>}` entry or a "
+                "`devices: {default: <profile>}` fallback."
+            )
+        return name
+
+    def spec_for(self, hw_id: int, dp_idx: int = 0) -> DeviceProfileSpec:
+        return self.profiles[self.resolve(hw_id, dp_idx)]
+
+    def profiles_as_dict(self) -> Dict[str, Dict[str, float]]:
+        return {name: spec.as_dict() for name, spec in self.profiles.items()}
+
+
+def _parse_device_profile_scale(profile_name: str, key: str, raw_value) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise DeviceProfileError(
+            f"device_profiles.profiles.{profile_name}.{key} must be a number (got {raw_value!r})"
+        ) from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise DeviceProfileError(
+            f"device_profiles.profiles.{profile_name}.{key} must be finite and > 0 (got {value!r})"
+        )
+    return value
+
+
+def parse_device_profiles(raw) -> Optional[DeviceProfilesConfig]:
+    """Parse and validate a `device_profiles:` mapping (hardware YAML or override file).
+
+    Returns ``None`` when ``raw`` is empty/absent. Raises :class:`DeviceProfileError`
+    with an actionable message on any schema violation.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise DeviceProfileError(
+            "device_profiles must be a mapping with `profiles:` and `devices:` sections"
+        )
+    if not raw:
+        return None
+
+    known_sections = {"profiles", "devices", "dp_devices"}
+    unknown = sorted(set(raw.keys()) - known_sections)
+    if unknown:
+        raise DeviceProfileError(
+            f"device_profiles has unknown section(s) {unknown}; "
+            f"expected only {sorted(known_sections)}"
+        )
+
+    profiles_raw = raw.get("profiles")
+    if not isinstance(profiles_raw, dict) or not profiles_raw:
+        raise DeviceProfileError(
+            "device_profiles.profiles must be a non-empty mapping of {name: {<scale fields>}}"
+        )
+    profiles: Dict[str, DeviceProfileSpec] = {}
+    for name_raw, spec_raw in profiles_raw.items():
+        name = str(name_raw)
+        if spec_raw is None:
+            spec_raw = {}
+        if not isinstance(spec_raw, dict):
+            raise DeviceProfileError(
+                f"device_profiles.profiles.{name} must be a mapping of scale fields "
+                f"(allowed: {list(DEVICE_PROFILE_SCALE_FIELDS)}); use `{name}: {{}}` for all-defaults"
+            )
+        unknown_fields = sorted(set(spec_raw.keys()) - set(DEVICE_PROFILE_SCALE_FIELDS))
+        if unknown_fields:
+            raise DeviceProfileError(
+                f"device_profiles.profiles.{name} has unknown field(s) {unknown_fields}; "
+                f"allowed fields: {list(DEVICE_PROFILE_SCALE_FIELDS)}"
+            )
+        scales = {
+            key: _parse_device_profile_scale(name, key, value)
+            for key, value in spec_raw.items()
+        }
+        profiles[name] = DeviceProfileSpec(name=name, **scales)
+
+    devices_raw = raw.get("devices")
+    if devices_raw is None:
+        devices_raw = {}
+    if not isinstance(devices_raw, dict):
+        raise DeviceProfileError(
+            "device_profiles.devices must be a mapping of {<int hw_id> | default: <profile name>}"
+        )
+    devices: Dict[int, str] = {}
+    default_profile: Optional[str] = None
+    for key_raw, value_raw in devices_raw.items():
+        profile_name = str(value_raw)
+        if profile_name not in profiles:
+            raise DeviceProfileError(
+                f"device_profiles.devices[{key_raw!r}] references unknown profile "
+                f"'{profile_name}'; defined profiles: {sorted(profiles)}"
+            )
+        if isinstance(key_raw, str) and key_raw.strip().lower() == "default":
+            default_profile = profile_name
+            continue
+        try:
+            hw_id = int(key_raw)
+        except (TypeError, ValueError) as exc:
+            raise DeviceProfileError(
+                f"device_profiles.devices key {key_raw!r} must be an integer hw_id or 'default'"
+            ) from exc
+        if hw_id < 0:
+            raise DeviceProfileError(
+                f"device_profiles.devices key {key_raw!r} must be >= 0"
+            )
+        if hw_id in devices:
+            raise DeviceProfileError(
+                f"device_profiles.devices has duplicate entry for hw_id {hw_id}"
+            )
+        devices[hw_id] = profile_name
+
+    if not devices and default_profile is None:
+        raise DeviceProfileError(
+            "device_profiles.devices must list at least one hw_id or provide a 'default' entry"
+        )
+
+    dp_devices_raw = raw.get("dp_devices")
+    if dp_devices_raw is None:
+        dp_devices_raw = {}
+    if not isinstance(dp_devices_raw, dict):
+        raise DeviceProfileError(
+            'device_profiles.dp_devices must be a mapping of {"<hw_id>,<dp_idx>": <profile name>}'
+        )
+    dp_devices: Dict[Tuple[int, int], str] = {}
+    for key_raw, value_raw in dp_devices_raw.items():
+        profile_name = str(value_raw)
+        if profile_name not in profiles:
+            raise DeviceProfileError(
+                f"device_profiles.dp_devices[{key_raw!r}] references unknown profile "
+                f"'{profile_name}'; defined profiles: {sorted(profiles)}"
+            )
+        parts = str(key_raw).split(",")
+        if len(parts) != 2:
+            raise DeviceProfileError(
+                f'device_profiles.dp_devices key {key_raw!r} must be of the form "<hw_id>,<dp_idx>"'
+            )
+        try:
+            hw_id = int(parts[0].strip())
+            dp_idx = int(parts[1].strip())
+        except (TypeError, ValueError) as exc:
+            raise DeviceProfileError(
+                f'device_profiles.dp_devices key {key_raw!r} must contain two integers "<hw_id>,<dp_idx>"'
+            ) from exc
+        if hw_id < 0 or dp_idx < 0:
+            raise DeviceProfileError(
+                f"device_profiles.dp_devices key {key_raw!r} must use non-negative indices"
+            )
+        if (hw_id, dp_idx) in dp_devices:
+            raise DeviceProfileError(
+                f"device_profiles.dp_devices has duplicate entry for ({hw_id},{dp_idx})"
+            )
+        dp_devices[(hw_id, dp_idx)] = profile_name
+
+    return DeviceProfilesConfig(
+        profiles=profiles,
+        devices=devices,
+        default_profile=default_profile,
+        dp_devices=dp_devices,
+    )
+
+
 @dataclass
 class HWConfig:
     sw_config: SWConfig
@@ -2146,6 +2369,7 @@ class HWConfig:
     network_layout: NetworkLayoutConfig
     execution_backend: ExecutionBackend
     inference_config: InferenceHWConfig
+    device_profiles: Optional[DeviceProfilesConfig] = None
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, object]) -> "HWConfig":
@@ -2199,6 +2423,7 @@ class HWConfig:
         )
         execution_backend = ExecutionBackend.from_dict(config_dict.get("execution_backend", {}))
         inference_config = InferenceHWConfig.from_dict(config_dict.get("inference"))
+        device_profiles = parse_device_profiles(config_dict.get("device_profiles"))
 
         return cls(
             sw_config=sw_config,
@@ -2211,6 +2436,7 @@ class HWConfig:
             network_layout=network_layout_config,
             execution_backend=execution_backend,
             inference_config=inference_config,
+            device_profiles=device_profiles,
         )
 
 @dataclass

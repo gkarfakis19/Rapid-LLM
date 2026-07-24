@@ -1,0 +1,28 @@
+# Device-profile override file: heterogeneous "hot center" example.
+#
+# Models a thermally throttled device 0 (e.g. the center of a waferscale grid)
+# with nominal neighbors. Devices are keyed by FLATTENED hw_id — the dp=0 slice
+# device id assigned by full_astrasim_flattened execution
+# (hw_id = sum(coord * stride) over the canonical tp,cp,ep,pp axis order).
+#
+# Per-op durations are re-priced through the full roofline/tiling model under
+# each profile's scaled hardware parameters (NOT flat duration multipliers):
+# BW-bound and compute-bound ops respond differently to the same throttle.
+profiles:
+  hot:
+    frequency_scale: 0.80        # core clock throttled to 80%
+    hbm_bandwidth_scale: 0.90    # HBM bandwidth derated to 90%
+    hbm_latency_scale: 1.10      # HBM latency inflated by 10%
+  warm:
+    frequency_scale: 0.95
+  nominal: {}                    # all scales default to 1.0
+devices:
+  0: hot                         # flattened hw_id 0 runs the `hot` profile
+  1: warm
+  default: nominal               # every other device runs nominal
+
+# OPTIONAL: per-(hw_id, dp_idx) overrides for training runs with dp > 1.
+# Keys are "<hw_id>,<dp_idx>" strings; resolution order is
+# dp_devices -> devices -> devices.default.
+# dp_devices:
+#   "0,1": warm                  # device hw_id=0 in dp replica 1 is only warm
