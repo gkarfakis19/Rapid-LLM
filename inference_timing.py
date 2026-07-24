@@ -641,12 +641,19 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         moe_transformer_timings = None
         moe_node_breakdown = None
         if moe_layers_active:
+            # Mixed-stack idle accounting (see train_timing analog): the dense
+            # and MoE decode pricing passes each record one layer's ops; keep
+            # them per layer type and record the global bucket once.
+            dense_idle_breakdown = self.get_idle_breakdown_seconds()
+            dense_idle_samples = self._idle_samples
+            self.reset_idle_accounting()
             moe_transformer_timings, moe_node_breakdown = self._build_decode_transformer_results(
                 batch_size=batch_size,
                 total_seq_len=total_seq_len,
                 use_moe_layer=True,
                 gemm_shapes=decode_gemm_shapes_moe,
             )
+            self.merge_moe_idle_pass(dense_idle_breakdown, dense_idle_samples)
 
         output_act_bytes = decode_gemm_shapes_dense["qkv_proj"][0] * decode_gemm_shapes_dense["qkv_proj"][1] * self.precision_bytes
         energy = self.calc_energy(transformer_timings, output_act_bytes)
@@ -742,6 +749,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self._prefill_idle_time_s = 0.0
         self._prefill_idle_layer_time_s = 0.0
         self._prefill_idle_global_time_s = 0.0
+        # Per-layer-type split of the prefill layer-bucket idle (MoE models only).
+        self._prefill_idle_layer_split = None
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
@@ -805,6 +814,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             moe_transformer_timings = None
             moe_node_breakdown = None
             if self.use_moe and any(getattr(self, "moe_layer_mask", []) or []):
+                # Mixed-stack idle accounting (see train_timing analog): keep
+                # per-layer-type idle, record the global bucket once.
+                dense_idle_breakdown = self.get_idle_breakdown_seconds()
+                dense_idle_samples = self._idle_samples
+                self.reset_idle_accounting()
                 moe_transformer_timings, moe_node_breakdown = self.compute_all_gemm_and_node_times(
                     batch_size,
                     vocab_size,
@@ -816,6 +830,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                     num_SMs,
                     use_moe_override=True,
                 )
+                self.merge_moe_idle_pass(dense_idle_breakdown, dense_idle_samples)
 
             output_act_bytes = batch_size * prefill_len * hidden_dim * self.precision_bytes
             total_energy = self.calc_energy(transformer_timings, output_act_bytes)
@@ -911,6 +926,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self._prefill_idle_time_s = float(prefill_idle_breakdown.get("total", 0.0))
             self._prefill_idle_layer_time_s = float(prefill_idle_breakdown.get("layer", 0.0))
             self._prefill_idle_global_time_s = float(prefill_idle_breakdown.get("global", 0.0))
+            self._prefill_idle_layer_split = self.get_idle_layer_split()
 
             prefill_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
@@ -1046,6 +1062,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             sample_every = 2**31 - 1
 
         decode_len = self.model.decode_len
+        self._decode_idle_layer_split = None
         if decode_len == 0:
             print("Skipping decode")
             return 0.0, 0.0, 0.0, [], 0.0, 0.0
@@ -1090,6 +1107,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self._decode_per_device_totals = getattr(
             inference_engine.decode_graph, "_per_device_totals", None
         )
+        # Integrated per-layer-type decode layer idle (mixed dense/MoE stacks
+        # only) for the thermal numerator.
+        self._decode_idle_layer_split = getattr(
+            inference_engine.decode_graph, "_idle_layer_split_totals", None
+        )
         return decode_result
 
     def calc_total_inference_time(self) -> dict:
@@ -1117,7 +1139,32 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_time = prefill_time + decode_time
         total_idle = prefill_idle + decode_idle
         idle_fraction = 0.0 if total_time <= 0.0 else (total_idle / total_time)
-        thermal_idle_time = ((prefill_idle_layer + decode_idle_layer) * self.num_layers) + prefill_idle_global + decode_idle_global
+        prefill_split = getattr(self, "_prefill_idle_layer_split", None)
+        decode_split = getattr(self, "_decode_idle_layer_split", None)
+        if prefill_split is None and decode_split is None:
+            # Pure-dense stack: historical formula, kept bit-identical.
+            thermal_idle_time = ((prefill_idle_layer + decode_idle_layer) * self.num_layers) + prefill_idle_global + decode_idle_global
+        else:
+            # Mixed dense/MoE stack: weight each layer type by its layer count
+            # (the layer bucket holds one dense layer's + one MoE layer's idle).
+            num_layers = max(1, int(self.num_layers))
+            num_moe = min(num_layers, max(0, int(getattr(self, "num_moe_layers", 0) or 0)))
+            num_dense = num_layers - num_moe
+
+            def _layer_weighted(layer_total: float, split) -> float:
+                if split is None:
+                    return layer_total * num_layers
+                return (
+                    float(split.get("dense", 0.0)) * num_dense
+                    + float(split.get("moe", 0.0)) * num_moe
+                )
+
+            thermal_idle_time = (
+                _layer_weighted(prefill_idle_layer, prefill_split)
+                + _layer_weighted(decode_idle_layer, decode_split)
+                + prefill_idle_global
+                + decode_idle_global
+            )
         idle_fraction_thermal = 0.0 if total_time <= 0.0 else (thermal_idle_time / total_time)
 
         time_to_first_token = prefill_time

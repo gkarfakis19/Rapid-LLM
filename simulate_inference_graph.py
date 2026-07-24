@@ -136,6 +136,10 @@ class DecodeGraph(Graph):
         # Integrated per-device decode metrics (flattened mode only); consumed
         # by device_metrics.json via TimeCalculationLLMInference.calc_decode_time.
         self._per_device_totals: Optional[Dict[str, Any]] = None
+        # Integrated per-layer-type (dense vs MoE) decode layer-bucket idle;
+        # None for pure-dense models. Consumed by the inference thermal
+        # numerator (dense*num_dense + moe*num_moe + global).
+        self._idle_layer_split_totals: Optional[Dict[str, float]] = None
 
     def build_decode_graph(self) -> Tuple[float, float, float, List[DecodeSample], float, float]:
         """
@@ -155,6 +159,7 @@ class DecodeGraph(Graph):
         # Execute graphs at sample points
         decode_samples = []
         sample_device_records: List[Optional[Dict[str, Any]]] = []
+        sample_idle_splits: List[Optional[Dict[str, float]]] = []
         for step_id in sample_points:
             generated_tokens = step_id + 1
             total_seq_len = self.config.seq_len + generated_tokens
@@ -178,12 +183,14 @@ class DecodeGraph(Graph):
                 sample_idle_layer,
                 sample_idle_global,
                 sample_device_record,
+                sample_idle_split,
             ) = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
             )
             sample_device_records.append(sample_device_record)
+            sample_idle_splits.append(sample_idle_split)
 
             decode_samples.append(
                 DecodeSample(
@@ -201,6 +208,9 @@ class DecodeGraph(Graph):
 
         self._per_device_totals = self._integrate_per_device_records(
             decode_samples, sample_device_records
+        )
+        self._idle_layer_split_totals = self._integrate_idle_splits(
+            decode_samples, sample_idle_splits
         )
 
         (
@@ -244,7 +254,7 @@ class DecodeGraph(Graph):
         step_id: int,
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
-    ) -> Tuple[float, float, float, float, float, Optional[Dict[str, Any]]]:
+    ) -> Tuple[float, float, float, float, float, Optional[Dict[str, Any]], Optional[Dict[str, float]]]:
         """Execute decode step using appropriate RAPID-LLM execution mode."""
 
         if not self.hw_config or not self.model_config:
@@ -315,6 +325,8 @@ class DecodeGraph(Graph):
         idle_breakdown = temp_time_calc.get_idle_breakdown_seconds()
         idle_layer_time = float(idle_breakdown.get("layer", 0.0))
         idle_global_time = float(idle_breakdown.get("global", 0.0))
+        # Per-layer-type split of the layer bucket (mixed dense/MoE stacks only).
+        idle_layer_split = temp_time_calc.get_idle_layer_split()
         # Per-device record for device_metrics.json (flattened mode only). Each
         # per-sample temp instance carries its own flattened run record and, with
         # device profiles active, its own per-step re-pricing bank.
@@ -340,7 +352,15 @@ class DecodeGraph(Graph):
                 f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
                 f"time={result.total_time:.4f}s"
             )
-        return result.total_time, energy, idle_time, idle_layer_time, idle_global_time, device_record
+        return (
+            result.total_time,
+            energy,
+            idle_time,
+            idle_layer_time,
+            idle_global_time,
+            device_record,
+            idle_layer_split,
+        )
 
     def _integrate_per_device_records(
         self,
@@ -388,6 +408,29 @@ class DecodeGraph(Graph):
         if any("profile_idle_layer_s" in record for record in records):
             totals["profile_idle_layer_s"] = _weighted_dict_sum("profile_idle_layer_s")
             totals["profile_idle_global_s"] = _weighted_dict_sum("profile_idle_global_s")
+        return totals
+
+    def _integrate_idle_splits(
+        self,
+        samples: List[DecodeSample],
+        splits: List[Optional[Dict[str, float]]],
+    ) -> Optional[Dict[str, float]]:
+        """Integrate per-sample dense/MoE layer-idle splits over the decode phase.
+
+        Uses the same trapezoid weights as `_integrate_decode_samples`. Returns
+        None unless every sampled step produced a split (pure-dense decode).
+        """
+        if not samples or len(samples) != len(splits):
+            return None
+        if any(split is None for split in splits):
+            return None
+        weights = _decode_sample_weights(
+            [sample.step_id for sample in samples], self.config.decode_len
+        )
+        totals = {"dense": 0.0, "moe": 0.0}
+        for weight, split in zip(weights, splits):
+            for key in totals:
+                totals[key] += weight * float(split.get(key, 0.0))
         return totals
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> Tuple[float, float, float, float, float]:

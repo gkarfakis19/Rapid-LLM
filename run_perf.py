@@ -273,8 +273,12 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     idle_breakdown = tc_llm.get_idle_breakdown_seconds()
     layer_idle_time = float(idle_breakdown.get("layer", 0.0))
     global_idle_time = float(idle_breakdown.get("global", 0.0))
-    num_layers = max(1, int(getattr(tc_llm, "num_layers", 1)))
-    thermal_idle_numerator = (layer_idle_time * num_layers) + global_idle_time
+    # Dense models: (layer_idle * num_layers) + global_idle (bit-identical to
+    # the historical formula). Mixed dense/MoE stacks: per-layer-type weighting
+    # dense_idle*num_dense + moe_idle*num_moe + global_idle (the layer bucket
+    # then holds one dense layer's + one MoE layer's idle; the txt line below
+    # reports their sum).
+    thermal_idle_numerator = tc_llm.get_thermal_idle_numerator_seconds()
     thermal_idle_fraction = 0.0 if total_time <= 0.0 else (thermal_idle_numerator / total_time)
     topology_lines = util.network_topology_summary_training(exp_hw_config)
 

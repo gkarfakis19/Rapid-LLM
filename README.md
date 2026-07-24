@@ -243,6 +243,24 @@ The thermal idle fraction scales the layer bucket by the layer count:
 GPU_time_frac_idle_thermal = (layer_idle * num_layers + global_idle) / total_time
 ```
 
+Mixed dense/MoE stacks are priced twice (once with the dense FFN, once with the
+MoE FFN). The two passes are kept per layer type — the `layer` bucket then holds
+one DENSE layer's idle plus one MOE layer's idle (`Idle Time Layer` reports the
+sum), the `global` bucket is recorded once (the once-per-step ops are priced
+identically in both passes), and the thermal numerator weights each layer type
+by its actual count in the stack:
+
+```
+GPU_time_frac_idle_thermal = (dense_layer_idle * num_dense_layers
+                              + moe_layer_idle * num_moe_layers
+                              + global_idle) / total_time
+```
+
+(the same weighting applies to the inference prefill and decode terms).
+MoE batched-expert FFN GEMMs record idle with expert-count-scaled flops/time so
+the recorded stall matches the op's observed compute time; the MoE router GEMMs
+remain uninstrumented (negligible).
+
 Output lines (parsed by the thermal_stco consumer; formats are load-bearing):
 
 - `LLM_training_results.txt`: `GPU_time_frac_idle: {:.8f}`,

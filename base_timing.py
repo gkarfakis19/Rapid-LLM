@@ -455,6 +455,13 @@ class TimeCalculation:
         self._idle_time_layer_s = 0.0
         self._idle_time_global_s = 0.0
         self._idle_samples = 0
+        # Mixed-stack (dense + MoE) models price the transformer twice; the
+        # per-layer-type split is filled by merge_moe_idle_pass (None otherwise).
+        self._idle_layer_split = None
+        # Multiplier applied to every record_idle_from_gemm call while set != 1
+        # (used by the MoE batched-expert paths, whose inner pricing records a
+        # single per-expert GEMM while the op executes expert-count of them).
+        self._idle_record_scale = 1.0
 
         default_policy = 'analytical'
         eb = getattr(hw_config, "execution_backend", None)
@@ -541,6 +548,7 @@ class TimeCalculation:
         self._idle_time_layer_s = 0.0
         self._idle_time_global_s = 0.0
         self._idle_samples = 0
+        self._idle_layer_split = None
 
     def record_idle_from_gemm(
         self,
@@ -551,8 +559,9 @@ class TimeCalculation:
         bucket: str = "layer",
     ) -> None:
         try:
-            observed = float(observed_time_s) * float(scale)
-            flop_val = float(flop) * float(scale)
+            effective_scale = float(scale) * float(getattr(self, "_idle_record_scale", 1.0))
+            observed = float(observed_time_s) * effective_scale
+            flop_val = float(flop) * effective_scale
         except Exception:
             return
         if not math.isfinite(observed) or not math.isfinite(flop_val):
@@ -577,6 +586,59 @@ class TimeCalculation:
             "global": float(self._idle_time_global_s),
             "total": float(self._idle_time_sum_s),
         }
+
+    def merge_moe_idle_pass(self, dense_breakdown: Dict[str, float], dense_samples: int) -> None:
+        """Merge the dense-pass idle snapshot with the just-recorded MoE pass.
+
+        Mixed-stack (dense + MoE) models price the transformer twice — once with
+        the dense FFN and once with the MoE FFN. The caller snapshots the dense
+        pass's breakdown, calls ``reset_idle_accounting()``, runs the MoE
+        pricing pass, then calls this. Afterwards:
+
+        - the ``layer`` bucket holds one DENSE layer's idle plus one MOE layer's
+          idle, with the per-layer-type split retained in ``_idle_layer_split``
+          (consumed by :meth:`get_thermal_idle_numerator_seconds`);
+        - the ``global`` bucket (once-per-step ops, priced identically in both
+          passes) is recorded ONCE, from the dense pass; the MoE pass's
+          duplicate is dropped.
+        """
+        dense_layer = float(dense_breakdown.get("layer", 0.0))
+        dense_global = float(dense_breakdown.get("global", 0.0))
+        moe_layer = float(self._idle_time_layer_s)
+        self._idle_layer_split = {"dense": dense_layer, "moe": moe_layer}
+        self._idle_time_layer_s = dense_layer + moe_layer
+        self._idle_time_global_s = dense_global
+        self._idle_time_sum_s = self._idle_time_layer_s + self._idle_time_global_s
+        self._idle_samples += int(dense_samples)
+
+    def get_idle_layer_split(self) -> Optional[Dict[str, float]]:
+        """Per-layer-type layer-bucket idle for mixed dense/MoE stacks, else None."""
+        if self._idle_layer_split is None:
+            return None
+        return dict(self._idle_layer_split)
+
+    def get_thermal_idle_numerator_seconds(self) -> float:
+        """Thermal idle numerator: per-layer idle scaled to the full stack + global.
+
+        Pure-dense models: ``layer_idle * num_layers + global_idle`` (bit-identical
+        to the historical formula). Mixed dense/MoE stacks weight each layer
+        type by its actual layer count:
+        ``dense_layer_idle * num_dense_layers + moe_layer_idle * num_moe_layers
+        + global_idle``.
+        """
+        breakdown = self.get_idle_breakdown_seconds()
+        global_idle = float(breakdown.get("global", 0.0))
+        num_layers = max(1, int(getattr(self, "num_layers", 1)))
+        split = self._idle_layer_split
+        if split is None:
+            return (float(breakdown.get("layer", 0.0)) * num_layers) + global_idle
+        num_moe = min(num_layers, max(0, int(getattr(self, "num_moe_layers", 0) or 0)))
+        num_dense = num_layers - num_moe
+        return (
+            float(split.get("dense", 0.0)) * num_dense
+            + float(split.get("moe", 0.0)) * num_moe
+            + global_idle
+        )
 
     def get_idle_fraction(self, total_time_s: float) -> float:
         total = float(total_time_s)

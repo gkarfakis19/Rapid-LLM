@@ -1491,12 +1491,20 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
-    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+    def single_gpu_gemm_forward(
+        self,
+        gemm: Tuple[int, ...],
+        name: str,
+        gemm_type: Optional[GemmType] = None,
+        *,
+        idle_bucket: Optional[str] = None,
+    ) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         total_flops = 2 * batch * m * k * n
         mem_accesses = []
         gemm_type = self._normalize_gemm_type(gemm_type)
-        idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
+        if idle_bucket is None:
+            idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.get_gemm_time(m, k, n, name, disable_overhead=True)[0] * batch + self.O
             self.record_idle_from_gemm(gemm_time, total_flops, bucket=idle_bucket)
@@ -1505,10 +1513,18 @@ class TimeCalculationLLM(TimeCalculation):
             self.record_idle_from_gemm(gemm_time, 2 * m * k * n, bucket=idle_bucket)
         return gemm_time, 0, 0, total_flops, mem_accesses
 
-    def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+    def single_gpu_gemm_backward(
+        self,
+        gemm: Tuple[int, ...],
+        name: str,
+        gemm_type: Optional[GemmType] = None,
+        *,
+        idle_bucket: Optional[str] = None,
+    ) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         gemm_type = self._normalize_gemm_type(gemm_type)
-        idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
+        if idle_bucket is None:
+            idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             grad_time_act = self.get_gemm_time(m, k, n, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.get_gemm_time(k, m, n, name, disable_overhead=True)[0] * batch + self.O
@@ -2443,21 +2459,29 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if batch <= 0 or m <= 0 or k <= 0 or n <= 0:
             return 0.0, 0.0, 0, 0.0, {}
-        if use_tp:
-            result = self.parallelism_gemm_forward(
-                (m, k, n),
-                name,
-                gemm_type=gemm_type,
-            )
-            if len(result) != 5:
-                raise ValueError(f"Unsupported parallelism_gemm_forward return length: {len(result)}")
-            per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = result
-        else:
-            per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = self.single_gpu_gemm_forward(
-                (m, k, n),
-                name,
-                gemm_type=gemm_type,
-            )
+        # The inner pricing records kernel idle for ONE per-expert GEMM, but this
+        # op's observed compute time is `per_time * batch`. Scale the idle record
+        # by the expert count so recorded idle matches the observed time.
+        prev_idle_scale = self._idle_record_scale
+        self._idle_record_scale = prev_idle_scale * float(batch)
+        try:
+            if use_tp:
+                result = self.parallelism_gemm_forward(
+                    (m, k, n),
+                    name,
+                    gemm_type=gemm_type,
+                )
+                if len(result) != 5:
+                    raise ValueError(f"Unsupported parallelism_gemm_forward return length: {len(result)}")
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = result
+            else:
+                per_time, per_comm_time, per_comm_bytes, per_flops, per_mem = self.single_gpu_gemm_forward(
+                    (m, k, n),
+                    name,
+                    gemm_type=gemm_type,
+                )
+        finally:
+            self._idle_record_scale = prev_idle_scale
         scale = int(batch)
         comm_bytes = int(math.ceil(float(per_comm_bytes or 0.0))) * scale
         comm_time = per_comm_time * scale
@@ -2484,18 +2508,25 @@ class TimeCalculationLLM(TimeCalculation):
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if batch <= 0 or m <= 0 or k <= 0 or n <= 0:
             return 0.0, 0.0, 0
-        if use_tp:
-            per_time, per_comm_time, per_comm_bytes = self.parallelism_gemm_backward(
-                (m, k, n),
-                name,
-                gemm_type=gemm_type,
-            )
-        else:
-            per_time, per_comm_time, per_comm_bytes = self.single_gpu_gemm_backward(
-                (m, k, n),
-                name,
-                gemm_type=gemm_type,
-            )
+        # See _batched_gemm_forward_compute: idle must be recorded with the
+        # expert-scaled flops/time matching the `per_time * batch` observed time.
+        prev_idle_scale = self._idle_record_scale
+        self._idle_record_scale = prev_idle_scale * float(batch)
+        try:
+            if use_tp:
+                per_time, per_comm_time, per_comm_bytes = self.parallelism_gemm_backward(
+                    (m, k, n),
+                    name,
+                    gemm_type=gemm_type,
+                )
+            else:
+                per_time, per_comm_time, per_comm_bytes = self.single_gpu_gemm_backward(
+                    (m, k, n),
+                    name,
+                    gemm_type=gemm_type,
+                )
+        finally:
+            self._idle_record_scale = prev_idle_scale
         scale = int(batch)
         comm_bytes = int(math.ceil(float(per_comm_bytes or 0.0))) * scale
         comm_time = per_comm_time * scale
@@ -2652,6 +2683,10 @@ class TimeCalculationLLM(TimeCalculation):
             gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(
                 patch_gemm,
                 "vit_patch_embed_f",
+                # Patch embedding executes once per step, not once per layer:
+                # its stall must not be multiplied by num_layers in the thermal
+                # numerator.
+                idle_bucket="global",
             )
             input_image_bytes = (
                 float(batch)
@@ -3107,6 +3142,8 @@ class TimeCalculationLLM(TimeCalculation):
             gemm_time, _, _ = self.single_gpu_gemm_backward(
                 patch_gemm,
                 "vit_patch_embed_b",
+                # Once-per-step op: see the forward analog.
+                idle_bucket="global",
             )
             token_bytes = float(batch) * float(seq_len) * float(hidden_dim) * float(self.precision.gradients)
             prep_time = self.roofline(
@@ -5507,6 +5544,15 @@ class TimeCalculationLLM(TimeCalculation):
         moe_transformer_timings = None
         moe_node_breakdown = None
         if self.use_moe:
+            # Mixed-stack idle accounting: the dense pass above and the MoE pass
+            # below each record one layer's ops plus the once-per-step global
+            # ops. Snapshot the dense pass, price the MoE pass on zeroed
+            # counters, then merge per layer type (global recorded once) — see
+            # merge_moe_idle_pass. Without this, both passes accumulate into the
+            # same counters and every shared op's idle is double-counted.
+            dense_idle_breakdown = self.get_idle_breakdown_seconds()
+            dense_idle_samples = self._idle_samples
+            self.reset_idle_accounting()
             moe_transformer_timings, moe_node_breakdown = self.compute_all_gemm_and_node_times(
                 batch_size,
                 vocab_size,
@@ -5518,6 +5564,7 @@ class TimeCalculationLLM(TimeCalculation):
                 num_SMs,
                 use_moe_override=True,
             )
+            self.merge_moe_idle_pass(dense_idle_breakdown, dense_idle_samples)
 
         mem_estimator = MemoryEstimator(self)
         memory_data = mem_estimator.build_memory_data(
