@@ -316,6 +316,42 @@ class TimeCalculationLLM(TimeCalculation):
                 "ViT inference does not support execution_backend.astra.mode='full_astrasim_flattened'."
             )
 
+        # Per-device throttle profiles (hardware-YAML `device_profiles:` block).
+        # Primary mode/consistency gate; a second defense-in-depth gate lives in
+        # LLMExecutionDispatcher.__init__ (mirroring _initialize_fault_mappings).
+        self._raw_model_config = model_config
+        self._device_profile_pricing_context: Optional[Dict[str, Any]] = None
+        self._device_profile_bank = None
+        self.flattened_run_no_dp: Optional[Dict[str, Any]] = None
+        self.flattened_run_final: Optional[Dict[str, Any]] = None
+        device_profiles_cfg = getattr(hw_config, "device_profiles", None)
+        if device_profiles_cfg is not None:
+            if str(mode).upper() == "VIT":
+                raise ValueError(
+                    "device_profiles are not supported for VIT models. Remove the "
+                    "device_profiles block (or --device_profiles flag) for ViT runs."
+                )
+            if self.execution_mode != ExecutionMode.FULL_ASTRASIM_FLATTENED:
+                raise ValueError(
+                    "device_profiles require full AstraSim flattened execution. Set "
+                    "execution_backend.model: astra and execution_backend.astra.mode: "
+                    "full_astrasim_flattened in the hardware config (current mode: "
+                    f"'{self.execution_mode.value}'), or remove the device_profiles block."
+                )
+            if device_profiles_cfg.dp_devices:
+                if self.run_type == "inference":
+                    raise ValueError(
+                        "device_profiles.dp_devices is training-only: flattened inference "
+                        "forces a single data-parallel replica, so per-(hw_id, dp_idx) "
+                        "entries would be silently dead. Use the devices map instead."
+                    )
+                if int(getattr(self, "dp", 1) or 1) <= 1:
+                    raise ValueError(
+                        "device_profiles.dp_devices requires data parallelism "
+                        f"(parallelism.train.dp > 1; current dp={getattr(self, 'dp', 1)}). "
+                        "Use the devices map for dp=1 runs."
+                    )
+
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0
@@ -5448,6 +5484,26 @@ class TimeCalculationLLM(TimeCalculation):
             num_SMs,
             use_moe_override=False,
         )
+        if getattr(self.hw_config, "device_profiles", None) is not None:
+            # Record the exact pricing entry point + arguments so the
+            # device-profile timing bank can re-price the SAME op set under each
+            # profile (see device_profiles.build_timing_bank).
+            self._device_profile_pricing_context = {
+                "kind": "training",
+                "compute_all_args": (
+                    batch_size,
+                    vocab_size,
+                    hidden_dim,
+                    seq_len,
+                    num_heads,
+                    kv_heads,
+                    intermediate_size,
+                    num_SMs,
+                ),
+                "optimizer_args": (hidden_dim, intermediate_size),
+                "timings": transformer_timings,
+            }
+            self._device_profile_bank = None
         moe_transformer_timings = None
         moe_node_breakdown = None
         if self.use_moe:
@@ -5782,6 +5838,22 @@ class TimeCalculationLLM(TimeCalculation):
                 print("  Simulated peak usage: {:.6f} GiB".format(peak_mem))
 
         return time_with_memory, peak_mem
+
+    def get_device_profile_bank(self, build: bool = True):
+        """Return (building lazily) the per-profile re-pricing bank for this instance.
+
+        The bank re-prices this instance's op set under every distinct device
+        profile via the same pricing entry point this instance used (recorded in
+        ``_device_profile_pricing_context`` at pricing time). Profile-variant
+        instances never build banks themselves (their hw config carries
+        ``device_profiles=None``).
+        """
+        if self._device_profile_bank is not None or not build:
+            return self._device_profile_bank
+        from device_profiles import build_timing_bank
+
+        self._device_profile_bank = build_timing_bank(self)
+        return self._device_profile_bank
 
     def get_time(self):
         return self.tot_time

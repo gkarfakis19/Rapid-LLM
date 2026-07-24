@@ -622,6 +622,21 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             use_moe_layer=False,
             gemm_shapes=decode_gemm_shapes_dense,
         )
+        if getattr(self.hw_config, "device_profiles", None) is not None:
+            # Decode pricing context (A4): the timing bank must re-price through
+            # decode's own pricing path with THIS step's total_seq_len, so
+            # decode-only op shapes/keys resolve correctly. Fresh per-sample
+            # decode instances each record their own context.
+            self._device_profile_pricing_context = {
+                "kind": "decode",
+                "decode_args": {
+                    "batch_size": batch_size,
+                    "total_seq_len": total_seq_len,
+                },
+                "optimizer_args": None,
+                "timings": transformer_timings,
+            }
+            self._device_profile_bank = None
         moe_transformer_timings = None
         moe_node_breakdown = None
         if moe_layers_active:
@@ -766,6 +781,26 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 num_SMs,
                 use_moe_override=False,
             )
+            if getattr(self.hw_config, "device_profiles", None) is not None:
+                # Prefill pricing context for the device-profile timing bank
+                # (see device_profiles.build_timing_bank). Inference graphs have
+                # no optimizer nodes, so no optimizer args are recorded.
+                self._device_profile_pricing_context = {
+                    "kind": "prefill",
+                    "compute_all_args": (
+                        batch_size,
+                        vocab_size,
+                        hidden_dim,
+                        prefill_len,
+                        num_heads,
+                        kv_heads,
+                        intermediate_size,
+                        num_SMs,
+                    ),
+                    "optimizer_args": None,
+                    "timings": transformer_timings,
+                }
+                self._device_profile_bank = None
             moe_transformer_timings = None
             moe_node_breakdown = None
             if self.use_moe and any(getattr(self, "moe_layer_mask", []) or []):
