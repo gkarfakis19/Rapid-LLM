@@ -501,3 +501,213 @@ def apply_profiles_to_flattened_root(
         "effective_dp": effective_dp,
         "hw_ids": sorted(hw_set),
     }
+
+
+# ---------------------------------------------------------------------------
+# device_metrics.json
+# ---------------------------------------------------------------------------
+
+def _device_coords(hw_id: int, dp_idx: int, rank_layout: Mapping[str, Any]) -> Dict[str, int]:
+    """Decode per-device axis coordinates from the flattened rank layout."""
+    try:
+        from astrasim_lib.layout_utils import axis_layout_from_descriptor, decode_axis_coordinates
+
+        layout = axis_layout_from_descriptor(rank_layout)
+        coords = {axis: int(value) for axis, value in decode_axis_coordinates(int(hw_id), layout)}
+    except Exception:
+        coords = {}
+    coords["dp"] = int(dp_idx)
+    return coords
+
+
+def write_device_metrics_json(
+    time_calc: Any,
+    exp_dir: str,
+    *,
+    run_type: str,
+    inference_metrics: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """Write ``device_metrics.json`` for a flattened-mode run (profiles or not).
+
+    Training: GA-combined metrics over the no_dp and final runs (A5); each run
+    also appears in a ``runs`` sub-array. Inference: prefill + trapezoid-
+    integrated decode. ``makespan_s`` is the RAW AstraSim total (pre
+    ``_pipeline_interleave_scale``); ``pipeline_interleave_scale`` is recorded
+    so consumers can reconcile with the reported Total Time (A7).
+
+    Returns the written path, or None when the run was not flattened-mode.
+    """
+    mode_value = getattr(getattr(time_calc, "execution_mode", None), "value", None)
+    if mode_value != FLATTENED_MODE_VALUE:
+        return None
+
+    run_type = str(run_type or "training").lower()
+    final_record = getattr(time_calc, "flattened_run_final", None)
+    runs: List[Tuple[str, float, Mapping[str, Any]]] = []
+    if run_type == "training":
+        ga_steps = int(getattr(time_calc, "gradient_accumulation_steps", 1) or 1)
+        no_dp_record = getattr(time_calc, "flattened_run_no_dp", None)
+        if ga_steps > 1 and no_dp_record:
+            runs.append(("no_dp", float(ga_steps - 1), no_dp_record))
+        if final_record:
+            runs.append(("final", 1.0, final_record))
+    else:
+        ga_steps = 1
+        if final_record:
+            runs.append(("prefill", 1.0, final_record))
+        decode_totals = getattr(time_calc, "_decode_per_device_totals", None)
+        if decode_totals:
+            runs.append(("decode", 1.0, decode_totals))
+    if not runs:
+        return None
+
+    # Static layout info: prefer a record that carries rank metadata.
+    reference = next((rec for _, _, rec in runs if rec.get("rank_meta")), runs[0][2])
+    rank_meta: Dict[int, Mapping[str, Any]] = {
+        int(rank): meta for _, _, rec in runs for rank, meta in (rec.get("rank_meta") or {}).items()
+    }
+    rank_layout = reference.get("rank_layout") or {}
+    layers_per_stage = list(reference.get("layers_per_stage") or [])
+    lm_head_hw_id = reference.get("lm_head_hw_id")
+    effective_dp = int(reference.get("effective_dp", 1) or 1)
+    interleave_scale = float(reference.get("interleave_scale", 1.0) or 1.0)
+
+    makespan_s = sum(weight * float(rec.get("total_raw_s", 0.0)) for _, weight, rec in runs)
+
+    def _combined(rank: int, key: str) -> float:
+        return sum(
+            weight * float((rec.get(key) or {}).get(rank, 0.0)) for _, weight, rec in runs
+        )
+
+    profiles_cfg = getattr(getattr(time_calc, "hw_config", None), "device_profiles", None)
+    bank = None
+    if profiles_cfg is not None:
+        bank = time_calc.get_device_profile_bank(build=False)
+
+    # Per-profile (or baseline) kernel-idle counters. These are pricing-time
+    # counters: recorded once per layer TYPE per pricing pass, independent of
+    # gradient-accumulation/microbatch counts (same semantics as the results-txt
+    # idle lines). Per device they scale by layers_hosted (+ the global bucket
+    # on the lm-head device only, A8/A10).
+    def _kernel_idle_components(profile_name: Optional[str]) -> Tuple[float, float]:
+        if profiles_cfg is not None:
+            layer_s = 0.0
+            global_s = 0.0
+            if run_type == "training":
+                if bank is not None and profile_name is not None:
+                    entry = bank.entry_for(profile_name)
+                    layer_s, global_s = entry.idle_layer_s, entry.idle_global_s
+            else:
+                # prefill bank (if prefill ran) + integrated decode per-profile idle
+                if bank is not None and profile_name is not None:
+                    entry = bank.entry_for(profile_name)
+                    layer_s += entry.idle_layer_s
+                    global_s += entry.idle_global_s
+                decode_totals = getattr(time_calc, "_decode_per_device_totals", None) or {}
+                if profile_name is not None:
+                    layer_s += float((decode_totals.get("profile_idle_layer_s") or {}).get(profile_name, 0.0))
+                    global_s += float((decode_totals.get("profile_idle_global_s") or {}).get(profile_name, 0.0))
+            return layer_s, global_s
+        if run_type == "training":
+            breakdown = time_calc.get_idle_breakdown_seconds()
+            return float(breakdown.get("layer", 0.0)), float(breakdown.get("global", 0.0))
+        metrics = inference_metrics or {}
+        layer_s = float(getattr(time_calc, "_prefill_idle_layer_time_s", 0.0)) + float(
+            metrics.get("decode_idle_layer_time", 0.0)
+        )
+        global_s = float(getattr(time_calc, "_prefill_idle_global_time_s", 0.0)) + float(
+            metrics.get("decode_idle_global_time", 0.0)
+        )
+        return layer_s, global_s
+
+    devices: List[Dict[str, Any]] = []
+    for rank in sorted(rank_meta):
+        meta = rank_meta[rank]
+        hw_id = int(meta.get("stage", rank))
+        dp_idx = int(meta.get("dp", 0))
+        coords = _device_coords(hw_id, dp_idx, rank_layout)
+        pp_coord = int(coords.get("pp", 0))
+        if layers_per_stage and 0 <= pp_coord < len(layers_per_stage):
+            layers_hosted = int(layers_per_stage[pp_coord])
+        else:
+            layers_hosted = 0
+        hosts_lm_head = lm_head_hw_id is not None and hw_id == int(lm_head_hw_id)
+        profile_name = profiles_cfg.resolve(hw_id, dp_idx) if profiles_cfg is not None else None
+        busy_s = _combined(rank, "per_rank_busy_s")
+        wall_s = _combined(rank, "per_rank_wall_s")
+        if makespan_s > 0.0:
+            sched_idle_frac = min(1.0, max(0.0, 1.0 - busy_s / makespan_s))
+        else:
+            sched_idle_frac = 0.0
+        idle_layer_unit_s, idle_global_unit_s = _kernel_idle_components(profile_name)
+        kernel_idle_layer_s = idle_layer_unit_s * layers_hosted
+        kernel_idle_global_s = idle_global_unit_s if hosts_lm_head else 0.0
+        kernel_idle_frac_thermal = (
+            (kernel_idle_layer_s + kernel_idle_global_s) / makespan_s if makespan_s > 0.0 else 0.0
+        )
+        devices.append(
+            {
+                "rank": int(rank),
+                "hw_id": hw_id,
+                "dp_idx": dp_idx,
+                "coords": coords,
+                "profile": profile_name,
+                "compute_busy_s": busy_s,
+                "wall_time_s": wall_s,
+                "sched_idle_frac": sched_idle_frac,
+                "layers_hosted": layers_hosted,
+                "hosts_lm_head": bool(hosts_lm_head),
+                "kernel_idle_layer_s": kernel_idle_layer_s,
+                "kernel_idle_global_s": kernel_idle_global_s,
+                "kernel_idle_frac_thermal": kernel_idle_frac_thermal,
+            }
+        )
+
+    runs_payload = [
+        {
+            "name": name,
+            "weight": weight,
+            "total_raw_s": float(rec.get("total_raw_s", 0.0)),
+            "devices": [
+                {
+                    "rank": int(rank),
+                    "compute_busy_s": float((rec.get("per_rank_busy_s") or {}).get(rank, 0.0)),
+                    "wall_time_s": float((rec.get("per_rank_wall_s") or {}).get(rank, 0.0)),
+                }
+                for rank in sorted(rank_meta)
+            ],
+        }
+        for name, weight, rec in runs
+    ]
+
+    payload = {
+        "schema_version": 1,
+        "execution_mode": FLATTENED_MODE_VALUE,
+        "run_type": run_type,
+        "dp_count": effective_dp,
+        "num_devices": len(devices),
+        "gradient_accumulation_steps": ga_steps,
+        "pipeline_interleave_scale": interleave_scale,
+        "makespan_s": makespan_s,
+        "total_time_s": makespan_s * interleave_scale,
+        "profiles": profiles_cfg.profiles_as_dict() if profiles_cfg is not None else {},
+        "runs": runs_payload,
+        "devices": devices,
+        "notes": (
+            "makespan_s is the raw AstraSim total (pre pipeline_interleave_scale), "
+            "GA-combined for training and prefill+integrated-decode for inference. "
+            "sched_idle_frac = clamp(1 - compute_busy_s/makespan_s, 0, 1); "
+            "collective/SEND/RECV time lands in the idle complement (comm is not "
+            "separable from the ET), so thermal consumers must not treat it as pure "
+            "idle-power time. kernel_idle_* derive from pricing-time counters "
+            "(once per layer type; GA/microbatch-independent); embedding and "
+            "pointwise ops are uninstrumented, so stage-0 devices under-report "
+            "kernel idle."
+        ),
+    }
+
+    os.makedirs(exp_dir, exist_ok=True)
+    path = os.path.join(exp_dir, DEVICE_METRICS_FILENAME)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=False)
+    return path

@@ -75,7 +75,38 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Run performance analysis for GEMM (sanity) or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
+    parser.add_argument(
+        "--device_profiles",
+        default=None,
+        help=(
+            "Optional per-device throttle-profile YAML (same schema as the hardware "
+            "config's device_profiles block). When given it REPLACES the hardware "
+            "YAML's device_profiles block. Requires execution_backend.astra.mode: "
+            "full_astrasim_flattened; not supported for GEMM/VIT modes."
+        ),
+    )
     return parser.parse_args()
+
+
+def _apply_device_profiles_override(exp_hw_config, device_profiles_path):
+    """Apply the CLI --device_profiles override onto a parsed hardware config."""
+    if not device_profiles_path:
+        return
+    from device_profiles import load_device_profiles_yaml
+
+    override = load_device_profiles_yaml(device_profiles_path)
+    if getattr(exp_hw_config, "device_profiles", None) is not None:
+        log_message(
+            "[device-profiles] CLI --device_profiles override REPLACES the hardware "
+            f"YAML's device_profiles block (override file: {device_profiles_path})",
+            category="profiles",
+        )
+    else:
+        log_message(
+            f"[device-profiles] Loaded device profiles from {device_profiles_path}",
+            category="profiles",
+        )
+    exp_hw_config.device_profiles = override
 
 def get_mode_from_config(model_config_path):
     """Read the mode from the model configuration file."""
@@ -128,11 +159,17 @@ def run_GEMM(
     exp_hw_config_path,
     exp_model_config_path,
     exp_dir,
-    mode
+    mode,
+    device_profiles_path=None,
 ):
     exp_hw_path = os.path.expandvars(os.path.expanduser(exp_hw_config_path))
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
+    if device_profiles_path or getattr(exp_hw_config, "device_profiles", None) is not None:
+        raise ValueError(
+            "device_profiles are not supported for GEMM mode. Remove the "
+            "device_profiles block (or the --device_profiles flag) for GEMM runs."
+        )
     _validate_astrasim_dependencies(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
     config.validate_configs(exp_hw_config, exp_model_config)
@@ -194,11 +231,18 @@ def run_LLM(
     exp_hw_config_path,
     exp_model_config_path,
     exp_dir,
-    mode):
+    mode,
+    device_profiles_path=None):
 
     exp_hw_path = os.path.expandvars(os.path.expanduser(exp_hw_config_path))
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
+    _apply_device_profiles_override(exp_hw_config, device_profiles_path)
+    if str(mode).upper() == "VIT" and getattr(exp_hw_config, "device_profiles", None) is not None:
+        raise ValueError(
+            "device_profiles are not supported for VIT mode. Remove the "
+            "device_profiles block (or the --device_profiles flag) for ViT runs."
+        )
     mem_only = _env_flag("RAPID_MEM_ONLY")
     _validate_astrasim_dependencies(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
@@ -234,6 +278,15 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     thermal_idle_fraction = 0.0 if total_time <= 0.0 else (thermal_idle_numerator / total_time)
     topology_lines = util.network_topology_summary_training(exp_hw_config)
 
+    # Per-device schedule/kernel metrics for flattened-mode runs. NOTE: the txt
+    # idle fractions above keep baseline (pricing-time) semantics even when
+    # device profiles are active; profile-aware consumers must read the JSON.
+    from device_profiles import write_device_metrics_json
+
+    device_metrics_path = write_device_metrics_json(tc_llm, exp_dir, run_type="training")
+    if device_metrics_path:
+        log_message(f"Device Metrics JSON: {device_metrics_path}", category="results")
+
     with open(output_file, "a+") as handle:
         handle.write("\n\n==============================================\n")
         handle.write("Performance Results\n")
@@ -244,6 +297,8 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("GPU_time_frac_idle_thermal: {0:.8f}\n".format(thermal_idle_fraction))
         handle.write("Idle Time Layer: {0:.8f}s\n".format(layer_idle_time))
         handle.write("Idle Time Global: {0:.8f}s\n".format(global_idle_time))
+        if device_metrics_path:
+            handle.write("Device Metrics JSON: {}\n".format(device_metrics_path))
         handle.write("\n")
         handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh\n")
         handle.write("\n".join(topology_lines))
@@ -324,6 +379,16 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
 
     topology_lines = util.network_topology_summary_inference(exp_hw_config)
 
+    # Per-device schedule/kernel metrics for flattened-mode runs (see the
+    # training analog for the baseline-semantics caveat on txt idle lines).
+    from device_profiles import write_device_metrics_json
+
+    device_metrics_path = write_device_metrics_json(
+        tc_inf, exp_dir, run_type="inference", inference_metrics=inference_timing
+    )
+    if device_metrics_path:
+        log_message(f"Device Metrics JSON: {device_metrics_path}", category="results")
+
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
     with open(output_path, "w") as handle:
@@ -345,6 +410,8 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write(f"Prefill Idle Global Time: {prefill_idle_global_time:.8f}s\n")
         handle.write(f"Decode Idle Layer Time: {decode_idle_layer_time:.8f}s\n")
         handle.write(f"Decode Idle Global Time: {decode_idle_global_time:.8f}s\n")
+        if device_metrics_path:
+            handle.write(f"Device Metrics JSON: {device_metrics_path}\n")
         if replica_count > 1:
             handle.write(f"Inference Replicas: {replica_count}\n")
         handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.3f}s\n")
@@ -389,6 +456,7 @@ if __name__ == "__main__":
             exp_model_config_path=config_model_path,
             exp_dir=exp_dir,
             mode=mode,
+            device_profiles_path=args.device_profiles,
         )
     elif mode == "GEMM":
         run_GEMM(
@@ -396,6 +464,7 @@ if __name__ == "__main__":
             exp_model_config_path=config_model_path,
             exp_dir=exp_dir,
             mode=mode,
+            device_profiles_path=args.device_profiles,
         )
     else:
         print("Invalid mode selected. Please choose 'LLM' or 'GEMM'.")

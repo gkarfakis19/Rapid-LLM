@@ -18,7 +18,7 @@
 import math
 import os
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple, Mapping, Set
+from typing import Any, Dict, List, Optional, Tuple, Mapping, Set
 from train_timing import (
     LLMExecutionDispatcher,
     TimeCalculationLLM,
@@ -58,6 +58,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self._prefill_idle_time_s = 0.0
         self._prefill_idle_layer_time_s = 0.0
         self._prefill_idle_global_time_s = 0.0
+        self._decode_per_device_totals: Optional[Dict[str, Any]] = None
 
     def _build_decode_transformer_results(
         self,
@@ -1083,7 +1084,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         # Build decode phase using sample-based approach with real RAPID-LLM integration.
         # Returns (decode_time, decode_energy, decode_idle, decode_samples,
         #          decode_idle_layer, decode_idle_global).
-        return inference_engine._build_decode_graph()
+        decode_result = inference_engine._build_decode_graph()
+        # Stash the integrated per-device decode metrics (flattened mode only)
+        # for the device_metrics.json writer.
+        self._decode_per_device_totals = getattr(
+            inference_engine.decode_graph, "_per_device_totals", None
+        )
+        return decode_result
 
     def calc_total_inference_time(self) -> dict:
         """

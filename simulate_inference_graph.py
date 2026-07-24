@@ -69,6 +69,24 @@ class DecodeSample:
     kv_cache_tokens: int
 
 
+def _decode_sample_weights(step_ids: List[int], decode_len: int) -> List[float]:
+    """Per-sample weights reproducing `_integrate_decode_samples`'s trapezoid rule.
+
+    total = sum(w_i * x_i) equals seed + midpoint-segment + flat-tail
+    integration for any per-sample scalar series x.
+    """
+    if not step_ids:
+        return []
+    weights = [0.0] * len(step_ids)
+    weights[0] += 1.0
+    for idx in range(1, len(step_ids)):
+        gap = step_ids[idx] - step_ids[idx - 1]
+        weights[idx - 1] += 0.5 * gap
+        weights[idx] += 0.5 * gap
+    weights[-1] += max(0, decode_len - (step_ids[-1] + 1))
+    return weights
+
+
 class DecodeGraph(Graph):
     """
     Graph builder for autoregressive decode phase.
@@ -115,6 +133,9 @@ class DecodeGraph(Graph):
         self.qk_rope_head_dim = getattr(attention_cfg, "qk_rope_head_dim", None)
         self.v_head_dim = getattr(attention_cfg, "v_head_dim", None)
         self.run_type = str(getattr(model_cfg, "run_type", "inference")).lower()
+        # Integrated per-device decode metrics (flattened mode only); consumed
+        # by device_metrics.json via TimeCalculationLLMInference.calc_decode_time.
+        self._per_device_totals: Optional[Dict[str, Any]] = None
 
     def build_decode_graph(self) -> Tuple[float, float, float, List[DecodeSample], float, float]:
         """
@@ -133,6 +154,7 @@ class DecodeGraph(Graph):
 
         # Execute graphs at sample points
         decode_samples = []
+        sample_device_records: List[Optional[Dict[str, Any]]] = []
         for step_id in sample_points:
             generated_tokens = step_id + 1
             total_seq_len = self.config.seq_len + generated_tokens
@@ -149,11 +171,19 @@ class DecodeGraph(Graph):
                 model_type=self.model_config.model_config.model_type,
             )
 
-            sample_time, sample_energy, sample_idle_time, sample_idle_layer, sample_idle_global = self._execute_decode_step(
+            (
+                sample_time,
+                sample_energy,
+                sample_idle_time,
+                sample_idle_layer,
+                sample_idle_global,
+                sample_device_record,
+            ) = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
             )
+            sample_device_records.append(sample_device_record)
 
             decode_samples.append(
                 DecodeSample(
@@ -168,6 +198,10 @@ class DecodeGraph(Graph):
                     kv_cache_tokens=total_seq_len,
                 )
             )
+
+        self._per_device_totals = self._integrate_per_device_records(
+            decode_samples, sample_device_records
+        )
 
         (
             total_decode_time,
@@ -210,7 +244,7 @@ class DecodeGraph(Graph):
         step_id: int,
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
-    ) -> Tuple[float, float, float, float, float]:
+    ) -> Tuple[float, float, float, float, float, Optional[Dict[str, Any]]]:
         """Execute decode step using appropriate RAPID-LLM execution mode."""
 
         if not self.hw_config or not self.model_config:
@@ -281,6 +315,20 @@ class DecodeGraph(Graph):
         idle_breakdown = temp_time_calc.get_idle_breakdown_seconds()
         idle_layer_time = float(idle_breakdown.get("layer", 0.0))
         idle_global_time = float(idle_breakdown.get("global", 0.0))
+        # Per-device record for device_metrics.json (flattened mode only). Each
+        # per-sample temp instance carries its own flattened run record and, with
+        # device profiles active, its own per-step re-pricing bank.
+        device_record = getattr(temp_time_calc, "flattened_run_final", None)
+        if device_record is not None:
+            bank = temp_time_calc.get_device_profile_bank(build=False)
+            if bank is not None:
+                device_record = dict(device_record)
+                device_record["profile_idle_layer_s"] = {
+                    name: float(entry.idle_layer_s) for name, entry in bank.entries.items()
+                }
+                device_record["profile_idle_global_s"] = {
+                    name: float(entry.idle_global_s) for name, entry in bank.entries.items()
+                }
         if sample_dir:
             temp_time_calc.output_dir = prev_output_dir
             print(
@@ -292,7 +340,55 @@ class DecodeGraph(Graph):
                 f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
                 f"time={result.total_time:.4f}s"
             )
-        return result.total_time, energy, idle_time, idle_layer_time, idle_global_time
+        return result.total_time, energy, idle_time, idle_layer_time, idle_global_time, device_record
+
+    def _integrate_per_device_records(
+        self,
+        samples: List[DecodeSample],
+        records: List[Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Integrate per-sample flattened device records over the decode phase.
+
+        Uses the same trapezoid weights as `_integrate_decode_samples`, applied
+        per rank (wall/busy) and per profile (kernel idle). Returns None unless
+        every sampled step produced a flattened run record.
+        """
+        if not samples or len(samples) != len(records):
+            return None
+        if any(record is None for record in records):
+            return None
+
+        weights = _decode_sample_weights(
+            [sample.step_id for sample in samples], self.config.decode_len
+        )
+
+        def _weighted_dict_sum(key: str) -> Dict[Any, float]:
+            totals: Dict[Any, float] = {}
+            for weight, record in zip(weights, records):
+                for entry_key, value in (record.get(key) or {}).items():
+                    totals[entry_key] = totals.get(entry_key, 0.0) + weight * float(value)
+            return totals
+
+        first = records[0]
+        totals: Dict[str, Any] = {
+            "total_raw_s": sum(
+                weight * float(record.get("total_raw_s", 0.0))
+                for weight, record in zip(weights, records)
+            ),
+            "per_rank_wall_s": _weighted_dict_sum("per_rank_wall_s"),
+            "per_rank_busy_s": _weighted_dict_sum("per_rank_busy_s"),
+            "rank_meta": dict(first.get("rank_meta") or {}),
+            "rank_layout": dict(first.get("rank_layout") or {}),
+            "layers_per_stage": list(first.get("layers_per_stage") or []),
+            "lm_head_hw_id": first.get("lm_head_hw_id"),
+            "effective_dp": int(first.get("effective_dp", 1) or 1),
+            "hw_ids": list(first.get("hw_ids") or []),
+            "interleave_scale": float(first.get("interleave_scale", 1.0) or 1.0),
+        }
+        if any("profile_idle_layer_s" in record for record in records):
+            totals["profile_idle_layer_s"] = _weighted_dict_sum("profile_idle_layer_s")
+            totals["profile_idle_global_s"] = _weighted_dict_sum("profile_idle_global_s")
+        return totals
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> Tuple[float, float, float, float, float]:
         """
