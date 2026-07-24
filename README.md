@@ -220,6 +220,54 @@ Re-run the same inference command with the updated hardware config.
 
 Comparing the two runs will show how increasing tensor parallelism changes the predicted inference runtime for this model (in this case, by around 50%).
 
+## Idle-time accounting
+
+RAPID-LLM records kernel-level (roofline-stall) idle time during GEMM pricing: for
+every priced GEMM, `idle = max(0, observed_compute_time - flops / peak_throughput)`,
+where `flops` are the per-rank *sharded* flops that produced the observed per-rank
+compute time and `peak_throughput` is the instance's own peak FLOP/s (`self.th`).
+This measures the portion of a kernel's modeled wall time not explained by
+peak-FLOP execution (memory-bound phases, launch overhead, tiling inefficiency).
+
+Idle samples land in one of two buckets:
+
+- **layer** — operations repeated once per transformer layer (attention/MLP GEMMs,
+  flash-attention GEMM components, MLA composite GEMMs). Because GEMMs are priced
+  once per unique layer graph, this bucket holds the idle seconds of ONE layer.
+- **global** — operations executed once per step/batch (the vocab-projection
+  `linear_softmax` GEMM).
+
+The thermal idle fraction scales the layer bucket by the layer count:
+
+```
+GPU_time_frac_idle_thermal = (layer_idle * num_layers + global_idle) / total_time
+```
+
+Output lines (parsed by the thermal_stco consumer; formats are load-bearing):
+
+- `LLM_training_results.txt`: `GPU_time_frac_idle: {:.8f}`,
+  `GPU_time_frac_idle_thermal: {:.8f}`, `Idle Time Layer: {:.8f}s`,
+  `Idle Time Global: {:.8f}s` (plus the pre-existing `Total Time: {:.8f}`).
+- `LLM_inference_results.txt`: `GPU_time_frac_idle`, `GPU_time_frac_idle_thermal`,
+  `Prefill Time` / `Decode Time` (at `.8f` + `s`), and
+  `Prefill/Decode Idle [Layer|Global] Time: {:.8f}s`. For inference the thermal
+  formula is `((prefill_idle_layer + decode_idle_layer) * num_layers +
+  prefill_idle_global + decode_idle_global) / total_time`. Prefill idle is
+  snapshotted immediately after the prefill run (before the decode-shaped
+  memory-estimation graphs are priced); decode idle comes from per-sample fresh
+  timing instances and is trapezoid-integrated exactly like decode time/energy.
+  No `Total Inference Time:` line is ever emitted (it would silently take over
+  the consumer's last-match runtime pick).
+
+Known limitations (v1):
+
+- Embedding and pointwise ops (layernorm, softmax, residual, gelu/swiglu) are not
+  instrumented; being memory-bound, this under-reports idle.
+- Communication/collective time and pipeline bubbles are never counted as idle
+  (the observation covers compute time only; grad-accumulation time is excluded).
+- Timing results are unchanged by the instrumentation: recording is a pure
+  observation on the pricing path.
+
 ## Current Support and Feature Status (LLM)
 
 ### AstraSim Integration
