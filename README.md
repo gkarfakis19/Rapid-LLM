@@ -268,6 +268,74 @@ Known limitations (v1):
 - Timing results are unchanged by the instrumentation: recording is a pure
   observation on the pricing path.
 
+## Per-device throttle profiles (heterogeneous devices)
+
+`full_astrasim_flattened` runs can model per-device hardware throttling (e.g. a
+thermally hot device in a waferscale grid). Add a top-level `device_profiles:`
+block to the hardware YAML (the primary surface), or pass
+`--device_profiles <yaml>` to `run_perf.py` to REPLACE that block for one run:
+
+```yaml
+device_profiles:
+  profiles:
+    hot:
+      frequency_scale: 0.80          # x tech_param.core.operating_frequency
+      hbm_bandwidth_scale: 0.90      # x tech_param.DRAM.bandwidth
+      hbm_latency_scale: 1.00        # x tech_param.DRAM.latency
+      l2_bandwidth_scale: 1.00       # x tech_param.SRAM-L2.bandwidth
+      l1_bandwidth_scale: 1.00       # x tech_param.SRAM-L1.bandwidth
+      register_bandwidth_scale: 1.00 # x tech_param.SRAM-R.bandwidth
+    nominal: {}                      # all scales default to 1.0
+  devices:                           # keyed by flattened hw_id (dp=0 slice id)
+    0: hot
+    default: nominal
+  dp_devices:                        # OPTIONAL, training with dp>1 only
+    "0,1": hot                       # device hw_id=0 in dp replica 1
+```
+
+Sample files live under `configs/device-profiles/`; a full hardware config with
+an embedded block is `configs/hardware-config/a100_80GB_flat_pp2_device_profiles.yaml`.
+
+Semantics and constraints:
+
+- Per-op durations are **re-priced through the full roofline/tiling model**
+  under each profile's parameters, per pricing path (training, prefill, and
+  each sampled decode step separately) — no flat duration multipliers. Each
+  profile re-runs tile/kernel selection at its operating point (the model's
+  best kernel there); real DVFS does not re-tile mid-run, but this keeps a
+  uniform profile exactly equivalent to a globally scaled hardware config.
+- Stage-level embedding/`linear_softmax` node durations embed analytic comm
+  time; only their compute component shifts (additive delta). Optimizer nodes
+  are re-priced through the HBM-bandwidth-bound `apply_grad` path.
+- Requires `execution_backend.astra.mode: full_astrasim_flattened`; analytical,
+  hybrid, and hierarchical modes hard-error (they cannot represent per-device
+  compute). GEMM/ViT/MoE and `optimize_2dmap` are rejected. `dp_devices`
+  requires training with `dp > 1`. Network/link throttling is out of scope
+  (use `network.faulty_links`).
+- Profile resolution order: `dp_devices["hw,dp"]` -> `devices[hw]` ->
+  `devices.default`; every flattened device must resolve, and every explicit
+  key must exist in the flattened graph (hard errors otherwise).
+
+Every flattened-mode run (with or without profiles) also writes
+`output/<MODE>/device_metrics.json` (`schema_version: 1`) with per-device
+`rank`/`hw_id`/`dp_idx`/axis coordinates, profile name, `compute_busy_s`,
+`wall_time_s`, `sched_idle_frac = clamp(1 - busy/makespan, 0, 1)`,
+`layers_hosted`, `hosts_lm_head`, and kernel-idle fields from the device's
+profile-instance counters. `makespan_s` is the raw AstraSim total
+(pre `pipeline_interleave_scale`, which is recorded alongside), GA-combined for
+training (with a per-run `runs` sub-array) and prefill + trapezoid-integrated
+decode for inference. Comm/SEND/RECV time lands in the `sched_idle_frac`
+complement (it is not separable from the ET) — thermal consumers must not treat
+it as pure idle-power time. When profiles are active the `GPU_time_frac_idle*`
+lines in the results txt keep baseline (pricing-time) semantics;
+**profile-aware consumers must read `device_metrics.json`**, and cache-carrying
+consumers should extend their file fingerprints with `device_profiles.py`,
+`llm_execution.py`, and `astrasim_lib/`.
+
+To run without a built astra-sim submodule, point `RAPID_ASTRASIM_BINARY` at an
+external `AstraSim_Analytical_Congestion_Aware` binary (Chakra protobufs from
+the same tree go on `PYTHONPATH`).
+
 ## Current Support and Feature Status (LLM)
 
 ### AstraSim Integration
