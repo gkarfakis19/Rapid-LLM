@@ -1218,6 +1218,22 @@ class TimeCalculationLLM(TimeCalculation):
         attn_output_time *= batch_size * num_heads / max(1, self.tp)
         attn_output_time += self.O
 
+        # Idle accounting: record the two flash-attention GEMM components with their
+        # per-rank sharded flop counts (head-dim work already scaled by 1/tp; sequence
+        # already sharded by cp via shard_seq -> active_tiles). Softmax and the initial
+        # KV load are pointwise/memory ops and stay uninstrumented (v1).
+        _fa_head_scale = batch_size * num_heads / max(1, self.tp)
+        self.record_idle_from_gemm(
+            attn_score_time,
+            2.0 * Br * d * Bc * active_tiles * _fa_head_scale,
+            bucket="layer",
+        )
+        self.record_idle_from_gemm(
+            attn_output_time,
+            2.0 * Br * Bc * d * active_tiles * _fa_head_scale,
+            bucket="layer",
+        )
+
         attention_forward_gemm_time = initial_load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
         attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
 
@@ -1301,11 +1317,38 @@ class TimeCalculationLLM(TimeCalculation):
         softmax_time_backward *= batch_size * num_heads / max(1, self.tp)
         act_dQ_time *= batch_size * num_heads / max(1, self.tp)
         act_dQ_time += self.O
-        if self.full_recomputation:  #attention recompute is already included in full recomputation   
+        if self.full_recomputation:  #attention recompute is already included in full recomputation
             recompute_time = 0
         else:
             recompute_time = attn_score_time + attn_scale_softmax_time #selective recomputation only recompute attention score and softmax
-            
+
+        # Idle accounting: record each flash-attention backward GEMM component with
+        # its per-rank sharded flop count (softmax and initial KV load stay
+        # uninstrumented). The score-recompute GEMM is only part of the observed
+        # kernel time when selective recomputation runs it here.
+        _fa_head_scale = batch_size * num_heads / max(1, self.tp)
+        if not self.full_recomputation:
+            self.record_idle_from_gemm(
+                attn_score_time,
+                2.0 * Br * d * Bc * active_tiles * _fa_head_scale,
+                bucket="layer",
+            )
+        self.record_idle_from_gemm(
+            act_dO_time,
+            2.0 * Bc * Br * d * active_tiles * _fa_head_scale,
+            bucket="layer",
+        )
+        self.record_idle_from_gemm(
+            act_dP_time,
+            2.0 * Br * d * Bc * active_tiles * _fa_head_scale,
+            bucket="layer",
+        )
+        self.record_idle_from_gemm(
+            act_dQ_time,
+            2.0 * Br * Bc * d * active_tiles * _fa_head_scale,
+            bucket="layer",
+        )
+
         attention_backward_gemm_time = initial_load_time + recompute_time + act_dO_time + act_dP_time + softmax_time_backward + act_dQ_time
         attention_backward_time = attention_backward_gemm_time + attention_backward_reduction_time
         
@@ -1417,22 +1460,32 @@ class TimeCalculationLLM(TimeCalculation):
         total_flops = 2 * batch * m * k * n
         mem_accesses = []
         gemm_type = self._normalize_gemm_type(gemm_type)
+        idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.get_gemm_time(m, k, n, name, disable_overhead=True)[0] * batch + self.O
+            self.record_idle_from_gemm(gemm_time, total_flops, bucket=idle_bucket)
         else :
             gemm_time,_,_, mem_accesses = self.get_gemm_time(m, k, n, name)
+            self.record_idle_from_gemm(gemm_time, 2 * m * k * n, bucket=idle_bucket)
         return gemm_time, 0, 0, total_flops, mem_accesses
-    
+
     def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         gemm_type = self._normalize_gemm_type(gemm_type)
+        idle_bucket = "global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer"
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             grad_time_act = self.get_gemm_time(m, k, n, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.get_gemm_time(k, m, n, name, disable_overhead=True)[0] * batch + self.O
+            flops_act = 2 * batch * m * k * n
+            flops_wt = 2 * batch * k * m * n
         else :
             grad_time_act = self.get_gemm_time(m, n, k, name)[0]
             grad_time_wt = self.get_gemm_time(k, m, n, name)[0]
+            flops_act = 2 * m * n * k
+            flops_wt = 2 * k * m * n
         gemm_time = grad_time_act + grad_time_wt
+        # Recorded BEFORE the grad-accum addition so grad-accum time is not counted as idle.
+        self.record_idle_from_gemm(gemm_time, flops_act + flops_wt, bucket=idle_bucket)
         grad_accum_elems = self._grad_accum_elems_for_gemm(
             gemm_type,
             k=k,
@@ -1489,6 +1542,9 @@ class TimeCalculationLLM(TimeCalculation):
         
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
         axis_hint = None
+        # Per-rank SHARDED flops matching the per-rank observed compute time
+        # (idle accounting; unsharded totals would clamp idle to 0).
+        idle_flops = 0.0
 
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
@@ -1499,15 +1555,31 @@ class TimeCalculationLLM(TimeCalculation):
                 disable_overhead=True,
             )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
+            idle_flops = (
+                2.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * shard_spec.k
+                * (shard_spec.n if not decode else shard_spec.shard_n)
+            )
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
-                shard_spec.k if not decode else shard_spec.shard_k,  
+                shard_spec.k if not decode else shard_spec.shard_k,
                 shard_spec.n,
                 name,
                 disable_overhead=True,
             )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
+            idle_flops = (
+                2.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * (shard_spec.k if not decode else shard_spec.shard_k)
+                * shard_spec.n
+            )
         elif gemm_type == GemmType.MLA_DOWN_PROJ:
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1515,6 +1587,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type == GemmType.QKV:  # column wise
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1522,6 +1595,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             if decode:
                 # for the current token shard instead of full-context K/V.
                 total_bytes = shard_spec.shard_m * shard_spec.k * self.precision.activations
@@ -1537,6 +1611,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
             total_bytes = math.ceil(self.precision.activations * shard_spec.shard_m * n)
             kind = REDUCE_SCATTER
             participants = self.tp # reduce scatter output activation for each tp group
@@ -1548,6 +1623,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
             total_bytes = math.ceil(self.precision.activations * shard_spec.shard_m * n)
             kind = REDUCE_SCATTER
             participants = self.tp  # reduce scatter output activation for each tp group
@@ -1559,9 +1635,16 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
-        
+        # Compute-only observation (reduction_time is never part of observed time).
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
+
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
             kind=kind,
@@ -1609,6 +1692,9 @@ class TimeCalculationLLM(TimeCalculation):
         
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
         axis_hint = None
+        # Per-rank SHARDED flops matching the per-rank observed compute time
+        # (idle accounting; act + wt grad GEMMs combined).
+        idle_flops = 0.0
 
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             grad_time_act = self.get_gemm_time(
@@ -1625,6 +1711,14 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch * shard_spec.batch_scale + self.O
+            idle_flops = (
+                4.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * shard_spec.k
+                * shard_spec.n
+            )
             total_bytes = self.precision.grad_communication * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
             kind = REDUCE_SCATTER
             participants = self.cp
@@ -1642,6 +1736,14 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0] * batch * shard_spec.batch_scale
+            idle_flops = (
+                4.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * shard_spec.k
+                * shard_spec.n
+            )
         elif gemm_type == GemmType.MLA_DOWN_PROJ:
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1655,6 +1757,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type == GemmType.QKV:  # column wise
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1668,6 +1771,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             total_bytes = math.ceil(self.precision.grad_communication * shard_spec.shard_m * k)
             kind = REDUCE_SCATTER
             participants = self.tp
@@ -1685,6 +1789,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
             total_bytes = self.get_kv_size_bytes() / self.tp
             kind = ALL_GATHER
             participants = self.cp
@@ -1702,6 +1807,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
         elif gemm_type == GemmType.FFN1:  # column wise
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1715,6 +1821,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             total_bytes = math.ceil(self.precision.grad_communication * shard_spec.shard_m * k)
             kind = REDUCE_SCATTER
             participants = self.tp
@@ -1732,12 +1839,19 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
             total_bytes = math.ceil(self.precision.grad_communication * shard_spec.shard_m * shard_spec.shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
             kind = ALL_GATHER
             participants = self.cp * self.tp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        # Recorded BEFORE the grad-accum addition; compute-only observation.
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
         grad_accum_elems = self._grad_accum_elems_for_gemm(
             gemm_type,
             k=shard_spec.k,
@@ -1799,6 +1913,8 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-parallel forward GEMM")
         
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
+        # Per-rank SHARDED flops matching the per-rank observed compute time (idle accounting).
+        idle_flops = 0.0
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time,_,_, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1808,6 +1924,14 @@ class TimeCalculationLLM(TimeCalculation):
                 disable_overhead=True,
             )
             gemm_time = gemm_time * batch * shard_spec.batch_scale + self.O
+            idle_flops = (
+                2.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * shard_spec.k
+                * shard_spec.n
+            )
         elif gemm_type == GemmType.MLA_DOWN_PROJ:
             gemm_time,_,_, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1815,6 +1939,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             gemm_time,_,_, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1822,6 +1947,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             gemm_time,_,_, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1829,6 +1955,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp
         elif gemm_type == GemmType.LINEAR_SOFTMAX: #assuming linear softmax is always column wise sharded
@@ -1838,11 +1965,18 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
-            
+        # Compute-only observation (reduction_time is never part of observed time).
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
+
         if size_bytes > 0:
             total_bytes = size_bytes # we already has the total bytes for all reduce not bytes per rank
             reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, participants=participants, name=name)
@@ -1890,6 +2024,9 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for tensor-parallel backward GEMM")
 
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
+        # Per-rank SHARDED flops matching the per-rank observed compute time
+        # (idle accounting; act + wt grad GEMMs combined).
+        idle_flops = 0.0
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1905,6 +2042,14 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch * shard_spec.batch_scale + self.O
+            idle_flops = (
+                4.0
+                * batch
+                * shard_spec.batch_scale
+                * shard_spec.shard_m
+                * shard_spec.k
+                * shard_spec.n
+            )
         elif gemm_type == GemmType.MLA_DOWN_PROJ:
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1918,6 +2063,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1931,6 +2077,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             act_bytes = math.ceil(self.precision.grad_communication * m * k)
             participants = self.tp
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
@@ -1946,6 +2093,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.shard_k * shard_spec.n
         elif gemm_type == GemmType.LINEAR_SOFTMAX:
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -1959,11 +2107,18 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.shard_n
             act_bytes = math.ceil(self.precision.grad_communication * m * k)
             participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        # Recorded BEFORE the grad-accum addition; compute-only observation.
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
         grad_accum_elems = self._grad_accum_elems_for_gemm(
             gemm_type,
             k=shard_spec.k,
@@ -2007,16 +2162,25 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for context-parallel forward GEMM")
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
+        # Per-rank SHARDED flops matching the per-rank observed compute time (idle accounting).
+        idle_flops = 0.0
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            
+
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
                 shard_spec.k,
-                shard_spec.n if not decode else shard_spec.shard_n,  
+                shard_spec.n if not decode else shard_spec.shard_n,
                 name,
                 disable_overhead=True,
-            ) 
+            )
             gemm_time = gemm_time * batch + self.O
+            idle_flops = (
+                2.0
+                * batch
+                * shard_spec.shard_m
+                * shard_spec.k
+                * (shard_spec.n if not decode else shard_spec.shard_n)
+            )
         elif gemm_type == GemmType.MLA_DOWN_PROJ:
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -2024,6 +2188,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type == GemmType.QKV:  # qkv gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -2031,6 +2196,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
             total_bytes = self.get_kv_size_bytes() if not decode else shard_spec.shard_m * shard_spec.k * self.precision.activations  # in decode, only need to broadcast the Q for the current token
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN1, GemmType.FFN2):
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
@@ -2039,8 +2205,15 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
+            idle_flops = 2.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
+        # Compute-only observation (reduction_time is never part of observed time).
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
         if gemm_type == GemmType.QKV:
             kind = ALL_GATHER 
             reduction_time = self.network_model.collective(
@@ -2076,6 +2249,8 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for context-parallel backward GEMM")
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
+        # Per-rank SHARDED flops matching the per-rank observed compute time
+        # (idle accounting; act + wt grad GEMMs combined).
         if gemm_type == GemmType.ATTENTION_SCORE:
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -2091,6 +2266,7 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch + self.O
+            idle_flops = 4.0 * batch * shard_spec.shard_m * shard_spec.k * shard_spec.n
             total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both K and V
             kind = REDUCE_SCATTER
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
@@ -2108,6 +2284,7 @@ class TimeCalculationLLM(TimeCalculation):
                 name,
                 disable_overhead=True,
             )[0] * batch + self.O
+            idle_flops = 4.0 * batch * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type in (GemmType.MLA_DOWN_PROJ, GemmType.QKV, GemmType.FFN1, GemmType.FFN2):
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -2121,6 +2298,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
         elif gemm_type == GemmType.OUT_PROJ:
             grad_time_act = self.get_gemm_time(
                 shard_spec.shard_m,
@@ -2134,11 +2312,18 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )[0]
+            idle_flops = 4.0 * shard_spec.shard_m * shard_spec.k * shard_spec.n
             total_bytes = self.get_kv_size_bytes()
             kind = ALL_GATHER
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        # Recorded BEFORE the grad-accum addition; compute-only observation.
+        self.record_idle_from_gemm(
+            gemm_time,
+            idle_flops,
+            bucket="global" if gemm_type == GemmType.LINEAR_SOFTMAX else "layer",
+        )
         grad_accum_elems = self._grad_accum_elems_for_gemm(
             gemm_type,
             k=shard_spec.k,
@@ -3372,6 +3557,12 @@ class TimeCalculationLLM(TimeCalculation):
                 self._mem_levels_to_list(total_mem),
                 name=stage_name,
             ) + self.O
+            # Idle accounting (design A9): MLA prices its composite GEMM stack via
+            # the roofline directly; total_local_flops is exactly the per-rank
+            # sharded flop count that produced compute_time. Recorded BEFORE the
+            # grad-accum addition. The MLA / non-flash / flash attention paths are
+            # mutually exclusive branches, so there is no double counting.
+            self.record_idle_from_gemm(compute_time, total_local_flops, bucket="layer")
         if backward and grad_accum_elems > 0:
             compute_time += self._grad_accum_time(int(grad_accum_elems), f"{stage_name}_grad_accum")
 

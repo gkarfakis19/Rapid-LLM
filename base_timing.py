@@ -447,7 +447,15 @@ class TimeCalculation:
         self.tot_mem = 0
         self.tot_time = 0
         self.debug = False
-        
+        # Legacy-compatible idle accounting: sum of (observed GEMM time - ideal compute time).
+        self._idle_time_sum_s = 0.0
+        # Bucketized idle accounting used for thermal scaling:
+        # - layer: operations repeated per transformer layer
+        # - global: operations executed once per step/batch (e.g., linear softmax)
+        self._idle_time_layer_s = 0.0
+        self._idle_time_global_s = 0.0
+        self._idle_samples = 0
+
         default_policy = 'analytical'
         eb = getattr(hw_config, "execution_backend", None)
         if eb and getattr(eb, "model", "analytical") == "astra":
@@ -527,6 +535,57 @@ class TimeCalculation:
             self.use_moe = bool(getattr(self.model, "use_moe", False))
             self.num_moe_layers = sum(self.moe_layer_mask)
 
+
+    def reset_idle_accounting(self) -> None:
+        self._idle_time_sum_s = 0.0
+        self._idle_time_layer_s = 0.0
+        self._idle_time_global_s = 0.0
+        self._idle_samples = 0
+
+    def record_idle_from_gemm(
+        self,
+        observed_time_s: float,
+        flop: float,
+        *,
+        scale: float = 1.0,
+        bucket: str = "layer",
+    ) -> None:
+        try:
+            observed = float(observed_time_s) * float(scale)
+            flop_val = float(flop) * float(scale)
+        except Exception:
+            return
+        if not math.isfinite(observed) or not math.isfinite(flop_val):
+            return
+        ideal = 0.0 if self.th <= 0 else (flop_val / self.th)
+        idle = observed - ideal
+        if idle < 0.0:
+            idle = 0.0
+        self._idle_time_sum_s += idle
+        if bucket == "global":
+            self._idle_time_global_s += idle
+        else:
+            self._idle_time_layer_s += idle
+        self._idle_samples += 1
+
+    def get_idle_time_seconds(self) -> float:
+        return float(self._idle_time_sum_s)
+
+    def get_idle_breakdown_seconds(self) -> Dict[str, float]:
+        return {
+            "layer": float(self._idle_time_layer_s),
+            "global": float(self._idle_time_global_s),
+            "total": float(self._idle_time_sum_s),
+        }
+
+    def get_idle_fraction(self, total_time_s: float) -> float:
+        total = float(total_time_s)
+        if total <= 0.0:
+            return 0.0
+        idle_fraction = self._idle_time_sum_s / total
+        if idle_fraction < 0.0:
+            return 0.0
+        return float(idle_fraction)
 
     def _derive_num_workers(self, hw_config) -> int:
         layout = getattr(hw_config, "network_layout", None)
