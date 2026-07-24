@@ -55,6 +55,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
+        self._prefill_idle_time_s = 0.0
+        self._prefill_idle_layer_time_s = 0.0
+        self._prefill_idle_global_time_s = 0.0
 
     def _build_decode_transformer_results(
         self,
@@ -719,6 +722,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
 
     def calc_time(self) -> Tuple[float, float]:
+        self.reset_idle_accounting()
+        self._prefill_idle_time_s = 0.0
+        self._prefill_idle_layer_time_s = 0.0
+        self._prefill_idle_global_time_s = 0.0
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
@@ -859,6 +866,16 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
             total_time = result.total_time
 
+            # Snapshot prefill idle IMMEDIATELY after the prefill dispatcher run and
+            # BEFORE the decode-shaped-graph-for-memory-estimation section below:
+            # prepare_decode_graphs re-prices decode GEMMs on this instance, which
+            # would otherwise contaminate the prefill counters (fixes the vendored
+            # thermal_stco snapshot-at-end quirk).
+            prefill_idle_breakdown = self.get_idle_breakdown_seconds()
+            self._prefill_idle_time_s = float(prefill_idle_breakdown.get("total", 0.0))
+            self._prefill_idle_layer_time_s = float(prefill_idle_breakdown.get("layer", 0.0))
+            self._prefill_idle_global_time_s = float(prefill_idle_breakdown.get("global", 0.0))
+
             prefill_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
                 batch_size=batch_size,
@@ -978,12 +995,14 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         return total_time, total_energy
 
-    def calc_decode_time(self) -> Tuple[float, List[DecodeSample]]:
+    def calc_decode_time(self) -> Tuple[float, float, float, List[DecodeSample], float, float]:
         """
         Calculate autoregressive decode phase execution time using sample-based approach.
 
         Returns:
-            float: Total decode phase execution time
+            Tuple of:
+              (decode_time, decode_energy, decode_idle, decode_samples,
+               decode_idle_layer, decode_idle_global)
         """
         # Get inference sampling configuration
         sample_every = self.model.inference_sample_every
@@ -993,7 +1012,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         if decode_len == 0:
             print("Skipping decode")
-            return 0.0, 0.0, []
+            return 0.0, 0.0, 0.0, [], 0.0, 0.0
 
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
@@ -1026,8 +1045,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             time_calc_cls=TimeCalculationLLMInference,
         )
 
-        # Build decode phase using sample-based approach with real RAPID-LLM integration
-        # decode_time, decode_energy, decode_samples = inference_engine._build_decode_graph()
+        # Build decode phase using sample-based approach with real RAPID-LLM integration.
+        # Returns (decode_time, decode_energy, decode_idle, decode_samples,
+        #          decode_idle_layer, decode_idle_global).
         return inference_engine._build_decode_graph()
 
     def calc_total_inference_time(self) -> dict:
@@ -1039,9 +1059,24 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         """
         # Calculate prefill time (existing functionality)
         prefill_time, prefill_energy = self.calc_time()
+        prefill_idle = float(getattr(self, "_prefill_idle_time_s", 0.0))
+        prefill_idle_layer = float(getattr(self, "_prefill_idle_layer_time_s", 0.0))
+        prefill_idle_global = float(getattr(self, "_prefill_idle_global_time_s", 0.0))
+
         # Calculate decode time (new functionality)
-        decode_time, decode_energy, decode_samples = self.calc_decode_time()
+        (
+            decode_time,
+            decode_energy,
+            decode_idle,
+            decode_samples,
+            decode_idle_layer,
+            decode_idle_global,
+        ) = self.calc_decode_time()
         total_time = prefill_time + decode_time
+        total_idle = prefill_idle + decode_idle
+        idle_fraction = 0.0 if total_time <= 0.0 else (total_idle / total_time)
+        thermal_idle_time = ((prefill_idle_layer + decode_idle_layer) * self.num_layers) + prefill_idle_global + decode_idle_global
+        idle_fraction_thermal = 0.0 if total_time <= 0.0 else (thermal_idle_time / total_time)
 
         time_to_first_token = prefill_time
         if decode_samples:
@@ -1116,7 +1151,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         return {
             "prefill_time": prefill_time,
             "decode_time": decode_time,
+            "prefill_idle_time": prefill_idle,
+            "decode_idle_time": decode_idle,
+            "prefill_idle_layer_time": prefill_idle_layer,
+            "prefill_idle_global_time": prefill_idle_global,
+            "decode_idle_layer_time": decode_idle_layer,
+            "decode_idle_global_time": decode_idle_global,
             "total_inference_time": total_time,
+            "gpu_time_frac_idle": idle_fraction,
+            "gpu_time_frac_idle_thermal": idle_fraction_thermal,
             "time_to_first_token": time_to_first_token,
             "kv_cache_prefill_store_bytes": prefill_store_bytes,
             "kv_cache_decode_store_bytes": decode_store_bytes,

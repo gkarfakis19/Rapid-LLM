@@ -62,6 +62,9 @@ class DecodeSample:
     current_seq_len: int
     execution_time: float
     execution_energy: float
+    execution_idle_time: float
+    execution_idle_layer_time: float
+    execution_idle_global_time: float
     graph_root: Any
     kv_cache_tokens: int
 
@@ -113,7 +116,7 @@ class DecodeGraph(Graph):
         self.v_head_dim = getattr(attention_cfg, "v_head_dim", None)
         self.run_type = str(getattr(model_cfg, "run_type", "inference")).lower()
 
-    def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
+    def build_decode_graph(self) -> Tuple[float, float, float, List[DecodeSample], float, float]:
         """
         Build decode phase using sample-based approach for efficiency.
 
@@ -121,7 +124,9 @@ class DecodeGraph(Graph):
         and integrate between sample points using linear interpolation.
 
         Returns:
-            Tuple of (total_decode_time, list_of_decode_samples)
+            Tuple of:
+              (total_decode_time, total_decode_energy, total_decode_idle, decode_samples,
+               total_decode_idle_layer, total_decode_idle_global)
         """
         # Determine decode steps we actually simulate
         sample_points = self._generate_sample_points()
@@ -144,7 +149,7 @@ class DecodeGraph(Graph):
                 model_type=self.model_config.model_config.model_type,
             )
 
-            sample_time, sample_energy = self._execute_decode_step(
+            sample_time, sample_energy, sample_idle_time, sample_idle_layer, sample_idle_global = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
@@ -156,14 +161,30 @@ class DecodeGraph(Graph):
                     current_seq_len=total_seq_len,
                     execution_time=sample_time,
                     execution_energy=sample_energy,
+                    execution_idle_time=sample_idle_time,
+                    execution_idle_layer_time=sample_idle_layer,
+                    execution_idle_global_time=sample_idle_global,
                     graph_root=None,
                     kv_cache_tokens=total_seq_len,
                 )
             )
 
-        total_decode_time, total_decode_energy = self._integrate_decode_samples(decode_samples)
+        (
+            total_decode_time,
+            total_decode_energy,
+            total_decode_idle,
+            total_decode_idle_layer,
+            total_decode_idle_global,
+        ) = self._integrate_decode_samples(decode_samples)
 
-        return total_decode_time, total_decode_energy, decode_samples
+        return (
+            total_decode_time,
+            total_decode_energy,
+            total_decode_idle,
+            decode_samples,
+            total_decode_idle_layer,
+            total_decode_idle_global,
+        )
 
     def _generate_sample_points(self) -> List[int]:
         """Generate decode step sample points based on sampling configuration."""
@@ -189,7 +210,7 @@ class DecodeGraph(Graph):
         step_id: int,
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
-    ) -> float:
+    ) -> Tuple[float, float, float, float, float]:
         """Execute decode step using appropriate RAPID-LLM execution mode."""
 
         if not self.hw_config or not self.model_config:
@@ -254,6 +275,12 @@ class DecodeGraph(Graph):
         )
 
         result = dispatcher.run(temp_time_calc.execution_mode)
+        # Fresh temp_time_calc counters start at zero (no reset needed); everything
+        # recorded on this instance came from pricing this decode step.
+        idle_time = temp_time_calc.get_idle_time_seconds()
+        idle_breakdown = temp_time_calc.get_idle_breakdown_seconds()
+        idle_layer_time = float(idle_breakdown.get("layer", 0.0))
+        idle_global_time = float(idle_breakdown.get("global", 0.0))
         if sample_dir:
             temp_time_calc.output_dir = prev_output_dir
             print(
@@ -265,9 +292,9 @@ class DecodeGraph(Graph):
                 f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
                 f"time={result.total_time:.4f}s"
             )
-        return result.total_time, energy
+        return result.total_time, energy, idle_time, idle_layer_time, idle_global_time
 
-    def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
+    def _integrate_decode_samples(self, samples: List[DecodeSample]) -> Tuple[float, float, float, float, float]:
         """
         Integrate execution times between sample points using linear interpolation.
 
@@ -279,11 +306,17 @@ class DecodeGraph(Graph):
 
         total_time = 0.0
         total_energy = 0.0
+        total_idle = 0.0
+        total_idle_layer = 0.0
+        total_idle_global = 0.0
 
         for idx, sample in enumerate(samples):
             if idx == 0:
                 total_time += sample.execution_time
                 total_energy += sample.execution_energy
+                total_idle += sample.execution_idle_time
+                total_idle_layer += sample.execution_idle_layer_time
+                total_idle_global += sample.execution_idle_global_time
                 if self._debug_graphs_enabled():
                     print(
                         f"[decode] integration seed step {sample.step_id:02d}: "
@@ -304,6 +337,20 @@ class DecodeGraph(Graph):
             segment_energy = midpoint_energy * step_gap
             total_energy += segment_energy
 
+            midpoint_idle = 0.5 * (prev_sample.execution_idle_time + sample.execution_idle_time)
+            segment_idle = midpoint_idle * step_gap
+            total_idle += segment_idle
+            midpoint_idle_layer = 0.5 * (
+                prev_sample.execution_idle_layer_time + sample.execution_idle_layer_time
+            )
+            segment_idle_layer = midpoint_idle_layer * step_gap
+            total_idle_layer += segment_idle_layer
+            midpoint_idle_global = 0.5 * (
+                prev_sample.execution_idle_global_time + sample.execution_idle_global_time
+            )
+            segment_idle_global = midpoint_idle_global * step_gap
+            total_idle_global += segment_idle_global
+
             print(
                 f"[decode] integration segment {prev_sample.step_id}->{sample.step_id}: "
                 f"width={step_gap}, midpoint={midpoint:.4f}s, contribution={segment_time:.4f}s"
@@ -315,6 +362,9 @@ class DecodeGraph(Graph):
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
             total_energy += remaining_steps * last_sample.execution_energy
+            total_idle += remaining_steps * last_sample.execution_idle_time
+            total_idle_layer += remaining_steps * last_sample.execution_idle_layer_time
+            total_idle_global += remaining_steps * last_sample.execution_idle_global_time
             print(
                 f"[decode] integration tail from {last_sample.step_id} covering {remaining_steps} steps: "
                 f"contribution={tail_time:.4f}s"
@@ -325,7 +375,7 @@ class DecodeGraph(Graph):
             f"from {len(samples)} samples"
         )
 
-        return total_time, total_energy
+        return total_time, total_energy, total_idle, total_idle_layer, total_idle_global
 
     def _debug_graphs_enabled(self) -> bool:
         flag = os.environ.get("RAPID_VISUALIZE_GRAPHS")
@@ -359,12 +409,14 @@ class InferenceEngine:
         self.time_calc_cls = time_calc_cls
 
 
-    def _build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
+    def _build_decode_graph(self) -> Tuple[float, float, float, List[DecodeSample], float, float]:
         """
         Build decode phase using sample-based approach with proper RAPID-LLM integration.
 
         Returns:
-            Tuple of (total_decode_time, decode_samples)
+            Tuple of:
+              (total_decode_time, total_decode_energy, total_decode_idle, decode_samples,
+               total_decode_idle_layer, total_decode_idle_global)
         """
         if self.time_calc_cls is None:
             raise RuntimeError("InferenceEngine requires time_calc_cls for decode graph building.")

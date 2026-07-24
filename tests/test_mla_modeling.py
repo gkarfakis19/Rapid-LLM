@@ -756,11 +756,14 @@ def test_mla_inference_decode_sampling_runs_for_latent_mode():
     model = _build_mla_model(run_type="inference")
     config.validate_configs(hw_config, model)
     tc = TimeCalculationLLMInference(hw_config, model, "LLM")
-    decode_time, decode_energy, samples = tc.calc_decode_time()
+    decode_time, decode_energy, decode_idle, samples, decode_idle_layer, decode_idle_global = tc.calc_decode_time()
 
     assert decode_time > 0.0
     assert decode_energy > 0.0
     assert len(samples) > 0
+    assert decode_idle >= 0.0
+    assert decode_idle_layer >= 0.0
+    assert decode_idle_global >= 0.0
 
 
 def test_mla_dense_vs_gqa_toy_training_and_inference_are_not_pathologically_reversed():
