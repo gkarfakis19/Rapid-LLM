@@ -53,6 +53,9 @@ def _copy_node_metadata(source: llm_simulation.Node, target: llm_simulation.Node
         "mem_kind",
         "recompute",
         "param_gather",
+        # op identity for per-device profile injection; must survive
+        # _split_tp_node so overlap-split head nodes are re-priced too.
+        "op_key",
     ):
         if hasattr(source, attr):
             setattr(target, attr, getattr(source, attr))
@@ -383,6 +386,9 @@ class PipelineGraphFlattener:
         self._clone_cache: Dict[int, Any] = {}
         self._op_id_counter: int = 0
         self._stage_span = 1
+        # The single flattened hw_id hosting the vocab-projection (lm head):
+        # linear_softmax lands on rank 0 of its stage (A8 attribution).
+        self.lm_head_hw_id: Optional[int] = None
 
     def _configure_rank_layout(self, descriptor: Dict[str, Any]) -> None:
         axis_order = list(descriptor.get("axis_order", []))
@@ -535,6 +541,12 @@ class PipelineGraphFlattener:
                     obj.duration,
                     fwd=obj.fwd,
                 )
+                cloned.op_key = (
+                    "linear_softmax",
+                    "forward" if getattr(obj, "fwd", True) else "backward",
+                )
+                if getattr(obj, "fwd", True):
+                    self.lm_head_hw_id = int(cloned.hw_id)
             elif "optimizer" in obj.name:
                 # Optimizer nodes need to be expanded per TP rank
                 cloned_nodes = []
@@ -547,6 +559,7 @@ class PipelineGraphFlattener:
                         duration=obj.duration,
                         fwd=obj.fwd,
                     )
+                    cloned_node.op_key = ("optimizer", "backward")
                     cloned_nodes.append(cloned_node)
                 
                 cloned_tuple = tuple(cloned_nodes)
@@ -572,6 +585,11 @@ class PipelineGraphFlattener:
                     obj.duration,
                     fwd=obj.fwd,
                 )
+                if base_name.startswith("embedding"):
+                    cloned.op_key = (
+                        "embedding",
+                        "forward" if getattr(obj, "fwd", True) else "backward",
+                    )
 
 
             # following _expand_transformer_node logic, we need to find siblings that are zero3 tp_shard=True.
@@ -743,6 +761,8 @@ class PipelineGraphFlattener:
                 gemm_node.recompute = bool(getattr(node, "recompute", False))
                 gemm_node.param_gather = (gemm_idx == 0)
                 gemm_node.is_moe_layer = is_moe_layer
+                # Op identity for per-device profile injection (metadata only).
+                gemm_node.op_key = (entry_name, direction)
 
                 if previous is not None:
                     previous.add_child(gemm_node)
@@ -1046,6 +1066,8 @@ class LLMExecutionDispatcher:
         self._fault_space: Optional[FaultSpace] = None
         self._fault_projections: Dict[str, FaultProjectionResult] = {}
         self._initialize_fault_mappings()
+        self._device_profiles_active = False
+        self._initialize_device_profiles()
 
     def _build_rank_layout_descriptor(self) -> Dict[str, Any]:
         hw_config = getattr(self.time_calc, "hw_config", None)
@@ -1304,6 +1326,61 @@ class LLMExecutionDispatcher:
         axis_order = self._rank_layout.get("axis_order", []) if isinstance(self._rank_layout, dict) else []
         axis_sizes = self._rank_layout.get("axis_sizes", {}) if isinstance(self._rank_layout, dict) else {}
         self._log_fault_summary(axis_order, axis_sizes)
+
+    def _initialize_device_profiles(self) -> None:
+        """Defense-in-depth gate for per-device throttle profiles.
+
+        Mirrors ``_initialize_fault_mappings``: the primary gate lives in
+        ``TimeCalculationLLM.__init__``; this one also covers programmatic
+        dispatcher construction and the optimize_2dmap/MoE interactions that
+        are only detectable here.
+        """
+        hw_config = getattr(self.time_calc, "hw_config", None)
+        profiles_cfg = getattr(hw_config, "device_profiles", None)
+        if not profiles_cfg:
+            return
+        if self.time_calc.execution_mode != ExecutionMode.FULL_ASTRASIM_FLATTENED:
+            raise ValueError(
+                "device_profiles require full AstraSim flattened execution. Set "
+                "execution_backend.model: astra and execution_backend.astra.mode: "
+                "full_astrasim_flattened in the hardware config (current mode: "
+                f"'{self.time_calc.execution_mode.value}')."
+            )
+        if self._first_dim_optimize_cfg:
+            raise ValueError(
+                "device_profiles are not supported together with optimize_2dmap: the "
+                "SCOTCH placement permutes stage->rank AFTER graph construction, so "
+                "profile keying by hw_id would silently target the wrong physical "
+                "devices. Disable network.dimensions[0].topology.optimize_2dmap or "
+                "remove the device_profiles block."
+            )
+        if self.moe_transformer_graph is not None or bool(getattr(self.time_calc, "use_moe", False)):
+            raise ValueError(
+                "device_profiles do not support MoE models: full AstraSim flattened "
+                "execution (the only mode supporting device_profiles) does not support "
+                "MoE. Remove the device_profiles block or disable MoE."
+            )
+        self._device_profiles_active = True
+
+    def _maybe_apply_device_profiles(
+        self,
+        flattened_root: Any,
+        unique_hw_ids: Set[int],
+        effective_dp: int,
+    ) -> None:
+        if not self._device_profiles_active:
+            return
+        import device_profiles as _device_profiles
+
+        bank = self.time_calc.get_device_profile_bank()
+        _device_profiles.apply_profiles_to_flattened_root(
+            flattened_root,
+            bank=bank,
+            profiles_cfg=self.time_calc.hw_config.device_profiles,
+            unique_hw_ids=unique_hw_ids,
+            effective_dp=effective_dp,
+            run_label="no_dp" if self.no_data_parallel else "final",
+        )
 
     def _axis_to_dimension_map(self, network_layout) -> Dict[str, int]:
         mapping: Dict[str, int] = {}
@@ -1626,7 +1703,13 @@ class LLMExecutionDispatcher:
         max_sec *= self._pipeline_interleave_scale()
         return ExecutionResult(total_time=max_sec, graph_root=self.pipeline_root, mode=ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
 
-    def _run_full_astrasim_flattened(self) -> ExecutionResult:
+    def _build_and_inject_flattened_root(self) -> Tuple[Any, Set[int], PipelineGraphFlattener, int]:
+        """Flatten the pipeline graph, apply overlap transforms, and inject profiles.
+
+        Returns ``(flattened_root, unique_hw_ids, flattener, effective_dp)``.
+        Device-profile injection happens AFTER ``apply_overlap_transforms`` (the
+        TP-overlap split collapses tuple durations) and BEFORE any AstraSim run.
+        """
         if self.moe_transformer_graph is not None:
             raise NotImplementedError("MoE is not supported with full AstraSim flattened execution.")
         if not self.pipeline_root:
@@ -1662,6 +1745,10 @@ class LLMExecutionDispatcher:
         flattener._propagate_local_hw_ids(flattened_root)
         setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
         self._attach_optimize_hint(flattened_root)
+        # NOTE: with profiles active this root carries the INJECTED (dp0-slice)
+        # durations; the memory-peak simulation reuses it via
+        # build_flattened_root_for_memory, which only uses durations for event
+        # ordering, never for capacity math.
         self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             filename = "/pipeline_graph_post_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_post_flatten"
@@ -1671,18 +1758,20 @@ class LLMExecutionDispatcher:
                 filename,
             )
         self.pipeline_root = flattened_root
-        # output_dir = "./astra_flattened_graph"
-        # os.makedirs(output_dir, exist_ok=True)
-        # base_path = os.path.join(output_dir, "pipeline_flattened")
-        # dot = visualize_graph(flattened_root, filename=base_path)
-        # try:
-        #     dot.render(base_path, format="svg", cleanup=True)
-        # except Exception as exc:  # pragma: no cover - visualization best-effort
-        #     print(f"[WARN] Failed to render flattened pipeline graph: {exc}")
 
         unique_hw_ids = self._collect_hw_ids(flattened_root)
         if not unique_hw_ids:
             raise RuntimeError("Flattened pipeline graph exposes no compute nodes with hardware IDs")
+
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+
+        self._maybe_apply_device_profiles(flattened_root, unique_hw_ids, effective_dp)
+
+        return flattened_root, unique_hw_ids, flattener, effective_dp
+
+    def _run_full_astrasim_flattened(self) -> ExecutionResult:
+        flattened_root, unique_hw_ids, flattener, effective_dp = self._build_and_inject_flattened_root()
 
         # Use flattened artifact directory when persisting artifacts
         artifact_dir = self.time_calc.output_dir
@@ -1693,7 +1782,6 @@ class LLMExecutionDispatcher:
             "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
         }
         run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
         if run_type == "inference":
             run_kwargs["dp_override"] = 1
 
@@ -1731,6 +1819,30 @@ class LLMExecutionDispatcher:
         self.time_calc.pipeline_astrasim_time = max_sec
         self.time_calc.flattened_astrasim_per_rank = per_rank_sec
         self.time_calc.flattened_astrasim_total = max_sec
+
+        # Per-run device metrics record (A5): keep the no_dp and final runs of a
+        # gradient-accumulation step under DISTINCT attributes so neither
+        # overwrites the other. Busy times come from the executor's
+        # pre-rounding float accumulation attached to time_calc by
+        # run_astra_simulation_only_onepath.
+        busy_map = getattr(self.time_calc, "last_astrasim_per_rank_busy", None) or {}
+        rank_meta = getattr(self.time_calc, "last_astrasim_rank_meta", None) or {}
+        run_record = {
+            "total_raw_s": float(max_sec),
+            "per_rank_wall_s": {int(idx): float(value) for idx, value in enumerate(per_rank_sec)},
+            "per_rank_busy_s": {int(rank): float(value) for rank, value in busy_map.items()},
+            "rank_meta": {int(rank): dict(meta) for rank, meta in rank_meta.items()},
+            "rank_layout": dict(self._rank_layout or {}),
+            "layers_per_stage": list(getattr(self.pipeline_graph, "layers_per_stage", []) or []),
+            "lm_head_hw_id": getattr(flattener, "lm_head_hw_id", None),
+            "effective_dp": int(effective_dp),
+            "hw_ids": sorted(int(hw_id) for hw_id in unique_hw_ids),
+            "interleave_scale": float(self._pipeline_interleave_scale()),
+        }
+        if self.no_data_parallel:
+            self.time_calc.flattened_run_no_dp = run_record
+        else:
+            self.time_calc.flattened_run_final = run_record
 
         return ExecutionResult(
             total_time=max_sec * self._pipeline_interleave_scale(),
