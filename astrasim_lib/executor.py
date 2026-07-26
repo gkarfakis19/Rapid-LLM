@@ -1864,6 +1864,25 @@ def convert_rapid_llm_graph_to_chakra_et(
         print(f"[AstraSim] Wrote graph manifest to {manifest_path}")
     except Exception as exc:
         print(f"[WARN] Failed to write manifest: {exc}")
+
+    # M1 SHADOW — removed at M2 cutover. When RAPID_SHADOW_EMIT is truthy,
+    # re-derive this bundle through program.legacy_lowering + program.et_emit
+    # into <output_dir>/__shadow__/ and diff it against the bundle written
+    # above (node sequences, manifest bytes, comm groups, tag pairing).
+    # Raises on any divergence; deletes __shadow__ on success. Must never
+    # change the legacy output path.
+    if _env_truthy("RAPID_SHADOW_EMIT"):
+        from program.shadow import run_shadow_comparison
+
+        run_shadow_comparison(
+            graph_root=graph_root,
+            dp_size=dp_size,
+            output_dir=output_dir,
+            legacy_rank_ids=rank_ids,
+            legacy_manifest_path=manifest_path,
+            legacy_dp_count=dp_count,
+        )
+
     return et_prefix, rank_ids, manifest_path
 
 def run_astra_simulation_only_onepath(

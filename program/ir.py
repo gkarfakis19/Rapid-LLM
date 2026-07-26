@@ -1,0 +1,391 @@
+# Copyright 2026 NanoCad lab, UCLA
+# https://nanocad.ee.ucla.edu/
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The Program IR — typed placed operations (DESIGN.md §2, design C §1.2).
+
+A :class:`Program` is a list of placed operations (``ComputeOp`` /
+``CollectiveOp`` / ``TransferOp``) whose list index *is* the operation uid.
+Uids are dense (``ops[uid].uid == uid``) and uid order is the global total
+order: for programs produced by :mod:`program.legacy_lowering` it is exactly
+the legacy converter's emission order (concatenated per-stage toposorts for
+main ops, then TransferOps in legacy Step-11 creation order), so the
+``legacy`` id policy of :mod:`program.et_emit` is a pure projection of it.
+
+Amendments from DESIGN.md §2 relative to the panel document:
+
+* same-placement TransferOps are legal (``src_device == dst_device``); the
+  ET emitter elides them into plain deps while the (future, M5) analytical
+  evaluator enqueues them (DESIGN §2.2 — extended: real flattened graphs
+  carry same-stage ``cross_layer`` edges with nonzero sizes, preserved here);
+* per-DP durations are first class: ``ComputeOp.duration`` is a tuple of
+  length 1 or ``Program.dp_count`` (DESIGN §2.4, legacy ``duration_profile``);
+* ``Program.devices`` includes devices seen only via collectives, and
+  ``meta.misc["num_stages_initial"]`` preserves the converter's
+  *pre-extension* stage count for the dp-major rank arithmetic
+  (DESIGN §2.5, executor.py Step 7 quirk);
+* wire group-id allocation is label-sorted and lives in the emitter
+  (DESIGN §2.6); the IR only carries :class:`GroupKey`/:class:`CommGroup`
+  plus the per-op ``label``.
+
+Deviation from design C §1.2, forced by the legacy converter's shape and
+documented here once:
+
+* Legacy programs are *per-device clone* programs: a labeled collective op is
+  emitted only on its own device, and the communicator is formed by the
+  isomorphic clone ops on the other member devices sharing the same label.
+  ``CollectiveOp.label`` therefore lives on the op (two distinct labels may
+  share one ``GroupKey``; the emitter deduplicates member sets when
+  interning wire gids, exactly like ``_TP_MEMBERS_TO_GID``).
+* ``TransferOp`` carries its consumer wiring explicitly (``consumers`` plus
+  the ``send_seq``/``recv_seq`` creation positions) because legacy Step 11
+  appends RECV/SEND ids into consumer nodes *after* Phase A and creates the
+  p2p nodes in a global order that is not always the transfer-uid order
+  (a local send can materialize before the matching recv is requested).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
+from timing_model import CollectiveType
+
+from program.layout import RankLayout
+
+OpUid = int
+DeviceId = int
+
+
+class OpRole(Enum):
+    """Semantic role vocabulary (design A §1); ``GENERIC`` for lowered ops."""
+
+    GENERIC = auto()
+    TRANSFORMER_LAYER = auto()
+    EMBEDDING = auto()
+    SOFTMAX = auto()
+    OPTIMIZER = auto()
+    GEMM = auto()
+    JOIN = auto()
+
+
+class Direction(Enum):
+    FORWARD = auto()
+    BACKWARD = auto()
+
+
+@dataclass(frozen=True)
+class GroupKey:
+    """Pre-DP communicator identity: an axis plus its member *devices*.
+
+    ``members`` are sorted device ids (stages). DP replication is stamped at
+    emission: the wire members for dp index ``d`` are
+    ``sorted(rank_for(device, d) for device in members)``.
+    """
+
+    axis: str
+    members: Tuple[DeviceId, ...]
+
+
+@dataclass
+class CommGroup:
+    """Registered communicator group; ``label`` is diagnostics-only here (the
+    authoritative label for gid interning is per-op, see module docstring)."""
+
+    key: GroupKey
+    label: str
+
+
+@dataclass
+class ComputeOp:
+    uid: OpUid
+    name: str
+    device: DeviceId
+    duration: Tuple[float, ...]  # length 1 or dp_count (V4)
+    deps: Tuple[OpUid, ...] = ()
+    role: OpRole = OpRole.GENERIC
+    direction: Direction = Direction.FORWARD
+    mem_kind: Optional[Any] = None
+    recompute: bool = False
+    param_gather: bool = False
+    micro_batch: Optional[int] = None
+    layer: Optional[int] = None
+    is_moe_layer: bool = False
+    #: legacy ``Node.op_id`` (naming/debug parity only; never dispatched on).
+    legacy_op_id: Optional[int] = None
+    #: deps discovered by legacy Step 11's same-stage ``ensure_pipeline``
+    #: branch; wired at emission Phase B (membership-only), exempt from V1.
+    post_deps: Tuple[OpUid, ...] = ()
+
+
+@dataclass
+class CollectiveOp:
+    uid: OpUid
+    name: str
+    device: DeviceId  # owning device (legacy "edge stage")
+    coll: CollectiveType  # never PIPELINE
+    size_bytes: int
+    participants: int = 0
+    interconnect: Optional[str] = None
+    #: legacy dp-collective flag: skipped entirely at emission when
+    #: ``dp_count <= 1`` (executor.py Step 10). True iff ``label is None``.
+    is_dp: bool = False
+    #: label from ``_assign_collective_labels`` ((base_name, primary member
+    #: set) -> label); None for dp/pp-interconnect collectives.
+    label: Optional[str] = None
+    group: Optional[GroupKey] = None
+    deps: Tuple[OpUid, ...] = ()
+    legacy_op_id: Optional[int] = None
+    post_deps: Tuple[OpUid, ...] = ()
+
+
+@dataclass
+class TransferOp:
+    """One logical p2p transfer: both endpoints, one identity (= one tag).
+
+    ``size_bytes == 0`` or a non-PIPELINE ``comm_type`` marks a *control*
+    transfer (legacy predicate, executor.py `_append_pipeline_send`): emitted
+    as a 1-byte ``*_send_control``/``*_recv_control`` pair. A same-device
+    transfer (``src_device == dst_device``) is never emitted — the consumer
+    already depends on the producer directly (legacy stage_deps behavior) —
+    but exists for the M5 analytical evaluator (DESIGN §2.2).
+    """
+
+    uid: OpUid
+    name: str
+    src_device: DeviceId
+    dst_device: DeviceId
+    size_bytes: int
+    comm_type: Optional[CollectiveType]
+    producer: OpUid
+    deps: Tuple[OpUid, ...] = ()
+    #: main ops whose ET nodes receive this transfer's RECV id (consumer on
+    #: dst_device) or SEND id (consumer on src_device) as a ctrl dep.
+    consumers: Tuple[OpUid, ...] = ()
+    #: global Phase-B node-creation positions (legacy Step-11 order); the
+    #: emitter creates SEND/RECV nodes sorted by these. ``recv_seq`` is None
+    #: when no consumer ever requested the recv (send-only transfer) and for
+    #: same-device transfers (never emitted).
+    send_seq: Optional[int] = None
+    recv_seq: Optional[int] = None
+    #: legacy tag basis (``edge.op_id``) — diagnostics only; the emitter tags
+    #: with ``uid`` (design C R4: tag values are free, pairing is identical).
+    legacy_tag: Optional[int] = None
+
+    @property
+    def is_control(self) -> bool:
+        return self.size_bytes == 0 or self.comm_type != CollectiveType.PIPELINE
+
+
+Op = Union[ComputeOp, CollectiveOp, TransferOp]
+
+
+@dataclass
+class ProgramMeta:
+    label: str = ""
+    optimize_2dmap: Optional[Dict[str, Any]] = None
+    misc: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Program:
+    #: layout the device ids live in (may have an empty axis_order when the
+    #: legacy graph carried no ``_astrasim_rank_layout``).
+    layout: RankLayout
+    dp_count: int
+    #: devices in EMISSION order (legacy final ``stage_ids``: sorted compute
+    #: stages, then collective-only stages in discovery order, permuted by
+    #: the SCOTCH remap when active). ``devices.index(d)`` is the legacy
+    #: ``stage_index[d]``.
+    devices: Tuple[DeviceId, ...]
+    ops: List[Op]
+    groups: Dict[GroupKey, CommGroup]
+    meta: ProgramMeta
+
+    # -- derived helpers -------------------------------------------------
+    def num_stages_initial(self) -> int:
+        """Pre-extension stage count used by the dp-major rank formula."""
+        return int(self.meta.misc.get("num_stages_initial", len(self.devices)))
+
+    def compute_devices(self) -> Tuple[DeviceId, ...]:
+        """Devices that own ET traces (legacy Step-2 stages), emission order."""
+        stored = self.meta.misc.get("compute_devices")
+        if stored is None:
+            return self.devices
+        return tuple(stored)
+
+    def device_index(self) -> Dict[DeviceId, int]:
+        return {device: idx for idx, device in enumerate(self.devices)}
+
+    def rank_for(self, device: DeviceId, dp_idx: int) -> int:
+        """dp-major rank: ``dp_idx * num_stages_initial + stage_index``.
+
+        Uses the *pre-extension* stage count on purpose (executor.py Step 7:
+        collective-only stages extend ``stage_to_ranks`` with ranks computed
+        from the original ``num_stages``) — DESIGN §2.5.
+        """
+        return dp_idx * self.num_stages_initial() + self.device_index()[device]
+
+    def validate(self) -> None:
+        from program.validate import validate_program
+
+        validate_program(self)
+
+
+class ProgramBuilder:
+    """Append-only builder: ``add_*`` returns the op's uid; uids are the
+    creation sequence, which therefore *is* the program's total order."""
+
+    def __init__(
+        self,
+        layout: Optional[RankLayout] = None,
+        dp_count: int = 1,
+        meta: Optional[ProgramMeta] = None,
+    ) -> None:
+        self.layout = layout if layout is not None else RankLayout((), {}, {})
+        self.dp_count = max(int(dp_count), 1)
+        self.meta = meta if meta is not None else ProgramMeta()
+        self._ops: List[Op] = []
+        self._groups: Dict[GroupKey, CommGroup] = {}
+
+    # -- ops -------------------------------------------------------------
+    def _next_uid(self) -> OpUid:
+        return len(self._ops)
+
+    def add_compute(
+        self,
+        name: str,
+        device: DeviceId,
+        duration: Union[float, Sequence[float]],
+        deps: Sequence[OpUid] = (),
+        **fields: Any,
+    ) -> OpUid:
+        if isinstance(duration, (int, float)):
+            duration_tuple = (float(duration),)
+        else:
+            duration_tuple = tuple(float(v) for v in duration)
+        op = ComputeOp(
+            uid=self._next_uid(),
+            name=name,
+            device=int(device),
+            duration=duration_tuple,
+            deps=tuple(deps),
+            **fields,
+        )
+        self._ops.append(op)
+        return op.uid
+
+    def add_collective(
+        self,
+        name: str,
+        device: DeviceId,
+        coll: CollectiveType,
+        size_bytes: int,
+        deps: Sequence[OpUid] = (),
+        **fields: Any,
+    ) -> OpUid:
+        op = CollectiveOp(
+            uid=self._next_uid(),
+            name=name,
+            device=int(device),
+            coll=coll,
+            size_bytes=int(size_bytes),
+            deps=tuple(deps),
+            **fields,
+        )
+        self._ops.append(op)
+        return op.uid
+
+    def add_transfer(
+        self,
+        name: str,
+        src_device: DeviceId,
+        dst_device: DeviceId,
+        size_bytes: int,
+        producer: OpUid,
+        comm_type: Optional[CollectiveType] = CollectiveType.PIPELINE,
+        consumers: Sequence[OpUid] = (),
+        **fields: Any,
+    ) -> OpUid:
+        op = TransferOp(
+            uid=self._next_uid(),
+            name=name,
+            src_device=int(src_device),
+            dst_device=int(dst_device),
+            size_bytes=int(size_bytes),
+            comm_type=comm_type,
+            producer=int(producer),
+            deps=(int(producer),),
+            consumers=tuple(consumers),
+            **fields,
+        )
+        self._ops.append(op)
+        return op.uid
+
+    def op(self, uid: OpUid) -> Op:
+        return self._ops[uid]
+
+    # -- groups ----------------------------------------------------------
+    def group(self, axis: str, members: Sequence[DeviceId], label: str) -> GroupKey:
+        key = GroupKey(axis=str(axis), members=tuple(sorted(int(m) for m in members)))
+        if key not in self._groups:
+            self._groups[key] = CommGroup(key=key, label=label)
+        return key
+
+    # -- finish ----------------------------------------------------------
+    def finish(
+        self,
+        devices: Optional[Sequence[DeviceId]] = None,
+        *,
+        num_stages_initial: Optional[int] = None,
+        compute_devices: Optional[Sequence[DeviceId]] = None,
+        validate: bool = True,
+    ) -> Program:
+        if devices is None:
+            seen: List[DeviceId] = []
+            for op in self._ops:
+                if isinstance(op, TransferOp):
+                    candidates = (op.src_device, op.dst_device)
+                else:
+                    candidates = (op.device,)
+                for device in candidates:
+                    if device not in seen:
+                        seen.append(device)
+            for key in self._groups:
+                for device in key.members:
+                    if device not in seen:
+                        seen.append(device)
+            devices = sorted(seen)
+        devices_tuple = tuple(int(d) for d in devices)
+        misc = dict(self.meta.misc)
+        misc["num_stages_initial"] = (
+            int(num_stages_initial) if num_stages_initial is not None else len(
+                tuple(compute_devices) if compute_devices is not None else devices_tuple
+            )
+        )
+        if compute_devices is not None:
+            misc["compute_devices"] = tuple(int(d) for d in compute_devices)
+        meta = ProgramMeta(label=self.meta.label, optimize_2dmap=self.meta.optimize_2dmap, misc=misc)
+        program = Program(
+            layout=self.layout,
+            dp_count=self.dp_count,
+            devices=devices_tuple,
+            ops=list(self._ops),
+            groups=dict(self._groups),
+            meta=meta,
+        )
+        if validate:
+            program.validate()
+        return program
