@@ -31,12 +31,16 @@ replacement of ``Graph.simulate_memory``), and the M4 BLOCK builder
 ``Graph.construct_transformer_graph`` powering the hybrid/hierarchical
 transformer AstraSim runs), and the M5 coarse stack:
 :mod:`program.pipeline_coarse` (``build_coarse_program``, the typed COARSE
-pipeline program over the same schedule events), :mod:`program.analytic_sim`
-(the analytical evaluator replacing ``Graph.simulate`` +
-``convert_comm_sizes_to_times``), and :mod:`program.retime`
-(``apply_block_timings``, the hybrid per-DP write-back replacing the
-coarse-graph half of ``_assign_transformer_durations``). Heavier submodules
-are imported lazily by their consumers; this package import stays light.
+pipeline program over the same schedule events, plus — M6 —
+``lower_coarse_for_emission``, the hierarchical pipeline emission entry
+that lowers the op_id-stamped, retimed schedule events through the shared
+``legacy_lowering`` pass and killed the legacy pipeline-graph AstraSim
+path), :mod:`program.analytic_sim` (the analytical evaluator replacing
+``Graph.simulate`` + ``convert_comm_sizes_to_times``), and
+:mod:`program.retime` (``apply_block_timings``, the per-DP write-back that
+replaced ``_apply_transformer_time``/``_assign_transformer_durations``
+entirely at M6). Heavier submodules are imported lazily by their
+consumers; this package import stays light.
 """
 
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords

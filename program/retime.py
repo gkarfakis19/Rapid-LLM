@@ -37,14 +37,14 @@ dense/MoE baseline fallback, verbatim legacy semantics:
   property, DESIGN.md §2 amendment 4).
 
 The write-back is mirrored onto the aligned schedule events
-(``meta.misc["coarse_events"]``, legacy scalar-vs-tuple convention) so
-``RAPID_VISUALIZE_GRAPHS`` renders the retimed durations; the evaluator
-itself reads only the ops.
-
-The legacy walk (``_apply_transformer_time`` + name-prefix recursion over
-legacy ``Node`` graphs) stays alive in ``llm_execution.py`` for the
-HIERARCHICAL mode only, which retimes the legacy pipeline graph before
-feeding it to AstraSim — it dies at M6 with that path.
+(``meta.misc["coarse_events"]``, legacy scalar-vs-tuple convention). The
+mirror is load-bearing since M6: the hierarchical pipeline emission lowers
+the coarse proto root (``program.pipeline_coarse.lower_coarse_for_emission``),
+and the lowering reads the events' ``duration_profile``/``duration`` —
+exactly the legacy ``Node`` duration surface the deleted
+``_apply_transformer_time``/``_assign_transformer_durations`` walk wrote.
+``RAPID_VISUALIZE_GRAPHS`` renders the same retimed durations; the
+analytical evaluator itself reads only the ops.
 """
 
 from __future__ import annotations

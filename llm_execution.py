@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
-import simulate_train_graph as llm_simulation
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
@@ -157,14 +156,6 @@ class LLMExecutionDispatcher:
         self._pipeline_rank_layout = _subset_descriptor(["pp", "dp"])
 
         return rank_layout.descriptor()
-
-    def _attach_optimize_hint(self, root: Any) -> None:
-        if root is None:
-            return
-        if self._first_dim_optimize_cfg:
-            setattr(root, "_optimize_2dmap", dict(self._first_dim_optimize_cfg))
-        elif hasattr(root, "_optimize_2dmap"):
-            delattr(root, "_optimize_2dmap")
 
     def _log_fault_summary(self, axis_order: Sequence[str], axis_sizes: Mapping[str, int]) -> None:
         if not axis_order:
@@ -525,50 +516,73 @@ class LLMExecutionDispatcher:
         )
 
     def _run_full_astrasim_hierarchical(self) -> ExecutionResult:
-        transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
-        if transformer_time is not None or moe_transformer_time is not None:
-            self._apply_transformer_time(transformer_time, moe_transformer_time)
+        """Hierarchical pipeline phase over the retimed COARSE Program (M6).
 
-        dp_count = getattr(self.time_calc, "dp", 1) or 1
-        if not self.pipeline_root:
-            raise RuntimeError("Pipeline graph root is not available for AstraSim execution")
+        Replaces the legacy pipeline-graph AstraSim path (attach
+        ``_astrasim_rank_layout``/``_optimize_2dmap`` to ``pipeline_root``,
+        retime via the ``_apply_transformer_time`` name-prefix walk, feed
+        the legacy Node graph to the converter): the coarse Program is
+        built from the schedule events, retimed with
+        ``program.retime.apply_block_timings`` (same per-(dp, stage)
+        fault-variant override semantics), and lowered for emission over
+        the ("pp","dp") pipeline sublayout by
+        ``program.pipeline_coarse.lower_coarse_for_emission`` — sharing the
+        emission-order pass with the fine builder. Bundle labels/dirs
+        (``astra_hier``), the pipeline fault override, the interleave scale
+        and the non-positive-duration error are unchanged.
+        """
+        from program.pipeline_coarse import lower_coarse_for_emission
+        from program.retime import apply_block_timings
+
+        transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
+
+        if not self.pipeline_graph:
+            raise RuntimeError("Pipeline graph is not available for AstraSim execution")
+
+        # Build from the pristine analytical comp_times (the legacy pipeline
+        # graph predated the write-back too), then retime the layer ops.
+        # Inference dp_override=1 lives in the builder: the coarse Program's
+        # dp_count is the effective dp (_build_coarse_program).
+        coarse_program = self._build_coarse_program()
+        if transformer_time is not None or moe_transformer_time is not None:
+            self._update_comp_times_from_timings(transformer_time, moe_transformer_time)
+            apply_block_timings(
+                coarse_program,
+                self._collect_block_timings(transformer_time, moe_transformer_time),
+                self._retime_dp_count(),
+            )
+        self.coarse_program = coarse_program
 
         # Use hierarchical artifact directory when persisting artifacts
         artifact_dir = self.time_calc.output_dir
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
-        pipeline_fault_override = self._fault_override("pipeline")
-        run_kwargs = {
-            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
-            "faulty_links_override": pipeline_fault_override,
-        }
-        # Inference runs force AstraSim dp_override=1; use run_type here to keep
-        # transformer durations scalar without threading override through call sites.
-        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
-        if run_type == "inference":
-            run_kwargs["dp_override"] = 1
-
-        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
+            # Render the coarse schedule events (retimed durations mirrored
+            # by apply_block_timings, like the legacy retimed graph).
             filename = "/pipeline_graph_hierarchical_no_dp" if self.no_data_parallel else "/pipeline_graph_hierarchical"
             self.pipeline_graph.save_graph(
-                self.pipeline_root,
+                coarse_program.meta.misc["coarse_proto_root"],
                 self.time_calc.output_dir,
                 filename,
             )
 
-        pipeline_layout = getattr(self, "_pipeline_rank_layout", None)
-        if pipeline_layout:
-            setattr(self.pipeline_root, "_astrasim_rank_layout", pipeline_layout)
-        elif hasattr(self.pipeline_root, "_astrasim_rank_layout"):
-            delattr(self.pipeline_root, "_astrasim_rank_layout")
-        self._attach_optimize_hint(self.pipeline_root)
+        optimize_cfg = dict(self._first_dim_optimize_cfg) if self._first_dim_optimize_cfg else None
+        gmap_workdir = artifact_dir if (optimize_cfg and self.time_calc.persist_astrasim_artifacts) else None
+        program = lower_coarse_for_emission(
+            coarse_program,
+            layout_descriptor=self._pipeline_rank_layout or None,
+            optimize_2dmap=optimize_cfg,
+            gmap_workdir=gmap_workdir,
+        )
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
-            self.pipeline_root,
+            program,
             self.time_calc,
             artifact_dir,
-            **run_kwargs,
+            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            faulty_links_override=self._fault_override("pipeline"),
         )
         self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
         self.time_calc.pipeline_astrasim_time = max_sec
@@ -654,18 +668,15 @@ class LLMExecutionDispatcher:
         )
         self.fine_program = program
 
-        run_kwargs = {
-            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
-            "rank_layout": self._rank_layout or None,
-        }
-        if run_type == "inference":
-            run_kwargs["dp_override"] = 1
-
+        # Inference dp_override=1 semantics live in the builder: the FINE
+        # Program's dp_count is the effective dp (M6 removed the executor's
+        # dp_override plumbing along with the legacy-graph entry).
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             program,
             self.time_calc,
             artifact_dir,
-            **run_kwargs,
+            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            rank_layout=self._rank_layout or None,
         )
 
         if not per_rank_sec:
@@ -1005,111 +1016,7 @@ class LLMExecutionDispatcher:
                 comp_times["transformer_f_moe"] = moe_baseline_timings.forward
                 comp_times["transformer_b_moe"] = moe_baseline_timings.backward
 
-    # dies at M6: the legacy-graph duration walk below retimes the legacy
-    # pipeline Node graph, which only the HIERARCHICAL mode still feeds to
-    # AstraSim. The hybrid/analytical coarse-program path uses
-    # program.retime.apply_block_timings instead.
-    def _apply_transformer_time(
-        self,
-        timings: Optional[TransformerTimings],
-        moe_timings: Optional[TransformerTimings] = None,
-    ) -> None:
-        if timings is None and moe_timings is None:
-            return
-        self._update_comp_times_from_timings(timings, moe_timings)
-
-        baseline_timings = timings or self._transformer_baseline_timings
-        moe_baseline_timings = moe_timings or self._transformer_moe_baseline_timings
-        stage_timings = getattr(self, "_transformer_stage_timings", {})
-        stage_moe_timings = getattr(self, "_transformer_stage_moe_timings", {})
-
-        visited: Set[int] = set()
-        roots: List[Any]
-        if isinstance(self.pipeline_root, (list, tuple)):
-            roots = list(self.pipeline_root)
-        else:
-            roots = [self.pipeline_root]
-
-        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-        if run_type == "inference":
-            dp_count = 1
-        else:
-            dp_count = max(1, getattr(self.time_calc, "dp", 1))
-
-        for root in roots:
-            self._assign_transformer_durations(
-                root,
-                visited,
-                stage_timings,
-                stage_moe_timings,
-                baseline_timings,
-                moe_baseline_timings,
-                dp_count,
-            )
-
-    # dies at M6 (see _apply_transformer_time): legacy name-prefix walk kept
-    # for the HIERARCHICAL legacy pipeline graph only.
-    def _assign_transformer_durations(
-        self,
-        node: Any,
-        visited: Set[int],
-        stage_timings: Dict[Tuple[int, int], TransformerTimings],
-        stage_moe_timings: Dict[Tuple[int, int], TransformerTimings],
-        dense_timings: Optional[TransformerTimings],
-        moe_timings: Optional[TransformerTimings],
-        dp_count: int,
-    ) -> None:
-        if node is None:
-            return
-        node_id = id(node)
-        if node_id in visited:
-            return
-        visited.add(node_id)
-
-        if isinstance(node, llm_simulation.Node):
-            base_name = str(getattr(node, "name", "") or "")
-            if base_name.startswith("transformer_layer") or base_name.startswith("vit_block"):
-                is_moe_layer = bool(getattr(node, "is_moe_layer", False))
-                timing_source = moe_timings if is_moe_layer and moe_timings is not None else dense_timings
-                if timing_source is None:
-                    timing_source = dense_timings
-                if timing_source is None:
-                    return
-                hw_stage = None
-                try:
-                    hw_stage = int(getattr(node, "hw_id", None))
-                except (TypeError, ValueError):
-                    hw_stage = None
-                def _per_dp_durations(is_forward: bool) -> List[float]:
-                    values: List[float] = []
-                    for dp_idx in range(dp_count):
-                        default = timing_source.forward if is_forward else timing_source.backward
-                        timing_override = None
-                        if hw_stage is not None:
-                            if is_moe_layer:
-                                timing_override = stage_moe_timings.get((dp_idx, hw_stage))
-                            else:
-                                timing_override = stage_timings.get((dp_idx, hw_stage))
-                        if timing_override:
-                            values.append(timing_override.forward if is_forward else timing_override.backward)
-                        else:
-                            values.append(default)
-                    return values
-
-                per_dp_values = _per_dp_durations(is_forward=bool(getattr(node, "fwd", True)))
-
-                if dp_count > 1:
-                    node.duration = tuple(per_dp_values)
-                else:
-                    node.duration = per_dp_values[0]
-
-        for child in getattr(node, "children", []):
-            self._assign_transformer_durations(
-                child,
-                visited,
-                stage_timings,
-                stage_moe_timings,
-                dense_timings,
-                moe_timings,
-                dp_count,
-            )
+    # M6 note: the legacy-graph retime walk (_apply_transformer_time +
+    # _assign_transformer_durations, the name-prefix recursion over legacy
+    # pipeline Node graphs) is deleted — every mode retimes through
+    # program.retime.apply_block_timings on the coarse Program now.

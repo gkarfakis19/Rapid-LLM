@@ -13,35 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""M5 coarse-builder / analytical-evaluator differential tests.
+"""M5/M6 coarse-builder tests.
 
-Two layers, both asserting EXACT float equality between the legacy
-analytical pipeline (``convert_comm_sizes_to_times`` + ``Graph.simulate``
-over the legacy Node/Edge graph) and the M5 replacement
-(``build_coarse_program`` + ``analytic_sim.evaluate``), including the full
-per-event finish-time maps and the converted comm durations:
+The M5 differential (legacy ``convert_comm_sizes_to_times`` +
+``Graph.simulate`` vs ``build_coarse_program`` + ``analytic_sim.evaluate``,
+EXACT totals + full finish-time maps + converted comm durations; the
+hybrid ``_assign_transformer_durations`` write-back vs
+``program.retime.apply_block_timings``) ran green pre-cutover on all 10
+synthetic cases and all 31 analytical+hybrid matrix specs (ga2
+final+no_dp, synthetic per-(dp, stage) retime overrides included), then
+again post-cutover against frozen verbatim reference copies of the deleted
+legacy methods. Per that plan, the reference copies died at M6 together
+with the legacy hierarchical retime write-back they mirrored
+(``_apply_transformer_time``/``_assign_transformer_durations``).
 
-* always-on synthetic differentials: hand-built pipeline configurations
-  covering GPipe multi-stage schedules, DP reducers (float byte sizes),
-  ZeRO-2/3 gather lattices (incl. the ZeRO-3 entry-edge root), EP sync,
-  MoE layer masks, recompute nodes, grad-accum nonfinal cycles, forward
-  -only (inference) graphs, and the hybrid per-DP retiming write-back
-  (legacy ``_assign_transformer_durations`` reference vs
-  ``program.retime.apply_block_timings``);
-* an env-gated matrix differential (``RAPID_COARSE_DIFF=1``): for every
-  analytical + hybrid golden spec (train + inference + ga2 final/no-dp +
-  zero2/zero3 + moe hybrid) the real config pipeline graphs are compared
-  end-to-end; hybrid specs additionally compare both write-back paths under
-  synthetic AstraSim block timings (per-(dp, stage) fault overrides
-  included) — no AstraSim binary involved.
+What remains:
 
-The legacy side prefers the LIVE legacy methods while they exist
-(pre-cutover evidence); after the M5 deletion it runs the frozen verbatim
-reference copies below over the legacy graph, which
-``construct_fwd_bwd_graph`` keeps building until M6. The reference copies
-die with it.
+* always-on synthetic tests pinning the coarse Program's typed surface and
+  the evaluator's legacy duration-index-0 semantics;
+* an always-on structural differential against the LIVE legacy constructor
+  (``construct_fwd_bwd_graph`` keeps building pipeline roots until M7):
+  the coarse schedule events must be add_child-order isomorphic to the
+  legacy Node/Edge graph INCLUDING the ``op_id`` sequence — the M6
+  hierarchical emission lowering (``lower_coarse_for_emission``) keys its
+  per-stage Kahn toposort and Step-11 transfer replay on those op_ids;
+* an env-gated determinism sweep (``RAPID_COARSE_DIFF=1``): every
+  analytical + hybrid golden spec builds and evaluates the coarse program
+  twice (hybrid: retimed under synthetic block timings) — totals AND full
+  finish-time maps must be identical across builds.
 
-Run the matrix differential:
+Run the matrix sweep:
     RAPID_COARSE_DIFF=1 ./.venv/bin/python -m pytest tests/test_coarse_builder_diff.py -q
 """
 
@@ -49,7 +50,6 @@ from __future__ import annotations
 
 import copy
 import os
-from heapq import heappop, heappush
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -76,235 +76,20 @@ COARSE_SPECS = [spec for spec in MATRIX if spec.backend in ("analytical", "hybri
 
 _diff_gate = pytest.mark.skipif(
     os.environ.get("RAPID_COARSE_DIFF", "") != "1",
-    reason="coarse differential sweep is a dev gate; set RAPID_COARSE_DIFF=1 to run",
+    reason="coarse determinism sweep is a dev gate; set RAPID_COARSE_DIFF=1 to run",
 )
 
 
 # ---------------------------------------------------------------------------
-# Frozen legacy reference (verbatim semantics of the deleted
-# Graph.convert_comm_sizes_to_times / Graph.simulate; dies at M6 with
-# construct_fwd_bwd_graph).
+# Structural pairing (legacy graph <-> coarse events)
 # ---------------------------------------------------------------------------
 
 
-def _reference_convert_comm_sizes_to_times(roots, network_model, interconnect_params):
-    def traverse_and_convert(node, visited=None):
-        if visited is None:
-            visited = set()
-        if id(node) in visited:
-            return
-        visited.add(id(node))
-
-        for child in node.children:
-            if hasattr(child, "comm_size_bytes") and child.comm_size_bytes > 0:
-                interconnect_type = child.comm_interconnect_type
-                if interconnect_type and interconnect_type in interconnect_params:
-                    ib, ll = interconnect_params[interconnect_type]
-                else:
-                    raise ValueError(f"Invalid interconnect type: {interconnect_type}")
-                if not isinstance(child.comm_type, CollectiveType):
-                    raise TypeError(
-                        f"Comm edge {getattr(child, 'name', '<unnamed>')} missing "
-                        "CollectiveType comm_type"
-                    )
-                child.duration = network_model.collective(
-                    kind=child.comm_type,
-                    size_bytes=child.comm_size_bytes,
-                    participants=child.participants,
-                    ib=ib,
-                    ll=ll,
-                    local_bytes=0.0,
-                    local_ops=0.0,
-                    debug_label=f"{child.name}_conversion",
-                )
-            traverse_and_convert(child, visited)
-
-    traverse_and_convert(roots)
-    return roots
-
-
-def _reference_reset_execution_state(root: Any) -> None:
-    if root is None:
-        return
-    visited: Set[int] = set()
-    stack: List[Any] = list(root) if isinstance(root, (list, tuple, set)) else [root]
-    while stack:
-        obj = stack.pop()
-        obj_id = id(obj)
-        if obj_id in visited:
-            continue
-        visited.add(obj_id)
-        if hasattr(obj, "done"):
-            obj.done = False
-        if hasattr(obj, "scheduled"):
-            obj.scheduled = False
-        if hasattr(obj, "finish_time"):
-            obj.finish_time = -1
-        stack.extend(getattr(obj, "children", []))
-
-
-def _reference_simulate(pp: int, root: Any) -> float:
-    """Verbatim ``Graph.simulate`` port (Data_batch events are never present:
-    the legacy constructor removed them before returning the root)."""
-    time = 0
-    counter = 0
-    event_queue: List[Tuple[float, int, Any]] = []
-    ready_list: List[Any] = []
-
-    _reference_reset_execution_state(root)
-
-    ready_list.append(root)
-    root.scheduled = True
-    base_devices = max(1, int(pp) if pp else 1)
-    max_hw_id = -1
-    visited_nodes: Set[int] = set()
-    stack = list(root if isinstance(root, (list, tuple)) else [root])
-    while stack:
-        node = stack.pop()
-        node_id = id(node)
-        if node_id in visited_nodes:
-            continue
-        visited_nodes.add(node_id)
-        hw_id = getattr(node, "hw_id", None)
-        if hw_id is not None:
-            try:
-                hw_val = int(hw_id)
-            except (TypeError, ValueError):
-                hw_val = None
-            if hw_val is not None and hw_val >= 0:
-                max_hw_id = max(max_hw_id, hw_val)
-        stack.extend(getattr(node, "children", []))
-    if max_hw_id >= 0:
-        base_devices = max(base_devices, max_hw_id + 1)
-
-    GPU_list = [True for _ in range(base_devices)]
-
-    heappush(event_queue, (root.duration, counter, root))
-    ready_list.remove(root)
-    counter = counter + 1
-
-    while len(event_queue) > 0:
-        time, _, event = heappop(event_queue)
-        event.done = True
-        event.scheduled = False
-        event.finish_time = time
-
-        for child in event.children:
-            is_ready = True
-            for parent in child.parents:
-                if parent.done == False:  # noqa: E712 - legacy comparison kept
-                    is_ready = False
-            if is_ready and (child not in ready_list) and (not child.done) and (not child.scheduled):
-                ready_list.append(child)
-
-        if isinstance(event, llm_simulation.Node):
-            GPU_list[int(event.hw_id)] = True
-
-        for event in ready_list[:]:
-            if isinstance(event, llm_simulation.Node):
-                if GPU_list[int(event.hw_id)] == True:  # noqa: E712
-                    new_time = time + event.duration
-                    heappush(event_queue, (new_time, counter, event))
-                    event.scheduled = True
-                    counter = counter + 1
-                    GPU_list[int(event.hw_id)] = False
-                    ready_list.remove(event)
-            elif isinstance(event, llm_simulation.Edge):
-                new_time = time + event.duration
-                heappush(event_queue, (new_time, counter, event))
-                event.scheduled = True
-                counter = counter + 1
-                ready_list.remove(event)
-
-    return time
-
-
-def _reference_assign_transformer_durations(
-    node: Any,
-    visited: Set[int],
-    stage_timings: Dict[Tuple[int, int], Any],
-    stage_moe_timings: Dict[Tuple[int, int], Any],
-    dense_timings: Optional[Any],
-    moe_timings: Optional[Any],
-    dp_count: int,
-) -> None:
-    """Verbatim ``LLMExecutionDispatcher._assign_transformer_durations``
-    (the legacy name-prefix hybrid write-back), kept as the reference for
-    the retiming differential."""
-    if node is None:
-        return
-    node_id = id(node)
-    if node_id in visited:
-        return
-    visited.add(node_id)
-
-    if isinstance(node, llm_simulation.Node):
-        base_name = str(getattr(node, "name", "") or "")
-        if base_name.startswith("transformer_layer") or base_name.startswith("vit_block"):
-            is_moe_layer = bool(getattr(node, "is_moe_layer", False))
-            timing_source = moe_timings if is_moe_layer and moe_timings is not None else dense_timings
-            if timing_source is None:
-                timing_source = dense_timings
-            if timing_source is not None:
-                try:
-                    hw_stage = int(getattr(node, "hw_id", None))
-                except (TypeError, ValueError):
-                    hw_stage = None
-
-                values: List[float] = []
-                is_forward = bool(getattr(node, "fwd", True))
-                for dp_idx in range(dp_count):
-                    default = timing_source.forward if is_forward else timing_source.backward
-                    timing_override = None
-                    if hw_stage is not None:
-                        if is_moe_layer:
-                            timing_override = stage_moe_timings.get((dp_idx, hw_stage))
-                        else:
-                            timing_override = stage_timings.get((dp_idx, hw_stage))
-                    if timing_override:
-                        values.append(timing_override.forward if is_forward else timing_override.backward)
-                    else:
-                        values.append(default)
-
-                if dp_count > 1:
-                    node.duration = tuple(values)
-                else:
-                    node.duration = values[0]
-
-    for child in getattr(node, "children", []):
-        _reference_assign_transformer_durations(
-            child,
-            visited,
-            stage_timings,
-            stage_moe_timings,
-            dense_timings,
-            moe_timings,
-            dp_count,
-        )
-
-
-def _legacy_total(graph: Any, root: Any, network_model: Any, interconnect_params) -> float:
-    """Legacy analytical total: LIVE legacy methods while they exist
-    (pre-cutover evidence), frozen reference afterwards."""
-    if hasattr(graph, "convert_comm_sizes_to_times") and hasattr(graph, "simulate"):
-        graph.convert_comm_sizes_to_times(root, network_model, interconnect_params)
-        return graph.simulate(root)
-    _reference_convert_comm_sizes_to_times(root, network_model, interconnect_params)
-    return _reference_simulate(int(getattr(graph, "pp", 1) or 1), root)
-
-
-# ---------------------------------------------------------------------------
-# Structural pairing (legacy graph <-> coarse events) + finish-map compare
-# ---------------------------------------------------------------------------
-
-
-def _assert_finish_maps_equal(legacy_root: Any, program: Any, finish_times: List[float]) -> int:
+def _assert_events_match_legacy(legacy_root: Any, program: Any) -> int:
     """Pairwise DFS over the isomorphic graphs asserting names, kinds,
-    children arity, converted comm durations, and finish times all match.
-    Returns the number of paired events."""
-    events = program.meta.misc["coarse_events"]
+    children arity, and — M6 — the legacy ``op_id`` sequence the emission
+    lowering depends on. Returns the number of paired events."""
     events_root = program.meta.misc["coarse_proto_root"]
-    uid_of = {id(event): uid for uid, event in enumerate(events)}
 
     paired = 0
     seen: Set[int] = set()
@@ -322,17 +107,9 @@ def _assert_finish_maps_equal(legacy_root: Any, program: Any, finish_times: List
         else:
             assert isinstance(legacy_obj, llm_simulation.Edge)
             assert isinstance(event_obj, CommEvent)
-            # Converted comm durations must agree exactly.
-            assert legacy_obj.duration == event_obj.duration, (
-                f"comm duration mismatch on '{legacy_obj.name}': "
-                f"{legacy_obj.duration} != {event_obj.duration}"
-            )
-
-        legacy_finish = getattr(legacy_obj, "finish_time", -1)
-        new_finish = finish_times[uid_of[id(event_obj)]]
-        assert legacy_finish == new_finish, (
-            f"finish-time mismatch on '{legacy_obj.name}': "
-            f"legacy={legacy_finish} new={new_finish}"
+        assert legacy_obj.op_id == event_obj.op_id, (
+            f"op_id mismatch on '{legacy_obj.name}': "
+            f"legacy={legacy_obj.op_id} event={event_obj.op_id}"
         )
 
         legacy_children = list(legacy_obj.children)
@@ -579,54 +356,20 @@ class _Timing:
 
 
 # ---------------------------------------------------------------------------
-# Always-on synthetic differentials
+# Always-on synthetic tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("case_name", sorted(SYNTHETIC_CASES))
-def test_synthetic_analytical_parity(case_name):
-    graph, root, spec = _synthetic_case(**SYNTHETIC_CASES[case_name])
+def test_synthetic_coarse_events_match_legacy(case_name):
+    """The coarse schedule events are isomorphic to the live legacy
+    ``construct_fwd_bwd_graph`` output — names, kinds, children order, and
+    the op_id sequence (dies at M7 with the legacy constructor)."""
+    _, root, spec = _synthetic_case(**SYNTHETIC_CASES[case_name])
     program = build_coarse_program(spec, None)
 
-    network_model = FakeNetworkModel()
-    legacy_total = _legacy_total(graph, root, network_model, FAKE_INTERCONNECT)
-    result = evaluate_detailed(program, network_model, FAKE_INTERCONNECT)
-
-    assert result.total_time == legacy_total
-    paired = _assert_finish_maps_equal(root, program, result.finish_times)
+    paired = _assert_events_match_legacy(root, program)
     assert paired == len(program.ops)
-
-
-@pytest.mark.parametrize("case_name", ["gpipe_dp", "moe_ep_sync", "recompute"])
-def test_synthetic_hybrid_retime_parity(case_name):
-    cfg = SYNTHETIC_CASES[case_name]
-    graph, root, spec = _synthetic_case(**cfg)
-    program = build_coarse_program(spec, None)
-
-    dp_count = int(cfg.get("dp", 1))
-    dense = _Timing(0.00125, 0.0025)
-    moe = _Timing(0.0035, 0.00475) if cfg.get("moe_layer_mask") else None
-    stage_dense = {(0, 0): _Timing(0.0015, 0.00275), (1, 1): _Timing(0.00175, 0.003)}
-    stage_moe = {(0, 1): _Timing(0.004, 0.005)} if moe else {}
-
-    # Legacy write-back (reference copy of _assign_transformer_durations).
-    _reference_assign_transformer_durations(
-        root, set(), stage_dense, stage_moe, dense, moe, dp_count
-    )
-    # New write-back (metadata-selected, per-DP tuples).
-    retimed = apply_block_timings(
-        program,
-        BlockTimings(dense=dense, moe=moe, stage_dense=stage_dense, stage_moe=stage_moe),
-        dp_count,
-    )
-    assert retimed > 0
-
-    network_model = FakeNetworkModel()
-    legacy_total = _legacy_total(graph, root, network_model, FAKE_INTERCONNECT)
-    result = evaluate_detailed(program, network_model, FAKE_INTERCONNECT)
-
-    assert result.total_time == legacy_total
-    _assert_finish_maps_equal(root, program, result.finish_times)
 
 
 def test_coarse_program_shape():
@@ -695,12 +438,8 @@ def test_evaluator_reads_duration_index_zero():
 
 
 # ---------------------------------------------------------------------------
-# Env-gated matrix differential (real configs, no AstraSim)
+# Env-gated matrix determinism sweep (real configs, no AstraSim)
 # ---------------------------------------------------------------------------
-
-
-def _sanitize(name: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)
 
 
 def _parse_spec_configs(spec, tmp_path: Path):
@@ -763,7 +502,7 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         batch_size = tc._effective_transformer_batch()
         decode_len = tc.model.decode_len
         prefill_len = tc.seq_len - decode_len
-        assert prefill_len > 0, "coarse differential requires a prefill phase"
+        assert prefill_len > 0, "coarse sweep requires a prefill phase"
         num_SMs = tc.hw_config.tech_config.core.num_bundles
         transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
             batch_size,
@@ -807,7 +546,11 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
 
 @_diff_gate
 @pytest.mark.parametrize("spec", COARSE_SPECS, ids=lambda s: s.spec_id)
-def test_matrix_coarse_parity(spec, tmp_path):
+def test_matrix_coarse_determinism(spec, tmp_path):
+    """Build + evaluate the coarse program twice per case: the events must
+    match the live legacy constructor (op_ids included) and totals + full
+    finish-time maps must be identical across builds (hybrid additionally
+    retimed under synthetic block timings)."""
     from llm_execution import TransformerTimings
 
     hw_config, model_config, mode = _parse_spec_configs(spec, tmp_path)
@@ -818,29 +561,15 @@ def test_matrix_coarse_parity(spec, tmp_path):
     assert cases
 
     for label, tc, dispatcher in cases:
-        graph = dispatcher.pipeline_graph
-        root = dispatcher.pipeline_root
         network_model = tc.network_model
         interconnect_params = dispatcher.interconnect_params
 
-        # ---- analytical arm (pristine comp_times on both sides) ----------
+        # Cross-check the events against the live legacy constructor.
         program = dispatcher._build_coarse_program()
-        # Hybrid arm program must ALSO see pristine comp_times: build now.
-        program_hybrid = (
-            dispatcher._build_coarse_program() if spec.backend == "hybrid" else None
-        )
-
-        legacy_total = _legacy_total(graph, root, network_model, interconnect_params)
-        result = evaluate_detailed(program, network_model, interconnect_params)
-        assert result.total_time == legacy_total, (
-            f"{spec.spec_id}[{label}]: analytical totals diverge: "
-            f"legacy={legacy_total!r} new={result.total_time!r}"
-        )
-        paired = _assert_finish_maps_equal(root, program, result.finish_times)
+        paired = _assert_events_match_legacy(dispatcher.pipeline_root, program)
         assert paired == len(program.ops)
 
-        # ---- hybrid arm: identical synthetic block timings through both
-        # write-back paths (no AstraSim involved) --------------------------
+        timings = None
         if spec.backend == "hybrid":
             dp = max(1, getattr(tc, "dp", 1))
             pp = max(1, getattr(tc, "pp", 1))
@@ -858,24 +587,23 @@ def test_matrix_coarse_parity(spec, tmp_path):
                 if moe
                 else {}
             )
-
-            # Legacy write-back onto the legacy graph.
-            dispatcher._transformer_stage_timings = dict(stage_dense)
-            dispatcher._transformer_stage_moe_timings = dict(stage_moe)
-            dispatcher._apply_transformer_time(dense, moe)
-
-            # New write-back onto the coarse program.
-            retimed = apply_block_timings(
-                program_hybrid,
-                dispatcher._collect_block_timings(dense, moe),
-                dispatcher._retime_dp_count(),
+            timings = BlockTimings(
+                dense=dense, moe=moe, stage_dense=stage_dense, stage_moe=stage_moe
             )
-            assert retimed > 0
 
-            legacy_total_h = _legacy_total(graph, root, network_model, interconnect_params)
-            result_h = evaluate_detailed(program_hybrid, network_model, interconnect_params)
-            assert result_h.total_time == legacy_total_h, (
-                f"{spec.spec_id}[{label}]: hybrid totals diverge: "
-                f"legacy={legacy_total_h!r} new={result_h.total_time!r}"
-            )
-            _assert_finish_maps_equal(root, program_hybrid, result_h.finish_times)
+        results = []
+        for _ in range(2):
+            program = dispatcher._build_coarse_program()
+            if timings is not None:
+                retimed = apply_block_timings(
+                    program, timings, dispatcher._retime_dp_count()
+                )
+                assert retimed > 0
+            results.append(evaluate_detailed(program, network_model, interconnect_params))
+
+        assert results[0].total_time == results[1].total_time, (
+            f"{spec.spec_id}[{label}]: totals diverge across builds"
+        )
+        assert results[0].finish_times == results[1].finish_times, (
+            f"{spec.spec_id}[{label}]: finish-time maps diverge across builds"
+        )

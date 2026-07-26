@@ -43,10 +43,25 @@ order derived from it) depends on that order.
 The event classes deliberately use the legacy attribute names (``hw_id``,
 ``local_hw_id``, ``micro_batch_index``, ...) so the flattening port in
 :mod:`program.pipeline_fine` reads them exactly as the legacy code did.
+
+M6 additions, for the hierarchical pipeline emission (which lowers the
+coarse events through :func:`program.legacy_lowering.lower_to_program`):
+
+* every event carries ``op_id``, stamped by ``build_pipeline_events`` in
+  CREATION order — the exact sequence ``construct_fwd_bwd_graph`` assigned
+  its ``op_id`` counter in (one increment per Node/Edge creation;
+  Data_batch tokens never consumed an op_id). The lowering's per-stage Kahn
+  toposort and Step-11 transfer replay key on it;
+* :class:`ComputeEvent` ports the legacy ``Node`` duration normalization
+  verbatim: writing a tuple stores a per-DP profile, ``duration`` reads
+  index 0, and ``duration_profile`` exposes the tuple (or ``None``) — this
+  is how the :func:`program.retime.apply_block_timings` events mirror
+  reaches the lowering's per-DP ``ComputeOp.duration``.
 """
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -243,12 +258,17 @@ class ScheduleSpec:
 
 class ComputeEvent:
     """A coarse compute event (legacy ``Node`` stand-in). Uses the legacy
-    attribute names so the flattening port reads them verbatim."""
+    attribute names so the flattening port reads them verbatim. Duration
+    storage ports the legacy ``Node`` property pair: scalar or per-DP tuple
+    in ``_duration_data``, ``duration`` reads index 0, ``duration_profile``
+    exposes the tuple (M6 — the lowering reads both, exactly like it read
+    legacy Nodes)."""
 
     __slots__ = (
         "name",
         "hw_id",
-        "duration",
+        "op_id",
+        "_duration_data",
         "fwd",
         "mem_kind",
         "recompute",
@@ -275,6 +295,7 @@ class ComputeEvent:
     ) -> None:
         self.name = name
         self.hw_id = int(hw_id)
+        self.op_id: Optional[int] = None
         self.duration = duration
         self.fwd = fwd
         self.mem_kind = mem_kind
@@ -292,6 +313,34 @@ class ComputeEvent:
         self.children.append(obj)
         obj.parents.append(self)
 
+    @staticmethod
+    def _normalize_duration(value: Any) -> Any:
+        """Verbatim legacy ``Node._normalize_duration``."""
+        if isinstance(value, (list, tuple)):
+            entries = tuple(float(v) for v in value)
+            if not entries:
+                raise ValueError("Duration tuple must contain at least one entry.")
+            return entries
+        return float(value)
+
+    @property
+    def duration(self) -> float:
+        data = self._duration_data
+        if isinstance(data, tuple):
+            return data[0]
+        return data
+
+    @duration.setter
+    def duration(self, value: Any) -> None:
+        self._duration_data = self._normalize_duration(value)
+
+    @property
+    def duration_profile(self) -> Optional[Tuple[float, ...]]:
+        data = self._duration_data
+        if isinstance(data, tuple):
+            return data
+        return None
+
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"ComputeEvent({self.name},hw={self.hw_id})"
 
@@ -303,6 +352,7 @@ class CommEvent:
 
     __slots__ = (
         "name",
+        "op_id",
         "duration",
         "is_dp",
         "comm_size_bytes",
@@ -335,6 +385,7 @@ class CommEvent:
         comm_key: Optional[str] = None,
     ) -> None:
         self.name = name
+        self.op_id: Optional[int] = None
         self.duration = 0
         self.is_dp = bool(is_dp)
         self.comm_size_bytes = comm_size_bytes
@@ -386,16 +437,30 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
     """Enumerate the coarse schedule as an event DAG.
 
     Structural port of ``Graph.construct_fwd_bwd_graph`` (simulate_train_
-    graph.py 371-1004) with ``Node``/``Edge`` replaced by events and
-    ``op_id`` bookkeeping dropped (the FINE builder assigns its own op ids
-    during expansion, like the legacy flattener did). Every ``add_child``
-    call is made in the same order as legacy so children-list order — which
-    drives the expansion DFS — is identical. Data_batch nodes are omitted:
-    legacy removed them from the graph before returning.
+    graph.py 371-1004) with ``Node``/``Edge`` replaced by events. Every
+    ``add_child`` call is made in the same order as legacy so children-list
+    order — which drives the expansion DFS — is identical. Data_batch nodes
+    are omitted: legacy removed them from the graph before returning (and
+    they never consumed an op_id — legacy tracked them by ``batch_id``).
+
+    ``op_id`` stamping (M6): every event creation stamps the next counter
+    value, reproducing the legacy ``op_id`` sequence exactly (legacy used
+    the counter at creation and incremented right after, one per Node/Edge)
+    — the hierarchical lowering's Kahn toposort keys and Step-11 transfer
+    tags depend on these values. The FINE builder still assigns its own op
+    ids during expansion, like the legacy flattener did.
     """
 
     B = spec.mb
     L = spec.num_layers
+
+    _op_ids = itertools.count()
+
+    def _stamp(event: Any) -> Any:
+        """Assign the next legacy op_id (call at each creation site, in
+        legacy creation order)."""
+        event.op_id = next(_op_ids)
+        return event
 
     def _comm_event(
         name: str,
@@ -418,7 +483,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             tp_shard=meta.tp_shard,
             comm_key=comm_key,
         )
-        return event
+        return _stamp(event)
 
     embedding_node: List[ComputeEvent] = []
     softmax_node: List[ComputeEvent] = []
@@ -472,21 +537,21 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
 
     # ---- forward chains per micro-batch ---------------------------------
     for b in range(B):
-        linear_softmax = ComputeEvent(
+        linear_softmax = _stamp(ComputeEvent(
             f"linear_softmax{b}",
             spec.pp - 1,
             linear_softmax_f_time,
             mem_kind=mem_softmax,
             role="softmax",
-        )
+        ))
         softmax_node.append(linear_softmax)
-        emb = ComputeEvent(
+        emb = _stamp(ComputeEvent(
             f"embedding{b}",
             0,
             embedding_f_time,
             mem_kind=mem_embedding,
             role="embedding",
-        )
+        ))
         embedding_node.append(emb)
 
         transformer_nodes[b] = []
@@ -497,13 +562,13 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             hw_id = spec.stage_for_layer(l)
             is_moe_layer = spec.is_moe_layer(l)
             transformer_duration = transformer_f_moe if is_moe_layer else transformer_f_dense
-            transformer_node = ComputeEvent(
+            transformer_node = _stamp(ComputeEvent(
                 f"{block_prefix}{l}",
                 hw_id,
                 transformer_duration,
                 mem_kind=mem_transformer,
                 role="layer",
-            )
+            ))
             transformer_node.micro_batch_index = b
             transformer_node.layer_index = l
             transformer_node.direction = "forward"
@@ -520,7 +585,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             curr_entries = layer_entry_nodes[b][l]
 
             if prev_node.hw_id == curr_node.hw_id:
-                edge = CommEvent("cross_layer", comm_type=CollectiveType.PIPELINE)
+                edge = _stamp(CommEvent("cross_layer", comm_type=CollectiveType.PIPELINE))
             else:
                 edge = _comm_event("cross_layer", "cross_layer")
 
@@ -531,7 +596,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
         first_entries = layer_entry_nodes[b][0]
         primary_entry = first_entries[0]
         if primary_entry.hw_id == embedding_node[b].hw_id:
-            edge = CommEvent("Emb_node0", comm_type=CollectiveType.PIPELINE)
+            edge = _stamp(CommEvent("Emb_node0", comm_type=CollectiveType.PIPELINE))
         else:
             edge = _comm_event("cross_layer", "cross_layer")
         embedding_node[b].add_child(edge)
@@ -540,7 +605,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
 
         last_exit = layer_exit_nodes[b][-1]
         if last_exit.hw_id == softmax_node[b].hw_id:
-            node_softmax = CommEvent("node_Softmax", comm_type=CollectiveType.PIPELINE)
+            node_softmax = _stamp(CommEvent("node_Softmax", comm_type=CollectiveType.PIPELINE))
         else:
             node_softmax = _comm_event("cross_layer", "cross_layer")
         last_exit.add_child(node_softmax)
@@ -585,23 +650,23 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
 
     # ---- backward chains per micro-batch (reversed) ---------------------
     for b in reversed(range(B)):
-        emb_b = ComputeEvent(
+        emb_b = _stamp(ComputeEvent(
             "embedding_b",
             0,
             embedding_b_time,
             fwd=False,
             mem_kind=mem_embedding,
             role="embedding_b",
-        )
+        ))
         embedding_node_b[b] = emb_b
-        linear_softmax_b = ComputeEvent(
+        linear_softmax_b = _stamp(ComputeEvent(
             "linear_softmax_b",
             spec.pp - 1,
             linear_softmax_b_time,
             fwd=False,
             mem_kind=mem_softmax,
             role="softmax_b",
-        )
+        ))
         softmax_node_b[b] = linear_softmax_b
         softmax_node[b].add_child(linear_softmax_b)
 
@@ -609,7 +674,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             hw_id = spec.stage_for_layer(l)
             recompute_node = None
             if recompute_enabled and recompute_nodes_b is not None:
-                recompute_node = ComputeEvent(
+                recompute_node = _stamp(ComputeEvent(
                     f"{block_prefix}{l}_recompute",
                     hw_id,
                     transformer_f_moe if spec.is_moe_layer(l) else transformer_f_dense,
@@ -617,7 +682,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
                     mem_kind=mem_transformer,
                     recompute=True,
                     role="recompute",
-                )
+                ))
                 recompute_node.micro_batch_index = b
                 recompute_node.layer_index = l
                 recompute_node.direction = "forward"
@@ -626,14 +691,14 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
                 recompute_nodes_b[b][l] = recompute_node
 
             is_moe_layer = spec.is_moe_layer(l)
-            transformer_node_b = ComputeEvent(
+            transformer_node_b = _stamp(ComputeEvent(
                 f"{block_prefix}{l}_b",
                 hw_id,
                 transformer_b_moe if is_moe_layer else transformer_b_dense,
                 fwd=False,
                 mem_kind=mem_transformer,
                 role="layer",
-            )
+            ))
             transformer_node_b.micro_batch_index = b
             transformer_node_b.layer_index = l
             transformer_node_b.direction = "backward"
@@ -647,7 +712,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             curr_node = _bwd_exit_node(b, l)
             next_ffn2 = _bwd_entry_node(b, l - 1)
             if curr_node.hw_id == next_ffn2.hw_id:
-                edge = CommEvent("cross_layer", comm_type=CollectiveType.PIPELINE)
+                edge = _stamp(CommEvent("cross_layer", comm_type=CollectiveType.PIPELINE))
             else:
                 edge = _comm_event("cross_layer", "cross_layer")
             curr_node.add_child(edge)
@@ -655,7 +720,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
 
         qkv_0_b = _bwd_exit_node(b, 0)
         if qkv_0_b.hw_id == emb_b.hw_id:
-            edge = CommEvent("Emb_node0", comm_type=CollectiveType.PIPELINE)
+            edge = _stamp(CommEvent("Emb_node0", comm_type=CollectiveType.PIPELINE))
         else:
             edge = _comm_event("cross_layer", "cross_layer")
         qkv_0_b.add_child(edge)
@@ -663,7 +728,7 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
 
         prev_layer_norm2 = _bwd_entry_node(b, L - 1)
         if prev_layer_norm2.hw_id == softmax_node_b[b].hw_id:
-            layernorm_softmax = CommEvent("layernorm2_Softmax", comm_type=CollectiveType.PIPELINE)
+            layernorm_softmax = _stamp(CommEvent("layernorm2_Softmax", comm_type=CollectiveType.PIPELINE))
         else:
             layernorm_softmax = _comm_event("cross_layer", "cross_layer")
         softmax_node_b[b].add_child(layernorm_softmax)
@@ -955,14 +1020,14 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
                         last_node = _bwd_exit_node(0, min_l)
 
                 if last_node:
-                    opt_node = ComputeEvent(
+                    opt_node = _stamp(ComputeEvent(
                         f"optimizer_stage{stage}",
                         stage,
                         optimizer_time,
                         fwd=False,
                         mem_kind=mem_optimizer,
                         role="optimizer",
-                    )
+                    ))
                     last_node.add_child(opt_node)
 
     return PipelineEvents(

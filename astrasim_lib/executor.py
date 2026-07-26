@@ -15,19 +15,20 @@
 
 """AstraSim execution helpers used by RAPID-LLM's comparison workflow.
 
-``convert_rapid_llm_graph_to_chakra_et`` converts a RAPID-LLM graph (with
-communication sizes) to an AstraSim Chakra ET bundle, and
 ``run_astra_simulation_only_onepath`` drives the end-to-end AstraSim
-simulation for comparison with RAPID-LLM analytical timing.
+simulation over a ``program.ir.Program``: emit (``program.et_emit``) ->
+config generation -> cached AstraSim run -> per-rank seconds.
 
-Since the M2 cutover (docs/rewrite/DESIGN.md §5) the conversion itself lives
-in the ``program`` core: ``program.legacy_lowering.lower_to_program``
-reproduces the legacy converter's graph analysis (Steps 1-7) over the
-unchanged legacy graph, and ``program.et_emit.emit_chakra`` owns every
-AstraSim contract rule — including the control-send renumbering that keeps
-1-byte pipeline control sends from being starved behind large collectives
-(see ``program/et_emit.py`` Phase C). Byte-equivalence of the new path was
-proven in shadow mode on all 42 golden specs at M1.
+History: the legacy converter (``convert_rapid_llm_graph_to_chakra_et``)
+died in two steps. At M2 (docs/rewrite/DESIGN.md §5) its body moved into the
+``program`` core — ``program.legacy_lowering.lower_to_program`` reproduces
+the graph analysis (Steps 1-7) and ``program.et_emit.emit_chakra`` owns
+every AstraSim contract rule, byte-equivalence proven in shadow mode on all
+42 golden specs at M1. At M6 the remaining shell (the legacy-graph entry of
+this runner) was deleted with the last legacy-graph caller: the
+hierarchical pipeline phase now lowers its coarse Program through the same
+shared pass (``program.pipeline_coarse.lower_coarse_for_emission``), so
+only Programs reach this runner.
 """
 
 import os
@@ -54,7 +55,6 @@ from .et_utils import (
 )
 from .integration import run_cache_astrasim
 from .layout_utils import derive_axes_filter
-from simulate_train_graph import visualize_graph
 from util import relpath_display
 
 
@@ -321,80 +321,27 @@ def _dump_et_text(et_paths: List[str]) -> None:
             print(f"[WARN] Failed to write ET text dump for {et_path}: {exc}")
 
 
-def convert_rapid_llm_graph_to_chakra_et(
-    graph_root,
-    dp_size: int,
-    output_dir: str,
-) -> Tuple[str, List[int], str]:
-    """Convert a RAPID-LLM graph to an AstraSim Chakra ET bundle.
-
-    M2 cutover shell (docs/rewrite/DESIGN.md §5): ``lower_to_program``
-    reproduces the legacy converter's analysis (Steps 1-7, including gmap
-    traffic collection and the SCOTCH stage remap) over the unchanged legacy
-    graph, and ``emit_chakra`` performs all ET emission (Phases A/B/C, the
-    manifest, comm_groups.json, and the always-on communicator-order
-    postcondition) under the byte-compatible ``legacy`` id policy.
-
-    INPUTS: ``graph_root`` is the RAPID-LLM DAG (after flattening); the rank
-    layout descriptor is read from ``graph_root._astrasim_rank_layout``.
-    ``dp_size`` is the data-parallel replication degree. ``output_dir`` is
-    where ET traces + metadata are written (also receives the
-    ``first_dim_comm.*`` SCOTCH artifacts when ``graph_root._optimize_2dmap``
-    is set).
-
-    OUTPUTS: returns ``(et_prefix, rank_ids, manifest_path)``. ``et_prefix``
-    is the file prefix for ``llm_graph.<rank>.et``. ``rank_ids`` is the
-    sorted list of produced rank IDs, and ``manifest_path`` points to the
-    per-rank summary JSON (the AstraSim cache key).
-    """
-
-    # Imported lazily: program.legacy_lowering imports astrasim_lib.gmap,
-    # which initializes the astrasim_lib package, which imports this module —
-    # a module-level import here would make `import program.legacy_lowering`
-    # fail on the partially initialized module.
-    from program.et_emit import emit_chakra
-    from program.legacy_lowering import lower_to_program
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    program = lower_to_program(
-        graph_root,
-        dp_size,
-        getattr(graph_root, "_astrasim_rank_layout", None),
-        gmap_workdir=output_dir,
-    )
-    bundle = emit_chakra(program, output_dir, id_policy="legacy")
-
-    rank_ids = bundle.rank_ids
-    print(f"[AstraSim] Generated ET files for ranks: {bundle.et_prefix}.{{0..{len(rank_ids)-1}}}.et")
-    print(f"[AstraSim] Wrote graph manifest to {bundle.manifest_path}")
-
-    return bundle.et_prefix, rank_ids, bundle.manifest_path
-
-
 def run_astra_simulation_only_onepath(
     fwdbwd_root,
     time_calc_obj,
     output_dir: str = "astra_comparison_output",
-    dp_override: Optional[int] = None,
     persist_artifacts: Optional[bool] = None,
     faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
     rank_layout: Optional[Dict[str, Any]] = None,
 ):
     """
-    Run AstraSim simulation on RAPID-LLM graph and print results.
+    Run AstraSim simulation on a RAPID-LLM Program and print results.
 
     Args:
-        fwdbwd_root: Forward and backward graph root node, or (since M3a) a
-            ``program.ir.Program`` — Programs are emitted directly through
-            ``program.et_emit.emit_chakra`` with their own ``dp_count``; the
-            legacy-graph entry stays for the hybrid/hierarchical paths.
+        fwdbwd_root: a ``program.ir.Program`` — emitted through
+            ``program.et_emit.emit_chakra`` with its own ``dp_count`` (the
+            builders apply any inference dp override when constructing it).
+            The legacy-graph entry died at M6 with the hierarchical cutover.
         time_calc_obj: TimeCalculationLLM object with hw_config and dp attributes
         output_dir: Directory for temporary files and results
         faulty_links_override: Optional remapped faulty link list for this run
         rank_layout: Explicit rank-layout descriptor (axes filter derivation).
-            Defaults to the Program's layout for Program inputs, or the
-            legacy root's ``_astrasim_rank_layout`` attribute otherwise.
+            Defaults to the Program's layout.
     """
     print("\n" + "="*60)
     print("ASTRASIM SIMULATION RESULTS")
@@ -417,35 +364,33 @@ def run_astra_simulation_only_onepath(
 
         # For now, just convert forward graph (can extend to include backward later)
         print(f"[AstraSim] Converting graph...")
-        # Lazy import for the astrasim_lib <-> program cycle reason as in
-        # convert_rapid_llm_graph_to_chakra_et.
+        # Imported lazily: the program modules import astrasim_lib.gmap,
+        # which initializes the astrasim_lib package, which imports this
+        # module — a module-level import here would fail on the partially
+        # initialized module.
         from program.ir import Program as _Program
 
-        is_program = isinstance(fwdbwd_root, _Program)
-        if is_program:
-            from program.et_emit import emit_chakra
+        if not isinstance(fwdbwd_root, _Program):
+            raise TypeError(
+                "run_astra_simulation_only_onepath expects a program.ir.Program "
+                f"(got {type(fwdbwd_root).__name__}); the legacy-graph entry "
+                "died at M6 (docs/rewrite/DESIGN.md §5)."
+            )
+        from program.et_emit import emit_chakra
 
-            # The Program carries its own emission dp (the builder already
-            # applied any inference dp_override when constructing it).
-            dp_count = max(1, int(fwdbwd_root.dp_count))
-            bundle = emit_chakra(fwdbwd_root, work_dir, id_policy="legacy")
-            fwd_et_prefix, rank_ids, fwd_manifest = (
-                bundle.et_prefix,
-                bundle.rank_ids,
-                bundle.manifest_path,
-            )
-            print(
-                f"[AstraSim] Generated ET files for ranks: {fwd_et_prefix}.{{0..{len(rank_ids)-1}}}.et"
-            )
-            print(f"[AstraSim] Wrote graph manifest to {fwd_manifest}")
-        else:
-            user_dp = max(1, getattr(time_calc_obj, "dp", 1))
-            dp_count = dp_override if dp_override is not None else user_dp
-            fwd_et_prefix, rank_ids, fwd_manifest = convert_rapid_llm_graph_to_chakra_et(
-                fwdbwd_root,
-                dp_count,
-                work_dir,
-            )
+        # The Program carries its own emission dp (the builder already
+        # applied any inference dp override when constructing it).
+        dp_count = max(1, int(fwdbwd_root.dp_count))
+        bundle = emit_chakra(fwdbwd_root, work_dir, id_policy="legacy")
+        fwd_et_prefix, rank_ids, fwd_manifest = (
+            bundle.et_prefix,
+            bundle.rank_ids,
+            bundle.manifest_path,
+        )
+        print(
+            f"[AstraSim] Generated ET files for ranks: {fwd_et_prefix}.{{0..{len(rank_ids)-1}}}.et"
+        )
+        print(f"[AstraSim] Wrote graph manifest to {fwd_manifest}")
         rank_count = len(rank_ids)
         # Astrasim doesn't play well with only 1 rank.
         # When that happens, let's duplicate to 2 ranks. No collectives exist between the two so this should not have an effect.
@@ -483,16 +428,12 @@ def run_astra_simulation_only_onepath(
             print("[AstraSim] RAPID_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
             exit()
 
-        # Lazy import for the same astrasim_lib <-> program cycle reason as in
-        # convert_rapid_llm_graph_to_chakra_et.
+        # Lazy import for the same astrasim_lib <-> program cycle reason as
+        # above.
         from program.legacy_lowering import _extract_axis_layout
 
-        if rank_layout is None:
-            if is_program:
-                if fwdbwd_root.layout.axis_order:
-                    rank_layout = fwdbwd_root.layout.descriptor()
-            else:
-                rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
+        if rank_layout is None and fwdbwd_root.layout.axis_order:
+            rank_layout = fwdbwd_root.layout.descriptor()
         axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)
         preferred_axes_for_synthetic = tuple(axis_order) if axis_order else tuple()
         axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)
@@ -561,35 +502,3 @@ def run_astra_simulation_only_onepath(
     finally:
         if not persist:
             shutil.rmtree(work_dir, ignore_errors=True)
-
-
-
-if __name__ == "__main__":
-
-    def my_save_graph(roots, output_folder = "output_graph/", filename="graph"):
-        dot_fw = visualize_graph(roots, filename=output_folder + filename)
-        dot_fw.render(output_folder + filename , format="svg", cleanup=True)
-        print("graph saved to %s%s.svg" % (output_folder , filename ))
-
-    import config
-    import pickle
-    # exp_path = os.path.expandvars(os.path.expanduser(exp_config))
-    exp_hw_path = os.path.expandvars(os.path.expanduser("configs/hardware-config/a100_80GB_tp.yaml"))
-    exp_model_path = os.path.expandvars(os.path.expanduser("configs/model-config/LLM.yaml"))
-    exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
-    exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    with open("fw_bw_graph.pkl", "rb") as f:
-        fw_bw_root = pickle.load(f)
-    # make a fake object
-    class FakeTimeCalculationLLM:
-        def __init__(self, hw_config, model_config, mode):
-            self.hw_config = hw_config
-            self.model_config = model_config
-            self.mode = mode
-            self.dp = 2
-    time_calc_obj = FakeTimeCalculationLLM(exp_hw_config, exp_model_config, "LLM")
-    my_save_graph(fw_bw_root, "./astra_comparison_output", "fw_bw_graph_astra")
-    paths = []
-    paths.append("/app/nanocad/projects/rapid_llm_dev/RAPID-LLM/RAPID-LLM_george/astra_cache/workload/all_reduce/2npus_1.50GB/all_reduce_1.50GB.0.et")
-    _dump_et_text(paths)
-    run_astra_simulation_only_onepath(fw_bw_root, time_calc_obj, "./astra_comparison_output")

@@ -57,8 +57,11 @@ uids in first-encounter DFS order (the ``convert_comm_sizes_to_times``
 traversal order). The legacy coarse graph legally violates V1's
 ``dep < uid`` rule (late-attached GPipe/ZeRO parents) and V5's dp/label
 coupling (EP-sync collectives are ``is_dp=False`` with no label); the
-coarse program is consumed only by :mod:`program.analytic_sim` /
-:mod:`program.retime`, never emitted.
+coarse OP LIST is consumed only by :mod:`program.analytic_sim` /
+:mod:`program.retime`. The M6 hierarchical emission does not emit it
+either: :func:`lower_coarse_for_emission` lowers the (op_id-stamped,
+retimed) EVENTS through :func:`program.legacy_lowering.lower_to_program`,
+which produces its own validated emission-ordered Program.
 """
 
 from __future__ import annotations
@@ -137,10 +140,12 @@ def build_coarse_program(
 ) -> Program:
     """Build the COARSE pipeline :class:`~program.ir.Program`.
 
-    ``layout`` is the ("pp","dp") sublayout when available (metadata only at
-    M5; the M6 hierarchical emission consumes it). ``dp_count`` is the
-    duration-profile replication degree (the dispatcher passes 1 for
-    inference, matching the legacy ``_apply_transformer_time`` rule).
+    ``layout`` is the ("pp","dp") sublayout when available (informational —
+    the M6 hierarchical emission passes the sublayout descriptor to
+    :func:`lower_coarse_for_emission` explicitly). ``dp_count`` is the
+    duration-profile replication degree AND the hierarchical emission dp
+    (the dispatcher passes 1 for inference — the legacy ``dp_override=1``
+    rule).
     """
     events = build_pipeline_events(schedule_spec)
     order = _enumerate_events(events.root)
@@ -259,3 +264,60 @@ def build_coarse_program(
         groups={},
         meta=meta,
     )
+
+
+def lower_coarse_for_emission(
+    coarse_program: Program,
+    *,
+    layout_descriptor: Optional[Dict[str, Any]] = None,
+    optimize_2dmap: Optional[Dict[str, Any]] = None,
+    gmap_workdir: Optional[str] = None,
+) -> Program:
+    """Lower the (retimed) coarse schedule events for AstraSim emission (M6).
+
+    The COARSE program's own op list is uid-ordered in the legacy
+    *conversion* DFS order and is consumed by :mod:`program.analytic_sim`;
+    Chakra ET emission needs the legacy EMISSION order (per-stage Kahn
+    toposort keyed by ``op_id``, Step-11 transfer replay, collective label
+    assignment). Rather than duplicating that ordering logic, the coarse
+    proto root — the schedule events, ``op_id``-stamped by
+    :func:`program.schedule.build_pipeline_events` in the exact legacy
+    creation sequence — is lowered through the SAME
+    :func:`program.legacy_lowering.lower_to_program` pass the fine builder
+    shares (M3a pattern). The events graph is ``add_child``-order
+    isomorphic to the legacy ``construct_fwd_bwd_graph`` output, so the
+    resulting Program (and hence the emitted bundle) is element-for-element
+    what the legacy hierarchical pipeline path produced.
+
+    ``layout_descriptor`` is the ("pp","dp") pipeline sublayout descriptor
+    (was the legacy root's ``_astrasim_rank_layout``); ``optimize_2dmap``
+    the first-dimension SCOTCH config (was ``_optimize_2dmap`` — passed
+    explicitly because the event classes are slotted). Retimed per-DP layer
+    durations are read from the events' ``duration_profile`` (written by
+    the :func:`program.retime.apply_block_timings` mirror), exactly like
+    the legacy ``Node.duration`` tuples were.
+    """
+    from program.legacy_lowering import lower_to_program
+
+    if not isinstance(coarse_program, Program):
+        raise TypeError(
+            f"lower_coarse_for_emission expects a Program (got {type(coarse_program).__name__})"
+        )
+    if coarse_program.meta.misc.get("granularity") != "coarse":
+        raise RuntimeError("lower_coarse_for_emission requires a COARSE program")
+    root = coarse_program.meta.misc.get("coarse_proto_root")
+    if root is None:
+        raise RuntimeError(
+            "COARSE program does not carry its schedule events root "
+            "(meta.misc['coarse_proto_root'])"
+        )
+
+    program = lower_to_program(
+        root,
+        coarse_program.dp_count,
+        layout_descriptor,
+        gmap_workdir=gmap_workdir,
+        optimize_2dmap=optimize_2dmap,
+    )
+    program.meta.label = coarse_program.meta.label
+    return program

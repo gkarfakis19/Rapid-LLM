@@ -278,6 +278,7 @@ def lower_to_program(
     layout_descriptor: Optional[Dict[str, Any]] = None,
     *,
     gmap_workdir: Optional[str] = None,
+    optimize_2dmap: Optional[Dict[str, Any]] = None,
 ) -> Program:
     """Lower an unchanged legacy graph to a :class:`Program`.
 
@@ -285,6 +286,9 @@ def lower_to_program(
     (falls back to reading the attribute when omitted). ``gmap_workdir``
     receives the SCOTCH artifacts (``first_dim_comm.*``) when the root
     carries ``_optimize_2dmap``; a temp dir is used when not given.
+    ``optimize_2dmap`` overrides the root-attribute read (M6: the coarse
+    schedule-event roots are slotted, so the hierarchical path passes the
+    config explicitly instead of via a ``_optimize_2dmap`` attribute).
     """
 
     # --- Step 1: snapshot every reachable object in DFS preorder ---------
@@ -317,7 +321,9 @@ def lower_to_program(
     axis_order, axis_sizes, axis_strides = _extract_axis_layout(layout_descriptor)
     stage_axis_coords = _compute_stage_axis_coords(stage_ids, axis_order, axis_sizes)
     axis_groups = _build_axis_groups(axis_order, axis_sizes, stage_axis_coords, stage_to_ranks)
-    optimize_cfg = getattr(graph_root, "_optimize_2dmap", None) if hasattr(graph_root, "_optimize_2dmap") else None
+    optimize_cfg = optimize_2dmap
+    if optimize_cfg is None:
+        optimize_cfg = getattr(graph_root, "_optimize_2dmap", None) if hasattr(graph_root, "_optimize_2dmap") else None
     gmap_tmpdir: Optional[str] = None
     if optimize_cfg and gmap_workdir is None:
         gmap_tmpdir = tempfile.mkdtemp(prefix="rapid_lowering_gmap_")
