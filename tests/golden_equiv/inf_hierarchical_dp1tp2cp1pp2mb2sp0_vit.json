@@ -70,7 +70,7 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "e4af130",
+ "git_rev": "7cf6f65",
  "phase_times": {
   "decode": 0.0,
   "prefill": 0.01

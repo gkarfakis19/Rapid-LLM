@@ -1,7 +1,28 @@
 {
  "astra_times": {
   "flat": {
-   "error": "2 cache entries; expected 1 (isolated run)"
+   "runs": [
+    {
+     "max_sec": 0.054020687000000005,
+     "per_rank_sec": [
+      0.032566921,
+      0.032566921,
+      0.054020687000000005,
+      0.054020687000000005
+     ],
+     "sig": "645d17d898637adf498d2ec4aae6727d2a12f0b49c6279e33f0aa381b92a918a"
+    },
+    {
+     "max_sec": 0.026410124,
+     "per_rank_sec": [
+      0.019310124,
+      0.019310124,
+      0.026410124,
+      0.026410124
+     ],
+     "sig": "7157c56cb4c6c6b099732a2309893bcec6159dce65a76ba5f2c3ed69934a8721"
+    }
+   ]
   }
  },
  "bundles": {
@@ -60,7 +81,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "85894c6",
+ "git_rev": "7cf6f65",
  "phase_times": {},
  "spec_id": "train:flattened:dp2tp1cp1pp2mb2sp0:ga2",
  "status": "ok",

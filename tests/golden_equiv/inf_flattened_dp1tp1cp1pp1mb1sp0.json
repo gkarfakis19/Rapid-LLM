@@ -1,7 +1,32 @@
 {
  "astra_times": {
   "flat": {
-   "error": "3 cache entries; expected 1 (isolated run)"
+   "runs": [
+    {
+     "max_sec": 0.001942001,
+     "per_rank_sec": [
+      0.001942001,
+      0.001942001
+     ],
+     "sig": "758eb4dbe25f13cb00f50c2203020a60f6f1dc63b55cde69901d558f08b7e0cd"
+    },
+    {
+     "max_sec": 0.010553,
+     "per_rank_sec": [
+      0.010553,
+      0.010553
+     ],
+     "sig": "f4e4006c4fa5e2f05353d756cc0fcf09940c1599b111cfc5fffd12d120132858"
+    },
+    {
+     "max_sec": 0.001968001,
+     "per_rank_sec": [
+      0.001968001,
+      0.001968001
+     ],
+     "sig": "ff4c9bc6eeb7658792fcbc2e2a32fc8274032b9ff97d2175f7448575558ff38e"
+    }
+   ]
   }
  },
  "bundles": {
@@ -32,7 +57,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "85894c6",
+ "git_rev": "7cf6f65",
  "phase_times": {
   "decode": 0.125,
   "prefill": 0.011

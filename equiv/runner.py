@@ -103,6 +103,14 @@ def _find_bundle_dirs(output_root: Path) -> Dict[str, Path]:
 
 
 def _read_astra_times(bundle_dir: Path) -> Optional[Dict[str, Any]]:
+    """Read exact per-rank AstraSim seconds from the bundle's cache.json.
+
+    Multi-run flows (grad accumulation's no-DP + final dispatchers, inference
+    prefill + decode samples) share one artifact dir, and the legacy cleanup
+    deletes ETs but not cache.json, so entries accumulate. That choreography
+    is part of the pinned surface: record every entry, keyed and ordered by
+    the cache's own signature hash, so all runs' wall seconds are gated.
+    """
     cache_path = bundle_dir / "cache.json"
     if not cache_path.exists():
         return None
@@ -111,15 +119,28 @@ def _read_astra_times(bundle_dir: Path) -> Optional[Dict[str, Any]]:
             cache = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return None
-    entries = [v for v in cache.values() if isinstance(v, dict) and "per_node_sec" in v]
+    entries = {
+        key: value
+        for key, value in cache.items()
+        if isinstance(value, dict) and "per_node_sec" in value
+    }
     if not entries:
         return None
-    if len(entries) > 1:
-        return {"error": f"{len(entries)} cache entries; expected 1 (isolated run)"}
-    entry = entries[0]
+    if len(entries) == 1:
+        entry = next(iter(entries.values()))
+        return {
+            "per_rank_sec": list(entry.get("per_node_sec", [])),
+            "max_sec": entry.get("max_sec"),
+        }
     return {
-        "per_rank_sec": list(entry.get("per_node_sec", [])),
-        "max_sec": entry.get("max_sec"),
+        "runs": [
+            {
+                "sig": key,
+                "per_rank_sec": list(value.get("per_node_sec", [])),
+                "max_sec": value.get("max_sec"),
+            }
+            for key, value in sorted(entries.items())
+        ]
     }
 
 
@@ -267,22 +288,45 @@ def compare_observation(
     for label in sorted(set(golden_bundles) & set(obs.bundles)):
         problems.extend(diff_bundles(golden_bundles[label], obs.bundles[label], label=label))
 
-    golden_astra = golden.get("astra_times") or {}
-    for label in sorted(set(golden_astra) & set(obs.astra_times)):
-        gold_entry, cand_entry = golden_astra[label], obs.astra_times[label]
+    def _diff_rank_seconds(label: str, gold_entry: Dict[str, Any], cand_entry: Dict[str, Any]) -> None:
         gold_ranks = gold_entry.get("per_rank_sec") or []
         cand_ranks = cand_entry.get("per_rank_sec") or []
         if len(gold_ranks) != len(cand_ranks):
             problems.append(
                 f"astra[{label}]: rank count golden={len(gold_ranks)} candidate={len(cand_ranks)}"
             )
-        else:
-            for idx, (a, b) in enumerate(zip(gold_ranks, cand_ranks)):
-                if not close(a, b):
-                    problems.append(
-                        f"astra[{label}] rank {idx}: golden={a} candidate={b}"
-                    )
-                    break
+            return
+        for idx, (a, b) in enumerate(zip(gold_ranks, cand_ranks)):
+            if not close(a, b):
+                problems.append(f"astra[{label}] rank {idx}: golden={a} candidate={b}")
+                return
+
+    golden_astra = golden.get("astra_times") or {}
+    for label in sorted(set(golden_astra) & set(obs.astra_times)):
+        gold_entry, cand_entry = golden_astra[label], obs.astra_times[label]
+        gold_runs = gold_entry.get("runs")
+        cand_runs = cand_entry.get("runs")
+        if (gold_runs is None) != (cand_runs is None):
+            problems.append(
+                f"astra[{label}]: run multiplicity differs "
+                f"(golden {'multi' if gold_runs else 'single'}, candidate {'multi' if cand_runs else 'single'})"
+            )
+            continue
+        if gold_runs is None:
+            _diff_rank_seconds(label, gold_entry, cand_entry)
+            continue
+        if len(gold_runs) != len(cand_runs):
+            problems.append(
+                f"astra[{label}]: run count golden={len(gold_runs)} candidate={len(cand_runs)}"
+            )
+            continue
+        for run_idx, (grun, crun) in enumerate(zip(gold_runs, cand_runs)):
+            if grun.get("sig") != crun.get("sig"):
+                problems.append(
+                    f"astra[{label}] run {run_idx}: signature differs"
+                )
+                break
+            _diff_rank_seconds(f"{label}/run{run_idx}", grun, crun)
     for label, ok in (golden.get("dlsim_ok") or {}).items():
         if ok and not obs.dlsim_ok.get(label, False):
             problems.append(f"dlsim[{label}]: golden completed but candidate deadlocks")

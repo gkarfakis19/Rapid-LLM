@@ -210,7 +210,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "85894c6",
+ "git_rev": "7cf6f65",
  "phase_times": {},
  "spec_id": "train:flattened:dp2tp2cp2pp2mb2sp1",
  "status": "ok",

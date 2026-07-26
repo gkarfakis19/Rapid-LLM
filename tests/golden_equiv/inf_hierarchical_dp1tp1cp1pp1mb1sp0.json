@@ -1,10 +1,60 @@
 {
  "astra_times": {
   "hier": {
-   "error": "3 cache entries; expected 1 (isolated run)"
+   "runs": [
+    {
+     "max_sec": 0.010553,
+     "per_rank_sec": [
+      0.010553,
+      0.010553
+     ],
+     "sig": "20c508bdb4f3471764a1838bb00078def5b676988e56c1a96fa9bd85ac9a1be8"
+    },
+    {
+     "max_sec": 0.001968001,
+     "per_rank_sec": [
+      0.001968001,
+      0.001968001
+     ],
+     "sig": "b7fdabec1caeae227fc265b3033b15bd4a533bb9f4cabf79b17f938123f3ddf5"
+    },
+    {
+     "max_sec": 0.001942001,
+     "per_rank_sec": [
+      0.001942001,
+      0.001942001
+     ],
+     "sig": "ca95a320cf769e101e6f5fca1a6dd43d3dd0188b47b436fcf59e4c99bf24c85a"
+    }
+   ]
   },
   "hier/fwd": {
-   "error": "3 cache entries; expected 1 (isolated run)"
+   "runs": [
+    {
+     "max_sec": 0.000755,
+     "per_rank_sec": [
+      0.000755,
+      0.000755
+     ],
+     "sig": "082d3f9b356b3f8829f023b50db898d7564d650a5aeb62b39952fd73a82baafa"
+    },
+    {
+     "max_sec": 0.000742,
+     "per_rank_sec": [
+      0.000742,
+      0.000742
+     ],
+     "sig": "5140f7d2f7c665f9d52a22ff22cc2477520c41f4e6654219782a741260559378"
+    },
+    {
+     "max_sec": 0.0038390000000000004,
+     "per_rank_sec": [
+      0.0038390000000000004,
+      0.0038390000000000004
+     ],
+     "sig": "ebb68a1438e48037e8155b93ac09cc08d788fbd82a84b9983ed2fb1d67eb5fa1"
+    }
+   ]
   }
  },
  "bundles": {
@@ -58,7 +108,7 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "85894c6",
+ "git_rev": "7cf6f65",
  "phase_times": {
   "decode": 0.125,
   "prefill": 0.011
