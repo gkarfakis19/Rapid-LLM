@@ -223,6 +223,8 @@ def _workload(
     comm: Mapping[str, Mapping[str, Any]] = DENSE_COMM,
     gemms: Tuple[Mapping[str, Any], ...] = DENSE_GEMMS,
     moe_gemms: Optional[Tuple[Mapping[str, Any], ...]] = None,
+    moe_comm: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    pipeline_comm: Optional[Mapping[str, Mapping[str, Any]]] = None,
     moe_layer_mask: Tuple[bool, ...] = (),
     layout: Optional[RankLayout] = None,
 ) -> Tuple[WorkloadSpec, BlockTemplate]:
@@ -242,12 +244,16 @@ def _workload(
         pipeline_style_recompute=grid.recompute,
     )
     dense = _template(gemms, comm)
-    moe = _template(moe_gemms, comm) if moe_gemms is not None else None
+    moe = (
+        _template(moe_gemms, comm if moe_comm is None else moe_comm)
+        if moe_gemms is not None
+        else None
+    )
     spec = WorkloadSpec(
         degrees=degrees,
         shape=shape,
         run=run,
-        comm=CommSpecTable.from_legacy(comm),
+        comm=CommSpecTable.from_legacy(comm if pipeline_comm is None else pipeline_comm),
         blocks=BlockTemplates(dense=dense, moe=moe),
         overlap=OverlapSpec(parallelism_mode=None, by_axis={}),
         layout=layout
@@ -1095,3 +1101,355 @@ def test_devices_for_sync_resolves_every_spread() -> None:
     for group in groups:
         assert group.axis == "tp"
         assert len(group.members) == grid.tp
+
+
+# ---------------------------------------------------------------------------
+# 7. REGRESSION: the five Wave-1 composition defects (B1-B5)
+# ---------------------------------------------------------------------------
+#
+# Each test below FAILS on the pre-fix tree. See the amendment notes in
+# docs/rewrite/restructure/INTERFACES.md dated 2026-07-26.
+
+
+def _sync_req(
+    *,
+    comm_key: str,
+    axes: Tuple[str, ...],
+    place_on: WorkItem,
+    spread: Any,
+    kind: CollectiveType = CollectiveType.ALL_REDUCE,
+    participants: int = 2,
+) -> Any:
+    from program.work import AttachMode, ByteSource, SyncKey, SyncPhase, SyncRequirement
+
+    return SyncRequirement(
+        key=SyncKey(comm_key=comm_key, phase=SyncPhase.GRAD, microbatch=0, layer=0),
+        bytes=ByteSource(key=comm_key),
+        kind=kind,
+        axes=axes,
+        participants=participants,
+        place_on=place_on,
+        spread=spread,
+        mode=AttachMode.AFTER,
+        anchors=(place_on,),
+    )
+
+
+# -- B2: dp is not a communicator axis of a device layout --------------------
+
+DP_COMM: Mapping[str, Mapping[str, Any]] = {
+    "transformer_dense": {
+        "size": 1000.5,
+        "type": CollectiveType.ALL_REDUCE,
+        "participants": 2,
+        "interconnect_type": "dp",
+    },
+    "cross_layer": DENSE_COMM["cross_layer"],
+}
+
+
+@pytest.mark.parametrize(
+    "granularity", [Granularity.COARSE, Granularity.FINE, Granularity.BLOCK]
+)
+def test_b2_dp_requirement_gets_no_communicator(granularity: Granularity) -> None:
+    """B2. ``Placement``'s device space carries ``dp``, so a dp-axis requirement
+    used to receive a communicator whose members are NOT devices of the program
+    (COARSE: ``dp:(0, 2)`` against ``devices() == (0, 1)``), and at BLOCK — where
+    the layout has no dp at all — it silently degenerated to a singleton that
+    ``et_emit`` substitutes with a zero-duration ``*_noop``, i.e. the reducer
+    disappears. Contradicts INTERFACES §3.3 and ``ir.py:92-99``.
+
+    Post-fix: ``groups_for`` returns ``None`` per instance device (the builder
+    stamps ``group=None, is_dp=True``) and asking the factory for a dp group at
+    all is a :class:`GroupError`.
+    """
+    from program.work import SyncSpread
+
+    grid = Grid("b2", tp=2, cp=1, ep=1, pp=2, mb=1, num_layers=2)
+    placement, _fw = _placement(grid, granularity, dp=2, comm=DP_COMM)
+
+    # (a) THE DEFECT: a dp requirement resolves to instance devices but NO
+    # GroupKey. Pre-fix this returned GroupKey(axis="dp", members=(0, 2)) at
+    # COARSE — member 2 is not in devices() == (0, 1) — and GroupKey(members=(0,))
+    # at BLOCK, a singleton et_emit substitutes with a zero-duration noop.
+    layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
+    spread = (
+        SyncSpread.STAGE if granularity is not Granularity.FINE else SyncSpread.CLUSTER_RANK_0
+    )
+    req = _sync_req(
+        comm_key="transformer_dense", axes=("dp",), place_on=layer, spread=spread
+    )
+    devices = placement.devices_for_sync(req)
+    assert devices
+    groups = placement.communicators.groups_for(req, placement)
+    assert groups == tuple(None for _ in devices), (
+        f"{granularity.name}: a dp collective must carry no GroupKey, got {groups}"
+    )
+    assert req.is_dp is True
+
+    # (b) dp is not in the group layout, and it is a hard error to span it.
+    assert "dp" not in placement.group_layout.axis_order
+    with pytest.raises(GroupError, match="dp"):
+        placement.communicators.members(("dp",), placement.devices()[0])
+    with pytest.raises(GroupError, match="dp"):
+        placement.communicators.group_for(("dp",), placement.devices()[0])
+
+    # (c) every member of every non-dp group IS a device of this program.
+    known = set(placement.devices())
+    for axis in ("tp", "cp", "ep", "pp"):
+        if axis not in placement.group_layout.axis_order:
+            continue
+        for device in placement.devices():
+            for member in placement.communicators.members((axis,), device):
+                assert member in known, (
+                    f"{granularity.name}: group over {axis!r} at device {device} "
+                    f"has member {member} which is not a device {sorted(known)}"
+                )
+
+    # (d) dropping dp from the group layout does not move a single device id.
+    for device in placement.devices():
+        coords = {
+            axis: value
+            for axis, value in placement.layout.coords_of(device).items()
+            if axis != "dp"
+        }
+        assert placement.group_layout.linearize(coords) == device
+
+
+def test_b2_group_partition_covers_exactly_the_device_set() -> None:
+    """B2, the same defect seen through ``partition`` (which V7 uses): with dp in
+    the layout, ``partition`` iterated ``num_ranks()`` = ``devices * dp`` and
+    invented groups outside the device space."""
+    grid = Grid("b2part", tp=2, cp=2, ep=1, pp=2, mb=1, num_layers=2)
+    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    assert placement.group_layout.num_ranks() == len(placement.devices())
+    for axis in ("tp", "cp", "pp"):
+        flat = [d for group in placement.communicators.partition((axis,)) for d in group]
+        assert sorted(flat) == list(placement.devices()), axis
+
+
+# -- B4: PER_CLUSTER_RANK must span the stage --------------------------------
+
+
+def test_b4_per_cluster_rank_spans_the_stage_when_place_on_is_pinned() -> None:
+    """B4. ``SyncSpread.PER_CLUSTER_RANK`` degraded to ONE device whenever
+    ``place_on``'s kind is pinned to cluster rank 0 by ``LEGACY_PLACEMENT``
+    (EMBEDDING and SOFTMAX are) — which is exactly ZeRO-3 row **S7**
+    (``zero3_transformer_gather``, ``tp_shard=True``, placed on
+    ``EMBEDDING/FORWARD``) and row **S13** (placed on ``SOFTMAX/BACKWARD``).
+    Legacy ``_ensure_zero3_per_rank_edges`` builds ``hw_ids`` for every
+    ``par_degree`` rank (``pipeline_fine.py:471-480``).
+
+    Invisible in the golden matrix only because every zero2/zero3 spec is
+    ``tp=cp=1``.
+    """
+    from program.work import SyncSpread
+
+    grid = Grid("b4", tp=2, cp=1, ep=1, pp=2, mb=1, num_layers=2)
+    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    assert placement.cluster_size() == 2
+
+    pinned = {
+        "S7": WorkItem(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=0),
+        "S13": WorkItem(WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=0),
+    }
+    for row, place_on in pinned.items():
+        # LEGACY_PLACEMENT pins these kinds: devices_for is ONE device...
+        assert len(placement.devices_for(place_on)) == 1, row
+        req = _sync_req(
+            comm_key="transformer_dense",
+            axes=("dp",),
+            place_on=place_on,
+            spread=SyncSpread.PER_CLUSTER_RANK,
+        )
+        # ... but a PER_CLUSTER_RANK collective still exists on every rank.
+        stage = placement.stage_of(place_on)
+        assert placement.devices_for_sync(req) == placement.cluster_devices(stage), row
+        assert len(placement.devices_for_sync(req)) == placement.cluster_size(), row
+
+    # A non-pinned host is unaffected (the two used to agree only here).
+    layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=1)
+    req = _sync_req(
+        comm_key="transformer_dense",
+        axes=("dp",),
+        place_on=layer,
+        spread=SyncSpread.PER_CLUSTER_RANK,
+    )
+    assert placement.devices_for_sync(req) == placement.devices_for(layer)
+
+
+def test_b4_per_cluster_rank_raises_when_it_cannot_span_the_cluster() -> None:
+    """B4's declared guard: a PER_CLUSTER_RANK collective that resolves to fewer
+    than ``cluster_size`` devices is a build error, never a silent single
+    instance."""
+    from program.work import SyncSpread
+
+    grid = Grid("b4guard", tp=2, cp=1, ep=1, pp=2, mb=1, num_layers=2)
+    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
+    req = _sync_req(
+        comm_key="transformer_dense",
+        axes=("dp",),
+        place_on=layer,
+        spread=SyncSpread.PER_CLUSTER_RANK,
+    )
+
+    class _ShrunkCluster:
+        """A stand-in whose cluster is smaller than the placement's."""
+
+        def __init__(self, inner: Placement) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def cluster_devices(self, stage: Any) -> Tuple[int, ...]:
+            return self._inner.cluster_devices(stage)[:1]
+
+    shrunk = _ShrunkCluster(placement)
+    with pytest.raises(PlacementError, match="PER_CLUSTER_RANK"):
+        Placement.devices_for_sync(shrunk, req)  # type: ignore[arg-type]
+
+
+# -- B1: block comm keys are per template -----------------------------------
+#
+# Measured on train:hybrid:dp2tp2cp1pp2mb2sp1:moe:ep2 (the golden MoE rows):
+# ep_dense_sync_layernorm1_backward is 337,641,472 bytes in the DENSE template
+# and 67,141,632 in the MoE one — a 5.0288x ratio. train_timing's own
+# _register_specs RAISES on exactly this conflict (train_timing.py:4694-4711).
+
+EP_SYNC_KEY = "ep_dense_sync_layernorm1_backward"
+EP_SYNC_DENSE_BYTES = 337_641_472
+EP_SYNC_MOE_BYTES = 67_141_632
+
+
+def _ep_sync_entry(size: int) -> Mapping[str, Any]:
+    return {
+        "size": size,
+        "type": CollectiveType.ALL_REDUCE,
+        "participants": 2,
+        "interconnect_type": "ep",
+        "placement": "post",
+    }
+
+
+def test_b1_block_expander_resolves_comm_through_the_layer_template() -> None:
+    """B1. ``WorkloadSpec.comm`` was ONE flat table while block-template comm
+    keys are named PER TEMPLATE, so the dense and MoE tables collide: a union
+    keeps one entry and both MoE golden rows get 5.03x-wrong EP-sync bytes. With
+    a mixed ``moe_layer_mask`` both values are needed simultaneously and a flat
+    table cannot express it at all.
+    """
+    dense_comm = {**DENSE_COMM, EP_SYNC_KEY: _ep_sync_entry(EP_SYNC_DENSE_BYTES)}
+    moe_comm = {**DENSE_COMM, EP_SYNC_KEY: _ep_sync_entry(EP_SYNC_MOE_BYTES)}
+    gemms = (
+        {
+            "name": "layernorm1",
+            "forward": {"duration": 1e-4, "comm_keys": []},
+            "backward": {"duration": 2e-4, "comm_keys": [EP_SYNC_KEY]},
+        },
+    )
+    #: layer 0 dense, layer 1 MoE — the mixed mask a flat table cannot express.
+    grid = Grid("b1", tp=1, cp=1, ep=2, pp=1, mb=1, num_layers=2)
+    spec, _ = _workload(
+        grid,
+        comm=dense_comm,
+        gemms=gemms,
+        moe_gemms=gemms,
+        moe_comm=moe_comm,
+        pipeline_comm={"cross_layer": DENSE_COMM["cross_layer"]},
+        moe_layer_mask=(False, True),
+    )
+    fw = spec.freeze()
+
+    # (a) THE DEFECT: the expansion of each layer resolves its OWN table.
+    # Pre-fix the expander read the ONE flat ``WorkloadSpec.comm``, so a
+    # block-template key was either absent from it or present exactly once —
+    # both layers then got the same bytes (or a PlacementError).
+    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(2, 1))
+    expander = BlockExpander(fw, placement)
+    by_layer = {}
+    for layer in (0, 1):
+        chain = expander.expand(
+            WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=layer)
+        )[0]
+        steps = [s for s in chain.comm_steps() if s.comm_key == EP_SYNC_KEY]
+        assert len(steps) == 1, layer
+        by_layer[layer] = steps[0].spec.size_bytes
+    assert by_layer == {0: float(EP_SYNC_DENSE_BYTES), 1: float(EP_SYNC_MOE_BYTES)}
+
+    # (b) both tables exist, keyed by MoE-ness, and they disagree by 5.03x.
+    dense_spec = fw.spec.block_comm(0).require(EP_SYNC_KEY)
+    moe_spec = fw.spec.block_comm(1).require(EP_SYNC_KEY)
+    assert dense_spec.size_bytes == float(EP_SYNC_DENSE_BYTES)
+    assert moe_spec.size_bytes == float(EP_SYNC_MOE_BYTES)
+    assert dense_spec.size_bytes / moe_spec.size_bytes == pytest.approx(5.0288, abs=1e-4)
+
+    # (c) the pipeline table does NOT carry block keys.
+    assert EP_SYNC_KEY not in fw.spec.comm
+
+
+def test_b1_pipeline_and_block_comm_namespaces_may_not_shadow() -> None:
+    """B1's guard: a pipeline-level key that shadows a block key with different
+    content is the flat-table defect again, so it is a construction error."""
+    from program.workload import WorkloadError
+
+    dense_comm = {**DENSE_COMM, EP_SYNC_KEY: _ep_sync_entry(EP_SYNC_DENSE_BYTES)}
+    grid = Grid("b1shadow", tp=1, cp=1, ep=2, pp=1, mb=1, num_layers=1)
+    with pytest.raises(WorkloadError, match="must not shadow"):
+        _workload(
+            grid,
+            comm=dense_comm,
+            pipeline_comm={
+                "cross_layer": DENSE_COMM["cross_layer"],
+                EP_SYNC_KEY: _ep_sync_entry(EP_SYNC_MOE_BYTES),
+            },
+        )
+
+
+# -- B5: one object satisfies both stage seams ------------------------------
+
+
+def test_b5_contiguous_stages_satisfies_placement_and_sharding_together() -> None:
+    """B5. ``StagePartition.stage_of(work: WorkItem)`` and
+    ``LayerAssignment.stage_of(layer: LayerId)`` shared a name with incompatible
+    argument types, so NO object satisfied both — yet ``Placement`` consumes a
+    ``LayerAssignment`` and ``ShardingContext`` a ``StagePartition``, and P3 must
+    pass one stage partition to both.
+    """
+    from program.policies.gradaccum import GradAccumPolicy
+    from program.policies.sharding import ContiguousStages, ShardingContext, ZeRO3
+
+    grid = Grid("b5", tp=2, cp=1, ep=1, pp=2, mb=2, num_layers=4)
+    spec, _ = _workload(grid, dp=2, comm=DP_COMM)
+    fw = spec.freeze()
+    stages = ContiguousStages.legacy(grid.num_layers, grid.pp)
+
+    # (a) the LayerAssignment surface: Placement accepts it verbatim.
+    placement = Placement(fw, Granularity.FINE, stages)
+    for layer in range(grid.num_layers):
+        item = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=layer)
+        assert placement.stage_of(item) == stages.stage_of(layer)
+    for stage in range(grid.pp):
+        assert stages.layers_of(stage)
+        assert stages.min_layer(stage) == stages.layers_of(stage)[0]
+    assert stages.contiguous(grid.num_layers, grid.pp) == stages
+
+    # (b) the StagePartition surface: the SAME object drives ShardingContext.
+    work = enumerate_work(fw, NoRecompute())
+    ctx = ShardingContext(
+        fw=fw,
+        work=work,
+        grad_accum=GradAccumPolicy(dp=2, zero_stage=3, mode=DpMicrobatchMode.EVERY_MB),
+        stages=stages,
+    )
+    first = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
+    last = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=grid.num_layers - 1)
+    assert ctx.same_stage(first, first)
+    assert not ctx.same_stage(first, last)
+    assert ZeRO3().requirements(first, ctx) is not None
+
+    # (c) and Placement itself is still a valid StagePartition (INTERFACES §3.2).
+    assert placement.same_stage(first, first)
+    assert placement.same_stage(first, last) is False
+    ShardingContext(fw=fw, work=work, grad_accum=ctx.grad_accum, stages=placement)

@@ -82,30 +82,47 @@ __all__ = [
 
 
 class StagePartition(Protocol):
-    """The subset of L2's ``Placement`` that L1 needs: which stage a WorkItem
-    lives on, and whether two WorkItems share one.
+    """The ONE thing L1 needs from L2's placement: do two WorkItems share a
+    pipeline stage?
+
+    AMENDMENT to INTERFACES §2.4 (dated 2026-07-26). This protocol used to also
+    declare ``stage_of(work: WorkItem)``. That made it *unsatisfiable together
+    with* ``LayerAssignment`` (INTERFACES §4.1), whose ``stage_of`` takes a
+    ``LayerId`` — and ``Placement.__init__`` consumes a ``LayerAssignment``
+    while ``ShardingContext`` consumes a ``StagePartition``, so a single object
+    had to be both and no object could. ``same_stage`` is the only member L1
+    ever called (``ShardingContext.same_stage``, ``ZeRO3._via``), so the
+    protocol shrinks to it and the clash disappears:
+    :class:`ContiguousStages` now satisfies both seams at once.
 
     ``program.placement.Placement`` (P3) satisfies this protocol as-is
-    (INTERFACES §3.2 declares exactly these two methods), so P3 passes a
-    ``Placement`` here and :class:`ContiguousStages` is deleted.
+    (INTERFACES §3.2 declares ``same_stage``), so P3 may pass a ``Placement``
+    here instead.
     """
-
-    def stage_of(self, work: WorkItem) -> StageId: ...
 
     def same_stage(self, a: WorkItem, b: WorkItem) -> bool: ...
 
 
 @dataclass(frozen=True)
-class ContiguousStages(StagePartition):
-    """TRANSITIONAL (deleted in P4): the legacy remainder-first layer split.
+class ContiguousStages:
+    """The legacy remainder-first layer split, satisfying BOTH stage seams.
 
     Port of ``schedule.legacy_layers_per_stage`` (:83-90) +
     ``_layer_to_stage`` (:93-100): ``base + 1`` layers for the first
-    ``num_layers % pp`` stages. INTERFACES §4.1 generalizes this to an explicit
-    ``LayerAssignment`` map; until P4 lands, L1 needs *some* stage partition to
-    choose ``via`` (INTERFACES §2.4) and this is it. It is a
-    ``@dataclass(frozen=True)`` implementing :class:`StagePartition`, so
-    swapping in ``LayerAssignment`` is a constructor argument.
+    ``num_layers % pp`` stages.
+
+    It implements:
+
+    * INTERFACES §4.1 ``LayerAssignment`` — :meth:`stage_of` (a ``LayerId``),
+      :meth:`layers_of`, :meth:`min_layer` — so it can be passed as
+      ``Placement(fw, granularity, layers=...)``; and
+    * :class:`StagePartition` — :meth:`same_stage` — so the SAME object can be
+      passed as ``ShardingContext(stages=...)``.
+
+    The WorkItem-keyed rule is :meth:`stage_of_work` (renamed from ``stage_of``
+    on 2026-07-26 to free ``stage_of`` for the ``LayerAssignment`` signature).
+    P4 replaces this class with ``program.sched.policy.LayerAssignment``, which
+    carries the same three ``LayerAssignment`` members.
     """
 
     stage_of_layer: Tuple[StageId, ...]
@@ -122,7 +139,16 @@ class ContiguousStages(StagePartition):
             mapping.extend(StageId(stage_idx) for _ in range(count))
         return cls(stage_of_layer=tuple(mapping), num_stages=stage_count)
 
-    def stage_of_layer_index(self, layer: LayerId) -> StageId:
+    @classmethod
+    def contiguous(cls, num_layers: int, pp: int) -> "ContiguousStages":
+        """:meth:`legacy` under the contract's name (INTERFACES §4.1
+        ``LayerAssignment.contiguous``), so P4's swap is a rename of the type
+        only."""
+        return cls.legacy(num_layers, pp)
+
+    # -- the LayerAssignment surface (INTERFACES §4.1) ---------------------
+    def stage_of(self, layer: LayerId) -> StageId:
+        """The stage hosting ``layer``. Keyed on a ``LayerId``, per §4.1."""
         if layer < 0 or layer >= len(self.stage_of_layer):
             raise WorkloadError(
                 f"Layer index {layer} is out of bounds for "
@@ -130,20 +156,37 @@ class ContiguousStages(StagePartition):
             )
         return self.stage_of_layer[layer]
 
-    def stage_of(self, work: WorkItem) -> StageId:
-        """Verbatim placement rules of schedule.py:583, :592, :603, :1054."""
+    def layers_of(self, stage: StageId) -> Tuple[LayerId, ...]:
+        return tuple(
+            layer
+            for layer, assigned in enumerate(self.stage_of_layer)
+            if int(assigned) == int(stage)
+        )
+
+    def min_layer(self, stage: StageId) -> Optional[LayerId]:
+        """The optimizer attach rule (§4.1); ``None`` for an empty stage."""
+        layers = self.layers_of(stage)
+        return layers[0] if layers else None
+
+    # -- the StagePartition surface ----------------------------------------
+    def stage_of_work(self, work: WorkItem) -> StageId:
+        """Verbatim placement rules of schedule.py:583, :592, :603, :1054.
+
+        Mirrors ``Placement.stage_of`` (which is WorkItem-keyed by §3.2); the
+        name differs so this class can also expose ``LayerAssignment.stage_of``.
+        """
         if work.kind is WorkKind.EMBEDDING:
             return StageId(0)
         if work.kind is WorkKind.SOFTMAX:
             return StageId(self.num_stages - 1)
         if work.kind in (WorkKind.LAYER, WorkKind.RECOMPUTE):
-            return self.stage_of_layer_index(work.layer)  # type: ignore[arg-type]
+            return self.stage_of(work.layer)  # type: ignore[arg-type]
         if work.kind is WorkKind.OPTIMIZER:
             return StageId(int(work.stage))  # type: ignore[arg-type]
         raise WorkloadError(f"No stage rule for {work!r}")
 
     def same_stage(self, a: WorkItem, b: WorkItem) -> bool:
-        return self.stage_of(a) == self.stage_of(b)
+        return self.stage_of_work(a) == self.stage_of_work(b)
 
 
 # ---------------------------------------------------------------------------

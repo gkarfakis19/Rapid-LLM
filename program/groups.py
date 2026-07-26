@@ -51,19 +51,29 @@ Two invariants this module is responsible for (INTERFACES §3.5):
   COMP substitution (``et_emit.py:313-320``) still applies unchanged
   (BUG_LEDGER Class B 10g).
 
-``dp`` never reaches this module: ``GroupKey.members`` are pre-DP devices and
-dp replication is stamped at emission (``ir.py:93-104``).
+``dp`` never reaches this module — and that is now ENFORCED, not merely intended
+(INTERFACES §3.3 amendment, 2026-07-26). ``GroupKey.members`` are pre-DP devices
+and dp replication is stamped at emission (``ir.py:93-104``), so
+
+* the layout this factory is constructed over is ``Placement.group_layout``,
+  which is the device layout MINUS ``dp``; and
+* :meth:`CommunicatorFactory._spanned_axes` **raises** :class:`GroupError` on
+  ``"dp"``, because with dp absent from the layout the "absent axis -> singleton"
+  rule above would otherwise silently delete every dp reducer (a singleton group
+  becomes a zero-duration ``*_noop`` at emission). A dp requirement carries
+  ``group=None, is_dp=True`` instead — see
+  :meth:`program.work.SyncRequirement.is_dp` and :meth:`groups_for`.
 """
 
 from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from program.ir import GroupKey
 from program.layout import CANONICAL_AXES, RankLayout
-from program.types import AxisName, DeviceId
+from program.types import DP_AXIS, AxisName, DeviceId
 
 
 class GroupError(ValueError):
@@ -129,18 +139,28 @@ class CommunicatorFactory:
             members=self.members(axes, anchor),
         )
 
-    def groups_for(self, req: "SyncRequirement", placement: "Placement") -> Tuple[GroupKey, ...]:  # noqa: F821
-        """One :class:`GroupKey` per instance device of ``req``.
+    def groups_for(
+        self, req: "SyncRequirement", placement: "Placement"  # noqa: F821
+    ) -> Tuple[Optional[GroupKey], ...]:
+        """One entry per instance device of ``req``: a :class:`GroupKey`, or
+        ``None`` when ``req.is_dp``.
 
         ``req`` is an L1 ``SyncRequirement`` (``.axes`` + ``.spread`` +
         ``.place_on``); ``placement`` resolves the spread to instance devices
         (:meth:`program.placement.Placement.devices_for_sync`). Kept here, next
         to :meth:`members`, so the only place a communicator is built is this
         class.
+
+        AMENDMENT to INTERFACES §3.3 (dated 2026-07-26): the return type is
+        ``Tuple[Optional[GroupKey], ...]``. A dp requirement gets ``None`` — it
+        maps to ``CollectiveOp(group=None, is_dp=True)`` and its wire members
+        are stamped at emission (``ir.py:93-104``). Before this, a dp
+        requirement got a group whose members were not devices at all.
         """
-        return tuple(
-            self.group_for(req.axes, device) for device in placement.devices_for_sync(req)
-        )
+        devices = placement.devices_for_sync(req)
+        if req.is_dp:
+            return tuple(None for _ in devices)
+        return tuple(self.group_for(req.axes, device) for device in devices)
 
     # -- introspection -----------------------------------------------------
     def spans(self, axes: Sequence[AxisName]) -> int:
@@ -169,6 +189,19 @@ class CommunicatorFactory:
         spanned: List[AxisName] = []
         for axis in axes:
             name = str(axis)
+            if name == DP_AXIS:
+                # A dp collective has no GroupKey at all: its members are not
+                # devices of this layout. Silently returning a singleton (which
+                # et_emit turns into a zero-duration *_noop) would DELETE the
+                # reducer; returning members that vary the dp coordinate would
+                # produce ids outside Placement.devices(). Both were live before
+                # this raise existed.
+                raise GroupError(
+                    "'dp' is not a communicator axis of a device layout: dp "
+                    "replication is stamped at emission over pre-dp device ids "
+                    "(ir.py:93-104). A dp requirement carries group=None, "
+                    "is_dp=True (SyncRequirement.is_dp)."
+                )
             if name not in CANONICAL_AXES:
                 raise GroupError(
                     f"Unknown communicator axis {name!r} (canonical axes: {CANONICAL_AXES})"

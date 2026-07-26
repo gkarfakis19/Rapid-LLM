@@ -345,13 +345,24 @@ def make_schedule_spec(cfg: Cfg) -> Tuple[ScheduleSpec, RecordingCommMetadata]:
     return spec, recorder
 
 
-def _block_template(comm_metadata: Dict[str, Dict[str, Any]]) -> BlockTemplate:
+def _block_template(
+    comm_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    backward_comm_keys: Tuple[str, ...] = (),
+) -> BlockTemplate:
+    """A two-GEMM block template with its OWN comm table.
+
+    Block-template comm keys live on the template, not in
+    ``WorkloadSpec.comm`` (INTERFACES §1.6 amendment 2026-07-26): the dense and
+    MoE templates name their keys independently and may declare the same key
+    with different bytes.
+    """
     return BlockTemplate.from_gemm_entries(
         [
             {
                 "name": "layernorm1",
                 "forward": {"duration": 1.0, "comm_keys": []},
-                "backward": {"duration": 2.0, "comm_keys": []},
+                "backward": {"duration": 2.0, "comm_keys": list(backward_comm_keys)},
             },
             {
                 "name": "attention",
@@ -359,15 +370,15 @@ def _block_template(comm_metadata: Dict[str, Dict[str, Any]]) -> BlockTemplate:
                 "backward": {"duration": 4.0, "comm_keys": []},
             },
         ],
-        comm_metadata,
+        comm_metadata or {},
     )
 
 
 def make_workload(cfg: Cfg) -> WorkloadSpec:
     raw = raw_comm_metadata(cfg)
     templates = BlockTemplates(
-        dense=_block_template(raw),
-        moe=_block_template(raw) if cfg.moe else None,
+        dense=_block_template(),
+        moe=_block_template() if cfg.moe else None,
     )
     return WorkloadSpec(
         degrees=ParallelDegrees(tp=cfg.tp, cp=cfg.cp, ep=cfg.ep, pp=cfg.pp, dp=cfg.dp),
@@ -1314,19 +1325,252 @@ def test_sync_requirement_validation() -> None:
 
 def test_byte_source_splits() -> None:
     """B 1 (``WHOLE``) and D 10c (``CEIL_DIV_CLUSTER``) are named policy values,
-    not literals in an expansion loop."""
+    not literals in an expansion loop.
+
+    ``instances`` is deliberately DIFFERENT from ``fw.spec.cluster_size()`` here:
+    passing the two equal is what hid defect B3 (``bytes_for`` divided by
+    ``cluster_size`` and ignored its argument).
+    """
     fw = make_workload(Cfg(dp=2, tp=2, cp=2, ep=1)).freeze()
     assert fw.spec.cluster_size() == 4
     whole = ByteSource("cross_layer", ByteSplit.WHOLE)
     split = ByteSource("cross_layer", ByteSplit.CEIL_DIV_CLUSTER)
     total = fw.spec.comm.require("cross_layer").size_bytes
-    assert whole.bytes_for(fw, 4) == total
-    assert split.bytes_for(fw, 4) == pytest.approx(total / 4)
+    assert whole.bytes_for(fw, 2) == total
+    assert split.bytes_for(fw, 2) == pytest.approx(total / 2)
 
     odd = dataclasses.replace(fw.spec.comm.require("cross_layer"), size_bytes=4097.0)
-    table = CommSpecTable([odd])
+    table = CommSpecTable(
+        [odd] + [s for k, s in fw.spec.comm.items() if k != "cross_layer"]
+    )
     fw_odd = fw.spec.with_(comm=table).freeze()
     assert split.bytes_for(fw_odd, 4) == 1025.0  # ceil, per pipeline_fine.py:645
+    assert split.bytes_for(fw_odd, 2) == 2049.0
+
+
+# ---------------------------------------------------------------------------
+# REGRESSION: the five Wave-1 composition defects (B1-B5)
+# ---------------------------------------------------------------------------
+#
+# Each test below FAILS on the pre-fix tree. See the amendment notes in
+# docs/rewrite/restructure/INTERFACES.md dated 2026-07-26.
+
+
+def test_b3_byte_source_honors_instances_not_cluster_size() -> None:
+    """B3. ``ByteSource.bytes_for`` ignored its ``instances`` argument:
+    ``CEIL_DIV_CLUSTER`` always divided by ``fw.spec.cluster_size()``.
+
+    The two differ exactly where it matters. ``Placement.cluster_size()`` is 1
+    at COARSE (the stage IS the device) while ``fw.spec.cluster_size()`` is
+    always ``tp*cp*ep``, and legacy COARSE uses the RAW cross-layer byte count
+    (``pipeline_coarse.py:222,238``) where legacy FINE divides
+    (``pipeline_fine.py:645``). At ``tp=2`` the pre-fix call returned 2048.0
+    where COARSE wants 4096.0 — wrong cross_layer bytes on every
+    coarse/hybrid/hierarchical row with ``cluster_size > 1``.
+    """
+    fw = make_workload(Cfg(dp=1, tp=2, cp=1, ep=1)).freeze()
+    assert fw.spec.cluster_size() == 2
+    raw = fw.spec.comm.require("cross_layer").size_bytes
+    assert raw == 4096.0
+
+    split = ByteSource("cross_layer", ByteSplit.CEIL_DIV_CLUSTER)
+    # COARSE: Placement.cluster_size() == 1 -> the RAW value.
+    assert split.bytes_for(fw, 1) == raw
+    # FINE: cluster_size instances -> divided.
+    assert split.bytes_for(fw, 2) == raw / 2
+    # ... and the divisor tracks `instances`, not the workload's cluster.
+    assert split.bytes_for(fw, 4) == raw / 4
+    assert split.bytes_for(fw, 8) == raw / 8
+
+    # WHOLE never divides, whatever the instance count (BUG_LEDGER Class B 1).
+    whole = ByteSource("cross_layer", ByteSplit.WHOLE)
+    assert {whole.bytes_for(fw, n) for n in (1, 2, 4, 8)} == {raw}
+
+    with pytest.raises(SyncError):
+        split.bytes_for(fw, 0)
+
+
+def test_b1_block_comm_tables_are_per_template() -> None:
+    """B1. ``WorkloadSpec.comm`` is ONE flat table but block-template comm keys
+    are named PER TEMPLATE, so the dense and MoE templates collide.
+
+    ``train_timing._register_specs`` (:4694-4711) RAISES on this very conflict,
+    and it is real: on ``train:hybrid:dp2tp2cp1pp2mb2sp1:moe:ep2``,
+    ``ep_dense_sync_layernorm1_backward`` is 337,641,472 bytes dense and
+    67,141,632 MoE (5.0288x). Both values are needed simultaneously under a
+    mixed ``moe_layer_mask``.
+    """
+    dense_bytes, moe_bytes = 337_641_472, 67_141_632
+    key = "ep_dense_sync_layernorm1_backward"
+
+    def entry(size: int) -> Dict[str, Any]:
+        return {
+            "size": size,
+            "type": ALL_REDUCE,
+            "participants": 2,
+            "interconnect_type": "ep",
+            "placement": "post",
+        }
+
+    cfg = Cfg(dp=2, tp=2, cp=1, ep=2, pp=2, num_layers=4, moe=True)
+    templates = BlockTemplates(
+        dense=_block_template({key: entry(dense_bytes)}, backward_comm_keys=(key,)),
+        moe=_block_template({key: entry(moe_bytes)}, backward_comm_keys=(key,)),
+    )
+    spec = make_workload(cfg).with_(blocks=templates)
+    fw = spec.freeze()
+
+    # cfg.moe_layer_mask alternates, so both templates are live at once.
+    mask = cfg.moe_layer_mask
+    assert set(mask) == {True, False}
+
+    for layer, is_moe_layer in enumerate(mask):
+        table = fw.spec.block_comm(layer)
+        expected = moe_bytes if is_moe_layer else dense_bytes
+        assert table.require(key).size_bytes == float(expected), layer
+
+    # The two tables are distinct objects with distinct content ...
+    assert templates.comm_for(False) is not templates.comm_for(True)
+    assert (
+        templates.comm_for(False).require(key).size_bytes
+        / templates.comm_for(True).require(key).size_bytes
+        == pytest.approx(5.0288, abs=1e-4)
+    )
+    # ... and the pipeline-level table carries no block key at all.
+    assert key not in fw.spec.comm
+    # A whole-workload SCAN still sees both (routing_policy_for uses this).
+    assert sorted(
+        s.size_bytes for s in fw.spec.all_comm_specs() if s.key == key
+    ) == [float(moe_bytes), float(dense_bytes)]
+
+
+def test_b1_moe_routing_mode_is_found_on_the_block_tables() -> None:
+    """B1 consequence: ``moe_routing_mode`` is only ever set by
+    ``train_timing._make_moe_comm_specs`` (:601,:617), whose specs are registered
+    on the BLOCK template — never in ``_build_comm_metadata``. Once the block
+    tables stop being unioned into ``WorkloadSpec.comm``, a scan of that table
+    alone finds nothing."""
+    a2a = {
+        "moe_dispatch_forward_base_all_to_all": {
+            "size": 16384,
+            "type": CollectiveType.ALL_TO_ALL,
+            "participants": 2,
+            "interconnect_type": "ep",
+            "placement": "post",
+            "parallel_group": "moe_route",
+            "moe_component": "base_all_to_all",
+            "moe_routing_mode": "tp_ep",
+        }
+    }
+    cfg = Cfg(dp=2, tp=2, ep=2, moe=True)
+    templates = BlockTemplates(
+        dense=_block_template(),
+        moe=_block_template(a2a, backward_comm_keys=tuple(a2a)),
+    )
+    fw = make_workload(cfg).with_(blocks=templates).freeze()
+    assert not any(s.moe_routing_mode for s in fw.spec.comm.values())
+    assert routing_policy_for(fw) is TP_EP_ROUTING
+
+
+def test_b2_dp_requirement_declares_itself_dp() -> None:
+    """B2 (L1 half): a dp collective is DECLARED as having no communicator.
+
+    ``GroupKey.members`` are pre-DP device ids (``ir.py:92-99``); dp replication
+    is stamped at emission. A dp requirement therefore lowers to
+    ``CollectiveOp(group=None, is_dp=True)`` and ``dp`` may never appear as one
+    axis of a device-layout communicator.
+    """
+    fw = make_workload(Cfg(dp=2, tp=2)).freeze()
+    item = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
+
+    dp_req = SyncRequirement.from_spec(
+        fw.spec.comm.require("transformer_dense"),
+        key=SyncKey("transformer_dense", SyncPhase.GRAD, 0, 0),
+        place_on=item,
+        mode=AttachMode.AFTER,
+        anchors=(item,),
+    )
+    assert dp_req.axes == ("dp",)
+    assert dp_req.is_dp is True
+
+    tp_spec = dataclasses.replace(
+        fw.spec.comm.require("transformer_dense"), axes=("tp",)
+    )
+    tp_req = SyncRequirement.from_spec(
+        tp_spec,
+        key=SyncKey("transformer_dense", SyncPhase.GRAD, 0, 0),
+        place_on=item,
+        mode=AttachMode.AFTER,
+        anchors=(item,),
+    )
+    assert tp_req.is_dp is False
+
+    # A composite communicator including dp is a declaration bug, not a group.
+    mixed = dataclasses.replace(
+        fw.spec.comm.require("transformer_dense"), axes=("dp", "tp")
+    )
+    with pytest.raises(SyncError, match="dp"):
+        SyncRequirement.from_spec(
+            mixed,
+            key=SyncKey("transformer_dense", SyncPhase.GRAD, 0, 0),
+            place_on=item,
+            mode=AttachMode.AFTER,
+            anchors=(item,),
+        )
+
+
+def test_b5_stage_partition_protocol_is_satisfiable() -> None:
+    """B5. ``StagePartition`` and ``LayerAssignment`` both declared ``stage_of``
+    with incompatible argument types (``WorkItem`` vs ``LayerId``), so no object
+    satisfied both — yet L1's ``ShardingContext`` needs the first and L2's
+    ``Placement`` the second, from the same stage partition.
+
+    Post-fix: ``StagePartition`` declares ONLY ``same_stage``; ``ContiguousStages``
+    carries ``LayerAssignment``'s ``stage_of(layer)`` / ``layers_of`` /
+    ``min_layer`` and exposes the WorkItem rule as ``stage_of_work``.
+    """
+    from program.policies.sharding import StagePartition
+
+    # The protocol declares exactly one member, and it is not `stage_of`.
+    declared = {
+        name
+        for name, value in vars(StagePartition).items()
+        if not name.startswith("_") and callable(value)
+    }
+    assert declared == {"same_stage"}
+
+    stages = ContiguousStages.legacy(5, 3)
+    # LayerAssignment surface: keyed on a LayerId.
+    assert [stages.stage_of(layer) for layer in range(5)] == [0, 0, 1, 1, 2]
+    assert stages.layers_of(0) == (0, 1)
+    assert stages.min_layer(2) == 4
+    with pytest.raises(Exception):
+        stages.stage_of(5)
+
+    # StagePartition surface: keyed on WorkItems, via stage_of_work.
+    embedding = WorkItem(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=0)
+    softmax = WorkItem(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=0)
+    layer4 = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=4)
+    optimizer = WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=1)
+    assert stages.stage_of_work(embedding) == 0
+    assert stages.stage_of_work(softmax) == 2
+    assert stages.stage_of_work(layer4) == 2
+    assert stages.stage_of_work(optimizer) == 1
+    assert stages.same_stage(softmax, layer4)
+    assert not stages.same_stage(embedding, softmax)
+
+    # The SAME object drives both seams: ShardingContext(stages=...) uses
+    # same_stage, Placement(layers=...) uses stage_of(layer). Neither shadows the
+    # other any more. (The Placement half is exercised in tests/test_placement.py
+    # ::test_b5_contiguous_stages_satisfies_placement_and_sharding_together.)
+    fw = make_workload(Cfg(dp=2, pp=3, num_layers=5)).freeze()
+    ctx = ShardingContext(
+        fw=fw,
+        work=enumerate_work(fw, NoRecompute()),
+        grad_accum=grad_accum_policy_for(fw),
+        stages=stages,
+    )
+    assert ctx.same_stage(softmax, layer4)
 
 
 def test_dep_class_via_sets() -> None:

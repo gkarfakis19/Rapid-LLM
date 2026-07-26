@@ -48,7 +48,7 @@ from typing import (
 
 from timing_model import CollectiveType
 
-from program.types import AxisName, CommKey, LayerId, MicroBatch, StageId
+from program.types import DP_AXIS, AxisName, CommKey, LayerId, MicroBatch, StageId
 from program.workload import CommSpec, FrozenWorkload, ceil_div
 
 try:  # MemKind lives in memory_estimation; keep this module importable without it.
@@ -495,17 +495,44 @@ class ByteSplit(Enum):
 @dataclass(frozen=True)
 class ByteSource:
     """Where a requirement's bytes come from. The VALUE is owned by
-    ``train_timing`` (``CommSpec.size_bytes``); only the SPLIT is policy."""
+    ``train_timing`` (``CommSpec.size_bytes``); only the SPLIT is policy.
+
+    ``key`` addresses the **pipeline-level** table ``WorkloadSpec.comm``, which
+    is where every key a ``SyncRequirement`` or an R2 transfer can name lives
+    (the dp reducers, the ZeRO gathers, ``cross_layer``, the EP grad syncs — all
+    from ``train_timing._build_comm_metadata``). Block-template collectives are
+    not requirements: they are ``CommStep``s carrying their own per-template
+    ``CommSpec`` (INTERFACES §1.6 / §3.4).
+    """
 
     key: CommKey
     split: ByteSplit = ByteSplit.WHOLE
 
     def bytes_for(self, fw: FrozenWorkload, instances: int) -> float:
+        """``instances`` is the number of copies of this collective/transfer the
+        caller is about to materialize — i.e. ``Placement.cluster_size()``
+        (INTERFACES §4.3 R2, §4.4).
+
+        AMENDMENT to INTERFACES §2.2 (dated 2026-07-26): ``CEIL_DIV_CLUSTER``
+        divides by ``instances``, NOT by ``FrozenWorkload.cluster_size()``. The
+        two differ exactly where it matters: ``Placement`` reports
+        ``cluster_size() == 1`` at COARSE (the stage IS the device) while
+        ``fw.spec.cluster_size()`` is always ``tp*cp*ep``. Legacy COARSE uses
+        the RAW value (pipeline_coarse.py:222,238) and legacy FINE divides
+        (pipeline_fine.py:645), so ignoring ``instances`` returned 2048.0 where
+        COARSE wants 4096.0 on every coarse/hybrid/hierarchical row with
+        ``cluster_size > 1``.
+        """
+        count = int(instances)
+        if count < 1:
+            raise SyncError(
+                f"ByteSource({self.key!r}).bytes_for needs instances >= 1 (got {instances})"
+            )
         spec = fw.spec.comm.require(self.key)
         if self.split is ByteSplit.WHOLE:
             return float(spec.size_bytes)
         if self.split is ByteSplit.CEIL_DIV_CLUSTER:
-            return ceil_div(spec.size_bytes, fw.spec.cluster_size())
+            return ceil_div(spec.size_bytes, count)
         from typing import assert_never  # py3.11
 
         assert_never(self.split)
@@ -602,6 +629,16 @@ class SyncRequirement:
                 f"SyncRequirement {self.key!r} has kind PIPELINE; a p2p transfer is a "
                 "data-flow TransferOp (R2), not a SyncRequirement"
             )
+        if DP_AXIS in tuple(self.axes) and tuple(self.axes) != (DP_AXIS,):
+            # dp is stamped at emission over PRE-dp device ids (ir.py:93-104), so
+            # it can never be one axis of a composite communicator built from a
+            # device layout. Every production dp spec declares
+            # interconnect_type="dp" alone; a mixed tuple is a declaration bug.
+            raise SyncError(
+                f"SyncRequirement {self.key!r} declares axes {tuple(self.axes)}: "
+                "'dp' is replicated at emission and cannot be combined with a "
+                "device-layout axis"
+            )
         if self.mode is AttachMode.AFTER:
             pass  # anchors may be a WorkItem OR another SyncKey (S3/S5/S10 chaining)
         elif any(isinstance(anchor, SyncKey) for anchor in self.anchors):
@@ -657,6 +694,19 @@ class SyncRequirement:
     @property
     def comm_key(self) -> CommKey:
         return self.bytes.key
+
+    @property
+    def is_dp(self) -> bool:
+        """``True`` iff this collective's communicator is the dp replica group.
+
+        A dp collective has **no** ``GroupKey``: its members are not devices of
+        the program's device space at all. dp replication is stamped at emission
+        over pre-dp device ids (``ir.py:93-104``,
+        ``CollectiveOp.is_dp`` / ``label is None``), so the builder must emit
+        ``group=None, is_dp=True`` — never a communicator built from the device
+        layout (INTERFACES §3.3 amendment, 2026-07-26).
+        """
+        return tuple(self.axes) == (DP_AXIS,)
 
     def size_bytes(self, fw: FrozenWorkload, instances: int = 1) -> float:
         return self.bytes.bytes_for(fw, instances)

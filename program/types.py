@@ -32,6 +32,14 @@ MicroBatch = int
 CommKey = str  #: index into a CommSpecTable
 Coords = Mapping[AxisName, int]
 
+#: THE replicated axis. Members of a ``dp`` communicator are *not* devices of any
+#: program's device space: dp replication is stamped at emission over pre-dp
+#: device ids (``program/ir.py:93-104``). It lives here so L1
+#: (``SyncRequirement.is_dp``) and L2 (``Placement`` / ``CommunicatorFactory``)
+#: agree on the name without either dispatching on a bare string literal, and
+#: without an import edge between them.
+DP_AXIS: AxisName = "dp"
+
 __all__ = [
     "AxisName",
     "DeviceId",
@@ -40,4 +48,5 @@ __all__ = [
     "MicroBatch",
     "CommKey",
     "Coords",
+    "DP_AXIS",
 ]

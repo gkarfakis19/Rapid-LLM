@@ -49,6 +49,7 @@ from typing import (
     Any,
     Dict,
     Iterator,
+    List,
     Mapping,
     Optional,
     Tuple,
@@ -56,7 +57,7 @@ from typing import (
 
 from timing_model import CollectiveType
 
-from program.block import BlockTemplate
+from program.block import BlockTemplate, CommMeta
 from program.layout import RankLayout
 from program.types import AxisName, CommKey, LayerId
 
@@ -228,6 +229,40 @@ class ModelShape:
 COMM_PLACEMENTS: Tuple[str, ...] = ("pre", "post")
 
 
+def _declare_axes(
+    key: CommKey,
+    interconnect: Optional[Any],
+    routing_mode: Optional[Any],
+) -> Tuple[AxisName, ...]:
+    """The default ``CommSpec.axes`` derivation, reproducing today's grouping::
+
+        axes = (interconnect_type,)          # the normal case
+        axes = routing_policy.routing_axes() # iff moe_routing_mode is set
+
+    The second line **deletes** the participant-count inference at
+    ``legacy_lowering.py:243-248``
+    (``if axis == "ep" and participants == tp*ep -> ("tp","ep")``): the
+    composite communicator is now DECLARED by the MoE routing policy at the
+    source (INTERFACES §2.6, §3.3).
+
+    One implementation, shared by :meth:`CommSpec.from_legacy` (raw dict) and
+    :meth:`CommSpec.from_comm_meta` (typed :class:`~program.block.CommMeta`).
+    """
+    if routing_mode is not None:
+        # Lazy import: program.policies imports program.work -> program.workload,
+        # so a module-level import here would close the cycle. The routing
+        # table is DATA (INTERFACES §2.6) and this is its only consumer at L0.
+        from program.policies.routing import routing_for_mode
+
+        return routing_for_mode(str(routing_mode)).routing_axes()
+    if interconnect is None:
+        raise WorkloadError(
+            f"comm_metadata[{key!r}] has neither 'interconnect_type' nor "
+            "'moe_routing_mode'; the communicator axis cannot be declared"
+        )
+    return (str(interconnect),)
+
+
 @dataclass(frozen=True)
 class CommSpec:
     """One entry of the comm table.
@@ -314,20 +349,7 @@ class CommSpec:
             )
         interconnect = data.get("interconnect_type")
         routing_mode = data.get("moe_routing_mode")
-        if routing_mode is not None:
-            # Lazy import: program.policies imports program.work -> program.workload,
-            # so a module-level import here would close the cycle. The routing
-            # table is DATA (INTERFACES §2.6) and this is its only consumer at L0.
-            from program.policies.routing import routing_for_mode
-
-            axes = routing_for_mode(str(routing_mode)).routing_axes()
-        else:
-            if interconnect is None:
-                raise WorkloadError(
-                    f"comm_metadata[{key!r}] has neither 'interconnect_type' nor "
-                    "'moe_routing_mode'; the communicator axis cannot be declared"
-                )
-            axes = (str(interconnect),)
+        axes = _declare_axes(key, interconnect, routing_mode)
 
         known = {
             "size",
@@ -357,6 +379,44 @@ class CommSpec:
             moe_component=data.get("moe_component"),
             moe_routing_mode=(None if routing_mode is None else str(routing_mode)),
             extra=extra,
+        )
+
+    @classmethod
+    def from_comm_meta(cls, meta: CommMeta) -> "CommSpec":
+        """Build one spec from a typed :class:`~program.block.CommMeta`.
+
+        ``BlockTemplate.comm_metadata`` is the per-template comm table
+        ``train_timing._build_transformer_template`` produced (one
+        ``_register_specs`` accumulator per template). It is an identity
+        conversion — no defaulting, no inference — and it is what makes
+        :class:`BlockTemplates` able to carry the dense and MoE tables
+        SEPARATELY (INTERFACES §1.6 amendment, 2026-07-26).
+        """
+        if not isinstance(meta, CommMeta):
+            raise WorkloadError(
+                f"CommSpec.from_comm_meta expects a CommMeta (got {type(meta).__name__})"
+            )
+        if not isinstance(meta.kind, CollectiveType):
+            raise WorkloadError(
+                f"BlockTemplate comm entry {meta.name!r} has no CollectiveType "
+                f"(got {type(meta.kind).__name__})"
+            )
+        return cls(
+            key=meta.name,
+            size_bytes=float(meta.size_bytes or 0.0),
+            kind=meta.kind,
+            axes=_declare_axes(meta.name, meta.interconnect, meta.moe_routing_mode),
+            participants=max(1, int(meta.participants or 1)),
+            ga_required_every_cycle=bool(meta.ga_required_every_cycle),
+            tp_shard=bool(meta.tp_shard),
+            placement=str(meta.placement),
+            local_comp_time=float(meta.local_comp_time or 0.0),
+            parallel_group=meta.parallel_group,
+            moe_component=meta.moe_component,
+            moe_routing_mode=(
+                None if meta.moe_routing_mode is None else str(meta.moe_routing_mode)
+            ),
+            extra=dict(meta.extra or {}),
         )
 
 
@@ -418,6 +478,26 @@ class CommSpecTable(Mapping[CommKey, CommSpec]):
         """Convert a raw ``comm_metadata`` dict (insertion order preserved)."""
         return cls(
             [(name, CommSpec.from_legacy(name, data)) for name, data in (raw or {}).items()]
+        )
+
+    @classmethod
+    def from_block_template(cls, template: BlockTemplate) -> "CommSpecTable":
+        """The comm table of ONE :class:`~program.block.BlockTemplate`.
+
+        Block-template comm keys are named PER TEMPLATE
+        (``train_timing._register_specs``, whose accumulator is local to
+        ``_build_transformer_template``), so the dense and MoE tables are
+        SEPARATE tables and may legitimately declare the same key with
+        different bytes — e.g. ``ep_dense_sync_layernorm1_backward`` is
+        337,641,472 bytes dense and 67,141,632 bytes MoE on the
+        ``train:*:moe:ep2`` golden rows. Unioning them would be a 5.03x byte
+        error, and with a mixed ``moe_layer_mask`` both are needed at once.
+        """
+        return cls(
+            [
+                (name, CommSpec.from_comm_meta(meta))
+                for name, meta in (template.comm_metadata or {}).items()
+            ]
         )
 
 
@@ -713,23 +793,102 @@ class OverlapSpec:
 
 @dataclass(frozen=True)
 class BlockTemplates:
+    """The dense (required) and MoE (optional) block templates AND their
+    per-template comm tables.
+
+    AMENDMENT to INTERFACES §1.6 (dated 2026-07-26). ``dense_comm`` /
+    ``moe_comm`` are new. Block-template comm keys are named per template
+    (``train_timing._build_transformer_template`` holds one ``_register_specs``
+    accumulator per call, and ``_register_specs`` itself RAISES on a byte
+    conflict — train_timing.py:4694-4711), so ONE flat table cannot express
+    them: measured on ``train:hybrid:dp2tp2cp1pp2mb2sp1:moe:ep2``,
+    ``ep_dense_sync_layernorm1_backward`` is 337,641,472 bytes in the dense
+    template and 67,141,632 in the MoE one (5.03x). A mixed ``moe_layer_mask``
+    needs both simultaneously.
+
+    ``WorkloadSpec.comm`` therefore keeps only PIPELINE-LEVEL keys (the dp
+    reducers, the ZeRO gathers, ``cross_layer``, the EP grad syncs) and every
+    block-template key is resolved through this object, keyed on whether the
+    layer is MoE.
+    """
+
     dense: BlockTemplate
     moe: Optional[BlockTemplate] = None
+    #: comm table of ``dense``; derived from ``dense.comm_metadata`` when absent.
+    dense_comm: Optional[CommSpecTable] = None
+    #: comm table of ``moe``; derived from ``moe.comm_metadata`` when absent.
+    moe_comm: Optional[CommSpecTable] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.dense, BlockTemplate):
             raise WorkloadError("BlockTemplates.dense must be a BlockTemplate")
         if self.moe is not None and not isinstance(self.moe, BlockTemplate):
             raise WorkloadError("BlockTemplates.moe must be a BlockTemplate or None")
+        for field_name, table in (("dense_comm", self.dense_comm), ("moe_comm", self.moe_comm)):
+            if table is not None and not isinstance(table, CommSpecTable):
+                raise WorkloadError(
+                    f"BlockTemplates.{field_name} must be a CommSpecTable or None"
+                )
+        if self.dense_comm is None:
+            object.__setattr__(
+                self, "dense_comm", CommSpecTable.from_block_template(self.dense)
+            )
+        if self.moe is None:
+            if self.moe_comm is not None:
+                raise WorkloadError(
+                    "BlockTemplates.moe_comm was supplied without a moe BlockTemplate"
+                )
+        elif self.moe_comm is None:
+            object.__setattr__(
+                self, "moe_comm", CommSpecTable.from_block_template(self.moe)
+            )
+
+    def template_for(self, is_moe_layer: bool) -> BlockTemplate:
+        if is_moe_layer:
+            if self.moe is None:
+                raise WorkloadError(
+                    "A MoE layer was requested but BlockTemplates.moe is None"
+                )
+            return self.moe
+        return self.dense
+
+    def comm_for(self, is_moe_layer: bool) -> CommSpecTable:
+        """The comm table of the template that expands ``is_moe_layer``."""
+        if is_moe_layer:
+            if self.moe_comm is None:
+                raise WorkloadError(
+                    "A MoE layer was requested but BlockTemplates.moe_comm is None"
+                )
+            return self.moe_comm
+        if self.dense_comm is None:  # pragma: no cover - __post_init__ fills it
+            raise WorkloadError("BlockTemplates.dense_comm is None")
+        return self.dense_comm
+
+    def tables(self) -> Tuple[CommSpecTable, ...]:
+        """Every block comm table, dense first. Diagnostics / whole-workload
+        scans (e.g. ``routing_policy_for``), never expansion."""
+        out = [self.comm_for(False)]
+        if self.moe_comm is not None:
+            out.append(self.moe_comm)
+        return tuple(out)
 
 
 @dataclass(frozen=True)
 class WorkloadSpec:
-    """The complete, typed workload description (INTERFACES §1.6)."""
+    """The complete, typed workload description (INTERFACES §1.6).
+
+    ``comm`` holds the **pipeline-level** comm keys only (the dp reducers, the
+    ZeRO gathers, ``cross_layer``, the EP grad syncs — i.e. exactly what
+    ``train_timing._build_comm_metadata`` produces). Block-template keys live on
+    :class:`BlockTemplates` and are resolved per layer through
+    :meth:`block_comm`, because they are named per template and the dense/MoE
+    tables genuinely disagree (INTERFACES §1.6 amendment, 2026-07-26).
+    """
 
     degrees: ParallelDegrees
     shape: ModelShape
     run: RunPolicy
+    #: PIPELINE-LEVEL comm keys only — see the class docstring.
     comm: CommSpecTable
     blocks: BlockTemplates
     overlap: OverlapSpec
@@ -760,6 +919,37 @@ class WorkloadSpec:
                 "WorkloadSpec.shape declares MoE layers but blocks.moe is None"
             )
         object.__setattr__(self, "interconnect", dict(self.interconnect or {}))
+        self._check_pipeline_block_key_disjointness()
+
+    def _check_pipeline_block_key_disjointness(self) -> None:
+        """A key present in BOTH the pipeline table and a block table must mean
+        the same thing in both.
+
+        The dense and MoE block tables may disagree with each other — that is
+        the whole point of :class:`BlockTemplates` — but a pipeline key that
+        silently shadows a block key with different bytes is the flat-table
+        defect all over again, so it is a construction error.
+        """
+        for table in self.blocks.tables():
+            for key, block_spec in table.items():
+                pipeline_spec = self.comm.get(key)
+                if pipeline_spec is None:
+                    continue
+                if (
+                    pipeline_spec.size_bytes != block_spec.size_bytes
+                    or pipeline_spec.kind is not block_spec.kind
+                    or pipeline_spec.axes != block_spec.axes
+                    or pipeline_spec.participants != block_spec.participants
+                ):
+                    raise WorkloadError(
+                        f"Comm key {key!r} is declared both pipeline-level and "
+                        "block-level with different content "
+                        f"(pipeline: {pipeline_spec.size_bytes} bytes / "
+                        f"{pipeline_spec.kind.name} / {pipeline_spec.axes}; block: "
+                        f"{block_spec.size_bytes} bytes / {block_spec.kind.name} / "
+                        f"{block_spec.axes}). Pipeline and block comm namespaces "
+                        "must not shadow each other."
+                    )
 
     # -- derived, pure ----------------------------------------------------
     def is_moe_layer(self, layer: LayerId) -> bool:
@@ -769,11 +959,27 @@ class WorkloadSpec:
         return self.degrees.cluster_size()
 
     def block_template(self, layer: LayerId) -> BlockTemplate:
-        if self.shape.is_moe_layer(layer):
-            if self.blocks.moe is None:
-                raise WorkloadError(f"Layer {layer} is MoE but no MoE BlockTemplate was supplied")
-            return self.blocks.moe
-        return self.blocks.dense
+        return self.blocks.template_for(self.shape.is_moe_layer(layer))
+
+    def block_comm(self, layer: LayerId) -> CommSpecTable:
+        """The comm table the block expansion of ``layer`` resolves against.
+
+        THE fix for the dense/MoE comm-key collision: a block comm key is only
+        ever looked up through the template that declared it.
+        """
+        return self.blocks.comm_for(self.shape.is_moe_layer(layer))
+
+    def all_comm_specs(self) -> Tuple[CommSpec, ...]:
+        """Every declared spec: pipeline-level first, then each block table.
+
+        For whole-workload SCANS only (``routing_policy_for``, diagnostics,
+        byte histograms). Never for resolution — a key may legitimately appear
+        more than once here with different bytes.
+        """
+        out: List[CommSpec] = list(self.comm.values())
+        for table in self.blocks.tables():
+            out.extend(table.values())
+        return tuple(out)
 
     def freeze(self) -> "FrozenWorkload":
         return FrozenWorkload(spec=self, durations=self.durations.snapshot())
@@ -808,7 +1014,13 @@ class FrozenWorkload:
 
     @property
     def comm(self) -> CommSpecTable:
+        """PIPELINE-LEVEL comm keys only; block keys go through
+        :meth:`block_comm`."""
         return self.spec.comm
+
+    @property
+    def blocks(self) -> BlockTemplates:
+        return self.spec.blocks
 
     @property
     def layout(self) -> Optional[RankLayout]:
@@ -819,6 +1031,12 @@ class FrozenWorkload:
 
     def cluster_size(self) -> int:
         return self.spec.cluster_size()
+
+    def block_comm(self, layer: LayerId) -> CommSpecTable:
+        return self.spec.block_comm(layer)
+
+    def all_comm_specs(self) -> Tuple[CommSpec, ...]:
+        return self.spec.all_comm_specs()
 
 
 def ceil_div(total: float, divisor: int) -> float:

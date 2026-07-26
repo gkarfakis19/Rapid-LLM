@@ -82,7 +82,7 @@ from memory_estimation import mem_kind_from_op_name
 from program.block import BlockTemplate, GemmEntry
 from program.groups import CommunicatorFactory, GroupError, canonical_axis_label
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords
-from program.types import AxisName, CommKey, Coords, DeviceId, LayerId, StageId
+from program.types import DP_AXIS, AxisName, CommKey, Coords, DeviceId, LayerId, StageId
 from program.work import (
     Direction,
     SyncSpread,
@@ -91,7 +91,7 @@ from program.work import (
     duration_for,
     mem_kind,
 )
-from program.workload import CommSpec, FrozenWorkload
+from program.workload import CommSpec, CommSpecTable, FrozenWorkload
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from program.policies.overlap import OverlapDecl, OverlapPolicy
@@ -340,11 +340,18 @@ class Placement:
         self._layout = full if granularity is Granularity.FINE else full.subset(axes)
         #: the axes a device id ranges over (dp excluded — see module docstring)
         self._device_axes: Tuple[AxisName, ...] = tuple(
-            axis for axis in self._layout.axis_order if axis != "dp"
+            axis for axis in self._layout.axis_order if axis != DP_AXIS
         )
+        # THE COMMUNICATOR LAYOUT EXCLUDES dp. ``devices()`` never varies the dp
+        # coordinate, so a group built over a dp-carrying layout produced members
+        # that are not devices of this program at all (COARSE dp:(0,2) against
+        # devices (0,1)). ``RankLayout`` always orders axes canonically with dp
+        # LAST and assigns row-major strides, so dropping dp is stride-preserving:
+        # every device id is unchanged. INTERFACES §3.3 amendment, 2026-07-26.
+        self._group_layout = self._layout.subset(self._device_axes)
         #: COARSE devices ARE stages, so a "cluster" is one device there.
         self._cluster_size = 1 if granularity is Granularity.COARSE else cluster
-        self._communicators = CommunicatorFactory(self._layout)
+        self._communicators = CommunicatorFactory(self._group_layout)
 
     # -- identity ---------------------------------------------------------
     @property
@@ -370,8 +377,20 @@ class Placement:
         return self._full_layout
 
     @property
+    def group_layout(self) -> RankLayout:
+        """:attr:`layout` WITHOUT ``dp`` — the space communicator members live in.
+
+        Identical device ids to :attr:`layout` (dp is always the outermost
+        canonical axis, so removing it preserves every stride), but no
+        communicator can span dp: a dp collective has no ``GroupKey``
+        (INTERFACES §3.3).
+        """
+        return self._group_layout
+
+    @property
     def communicators(self) -> CommunicatorFactory:
-        """The :class:`~program.groups.CommunicatorFactory` over :attr:`layout`."""
+        """The :class:`~program.groups.CommunicatorFactory` over
+        :attr:`group_layout`."""
         return self._communicators
 
     def cluster_size(self) -> int:
@@ -495,11 +514,25 @@ class Placement:
         """Resolve a :class:`~program.work.SyncRequirement`'s ``spread``.
 
         ``STAGE`` -> the stage device; ``CLUSTER_RANK_0`` -> the first device of
-        ``place_on``; ``PER_CLUSTER_RANK`` -> every device of ``place_on``.
+        ``place_on``; ``PER_CLUSTER_RANK`` -> **every device of ``place_on``'s
+        stage**.
 
         This REPLACES ``local_hw_id`` + ``propagate_local_hw_ids`` entirely: the
         host is declared on the requirement, so nothing is back-propagated from
         a parent that happened to be visited first.
+
+        AMENDMENT to INTERFACES §3.2 (dated 2026-07-26): ``PER_CLUSTER_RANK``
+        resolves against ``cluster_devices(stage_of(place_on))``, NOT against
+        ``devices_for(place_on)``. The two differ whenever :attr:`policy` pins
+        ``place_on``'s kind to cluster rank 0 — which is exactly ZeRO-3 row S7,
+        whose ``zero3_transformer_gather`` (``tp_shard=True``, therefore
+        ``PER_CLUSTER_RANK``) is placed on ``EMBEDDING/FORWARD``, and row S13,
+        placed on ``SOFTMAX/BACKWARD``. Delegating to ``devices_for`` collapsed
+        the requirement to ONE device while legacy
+        ``_ensure_zero3_per_rank_edges`` builds ``hw_ids`` for every
+        ``par_degree`` rank (``pipeline_fine.py:471-480``). The SPREAD of a
+        collective is a property of the collective, not of the placement of the
+        work it hangs off.
         """
         spread = req.spread
         place_on = req.place_on
@@ -508,7 +541,15 @@ class Placement:
         if spread is SyncSpread.CLUSTER_RANK_0:
             return (self.devices_for(place_on)[0],)
         if spread is SyncSpread.PER_CLUSTER_RANK:
-            return self.devices_for(place_on)
+            devices = self.cluster_devices(self.stage_of(place_on))
+            if len(devices) < self._cluster_size:
+                raise PlacementError(
+                    f"SyncSpread.PER_CLUSTER_RANK for {req.key!r} resolved to "
+                    f"{len(devices)} device(s) but cluster_size is "
+                    f"{self._cluster_size}; a per-cluster-rank collective must "
+                    "exist on every cluster rank of its stage"
+                )
+            return devices
         raise PlacementError(f"Unhandled SyncSpread {spread!r}")
 
     def same_stage(self, a: WorkItem, b: WorkItem) -> bool:
@@ -747,7 +788,24 @@ class BlockExpander:
         self._placement = placement
         self._overlap = overlap
         self._routing = routing
-        self._specs = fw.spec.comm
+
+    # -- comm resolution ---------------------------------------------------
+    def _specs_for(self, work: WorkItem) -> CommSpecTable:
+        """The comm table ``work``'s chain resolves its keys against.
+
+        Block-template comm keys are named PER TEMPLATE, so the dense and MoE
+        tables must be consulted separately: on the ``moe:ep2`` golden rows
+        ``ep_dense_sync_layernorm1_backward`` is 337,641,472 bytes dense and
+        67,141,632 MoE. Reading them from one flat union picked whichever
+        template registered first and was a 5.03x byte error on both MoE rows
+        (INTERFACES §1.6 / §3.4 amendment, 2026-07-26).
+        """
+        if work.layer is None:
+            raise PlacementError(
+                f"{work.kind.name} WorkItem has no layer, so it resolves no block "
+                f"comm keys: {work!r}"
+            )
+        return self._fw.spec.block_comm(work.layer)
 
     # -- public ------------------------------------------------------------
     def expand(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
@@ -809,13 +867,14 @@ class BlockExpander:
             else tuple(reversed(template.entries))
         )
 
+        specs = self._specs_for(work)
         devices = self._placement.devices_for(work)
         #: (parallel_group, hot device) -> the hot rank's join step
         joins: Dict[Tuple[str, DeviceId], StepRef] = {}
         chains: List[ExpandedChain] = []
         for cluster_rank, device in enumerate(devices):
             steps = self._expand_chain(
-                work, device, cluster_rank, entries, direction, joins
+                work, device, cluster_rank, entries, direction, joins, specs
             )
             chains.append(
                 ExpandedChain(
@@ -837,6 +896,7 @@ class BlockExpander:
         entries: Sequence[GemmEntry],
         direction: Direction,
         joins: Dict[Tuple[str, DeviceId], StepRef],
+        specs: CommSpecTable,
     ) -> Tuple[ChainStep, ...]:
         steps: List[ChainStep] = []
         previous: Optional[int] = None
@@ -849,12 +909,12 @@ class BlockExpander:
                     f"Missing duration for transformer entry {entry.name!r} in "
                     f"direction {direction_name!r}"
                 )
-            pre_keys, post_keys = split_comm_keys(cfg.comm_keys, self._specs)
+            pre_keys, post_keys = split_comm_keys(cfg.comm_keys, specs)
 
             # placement="pre": the collective feeds the GEMM. The FINE path
             # ignored this (pipeline_fine.py:577-589); here it is honored.
             for key in pre_keys:
-                previous = self._append_comm(steps, key, previous)
+                previous = self._append_comm(steps, key, previous, specs)
 
             compute_index = len(steps)
             steps.append(
@@ -871,15 +931,15 @@ class BlockExpander:
             )
             previous = compute_index
 
-            for group in comm_parallel_groups(post_keys, self._specs):
-                head = self._specs[group[0]]
+            for group in comm_parallel_groups(post_keys, specs):
+                head = specs[group[0]]
                 if head.parallel_group and head.moe_component:
                     previous = self._append_moe_group(
-                        steps, group, previous, device, joins
+                        steps, group, previous, device, joins, specs
                     )
                 else:
                     for key in group:
-                        previous = self._append_comm(steps, key, previous)
+                        previous = self._append_comm(steps, key, previous, specs)
 
         if not steps:
             raise PlacementError("Transformer expansion produced no steps")
@@ -890,8 +950,9 @@ class BlockExpander:
         steps: List[ChainStep],
         key: CommKey,
         previous: Optional[int],
+        specs: CommSpecTable,
     ) -> int:
-        spec = self._specs.require(key)
+        spec = specs.require(key)
         index = len(steps)
         steps.append(
             CommStep(
@@ -917,6 +978,7 @@ class BlockExpander:
         previous: Optional[int],
         device: DeviceId,
         joins: Dict[Tuple[str, DeviceId], StepRef],
+        specs: CommSpecTable,
     ) -> int:
         """Port of ``block_program._attach_moe_parallel_post_group`` (:285-374).
 
@@ -940,7 +1002,7 @@ class BlockExpander:
         from program.policies.routing import MoEComponent, component_of, routing_for_mode
 
         for key in group:
-            spec = self._specs.require(key)
+            spec = specs.require(key)
             parallel_group = parallel_group or spec.parallel_group
             routing_mode = routing_mode or spec.moe_routing_mode
             # The component vocabulary is a CLOSED enum owned by the routing
@@ -981,7 +1043,7 @@ class BlockExpander:
 
         base_index: Optional[int] = None
         if base_key is not None:
-            base_index = self._append_comm(steps, base_key, previous)
+            base_index = self._append_comm(steps, base_key, previous, specs)
 
         residual_index: Optional[int] = None
         extra_consumers: Tuple[StepRef, ...] = ()
@@ -998,10 +1060,10 @@ class BlockExpander:
                 CommStep(
                     index=residual_index,
                     comm_key=residual_key,
-                    spec=self._specs.require(residual_key),
+                    spec=specs.require(residual_key),
                     deps=() if previous is None else (previous,),
                     extra_consumers=(hot_join,),
-                    overlap=self._declare_overlap(self._specs.require(residual_key)),
+                    overlap=self._declare_overlap(specs.require(residual_key)),
                 )
             )
 

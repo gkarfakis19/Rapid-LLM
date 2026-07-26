@@ -179,16 +179,24 @@ def routing_for_mode(mode: str) -> AxisRouting:
 
 
 def routing_policy_for(fw: Any) -> Optional[AxisRouting]:
-    """Select the routing policy declared by the workload's comm table.
+    """Select the routing policy declared by the workload's comm tables.
 
     The mode is DATA on the MoE comm specs (``CommSpec.moe_routing_mode``); a
     workload with no MoE collectives has no routing policy. When ``ep > 1``
     without any MoE collective (dense layers of a mixed model) the EP grad-sync
     still needs a home, so the default :data:`EP_ROUTING` is used.
+
+    Scans ``WorkloadSpec.all_comm_specs()``, i.e. the pipeline-level table AND
+    both block tables. ``moe_routing_mode`` is only ever set by
+    ``train_timing._make_moe_comm_specs``, whose specs are registered on the
+    BLOCK template (``train_timing.py:601,617``) — never in
+    ``_build_comm_metadata`` — so scanning ``fw.spec.comm`` alone found nothing
+    once the dense/MoE block tables stopped being unioned into it
+    (INTERFACES §1.6 amendment, 2026-07-26).
     """
     declared = {
         spec.moe_routing_mode
-        for spec in fw.spec.comm.values()
+        for spec in fw.spec.all_comm_specs()
         if spec.moe_routing_mode is not None
     }
     if len(declared) > 1:
