@@ -38,6 +38,11 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# Raised for deep event graphs. Originally installed for the deleted
+# recursive converter (convert_rapid_llm_graph_to_chakra_et); the surviving
+# recursive consumers that depend on this import-time side effect are
+# program/analytic_sim.py (convert_comm_sizes_to_times) and program/viz.py
+# (_visit) — deep coarse event graphs can exceed the default limit.
 sys.setrecursionlimit(100000)
 
 from graphviz import Digraph
@@ -359,10 +364,10 @@ def run_astra_simulation_only_onepath(
         work_dir = tempfile.mkdtemp(prefix="astrasim_", dir=output_dir)
 
     try:
-        # Convert both forward and backward graphs to Chakra ET format
+        # Convert the Program to a Chakra ET bundle (one Program per call;
+        # the fwd/bwd split lives in the dispatcher's BLOCK programs).
         astrasim_start = time.time()
 
-        # For now, just convert forward graph (can extend to include backward later)
         print(f"[AstraSim] Converting graph...")
         # Imported lazily: the program modules import astrasim_lib.gmap,
         # which initializes the astrasim_lib package, which imports this

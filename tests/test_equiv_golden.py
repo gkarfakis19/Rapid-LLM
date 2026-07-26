@@ -16,10 +16,11 @@
 """Golden-equivalence gates for the AstraSim execution rewrite.
 
 Every spec in ``equiv.configs.MATRIX`` that has a recorded golden is re-run
-against the current code and compared at four levels: per-rank op multisets,
-dependency-DAG hashes, exact AstraSim per-rank wall seconds, and end-to-end
-reported times. Regenerate goldens deliberately with ``python -m
-equiv.capture`` and commit the diff with justification.
+against the current code and compared at five levels: per-rank op multisets,
+dependency-DAG hashes, exact AstraSim per-rank wall seconds, end-to-end
+reported times, and dlsim causal completability (a golden-completed bundle
+must not deadlock in the dlsim replay). Regenerate goldens deliberately
+with ``python -m equiv.capture`` and commit the diff with justification.
 
 Run: pytest tests/test_equiv_golden.py -q          (whole matrix, ~2-4 min)
      pytest tests/test_equiv_golden.py -q -k flat  (subset)

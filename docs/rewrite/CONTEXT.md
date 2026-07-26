@@ -26,7 +26,9 @@ tie discipline, the memory replay's FIFO order, and the pinned emission
 order are defined over children-list adjacency order), and
 `program.legacy_lowering.lower_to_program` stays as the permanent
 emission-ordering pass over those events (its name records its converter
-lineage). Module inventory: `program/__init__.py`.
+lineage). Module inventory: `program/__init__.py`. Test-tier map (golden
+gate, always-on suites, env-gated determinism sweeps, run environment):
+`docs/rewrite/TESTING.md`.
 
 Everything below this section is HISTORICAL: it documents the legacy
 architecture as it existed when the rewrite began (the golden-gate
@@ -110,12 +112,15 @@ converter re-infers a global schedule it was never given.
 
 ## The equivalence safety net (must stay green at every step)
 
-`equiv/` + `tests/test_equiv_golden.py`: 35 golden specs (4 backends ×
-parallelism rows × ZeRO-2/3 × grad-accum × recompute × MoE(hybrid/hier) ×
-inference). Gates per spec: (1) per-rank op multisets, (2) dependency-DAG
-Merkle hashes, (3) exact AstraSim per-rank wall seconds, (4) end-to-end
-reported times, (5) dlsim completability. Regenerating goldens is allowed
-only for deliberate, justified behavior changes, committed with the diff.
+`equiv/` + `tests/test_equiv_golden.py`: 42 golden specs (35 at rewrite
+start; fault, gmap/mesh2d, GQA, ViT and ga2 rows were added since — 4
+backends × parallelism rows × ZeRO-2/3 × grad-accum × recompute ×
+MoE(hybrid/hier) × inference). Gates per spec: (1) per-rank op multisets,
+(2) dependency-DAG Merkle hashes, (3) exact AstraSim per-rank wall
+seconds, (4) end-to-end reported times, (5) dlsim completability.
+Regenerating goldens is allowed only for deliberate, justified behavior
+changes, committed with the diff. See `docs/rewrite/TESTING.md` for the
+full test-tier map and run commands.
 
 Environment: run via `./.venv/bin/python`, with
 `LD_LIBRARY_PATH=/u1/ee/karfakis/gcc-10.2.0/lib64:...anaconda3/lib` for the

@@ -26,8 +26,12 @@ path). What remains:
   the op streams must compare equal and the emitted ET bundles (rank
   ``.et`` files, manifest, ``comm_groups.json``) must be byte-identical.
   This is the process-internal replacement for the old differential: the
-  builder has no hidden iteration-order dependence (the legacy Step-11
-  set-order tie was resolved deterministically in M3a).
+  builder shows no WITHIN-PROCESS nondeterminism (the legacy Step-11
+  set-order tie was resolved deterministically in M3a). Limitation (also
+  applies to the block/coarse/hier twins): both builds run in one
+  interpreter, so PYTHONHASHSEED-dependent set/dict iteration order is
+  identical across them and invisible here — only the golden gate's
+  cross-run byte comparisons catch that class.
 
 Run:
     RAPID_FINE_DIFF=1 ./.venv/bin/python -m pytest tests/test_fine_builder_diff.py -q

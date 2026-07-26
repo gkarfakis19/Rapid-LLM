@@ -20,8 +20,9 @@ The M5 differential (legacy ``convert_comm_sizes_to_times`` +
 EXACT totals + full finish-time maps + converted comm durations; the
 hybrid ``_assign_transformer_durations`` write-back vs
 ``program.retime.apply_block_timings``) ran green pre-cutover on all 10
-synthetic cases and all 31 analytical+hybrid matrix specs (ga2
-final+no_dp, synthetic per-(dp, stage) retime overrides included), then
+synthetic cases and the analytical+hybrid matrix specs (16 specs as of
+M8; differential cases counted arms — ga2 final+no_dp, synthetic
+per-(dp, stage) retime overrides included), then
 again post-cutover against frozen verbatim reference copies of the deleted
 legacy methods. Per that plan, the reference copies died at M6 together
 with the legacy hierarchical retime write-back they mirrored

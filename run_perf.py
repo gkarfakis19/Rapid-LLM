@@ -53,12 +53,7 @@ DEFAULT_OUTPUT_DIR = "output"
 # Global wall-clock timer: report total program runtime at exit
 _program_start_time = time.perf_counter()
 
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "no"}
+from program import _env_flag
 
 def _report_total_wall_time() -> None:
     try:

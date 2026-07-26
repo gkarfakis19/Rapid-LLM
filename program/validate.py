@@ -18,6 +18,13 @@
 ``validate_program`` raises :class:`ProgramInvariantError` on the fatal
 invariants V1-V5 and emits a non-fatal :class:`GroupRaceWarning` for V6.
 
+V6 scope note: every production construction path calls
+``validate_program(..., check_races=False)`` (legacy_lowering, et_emit,
+transforms) — the O(paths) race scan is a test-time/builder-time
+diagnostic only (``ProgramBuilder.finish`` and unit tests enable it). The
+85894c6 deadlock class it describes is enforced in production wire-level
+by the always-on emission postcondition in :mod:`program.et_emit`.
+
 V3 is relaxed per DESIGN §2.2: a ``TransferOp`` with ``src_device ==
 dst_device`` is legal (legacy same-stage PIPELINE edges; the ET emitter
 elides them into plain deps, the analytical evaluator will enqueue them).

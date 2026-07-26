@@ -18,19 +18,17 @@
 import math
 import os
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Tuple, Mapping, Set
+from typing import Dict, List, Optional, Tuple, Mapping
 from train_timing import (
     LLMExecutionDispatcher,
     TimeCalculationLLM,
     GemmType,
-    COMMUNICATION_RULES,
-    COMM_RULE_DEFAULT_KEY,
 )
 from memory_estimation import MemoryEstimator
 from simulate_inference_graph import DecodeSample, InferenceConfig, InferenceEngine
 import llm_util
 import json
-from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
+from timing_model import DirectionTiming, OperationTiming, OperationGroup
 
 def convert_prefix(value: float) -> float:
     """Assign SI unit prefixes to numerical values."""
@@ -958,15 +956,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             kv_heads=self.kv_heads,
             intermediate_size=self.intermediate_size,
             vocab_size=self.vocab_size,
-            num_layers=self.num_layers,
             use_moe=self.use_moe,
             num_experts=self.moe_num_experts,
             top_k=self.moe_top_k,
-            pp=self.pp,
-            tp=self.tp,
-            cp=self.cp,
-            tp_sp=self.tp_sp,
-            moe_dp=self.moe_dp,
             sample_every=sample_every,
         )
 

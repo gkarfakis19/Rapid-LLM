@@ -26,9 +26,10 @@ main ops, then TransferOps in legacy Step-11 creation order), so the
 Amendments from DESIGN.md §2 relative to the panel document:
 
 * same-placement TransferOps are legal (``src_device == dst_device``); the
-  ET emitter elides them into plain deps while the (future, M5) analytical
-  evaluator enqueues them (DESIGN §2.2 — extended: real flattened graphs
-  carry same-stage ``cross_layer`` edges with nonzero sizes, preserved here);
+  ET emitter elides them into plain deps while the analytical evaluator
+  (:mod:`program.analytic_sim`) enqueues them (DESIGN §2.2 — extended: real
+  flattened graphs carry same-stage ``cross_layer`` edges with nonzero
+  sizes, preserved here);
 * per-DP durations are first class: ``ComputeOp.duration`` is a tuple of
   length 1 or ``Program.dp_count`` (DESIGN §2.4, legacy ``duration_profile``);
 * ``Program.devices`` includes devices seen only via collectives, and
@@ -59,7 +60,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from timing_model import CollectiveType
 
@@ -77,6 +78,9 @@ class OpRole(Enum):
     EMBEDDING = auto()
     SOFTMAX = auto()
     OPTIMIZER = auto()
+    # GEMM/JOIN are not stamped by any current builder (lowered ops stay
+    # GENERIC; coarse ops use the five roles above) — reserved API surface
+    # for the post-M9 typed block programs (DESIGN §5 M9).
     GEMM = auto()
     JOIN = auto()
 
@@ -195,7 +199,6 @@ Op = Union[ComputeOp, CollectiveOp, TransferOp]
 @dataclass
 class ProgramMeta:
     label: str = ""
-    optimize_2dmap: Optional[Dict[str, Any]] = None
     misc: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -246,7 +249,12 @@ class Program:
 
 class ProgramBuilder:
     """Append-only builder: ``add_*`` returns the op's uid; uids are the
-    creation sequence, which therefore *is* the program's total order."""
+    creation sequence, which therefore *is* the program's total order.
+
+    No production builder constructs Programs through this class today
+    (lower_to_program and pipeline_coarse build ``Program`` directly) — it
+    is exercised by the unit tests and reserved as the forward-looking
+    construction API for the post-M9 ``program`` id-policy builders."""
 
     def __init__(
         self,
@@ -377,7 +385,7 @@ class ProgramBuilder:
         )
         if compute_devices is not None:
             misc["compute_devices"] = tuple(int(d) for d in compute_devices)
-        meta = ProgramMeta(label=self.meta.label, optimize_2dmap=self.meta.optimize_2dmap, misc=misc)
+        meta = ProgramMeta(label=self.meta.label, misc=misc)
         program = Program(
             layout=self.layout,
             dp_count=self.dp_count,

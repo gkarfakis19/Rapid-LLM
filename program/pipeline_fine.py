@@ -43,14 +43,14 @@ the identical sequence. Reproduced rules, each pinned by the golden gates
 * same-stage zero-byte PIPELINE control edges (lowered to same-device
   TransferOps that the ET emitter elides — DESIGN §2.2).
 
-M3a scope note: the builder owns the fine STRUCTURE; the projection of that
-structure into Program uid order (per-stage Kahn keyed by op_id, Step-11
-transfer replay, collective label assignment, gmap traffic collection +
-SCOTCH stage remap) is shared with the quarantined
+Scope note (post-M8): the builder owns the fine STRUCTURE; the projection
+of that structure into Program uid order (per-stage Kahn keyed by op_id,
+Step-11 transfer replay, collective label assignment, gmap traffic
+collection + SCOTCH stage remap) is PERMANENTLY shared with
 :func:`program.legacy_lowering.lower_to_program`, invoked here over the
-builder's own typed elements. Both the legacy path (flatten -> lower) and
-this builder therefore agree on ordering semantics by sharing code; M3b/M8
-collapse the shared pass into the builder when the legacy graph path dies.
+builder's own typed elements. The ordering pass stays: the pinned emission
+order is defined over children-list adjacency order, which the uid-ordered
+op list cannot represent (see legacy_lowering's module docstring).
 """
 
 from __future__ import annotations
@@ -148,6 +148,59 @@ class FineEdge:
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"FineEdge({self.name},op={self.op_id})"
+
+
+# ---------------------------------------------------------------------------
+# Shared metadata-copy attribute tuples (single home for the three copy
+# helpers: ``_FineExpander._copy_metadata`` below and ``program.transforms``'
+# ``_copy_fine_node_metadata`` / ``_copy_fine_edge_metadata``). The deltas
+# between the tuples are PINNED LEGACY QUIRKS — do not "fix" them without a
+# deliberate, golden-regenerating change:
+#
+# * ``OVERLAP_NODE_COPY_ATTRS`` is the verbatim legacy
+#   ``llm_execution._copy_node_metadata`` list. It OMITS ``is_moe_layer``
+#   (legacy omitted it too — commit 85894c6 audit), so a tp-overlap head
+#   split of a MoE FineNode loses the flag and ``program.memory_sim``
+#   classifies the head as dense in the MoE + tp_overlap memory path.
+#   Bug-compatible by design. It also carries ``param_gather``/``cp_rank``,
+#   which the expander copy does not.
+# * ``FINE_EXPANDER_COPY_ATTRS`` (``_FineExpander._copy_metadata``) INCLUDES
+#   ``is_moe_layer`` but omits ``param_gather``/``cp_rank`` (the expander
+#   only clones within one rank's chain; legacy flattener parity).
+# ---------------------------------------------------------------------------
+
+FINE_EXPANDER_COPY_ATTRS: Tuple[str, ...] = (
+    "micro_batch_index",
+    "layer_index",
+    "direction",
+    "stage_id",
+    "tp_rank",
+    "mem_kind",
+    "recompute",
+    "is_moe_layer",
+)
+
+OVERLAP_NODE_COPY_ATTRS: Tuple[str, ...] = (
+    "micro_batch_index",
+    "layer_index",
+    "direction",
+    "stage_id",
+    "tp_rank",
+    "cp_rank",
+    "mem_kind",
+    "recompute",
+    "param_gather",
+)
+
+OVERLAP_EDGE_COPY_ATTRS: Tuple[str, ...] = (
+    "local_hw_id",
+    "stage_id",
+    "micro_batch_index",
+    "layer_index",
+    "direction",
+    "tp_rank",
+    "cp_rank",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +343,7 @@ class _FineExpander:
             transformer_mode = False
 
         if transformer_mode == "":
-            raise Exception(
+            raise ValueError(
                 "Invalid _ensure_zero3_per_rank_edges call. At least one of "
                 "(rank_tails,rank_heads) or (hw_ids) must be provided."
             )
@@ -710,16 +763,9 @@ class _FineExpander:
         return comm_edge
 
     def _copy_metadata(self, source: Any, target: Any) -> None:
-        for attr in (
-            "micro_batch_index",
-            "layer_index",
-            "direction",
-            "stage_id",
-            "tp_rank",
-            "mem_kind",
-            "recompute",
-            "is_moe_layer",
-        ):
+        # Attribute tuple shared with program.transforms' overlap copies —
+        # see FINE_EXPANDER_COPY_ATTRS for the pinned deltas between them.
+        for attr in FINE_EXPANDER_COPY_ATTRS:
             if hasattr(source, attr):
                 setattr(target, attr, getattr(source, attr))
 
@@ -908,14 +954,15 @@ def build_fine_program(
         gmap_workdir=gmap_workdir,
     )
     program.meta.label = "fine_no_dp" if no_data_parallel else "fine"
-    if optimize_2dmap:
-        program.meta.optimize_2dmap = dict(optimize_2dmap)
     # M3b: the memory replay (program/memory_sim.py) consumes the builder's
     # own proto graph — the event-loop replica needs the children-list
     # adjacency order, which the uid-ordered op list does not preserve (uid
     # order is the per-stage Kahn emission order). The proto root is a fine
-    # builder product (no legacy Graph involved); collapsing it into the op
-    # list is M8 work. ``granularity`` is the typed replacement of the legacy
+    # builder product (no legacy Graph involved). M8 resolution: the proto
+    # graph is NOT collapsed into the op list — the memory replay's FIFO
+    # discipline needs the children-list adjacency order that uid order
+    # cannot represent, so it stays, by design (see memory_sim's docstring).
+    # ``granularity`` is the typed replacement of the legacy
     # ``_is_non_flattened`` name-sniffing guard in MemoryEstimator.
     program.meta.misc["granularity"] = "fine"
     program.meta.misc["fine_proto_root"] = fine_root

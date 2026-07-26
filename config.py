@@ -15,7 +15,6 @@
 
 from dataclasses import dataclass, field
 import math
-import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import yaml as _yaml
@@ -34,13 +33,7 @@ _PRECISION_DTYPE_BYTES = {
 }
 
 
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "no"}
-
+from program import _env_flag
 
 _MOE_PADDING_WARNED = False
 _MLA_DECODE_FLASH_WARNED = False

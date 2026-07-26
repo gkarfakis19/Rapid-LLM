@@ -22,8 +22,10 @@ coarse schedule events (:class:`program.schedule.ComputeEvent` /
 FineNode`/``FineEdge``. The classification is duck-typed exactly like the
 legacy renderer's event branches:
 
-* ``comm_size_bytes`` present -> comm event: green when ``is_dp``, white for
-  zero-byte same-stage PIPELINE control edges, yellow otherwise; the label
+* ``comm_size_bytes`` present -> comm event: green when ``is_dp``, white
+  for EVERY ``PIPELINE`` comm event — including byte-carrying cross-stage
+  ``cross_layer`` transfers; the legacy renderer never checked bytes —
+  yellow for the remaining (non-dp, non-PIPELINE) collectives; the label
   shows ``local_hw_id`` when placed;
 * ``hw_id`` present -> compute event: lightblue forward / lightcoral
   backward; the label shows the scalar duration or the per-DP

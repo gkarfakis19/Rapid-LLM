@@ -50,6 +50,19 @@ Heavier submodules are imported lazily by their consumers; this package
 import stays light.
 """
 
+import os
+
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords
 
-__all__ = ["CANONICAL_AXES", "RankLayout", "cluster_coords"]
+__all__ = ["CANONICAL_AXES", "RankLayout", "cluster_coords", "_env_flag"]
+
+
+def _env_flag(name: str) -> bool:
+    """Truthy env-flag check (``RAPID_*`` switches). Single shared home —
+    formerly duplicated byte-identically in config.py, run_perf.py,
+    train_timing.py, llm_execution.py and program/memory_sim.py."""
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "no"}

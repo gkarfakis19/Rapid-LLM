@@ -15,31 +15,23 @@
 
 import math
 import os
-import json
 import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
+from typing import Any, Dict, Tuple, Optional, List, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from llm_execution import ExecutionMode, LLMExecutionDispatcher
+from program import _env_flag
 from program.block import BlockTemplate
 from program.block_program import TransformerBlockSpec
 from program.schedule import ScheduleInputs
 import llm_util
 from memory_estimation import MemoryEstimator
 from base_timing import TimeCalculation
-from itertools import zip_longest  # for element-wise aggregation of memory access lists
 from timing_model import CollectiveType, CommSpec, DirectionTiming, OperationTiming, OperationGroup
 import yaml
 
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "no"}
 
-    
 class ParallelismMode(Enum):
     TENSOR = "tensor"
     TENSOR_SEQUENCE = "tensor_sequence"
@@ -339,8 +331,6 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_astrasim_per_rank_backward: Optional[List[float]] = None
         self.transformer_astrasim_per_rank_forward_moe: Optional[List[float]] = None
         self.transformer_astrasim_per_rank_backward_moe: Optional[List[float]] = None
-        self.pipeline_astrasim_time: Optional[float] = None
-        self.pipeline_astrasim_per_rank: Optional[List[float]] = None
         self.pipeline_graph_no_dp: Optional[ScheduleInputs] = None
 
     def _sequence_parallel_degree(self) -> int:
@@ -5043,8 +5033,6 @@ class TimeCalculationLLM(TimeCalculation):
             "transformer_f_moe": moe_transformer_f,
             "transformer_b_moe": moe_transformer_b,
             "optimizer": self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size),
-            "cross_layer_f": 0.0,
-            "cross_layer_b": 0.0,
         }
         comp_times_no_dp = None
         if need_no_dp_variant:
@@ -5084,7 +5072,6 @@ class TimeCalculationLLM(TimeCalculation):
             "dp_microbatch_mode": getattr(self, "dp_microbatch", "every_mb"),
             "moe_layer_mask": moe_layer_mask,
             "model_type": self.model_type,
-            "disable_embedding_unembedding": self.disable_embedding_unembedding,
         }
         misc_metadata_final = dict(misc_metadata)
         misc_metadata_final["grad_accum_cycle"] = "final"

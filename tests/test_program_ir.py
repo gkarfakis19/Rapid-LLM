@@ -371,6 +371,38 @@ def test_postcondition_passes_on_consistent_group(tmp_path):
     emit_chakra(b.finish(), str(tmp_path))  # must not raise
 
 
+def test_interning_rejects_label_with_divergent_member_sets(tmp_path):
+    # One label mapping to two DIFFERENT member sets at the same dp index:
+    # before the guard, the (label, dp) -> gid interning silently last-won
+    # and the losing ops were stamped with a pg_name of a communicator
+    # their rank does not belong to — which the member-iterating
+    # postcondition never compared (silent AstraSim deadlock). V5 does not
+    # cross-check label/member-set consistency across ops, so the emitter
+    # must catch it.
+    b = ProgramBuilder(dp_count=1)
+    gk_a = b.group("tp", [1, 2], "ar")
+    gk_b = b.group("tp", [0, 3], "ar")
+    b.add_collective("ar_coll", 1, AR, 128, label="ar", group=gk_a, participants=2)
+    b.add_collective("ar_coll", 0, AR, 128, label="ar", group=gk_b, participants=2)
+    prog = b.finish()
+    with pytest.raises(EmissionError, match="maps to two different"):
+        emit_chakra(prog, str(tmp_path))
+
+
+def test_postcondition_rejects_records_on_nonmember_rank():
+    # Coverage-hole guard: a collective recorded under a gid on a rank that
+    # is NOT in gid_members[gid] must trip the postcondition (before the
+    # fix, only member ranks were compared, so the record was invisible).
+    from program.et_emit import _check_group_order_postcondition
+
+    node_a = new_comm_node(0, "ar", pb.ALL_REDUCE, 512)
+    node_b = new_comm_node(0, "ar", pb.ALL_REDUCE, 512)
+    group_records = {"1000": {0: [(node_a, 0, 512)], 5: [(node_b, 0, 512)]}}
+    gid_members = {"1000": [0, 1]}
+    with pytest.raises(EmissionError, match="non-member ranks"):
+        _check_group_order_postcondition(group_records, gid_members, 1, 2)
+
+
 # ---------------------------------------------------------------------------
 # EmittedBundle equality against a hand-built expected ET
 # ---------------------------------------------------------------------------

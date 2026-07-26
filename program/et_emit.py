@@ -177,6 +177,15 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
             "exists during the migration (DESIGN.md §3; the pure 'program' "
             "policy lands at M9)"
         )
+    if program.meta.misc.get("granularity") == "coarse":
+        # COARSE Programs are built with validation off and legally violate
+        # V1/V5 (late-attached GPipe/ZeRO parents, unlabeled EP-sync
+        # collectives) — validate_program below would fail with a confusing
+        # V1 message. Every other coarse consumer guards like this too.
+        raise EmissionError(
+            "coarse Programs are not emittable — lower them first via "
+            "program.pipeline_coarse.lower_coarse_for_emission"
+        )
     validate_program(program, check_races=False)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -229,6 +238,20 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
                 members_to_gid[members_tuple] = gid
                 if gid not in gid_members:
                     gid_members[gid] = list(members_tuple)
+            existing = label_dp_gid.get((label, dp_idx))
+            if existing is not None and existing != gid:
+                # One label mapping to two different member sets at the same
+                # dp index would silently last-win here, stamping the losing
+                # ops with a pg_name of a communicator their rank does not
+                # belong to — the silent-AstraSim-deadlock class the group-
+                # order postcondition exists to make loud. Fail at interning.
+                raise EmissionError(
+                    f"collective label '{label}' maps to two different "
+                    f"communicator member sets at dp index {dp_idx}: gid "
+                    f"{existing} (members {gid_members.get(existing)}) vs gid "
+                    f"{gid} (members {gid_members.get(gid)}). One label must "
+                    "identify exactly one communicator per dp index."
+                )
             label_dp_gid[(label, dp_idx)] = gid
 
     # --- Phase A: main ops in uid order ------------------------------------
@@ -329,7 +352,10 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
             continue  # same-device transfers are elided (DESIGN §2.2)
         if transfer.send_seq is None:
             # Builder-made transfer without explicit legacy ordering: emit the
-            # send/recv pair in uid order after all sequenced events.
+            # send/recv pair in uid order after all sequenced events. Every
+            # production Program reaches emission via legacy_lowering, which
+            # always sequences cross-device transfers — only ProgramBuilder-
+            # built programs (unit tests; the M9 construction API) hit this.
             events.append(((max_seq + 1, next(auto_seq)), "send", transfer))
             events.append(((max_seq + 1, next(auto_seq)), "recv", transfer))
         else:
@@ -414,7 +440,14 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
             dep_op = ops[dep]
             for dp_idx in range(dp_count):
                 rank = rank_for(op.device, dp_idx)
-                node = traces[rank].nodes[et_ids[(op.uid, rank)]]
+                own_id = et_ids.get((op.uid, rank))
+                if own_id is None:
+                    raise EmissionError(
+                        f"op {op.uid} ('{op.name}') with post_deps has no ET "
+                        f"node on rank {rank} (skipped is_dp collective at "
+                        "dp <= 1?)"
+                    )
+                node = traces[rank].nodes[own_id]
                 dep_id = et_ids.get((dep, rank_for(dep_op.device, dp_idx)))
                 if dep_id is None:
                     raise EmissionError(
@@ -428,7 +461,7 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
         trace.renumber_control_priority()
 
     # --- ALWAYS-ON POSTCONDITION: per-group collective sequences -----------
-    _check_group_order_postcondition(group_records, gid_members, dp_count, ns_initial, device_index)
+    _check_group_order_postcondition(group_records, gid_members, dp_count, ns_initial)
 
     # --- write ETs ----------------------------------------------------------
     for trace in traces.values():
@@ -454,13 +487,13 @@ def _check_group_order_postcondition(
     gid_members: Dict[str, List[int]],
     dp_count: int,
     ns_initial: int,
-    device_index: Dict[int, int],
 ) -> None:
     """AstraSim matches collectives within a communicator by PER-RANK ISSUE
     ORDER; if two members issue a group's collectives in different relative
     orders the simulation deadlocks silently (CONTEXT.md, verified). Assert
-    every member rank's post-renumber (comm_type, size) sequence for each
-    wire group is identical."""
+    (a) every rank a group's collectives were recorded on is a member of
+    that group, and (b) every member rank's post-renumber (comm_type, size)
+    sequence for each wire group is identical."""
 
     for gid, per_rank in group_records.items():
         members = gid_members.get(gid)
@@ -468,6 +501,18 @@ def _check_group_order_postcondition(
             # dp stage group "stage_idx + 1": members across dp of one stage.
             stage_idx = int(gid) - 1
             members = [dp_idx * ns_initial + stage_idx for dp_idx in range(dp_count)]
+        non_members = set(per_rank.keys()) - set(members)
+        if non_members:
+            # A collective stamped with a pg_name whose member list does not
+            # include its own rank would never be compared by the sequence
+            # check below — and deadlocks AstraSim silently at runtime.
+            raise EmissionError(
+                f"group-order postcondition violated for communicator group "
+                f"{gid} (members {members}): collectives were recorded on "
+                f"non-member ranks {sorted(non_members)}. Ops are stamped "
+                "with a pg_name of a communicator their rank does not "
+                "belong to, which deadlocks AstraSim silently."
+            )
         sequences: Dict[int, List[Tuple[int, int]]] = {}
         for rank in members:
             records = per_rank.get(rank, [])

@@ -406,7 +406,6 @@ class CommEvent:
         "comm_interconnect_type",
         "local_hw_id",
         "tp_shard",
-        "comm_key",
         "zero3_offset_hint",
         "micro_batch_index",
         "layer_index",
@@ -427,7 +426,6 @@ class CommEvent:
         is_dp: bool = False,
         local_hw_id: Optional[int] = None,
         tp_shard: bool = False,
-        comm_key: Optional[str] = None,
     ) -> None:
         self.name = name
         self.op_id: Optional[int] = None
@@ -444,7 +442,6 @@ class CommEvent:
         self.comm_interconnect_type = comm_interconnect_type
         self.local_hw_id = local_hw_id
         self.tp_shard = bool(tp_shard)
-        self.comm_key = comm_key
         #: "fwd"/"bwd" for ZeRO-3 transformer gathers — the typed stand-in
         #: for the legacy ``"bwd" in edge.name`` offset hack.
         self.zero3_offset_hint: Optional[str] = None
@@ -526,7 +523,6 @@ def build_pipeline_events(spec: ScheduleSpec) -> PipelineEvents:
             is_dp=is_dp,
             local_hw_id=int(local_hw_id) if local_hw_id is not None else None,
             tp_shard=meta.tp_shard,
-            comm_key=comm_key,
         )
         return _stamp(event)
 

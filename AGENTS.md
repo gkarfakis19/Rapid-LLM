@@ -12,4 +12,6 @@ RAPID-LLM quick brief for future agents
 - Key environment flags: `RAPID_VISUALIZE_GRAPHS`, `RAPID_PERSIST_ASTRASIM_ARTIFACTS`, `RAPID_PERSIST_ARTIFACT_VIZ`, `RAPID_ASTRA_CACHE_MODE` (default CACHE_READWRITE).
 
 
-Use the python interpreter in $REPO_ROOT$/venv/bin/python to run the scripts, not the system python/python3 binaries.
+Use the python interpreter in $REPO_ROOT/.venv/bin/python to run the scripts, not the system python/python3 binaries.
+
+Test-tier map (golden gate, always-on suites, env-gated determinism sweeps, run environment incl. LD_LIBRARY_PATH): docs/rewrite/TESTING.md.

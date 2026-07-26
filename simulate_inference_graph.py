@@ -20,7 +20,6 @@ This module extends RAPID-LLM's LLM training simulation to support full inferenc
 workflows including both prefill and autoregressive decode phases.
 """
 
-import math
 import os
 import shutil
 from typing import Any, Callable, Dict, List, Tuple, Optional
@@ -31,7 +30,12 @@ from train_timing import LLMExecutionDispatcher
 
 @dataclass
 class InferenceConfig:
-    """Configuration for inference simulation parameters."""
+    """Configuration for inference simulation parameters.
+
+    Decode steps re-derive all parallelism degrees from the fresh
+    ``TimeCalculationLLMInference`` instance, so this carrier holds only
+    the fields the decode driver actually reads.
+    """
     batch_size: int
     seq_len: int  # prefill sequence length
     decode_len: int  # number of decode steps
@@ -40,17 +44,10 @@ class InferenceConfig:
     kv_heads: int
     intermediate_size: int
     vocab_size: int
-    num_layers: int
-    use_moe: bool 
+    use_moe: bool
     num_experts: int
     top_k: int
 
-    
-    moe_dp: int = 1  # inference expert pool expansion (used to size MoE routing group)
-    pp: int = 1  # layer parallel
-    tp: int = 1  # tensor parallel degree
-    cp: int = 1  # context parallel degree
-    tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
 
@@ -61,7 +58,6 @@ class DecodeSample:
     current_seq_len: int
     execution_time: float
     execution_energy: float
-    graph_root: Any
     kv_cache_tokens: int
 
 
@@ -84,9 +80,6 @@ class DecodeGraph:
         hw_config,
         model_config,
         time_calc_cls: Callable[..., Any],
-        use_moe,
-        num_experts,
-        top_k,
     ):
         self.config = config
         self.hw_config = hw_config
@@ -114,7 +107,7 @@ class DecodeGraph:
         self.v_head_dim = getattr(attention_cfg, "v_head_dim", None)
         self.run_type = str(getattr(model_cfg, "run_type", "inference")).lower()
 
-    def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
+    def build_decode_graph(self) -> Tuple[float, float, List[DecodeSample]]:
         """
         Build decode phase using sample-based approach for efficiency.
 
@@ -122,7 +115,7 @@ class DecodeGraph:
         and integrate between sample points using linear interpolation.
 
         Returns:
-            Tuple of (total_decode_time, list_of_decode_samples)
+            Tuple of (total_decode_time, total_decode_energy, decode_samples)
         """
         # Determine decode steps we actually simulate
         sample_points = self._generate_sample_points()
@@ -157,7 +150,6 @@ class DecodeGraph:
                     current_seq_len=total_seq_len,
                     execution_time=sample_time,
                     execution_energy=sample_energy,
-                    graph_root=None,
                     kv_cache_tokens=total_seq_len,
                 )
             )
@@ -190,8 +182,10 @@ class DecodeGraph:
         step_id: int,
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
-    ) -> float:
-        """Execute decode step using appropriate RAPID-LLM execution mode."""
+    ) -> Tuple[float, float]:
+        """Execute decode step using appropriate RAPID-LLM execution mode.
+
+        Returns ``(execution_time, execution_energy)``."""
 
         if not self.hw_config or not self.model_config:
             raise RuntimeError("Hardware config and model config are required for decode step execution.")
@@ -255,12 +249,13 @@ class DecodeGraph:
             )
         return result.total_time, energy
 
-    def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
+    def _integrate_decode_samples(self, samples: List[DecodeSample]) -> Tuple[float, float]:
         """
         Integrate execution times between sample points using linear interpolation.
 
         Since attention cost grows linearly, we can use trapezoid rule integration
-        to get accurate total time from sparse samples.
+        to get accurate total time from sparse samples. Returns
+        ``(total_time, total_energy)``.
         """
         if not samples:
             raise ValueError("No decode samples available for integration")
@@ -346,12 +341,12 @@ class InferenceEngine:
         self.time_calc_cls = time_calc_cls
 
 
-    def _build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
+    def _build_decode_graph(self) -> Tuple[float, float, List[DecodeSample]]:
         """
         Build decode phase using sample-based approach with proper RAPID-LLM integration.
 
         Returns:
-            Tuple of (total_decode_time, decode_samples)
+            Tuple of (total_decode_time, total_decode_energy, decode_samples)
         """
         if self.time_calc_cls is None:
             raise RuntimeError("InferenceEngine requires time_calc_cls for decode graph building.")
@@ -361,9 +356,6 @@ class InferenceEngine:
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,
-            use_moe=self.config.use_moe,
-            num_experts=self.config.num_experts,
-            top_k=self.config.top_k,
         )
 
         return self.decode_graph.build_decode_graph()

@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TYP
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
+from program import _env_flag
 from program.block_program import TransformerBlockSpec
 from program.layout import RankLayout
 from program.schedule import ScheduleInputs
@@ -30,22 +31,6 @@ from util import log_message
 
 if TYPE_CHECKING:
     from train_timing import TimeCalculationLLM
-
-
-def _mode_label(mode: Any) -> str:
-    for attr in ("value", "name"):
-        if hasattr(mode, attr):
-            return str(getattr(mode, attr)).lower()
-    return str(mode).lower()
-
-
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "no"}
-
 
 
 
@@ -59,13 +44,11 @@ class ExecutionMode(Enum):
     
 @dataclass
 class ExecutionResult:
+    # M7/M8 note: the legacy ``graph_root``/``mode`` compat fields were
+    # retired — no caller ever read them (callers consume ``total_time``
+    # only; the executed Programs live on the dispatcher as
+    # ``coarse_program``/``fine_program``).
     total_time: float
-    #: The Program the mode executed (COARSE for analytical/hybrid/
-    #: hierarchical, FINE for flattened). M7 note: this was the legacy
-    #: pipeline-graph root; callers only ever kept it for reference, so the
-    #: typed Program took its place when ``construct_fwd_bwd_graph`` retired.
-    graph_root: Any
-    mode: ExecutionMode
 
 
 @dataclass
@@ -502,12 +485,12 @@ class LLMExecutionDispatcher:
             )
 
         total_time *= self._pipeline_interleave_scale()
-        return ExecutionResult(total_time=total_time, graph_root=coarse_program, mode=declared_mode)
+        return ExecutionResult(total_time=total_time)
 
     def _run_hybrid(self) -> ExecutionResult:
         from program.retime import apply_block_timings
 
-        transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+        transformer_time, moe_transformer_time = self._run_transformer_astrasim()
 
         # Build from the pristine analytical comp_times (the legacy pipeline
         # graph predated the write-back), then retime the layer ops.
@@ -542,7 +525,7 @@ class LLMExecutionDispatcher:
         from program.pipeline_coarse import lower_coarse_for_emission
         from program.retime import apply_block_timings
 
-        transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
+        transformer_time, moe_transformer_time = self._run_transformer_astrasim()
 
         if not self.pipeline_graph:
             raise RuntimeError("Pipeline graph is not available for AstraSim execution")
@@ -594,12 +577,10 @@ class LLMExecutionDispatcher:
             persist_artifacts=self.time_calc.persist_astrasim_artifacts,
             faulty_links_override=self._fault_override("pipeline"),
         )
-        self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
-        self.time_calc.pipeline_astrasim_time = max_sec
         if max_sec <= 0:
             raise RuntimeError("AstraSim pipeline execution returned non-positive duration")
         max_sec *= self._pipeline_interleave_scale()
-        return ExecutionResult(total_time=max_sec, graph_root=coarse_program, mode=ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
+        return ExecutionResult(total_time=max_sec)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
         """Flattened execution via ``program.pipeline_fine.build_fine_program``.
@@ -718,15 +699,8 @@ class LLMExecutionDispatcher:
         if max_sec <= 0:
             raise RuntimeError("AstraSim flattened execution returned non-positive duration")
 
-        self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
-        self.time_calc.pipeline_astrasim_time = max_sec
-        self.time_calc.flattened_astrasim_per_rank = per_rank_sec
-        self.time_calc.flattened_astrasim_total = max_sec
-
         return ExecutionResult(
             total_time=max_sec * self._pipeline_interleave_scale(),
-            graph_root=program,
-            mode=ExecutionMode.FULL_ASTRASIM_FLATTENED,
         )
 
     def build_fine_program_for_memory(self) -> Any:
@@ -853,10 +827,7 @@ class LLMExecutionDispatcher:
 
     def _run_transformer_astrasim(
         self,
-        mode: ExecutionMode,
     ) -> Tuple[Optional[TransformerTimings], Optional[TransformerTimings]]:
-        del mode  # mode currently unused but kept for signature consistency
-
         blocks = self.transformer_blocks
         has_dense = blocks is not None and blocks.dense is not None
         has_moe = blocks is not None and blocks.moe is not None

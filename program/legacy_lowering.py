@@ -15,10 +15,14 @@
 
 """Event graph -> Program emission-ordering pass (PERMANENT — kept at M8).
 
-``lower_to_program`` turns a proto event DAG — the coarse schedule events
-(:mod:`program.schedule`) for the hierarchical pipeline emission
-(:func:`program.pipeline_coarse.lower_coarse_for_emission`) — into a
-validated, emission-ordered :class:`~program.ir.Program`. It is deliberately
+``lower_to_program`` turns a proto event DAG into a validated,
+emission-ordered :class:`~program.ir.Program`. It is the shared ordering
+pass for ALL THREE proto-event producers: the coarse schedule events
+(:mod:`program.schedule`) lowered for the hierarchical pipeline emission
+(:func:`program.pipeline_coarse.lower_coarse_for_emission`), the FINE
+builder's ``FineNode``/``FineEdge`` roots
+(:func:`program.pipeline_fine.build_fine_program`), and the BLOCK builder's
+roots (:func:`program.block_program.build_block_program`). It is deliberately
 load-bearing after the legacy retirement: the pinned Chakra ET emission
 order (per-stage Kahn toposort keyed on ``op_id``, Step-11 transfer replay,
 collective label assignment) is defined over children-list adjacency order,
@@ -831,7 +835,6 @@ def lower_to_program(
     )
     meta = ProgramMeta(
         label="legacy_lowering",
-        optimize_2dmap=dict(optimize_cfg) if isinstance(optimize_cfg, dict) else optimize_cfg,
         misc={
             "num_stages_initial": num_stages,
             "compute_devices": tuple(s for s in stage_ids if s in initial_stages),

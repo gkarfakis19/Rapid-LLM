@@ -53,19 +53,12 @@ from heapq import heappop, heappush
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from memory_estimation import MemKind, NON_TRANSFORMER_KINDS, TRANSFORMER_OP_KINDS
+from program import _env_flag
 from program.ir import Program
 from program.pipeline_fine import FineEdge, FineNode
 
 debug = False
 BYTES_PER_GIB = 1024 ** 3
-
-
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    normalized = value.strip().lower()
-    return normalized not in {"", "0", "false", "no"}
 
 
 def fine_proto_root(program: Program) -> Any:
@@ -263,11 +256,7 @@ def simulate_memory(
     output_folder: str = "output/LLM/",
     filename: str = "memory_graph",
 ) -> Tuple[float, float]:
-    """Replay the FINE program and return ``(finish_time, peak_gib)``.
-
-    The full per-device summary (the legacy ``memory_monitor_summary``) is
-    stored at ``program.meta.misc["memory_summary"]``.
-    """
+    """Replay the FINE program and return ``(finish_time, peak_gib)``."""
     root = fine_proto_root(program)
     pipeline_pp = int(program.meta.misc.get("fine_pp", 0) or 0)
 
@@ -536,6 +525,5 @@ def simulate_memory(
 
     summary = memory_snapshot.summary()
     memory_snapshot.close()
-    program.meta.misc["memory_summary"] = summary
     peak_mem = max(entry["peak_gib"] for entry in summary) if summary else 0.0
     return time, peak_mem
