@@ -379,15 +379,22 @@ def run_astra_simulation_only_onepath(
     dp_override: Optional[int] = None,
     persist_artifacts: Optional[bool] = None,
     faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
+    rank_layout: Optional[Dict[str, Any]] = None,
 ):
     """
     Run AstraSim simulation on RAPID-LLM graph and print results.
 
     Args:
-        fwdbwd_root: Forward and backward graph root node
+        fwdbwd_root: Forward and backward graph root node, or (since M3a) a
+            ``program.ir.Program`` — Programs are emitted directly through
+            ``program.et_emit.emit_chakra`` with their own ``dp_count``; the
+            legacy-graph entry stays for the hybrid/hierarchical paths.
         time_calc_obj: TimeCalculationLLM object with hw_config and dp attributes
         output_dir: Directory for temporary files and results
         faulty_links_override: Optional remapped faulty link list for this run
+        rank_layout: Explicit rank-layout descriptor (axes filter derivation).
+            Defaults to the Program's layout for Program inputs, or the
+            legacy root's ``_astrasim_rank_layout`` attribute otherwise.
     """
     print("\n" + "="*60)
     print("ASTRASIM SIMULATION RESULTS")
@@ -410,14 +417,35 @@ def run_astra_simulation_only_onepath(
 
         # For now, just convert forward graph (can extend to include backward later)
         print(f"[AstraSim] Converting graph...")
-        user_dp = max(1, getattr(time_calc_obj, "dp", 1))
-        run_type = getattr(getattr(time_calc_obj, "model", None), "run_type", "")
-        dp_count = dp_override if dp_override is not None else user_dp
-        fwd_et_prefix, rank_ids, fwd_manifest = convert_rapid_llm_graph_to_chakra_et(
-            fwdbwd_root,
-            dp_count,
-            work_dir,
-        )
+        # Lazy import for the astrasim_lib <-> program cycle reason as in
+        # convert_rapid_llm_graph_to_chakra_et.
+        from program.ir import Program as _Program
+
+        is_program = isinstance(fwdbwd_root, _Program)
+        if is_program:
+            from program.et_emit import emit_chakra
+
+            # The Program carries its own emission dp (the builder already
+            # applied any inference dp_override when constructing it).
+            dp_count = max(1, int(fwdbwd_root.dp_count))
+            bundle = emit_chakra(fwdbwd_root, work_dir, id_policy="legacy")
+            fwd_et_prefix, rank_ids, fwd_manifest = (
+                bundle.et_prefix,
+                bundle.rank_ids,
+                bundle.manifest_path,
+            )
+            print(
+                f"[AstraSim] Generated ET files for ranks: {fwd_et_prefix}.{{0..{len(rank_ids)-1}}}.et"
+            )
+            print(f"[AstraSim] Wrote graph manifest to {fwd_manifest}")
+        else:
+            user_dp = max(1, getattr(time_calc_obj, "dp", 1))
+            dp_count = dp_override if dp_override is not None else user_dp
+            fwd_et_prefix, rank_ids, fwd_manifest = convert_rapid_llm_graph_to_chakra_et(
+                fwdbwd_root,
+                dp_count,
+                work_dir,
+            )
         rank_count = len(rank_ids)
         # Astrasim doesn't play well with only 1 rank.
         # When that happens, let's duplicate to 2 ranks. No collectives exist between the two so this should not have an effect.
@@ -459,7 +487,12 @@ def run_astra_simulation_only_onepath(
         # convert_rapid_llm_graph_to_chakra_et.
         from program.legacy_lowering import _extract_axis_layout
 
-        rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
+        if rank_layout is None:
+            if is_program:
+                if fwdbwd_root.layout.axis_order:
+                    rank_layout = fwdbwd_root.layout.descriptor()
+            else:
+                rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
         axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)
         preferred_axes_for_synthetic = tuple(axis_order) if axis_order else tuple()
         axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)

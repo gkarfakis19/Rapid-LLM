@@ -15,12 +15,17 @@
 
 """``program`` — the typed placed-operation IR core (docs/rewrite/DESIGN.md).
 
-Shipped so far: :mod:`program.layout` (M0, the unified ``RankLayout``) and
-the M1 shadow-mode stack — :mod:`program.ir` (the Program IR),
+Shipped so far: :mod:`program.layout` (M0, the unified ``RankLayout``), the
+M1 shadow-mode stack — :mod:`program.ir` (the Program IR),
 :mod:`program.validate` (invariants V1-V6), :mod:`program.legacy_lowering`
 (legacy graph -> Program, transitional) and :mod:`program.et_emit`
-(Program -> Chakra ET bundle). Heavier submodules are imported lazily by
-their consumers; this package import stays light.
+(Program -> Chakra ET bundle) — and the M3a FINE builder:
+:mod:`program.schedule` (``ScheduleSpec`` + the GPipe event enumeration),
+:mod:`program.block` (``BlockTemplate``/``CommMeta``),
+:mod:`program.pipeline_fine` (``build_fine_program``, the direct flattened
+builder that replaced ``PipelineGraphFlattener`` on the execution path) and
+:mod:`program.transforms` (TP/TP-SP/CP overlap). Heavier submodules are
+imported lazily by their consumers; this package import stays light.
 """
 
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords

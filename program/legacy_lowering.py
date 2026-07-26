@@ -1016,10 +1016,21 @@ def _replay_step11(
             info = collective_info[task] if task in collective_info else compute_info[task]
             if not info["pipeline_deps"] and not info.get("local_pipeline_deps"):
                 continue
-            # key=op_id ONLY: op_ids repeat (tp-overlap head/tail share one),
-            # and legacy's stable sort falls back to set iteration order —
-            # which our identically-built sets reproduce in-process.
-            for parent in sorted(info["pipeline_deps"], key=_op_id_key):
+            # Primary key = op_id (legacy). op_ids repeat (the tp-overlap
+            # head split reuses its source's op_id), where legacy's stable
+            # sort fell back to SET ITERATION ORDER — i.e. object addresses,
+            # not reproducible across graph instances (M3a differential
+            # finding). The tie is broken here by the task's emission
+            # position (task_uid) instead: deterministic, identical for the
+            # legacy-flatten and fine-builder paths, and invisible to every
+            # golden gate (the tied transfers are same-payload control
+            # sends; canonical forms and the manifest sort ignore the swap,
+            # and wall seconds never depended on the legacy coin flip —
+            # the gates pass today across processes with varying id order).
+            for parent in sorted(
+                info["pipeline_deps"],
+                key=lambda p: (_op_id_key(p), task_uid.get(p, len(ops))),
+            ):
                 if parent not in collective_info and parent not in compute_info:
                     continue  # orphaned parent, ignored (legacy TODO comment)
                 _ensure_pipeline(parent, task)

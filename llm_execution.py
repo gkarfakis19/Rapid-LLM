@@ -1500,7 +1500,133 @@ class LLMExecutionDispatcher:
             raise RuntimeError("Pipeline graph root is not available for flattening")
         if not self.transformer_graph:
             raise RuntimeError("Transformer graph metadata is required for flattening")
+        # M3a cutover (docs/rewrite/DESIGN.md §5): the FINE-program builder is
+        # the default flattened execution path; RAPID_LEGACY_FLATTEN=1 keeps
+        # the legacy flattener path (removed at M3b together with the memory
+        # flattening, which STAYS legacy either way).
+        if _env_flag("RAPID_LEGACY_FLATTEN"):
+            return self._run_full_astrasim_flattened_legacy()
+        return self._run_full_astrasim_flattened_fine()
 
+    def _run_full_astrasim_flattened_fine(self) -> ExecutionResult:
+        """Flattened execution via ``program.pipeline_fine.build_fine_program``.
+
+        Builds the flattened Program directly from the pipeline graph's
+        ScheduleSpec + the transformer graph's BlockTemplate (no legacy
+        flattener clone), applies the Program-level overlap transforms, and
+        feeds the Program straight into ``run_astra_simulation_only_onepath``.
+        The coarse ``self.pipeline_root`` is left untouched so the memory
+        path (``build_flattened_root_for_memory``) keeps using the legacy
+        flattener until M3b.
+        """
+        from program.block import BlockTemplate
+        from program.pipeline_fine import build_fine_program
+        from program.schedule import ScheduleSpec
+
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        include_backward = run_type != "inference"
+        # _prepare_execution_graphs builds the final-cycle graph with the
+        # optimizer and the nonfinal (grad-accum no-DP) graph without it.
+        misc = getattr(self.pipeline_graph, "misc_metadata", None) or {}
+        include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
+
+        spec = ScheduleSpec.from_pipeline_graph(
+            self.pipeline_graph,
+            include_backward=include_backward,
+            include_optimizer=include_optimizer,
+        )
+        block_templates = {"dense": BlockTemplate.from_transformer_graph(self.transformer_graph)}
+        if self.moe_transformer_graph is not None:  # pragma: no cover - rejected above
+            block_templates["moe"] = BlockTemplate.from_transformer_graph(self.moe_transformer_graph)
+
+        layout_obj: Optional[RankLayout] = None
+        if self._rank_layout and self._rank_layout.get("axis_order"):
+            layout_obj = RankLayout(
+                axis_order=tuple(self._rank_layout.get("axis_order", [])),
+                axis_sizes=dict(self._rank_layout.get("axis_sizes", {})),
+                axis_strides=dict(self._rank_layout.get("axis_strides", {})),
+            )
+
+        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+            filename = "/pipeline_graph_pre_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_pre_flatten"
+            self.pipeline_graph.save_graph(
+                self.pipeline_root,
+                self.time_calc.output_dir,
+                filename,
+            )
+
+        # Use flattened artifact directory when persisting artifacts
+        artifact_dir = self.time_calc.output_dir
+        if self.time_calc.persist_astrasim_artifacts:
+            artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")
+
+        optimize_cfg = dict(self._first_dim_optimize_cfg) if self._first_dim_optimize_cfg else None
+        gmap_workdir = artifact_dir if (optimize_cfg and self.time_calc.persist_astrasim_artifacts) else None
+
+        program = build_fine_program(
+            spec,
+            block_templates,
+            layout_obj,
+            no_data_parallel=self.no_data_parallel,
+            dp_count=effective_dp,
+            optimize_2dmap=optimize_cfg,
+            gmap_workdir=gmap_workdir,
+            parallelism_mode=self.time_calc.get_parallelism_mode(),
+            tp_overlap=getattr(self.time_calc, "tp_overlap", 0.0),
+            tp_sp_overlap=getattr(self.time_calc, "tp_sp_overlap", 0.0),
+            cp_overlap=getattr(self.time_calc, "cp_overlap", 0.0),
+        )
+
+        run_kwargs = {
+            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+            "rank_layout": self._rank_layout or None,
+        }
+        if run_type == "inference":
+            run_kwargs["dp_override"] = 1
+
+        per_rank_sec, max_sec = run_astra_simulation_only_onepath(
+            program,
+            self.time_calc,
+            artifact_dir,
+            **run_kwargs,
+        )
+
+        if not per_rank_sec:
+            raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
+
+        expected_rank_count = effective_dp * len(program.compute_devices())
+
+        # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
+        # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
+        if expected_rank_count == 1:
+            if len(per_rank_sec) > 2:
+                raise RuntimeError(
+                    "AstraSim rank count mismatch for flattened execution: "
+                    f"expected {expected_rank_count}, got {len(per_rank_sec)}"
+                )
+            per_rank_sec = per_rank_sec[:1]
+        if len(per_rank_sec) != expected_rank_count:
+            raise RuntimeError(
+                "AstraSim rank count mismatch for flattened execution: "
+                f"expected {expected_rank_count}, got {len(per_rank_sec)}"
+            )
+
+        if max_sec <= 0:
+            raise RuntimeError("AstraSim flattened execution returned non-positive duration")
+
+        self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
+        self.time_calc.pipeline_astrasim_time = max_sec
+        self.time_calc.flattened_astrasim_per_rank = per_rank_sec
+        self.time_calc.flattened_astrasim_total = max_sec
+
+        return ExecutionResult(
+            total_time=max_sec * self._pipeline_interleave_scale(),
+            graph_root=self.pipeline_root,
+            mode=ExecutionMode.FULL_ASTRASIM_FLATTENED,
+        )
+
+    def _run_full_astrasim_flattened_legacy(self) -> ExecutionResult:
         flattener = PipelineGraphFlattener(
             pipeline_graph=self.pipeline_graph,
             transformer_graph=self.transformer_graph,
