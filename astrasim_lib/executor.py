@@ -26,6 +26,7 @@ we renumber control send IDs just before writing each ET so they occupy the lowe
 indices. See `_RankTrace._renumber_control_priority` for details.
 """
 
+import heapq
 import itertools
 import json
 import os
@@ -1292,18 +1293,31 @@ def convert_rapid_llm_graph_to_chakra_et(
                 stage_indegree[stage][edge] += 1
 
 
+    # AstraSim matches collectives within a communicator group by issue order
+    # per member rank, NOT by name/tag. Every member rank must therefore emit
+    # the group's collectives in the same relative order or the simulation
+    # deadlocks silently. Ready-task ties are broken by op_id: the flattener
+    # creates each rank's expansion in the same creation sequence, so op_id
+    # order is consistent across the isomorphic per-rank chains.
+    def _stage_task_key(task: Any) -> int:
+        return int(getattr(task, "op_id", 0) or 0)
+
     stage_order: Dict[int, List[Any]] = {}
     for stage, tasks in stage_tasks.items():
         indeg = stage_indegree[stage]
-        queue = deque(task for task in tasks if indeg.get(task, 0) == 0)
+        heap: List[Tuple[int, int, Any]] = []
+        seq = itertools.count()
+        for task in tasks:
+            if indeg.get(task, 0) == 0:
+                heapq.heappush(heap, (_stage_task_key(task), next(seq), task))
         order: List[Any] = []
-        while queue:
-            task = queue.popleft()
+        while heap:
+            _, _, task = heapq.heappop(heap)
             order.append(task)
             for neighbor in stage_adj[stage].get(task, set()):
                 indeg[neighbor] -= 1
                 if indeg[neighbor] == 0:
-                    queue.append(neighbor)
+                    heapq.heappush(heap, (_stage_task_key(neighbor), next(seq), neighbor))
         if len(order) != len(tasks):
             if debug_enabled:
                 print(f"[ConverterDebug] cycle stage {stage}")
@@ -1384,7 +1398,25 @@ def convert_rapid_llm_graph_to_chakra_et(
     collective_et_ids: Dict[Tuple[Any, int], int] = {}
     pipeline_recv_cache: Dict[Tuple[Any, Any, int], int] = {}
     pipeline_send_cache: Dict[Tuple[Any, int, int, Any], int] = {}
-    tag_counter = itertools.count(start=1)
+    tag_counter = itertools.count(start=1_000_000)
+    # P2P tags must be identical on the send and recv side of one logical
+    # transfer. When a cross-stage dependency has no pipeline Edge object
+    # (pipeline_edge_map value is None), both sides used to draw independent
+    # tags from tag_counter, so the pair never matched and AstraSim
+    # deadlocked. Allocate fallback tags once per logical transfer instead.
+    # (The counter starts at 1e6 so fallback tags cannot collide with
+    # op_id-derived tags.)
+    pipeline_tag_map: Dict[Tuple[Any, int, int, Any], int] = {}
+
+    def _pipeline_tag(parent: Any, dst_stage: int, dp_idx: int, edge_obj: Any) -> int:
+        if edge_obj is not None and getattr(edge_obj, "op_id", None) is not None:
+            return int(edge_obj.op_id)
+        key = (parent, int(dst_stage), int(dp_idx), edge_obj)
+        tag = pipeline_tag_map.get(key)
+        if tag is None:
+            tag = next(tag_counter)
+            pipeline_tag_map[key] = tag
+        return tag
 
     # Step 8 helper: materialise SEND/RECV control edges across stages whenever a
     # pipeline dependency exists between ``parent`` and ``target``.
@@ -1400,7 +1432,7 @@ def convert_rapid_llm_graph_to_chakra_et(
             return cached_send
 
         size = int(getattr(edge_obj, "comm_size_bytes", 0))
-        tag = getattr(edge_obj, "op_id", next(tag_counter))
+        tag = _pipeline_tag(parent, dst_stage, dp_idx, edge_obj)
 
         src_rank = rank_for(parent_stage, dp_idx)
         dst_rank = rank_for(dst_stage, dp_idx)
@@ -1487,7 +1519,7 @@ def convert_rapid_llm_graph_to_chakra_et(
         dst_rank = rank_for(target_stage, dp_idx)
         recv_trace = rank_traces[dst_rank]
         size = int(getattr(edge_obj, "comm_size_bytes", 0))
-        tag = getattr(edge_obj, "op_id", next(tag_counter))
+        tag = _pipeline_tag(parent, target_stage, dp_idx, edge_obj)
         is_control = False
         if size == 0 or getattr(edge_obj, "comm_type", None) != CollectiveType.PIPELINE:
             size = 1
