@@ -24,6 +24,11 @@
   "git_rev": "85894c6",
   "status": "ok"
  },
+ "inf:hierarchical:dp1tp2cp1pp2mb2sp0:vit": {
+  "file": "inf_hierarchical_dp1tp2cp1pp2mb2sp0_vit.json",
+  "git_rev": "e4af130",
+  "status": "ok"
+ },
  "inf:hierarchical:dp2tp2cp1pp2mb2sp1": {
   "file": "inf_hierarchical_dp2tp2cp1pp2mb2sp1.json",
   "git_rev": "85894c6",
@@ -79,14 +84,34 @@
   "git_rev": "85894c6",
   "status": "ok"
  },
+ "train:flattened:dp1tp2cp1pp2mb2sp0:fault_tp": {
+  "file": "train_flattened_dp1tp2cp1pp2mb2sp0_fault_tp.json",
+  "git_rev": "e4af130",
+  "status": "ok"
+ },
  "train:flattened:dp1tp2cp1pp2mb2sp1": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1.json",
   "git_rev": "85894c6",
   "status": "ok"
  },
+ "train:flattened:dp1tp2cp1pp2mb2sp1:gqa": {
+  "file": "train_flattened_dp1tp2cp1pp2mb2sp1_gqa.json",
+  "git_rev": "e4af130",
+  "status": "ok"
+ },
  "train:flattened:dp1tp2cp1pp2mb2sp1:recompute": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1_recompute.json",
   "git_rev": "85894c6",
+  "status": "ok"
+ },
+ "train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d": {
+  "file": "train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d.json",
+  "git_rev": "e4af130",
+  "status": "ok"
+ },
+ "train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d_gmap": {
+  "file": "train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d_gmap.json",
+  "git_rev": "e4af130",
   "status": "ok"
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0": {
@@ -122,6 +147,16 @@
  "train:hierarchical:dp1tp1cp2pp2mb2sp0": {
   "file": "train_hierarchical_dp1tp1cp2pp2mb2sp0.json",
   "git_rev": "85894c6",
+  "status": "ok"
+ },
+ "train:hierarchical:dp1tp2cp1pp2mb2sp0:fault_pp": {
+  "file": "train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_pp.json",
+  "git_rev": "e4af130",
+  "status": "ok"
+ },
+ "train:hierarchical:dp1tp2cp1pp2mb2sp0:fault_tp": {
+  "file": "train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_tp.json",
+  "git_rev": "e4af130",
   "status": "ok"
  },
  "train:hierarchical:dp1tp2cp1pp2mb2sp1": {

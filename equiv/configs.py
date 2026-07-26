@@ -228,6 +228,113 @@ def build_matrix() -> List[EquivSpec]:
                 )
             )
 
+    # Faulty links (full-astra modes only; analytical/hybrid raise on faults).
+    # network.faulty_links entries are GLOBAL rank ids decoded in the canonical
+    # tp,cp,ep,pp,dp layout. dim0 (tp/cp/ep) is switched to Ring because only
+    # ring/mesh/torus-family AstraSim topologies understand per-link faults
+    # (tools/fault_sweep.py TOPOLOGIES_WITH_FAULTY_LINK_SUPPORT); dim1 (pp,dp)
+    # is already Ring in the base validation config.
+    fault_row = dict(dp=1, tp=2, cp=1, pp=2, mb=2, tp_sp=False)
+    for backend in ("hierarchical", "flattened"):
+        # tp fault: ranks 0 and 1 differ only in the tp coordinate (stage 0),
+        # so it projects onto the transformer axis subset in both modes.
+        specs.append(
+            EquivSpec(
+                spec_id=f"train:{backend}:{_row_tag(fault_row)}:fault_tp",
+                run_type="training",
+                backend=backend,
+                extra_hw={
+                    "network": {
+                        "faulty_links": [[0, 1, 0.5]],
+                        "dimensions": [{"id": "dim0", "topology": {"type": "Ring"}}],
+                    }
+                },
+                **fault_row,
+            )
+        )
+    # pp fault: ranks 0 and 2 differ only in the pp coordinate (tp stride is
+    # 2), so it projects onto the pipeline axis subset (hierarchical runs the
+    # pipeline graph through AstraSim with the fault override).
+    specs.append(
+        EquivSpec(
+            spec_id=f"train:hierarchical:{_row_tag(fault_row)}:fault_pp",
+            run_type="training",
+            backend="hierarchical",
+            extra_hw={"network": {"faulty_links": [[0, 2, 0.5]]}},
+            **fault_row,
+        )
+    )
+
+    # 2D first-dimension topology: Mesh2D 2x2 over tp=4 on a flattened run.
+    row_2d = dict(dp=1, tp=4, cp=1, pp=1, mb=1, tp_sp=False)
+    specs.append(
+        EquivSpec(
+            spec_id=f"train:flattened:{_row_tag(row_2d)}:mesh2d",
+            run_type="training",
+            backend="flattened",
+            extra_hw={
+                "network": {
+                    "dimensions": [
+                        {"id": "dim0", "size": [2, 2], "topology": {"type": "Mesh2D"}}
+                    ]
+                }
+            },
+            **row_2d,
+        )
+    )
+    # Same 2D run with optimize_2dmap: SCOTCH gmap stage remapping
+    # (astrasim_lib/gmap.py; scotchpy import happens inside the collector).
+    specs.append(
+        EquivSpec(
+            spec_id=f"train:flattened:{_row_tag(row_2d)}:mesh2d_gmap",
+            run_type="training",
+            backend="flattened",
+            extra_hw={
+                "network": {
+                    "dimensions": [
+                        {
+                            "id": "dim0",
+                            "size": [2, 2],
+                            "topology": {"type": "Mesh2D", "optimize_2dmap": True},
+                        }
+                    ]
+                }
+            },
+            **row_2d,
+        )
+    )
+
+    # GQA attention (kv_heads=8 < num_heads=32) on a flattened train run.
+    row = dict(dp=1, tp=2, cp=1, pp=2, mb=2, tp_sp=True)
+    specs.append(
+        EquivSpec(
+            spec_id=f"train:flattened:{_row_tag(row)}:gqa",
+            run_type="training",
+            backend="flattened",
+            attention_type="gqa",
+            **row,
+        )
+    )
+
+    # ViT inference on the hierarchical backend. The base Llama2-7B model
+    # config is overridden in place: ViT requires a vision block, mode "ViT",
+    # and decode_len == 0 (seq_len 256 >= 196 patches + 1 prefix token).
+    row = dict(dp=1, tp=2, cp=1, pp=2, mb=2, tp_sp=False)
+    specs.append(
+        EquivSpec(
+            spec_id=f"inf:hierarchical:{_row_tag(row)}:vit",
+            run_type="inference",
+            backend="hierarchical",
+            model_type="vit",
+            extra_model={
+                "mode": "ViT",
+                "decode_len": 0,
+                "vision": {"image_size": 224, "patch_size": 16},
+            },
+            **row,
+        )
+    )
+
     ids = [s.spec_id for s in specs]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate spec ids in equivalence matrix")
