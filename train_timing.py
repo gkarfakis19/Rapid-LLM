@@ -21,11 +21,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
-import simulate_train_graph as llm_simulation
 from llm_execution import ExecutionMode, LLMExecutionDispatcher
 from program.block import BlockTemplate
 from program.block_program import TransformerBlockSpec
-from simulate_train_graph import Graph
+from program.schedule import ScheduleInputs
 import llm_util
 from memory_estimation import MemoryEstimator
 from base_timing import TimeCalculation
@@ -321,8 +320,9 @@ class TimeCalculationLLM(TimeCalculation):
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0
-        self.pipeline_graph: Optional[Graph] = None
-        self.pipeline_root: Optional[Any] = None
+        #: Pipeline schedule inputs (M7: ``program.schedule.ScheduleInputs``,
+        #: the typed carrier that replaced the legacy pipeline ``Graph``).
+        self.pipeline_graph: Optional[ScheduleInputs] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
         #: BLOCK template bundles (M4): dense/MoE BlockTemplates + cluster
         #: degrees, replacing the legacy transformer Graph/root twelve-tuple.
@@ -341,8 +341,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_astrasim_per_rank_backward_moe: Optional[List[float]] = None
         self.pipeline_astrasim_time: Optional[float] = None
         self.pipeline_astrasim_per_rank: Optional[List[float]] = None
-        self.pipeline_graph_no_dp: Optional[Graph] = None
-        self.pipeline_root_no_dp: Optional[Any] = None
+        self.pipeline_graph_no_dp: Optional[ScheduleInputs] = None
 
     def _sequence_parallel_degree(self) -> int:
         """Return tensor-parallel degree used for sequence-parallel collectives.
@@ -4550,17 +4549,20 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
     ) -> Tuple[
-        Graph,
-        Any,
-        Optional[Graph],
-        Optional[Any],
+        ScheduleInputs,
+        Optional[ScheduleInputs],
         "TransformerBlockSpec",
         Dict[str, Tuple[float, float]],
     ]:
-        """Build the pipeline graphs + transformer BLOCK templates shared
-        across training and inference. The no-DP transformer twin (grad
-        accumulation with MoE EP sync) is stored on
-        ``self.transformer_blocks_no_dp``."""
+        """Build the pipeline schedule inputs + transformer BLOCK templates
+        shared across training and inference. The no-DP transformer twin
+        (grad accumulation with MoE EP sync) is stored on
+        ``self.transformer_blocks_no_dp``.
+
+        M7 note: this used to construct legacy pipeline ``Graph`` objects
+        and their ``construct_fwd_bwd_graph`` roots; the dispatcher builds
+        every Program (coarse/fine) from the :class:`ScheduleInputs`
+        carrier now, so only the inputs are assembled here."""
         need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
 
         if not include_pipeline_backward and not include_transformer_backward:
@@ -5089,8 +5091,7 @@ class TimeCalculationLLM(TimeCalculation):
         misc_metadata_nonfinal = dict(misc_metadata)
         misc_metadata_nonfinal["grad_accum_cycle"] = "nonfinal"
 
-        pipeline_graph_obj = llm_simulation.Graph(
-            mode="pipeline",
+        pipeline_inputs = ScheduleInputs(
             dp=self.dp,
             pp=self.pp,
             tp=self.tp,
@@ -5101,17 +5102,12 @@ class TimeCalculationLLM(TimeCalculation):
             misc_metadata=misc_metadata_final,
         )
 
-        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(
-            include_backward=include_pipeline_backward,
-            include_optimizer=True
-        )
-        pipeline_graph_obj_no_dp = None
-        graph_root_no_dp = None
+        pipeline_inputs_no_dp = None
         if need_no_dp_variant:
-            pipeline_graph_obj_no_dp = llm_simulation.Graph(
-                # For grad accumulation we run non-final cycles with optimizer disabled,
-                # while selectively skipping skippable DP ops at graph-construction time.
-                mode="pipeline",
+            # For grad accumulation we run non-final cycles with the optimizer
+            # disabled while skipping skippable DP comms (the "nonfinal"
+            # grad_accum_cycle marker drives both in the schedule builders).
+            pipeline_inputs_no_dp = ScheduleInputs(
                 dp=self.dp,
                 pp=self.pp,
                 tp=self.tp,
@@ -5121,22 +5117,14 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_metadata=comm_metadata,
                 misc_metadata=misc_metadata_nonfinal,
             )
-            
-            graph_root_no_dp = pipeline_graph_obj_no_dp.construct_fwd_bwd_graph(
-                include_backward=include_pipeline_backward,
-                include_optimizer=False
-            )
 
-        
         interconnect_params = self._build_interconnect_params()
 
         self.transformer_blocks_no_dp = transformer_blocks_no_dp
 
         return (
-            pipeline_graph_obj,
-            graph_root,
-            pipeline_graph_obj_no_dp,
-            graph_root_no_dp,
+            pipeline_inputs,
+            pipeline_inputs_no_dp,
             transformer_blocks,
             interconnect_params,
         )
@@ -5286,10 +5274,8 @@ class TimeCalculationLLM(TimeCalculation):
                 )
 
         (
-            pipeline_graph_obj,
-            graph_root,
-            pipeline_graph_obj_no_dp,
-            graph_root_no_dp,
+            pipeline_inputs,
+            pipeline_inputs_no_dp,
             transformer_blocks,
             interconnect_params,
         ) = self._prepare_execution_graphs(
@@ -5329,11 +5315,9 @@ class TimeCalculationLLM(TimeCalculation):
             )
             self.transformer_analytical_time_backward = self.transformer_analytical_time_backward_combined
 
-        self.pipeline_graph = pipeline_graph_obj
-        self.pipeline_root = graph_root
+        self.pipeline_graph = pipeline_inputs
         self.pipeline_interconnect = interconnect_params
-        self.pipeline_graph_no_dp = pipeline_graph_obj_no_dp
-        self.pipeline_root_no_dp = graph_root_no_dp
+        self.pipeline_graph_no_dp = pipeline_inputs_no_dp
 
         return mem_estimator, memory_data
 
@@ -5344,13 +5328,12 @@ class TimeCalculationLLM(TimeCalculation):
         mode = self.execution_mode
         time_fw_bw_no_dp: Optional[float] = None
         if self.gradient_accumulation_steps > 1:
-            if not (self.pipeline_graph_no_dp and self.pipeline_root_no_dp):
-                raise RuntimeError("Gradient accumulation steps > 1 requires a non-final accumulation pipeline graph")
+            if not self.pipeline_graph_no_dp:
+                raise RuntimeError("Gradient accumulation steps > 1 requires non-final accumulation schedule inputs")
             transformer_blocks_no_dp = self.transformer_blocks_no_dp or self.transformer_blocks
             dispatcher_no_dp = LLMExecutionDispatcher(
                 time_calc=self,
                 pipeline_graph=self.pipeline_graph_no_dp,
-                pipeline_root=self.pipeline_root_no_dp,
                 interconnect_params=self.pipeline_interconnect,
                 transformer_blocks=transformer_blocks_no_dp,
                 no_data_parallel=True,
@@ -5364,7 +5347,6 @@ class TimeCalculationLLM(TimeCalculation):
         dispatcher = LLMExecutionDispatcher(
             time_calc=self,
             pipeline_graph=self.pipeline_graph,
-            pipeline_root=self.pipeline_root,
             interconnect_params=self.pipeline_interconnect,
             transformer_blocks=self.transformer_blocks,
             no_data_parallel=False,
@@ -5375,11 +5357,6 @@ class TimeCalculationLLM(TimeCalculation):
             raise NotImplementedError(f"{exc}. Selected execution mode '{mode.value}'.") from exc
         time_fw_bw = result.total_time
 
-
-        pipeline_root = result.graph_root
-        self.pipeline_graph = dispatcher.pipeline_graph
-        self.pipeline_root = pipeline_root
-        self.pipeline_interconnect = dispatcher.interconnect_params
         memory_program = dispatcher.build_fine_program_for_memory()
         _, training_peak_gb = mem_estimator.simulate_peak(memory_program, memory_data, mode="training", filename="memory_graph_training")
 
@@ -5409,7 +5386,6 @@ class TimeCalculationLLM(TimeCalculation):
         dispatcher = LLMExecutionDispatcher(
             time_calc=self,
             pipeline_graph=self.pipeline_graph,
-            pipeline_root=self.pipeline_root,
             interconnect_params=self.pipeline_interconnect,
             transformer_blocks=self.transformer_blocks,
             no_data_parallel=False,

@@ -918,8 +918,6 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             )
         (
             pipeline_graph,
-            pipeline_root,
-            _,
             _,
             transformer_blocks,
             interconnect_params,
@@ -939,7 +937,6 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=pipeline_graph,
-            pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
             transformer_blocks=transformer_blocks,
         )
@@ -973,8 +970,6 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         )
         (
             decode_pipeline_graph,
-            decode_pipeline_root,
-            _,
             _,
             decode_transformer_blocks,
             decode_interconnect_params,
@@ -986,7 +981,6 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         decode_dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=decode_pipeline_graph,
-            pipeline_root=decode_pipeline_root,
             interconnect_params=decode_interconnect_params,
             transformer_blocks=decode_transformer_blocks,
         )

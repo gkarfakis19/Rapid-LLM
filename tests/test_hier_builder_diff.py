@@ -31,16 +31,18 @@ AND byte-identical bundle files. The write-back arms died with
 ``_apply_transformer_time``/``_assign_transformer_durations`` in the same
 change.
 
+The UN-RETIMED cross-differential (legacy ``construct_fwd_bwd_graph`` root
+vs the coarse schedule events, both lowered through the shared pass) ran
+green through M6 and died at M7 with ``construct_fwd_bwd_graph`` itself.
+
 What remains:
 
 * an always-on synthetic test pinning the emission-lowered coarse Program
   shape over a ("pp","dp") sublayout (no configs, no AstraSim);
-* an env-gated sweep (``RAPID_HIER_DIFF=1``) over the hierarchical golden
-  matrix keeping the halves that still have two live implementations:
-  the UN-RETIMED cross-differential (legacy pipeline root, which
-  ``_prepare_execution_graphs`` keeps building until M7, vs the coarse
-  schedule events — both lowered through the shared pass) plus a retimed
-  build/emit determinism check (two builds byte-identical).
+* an env-gated determinism sweep (``RAPID_HIER_DIFF=1``) over the
+  hierarchical golden matrix: build + lower + emit twice, un-retimed AND
+  retimed under synthetic block timings — identical Program op streams and
+  byte-identical bundles across builds.
 
 Run:
     RAPID_HIER_DIFF=1 ./.venv/bin/python -m pytest tests/test_hier_builder_diff.py -q
@@ -119,8 +121,6 @@ def _inference_prefill_case(tc, out_dir: Path):
     )
     (
         pipeline_graph,
-        pipeline_root,
-        _,
         _,
         transformer_blocks,
         interconnect_params,
@@ -138,7 +138,6 @@ def _inference_prefill_case(tc, out_dir: Path):
     return LLMExecutionDispatcher(
         time_calc=tc,
         pipeline_graph=pipeline_graph,
-        pipeline_root=pipeline_root,
         interconnect_params=interconnect_params,
         transformer_blocks=transformer_blocks,
     )
@@ -164,8 +163,6 @@ def _inference_decode_case(tc):
     )
     (
         decode_pipeline_graph,
-        decode_pipeline_root,
-        _,
         _,
         decode_transformer_blocks,
         decode_interconnect_params,
@@ -177,7 +174,6 @@ def _inference_decode_case(tc):
     return LLMExecutionDispatcher(
         time_calc=tc,
         pipeline_graph=decode_pipeline_graph,
-        pipeline_root=decode_pipeline_root,
         interconnect_params=decode_interconnect_params,
         transformer_blocks=decode_transformer_blocks,
     )
@@ -195,7 +191,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=tc.pipeline_graph,
-            pipeline_root=tc.pipeline_root,
             interconnect_params=tc.pipeline_interconnect,
             transformer_blocks=tc.transformer_blocks,
             no_data_parallel=False,
@@ -209,39 +204,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         if int(getattr(tc.model, "decode_len", 0) or 0) > 0:
             cases.append(("decode", tc, _inference_decode_case(tc)))
     return cases
-
-
-def _effective_dp(tc) -> int:
-    run_type = str(getattr(getattr(tc, "model", None), "run_type", "training")).lower()
-    return 1 if run_type == "inference" else max(1, getattr(tc, "dp", 1))
-
-
-def _legacy_root_bundle(dispatcher, tc, out_dir: Path):
-    """Un-retimed legacy arm: pipeline root -> lower -> emit — the pre-M6
-    `_run_full_astrasim_hierarchical` plumbing (root attach included).
-    Lives until `construct_fwd_bwd_graph` stops producing roots (M7)."""
-    from program.et_emit import emit_chakra
-    from program.legacy_lowering import lower_to_program
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    root = dispatcher.pipeline_root
-    layout = getattr(dispatcher, "_pipeline_rank_layout", None)
-    if layout:
-        setattr(root, "_astrasim_rank_layout", layout)
-    elif hasattr(root, "_astrasim_rank_layout"):
-        delattr(root, "_astrasim_rank_layout")
-    if dispatcher._first_dim_optimize_cfg:
-        setattr(root, "_optimize_2dmap", dict(dispatcher._first_dim_optimize_cfg))
-    elif hasattr(root, "_optimize_2dmap"):
-        delattr(root, "_optimize_2dmap")
-    program = lower_to_program(
-        root,
-        _effective_dp(tc),
-        getattr(root, "_astrasim_rank_layout", None),
-        gmap_workdir=str(out_dir),
-    )
-    bundle = emit_chakra(program, str(out_dir), id_policy="legacy")
-    return program, bundle
 
 
 def _coarse_bundle(dispatcher, coarse_program, out_dir: Path):
@@ -473,16 +435,22 @@ def test_hier_pipeline_emission_sweep(spec, tmp_path):
     assert cases, f"{spec.spec_id}: no pipeline cases produced"
 
     for label, tc, dispatcher in cases:
-        # ---- un-retimed cross-differential (two live implementations) ----
-        coarse_plain = dispatcher._build_coarse_program()
-        dir_a = tmp_path / f"legacy_{_sanitize(label)}_plain"
-        dir_b = tmp_path / f"coarse_{_sanitize(label)}_plain"
-        program_a, bundle_a = _legacy_root_bundle(dispatcher, tc, dir_a)
-        program_b, bundle_b = _coarse_bundle(dispatcher, coarse_plain, dir_b)
+        # ---- un-retimed determinism (build + lower + emit twice) ---------
+        # (Successor of the M6 legacy-root cross-differential, which died at
+        # M7 with construct_fwd_bwd_graph.)
+        plain_dirs = [tmp_path / f"plain_{_sanitize(label)}_{i}" for i in (0, 1)]
+        plain_outputs = [
+            _coarse_bundle(dispatcher, dispatcher._build_coarse_program(), out_dir)
+            for out_dir in plain_dirs
+        ]
+        (program_a, bundle_a), (program_b, bundle_b) = plain_outputs
         assert _describe_ops(program_a) == _describe_ops(program_b), (
-            f"{spec.spec_id} [{label}/plain]: op streams diverge"
+            f"{spec.spec_id} [{label}/plain]: two builds produced different op streams"
         )
-        _assert_bundles_match(spec.spec_id, label, "plain", dir_a, dir_b, bundle_a, bundle_b)
+        _assert_bundles_match(
+            spec.spec_id, label, "plain", plain_dirs[0], plain_dirs[1], bundle_a, bundle_b,
+            reference_label="build0", candidate_label="build1",
+        )
 
         # ---- retimed determinism (build + retime + lower + emit twice) ---
         timings = _synthetic_block_timings(spec, tc)

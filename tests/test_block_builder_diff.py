@@ -104,7 +104,6 @@ def _transformer_cases(spec, hw_config, model_config, mode, out_dir: Path):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=tc.pipeline_graph,
-            pipeline_root=tc.pipeline_root,
             interconnect_params=tc.pipeline_interconnect,
             transformer_blocks=tc.transformer_blocks,
             no_data_parallel=False,
@@ -148,8 +147,6 @@ def _transformer_cases(spec, hw_config, model_config, mode, out_dir: Path):
             )
         (
             pipeline_graph,
-            pipeline_root,
-            _,
             _,
             transformer_blocks,
             interconnect_params,
@@ -169,7 +166,6 @@ def _transformer_cases(spec, hw_config, model_config, mode, out_dir: Path):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=pipeline_graph,
-            pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
             transformer_blocks=transformer_blocks,
         )

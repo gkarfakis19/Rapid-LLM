@@ -1288,7 +1288,6 @@ def run_rapid_estimation(
                 dispatcher = LLMExecutionDispatcher(
                     time_calc=tc,
                     pipeline_graph=tc.pipeline_graph,
-                    pipeline_root=tc.pipeline_root,
                     interconnect_params=tc.pipeline_interconnect,
                     transformer_blocks=tc.transformer_blocks,
                     no_data_parallel=False,
@@ -1508,7 +1507,6 @@ def _worker_process_row(
                     dispatcher = LLMExecutionDispatcher(
                         time_calc=tc,
                         pipeline_graph=tc.pipeline_graph,
-                        pipeline_root=tc.pipeline_root,
                         interconnect_params=tc.pipeline_interconnect,
                         transformer_blocks=tc.transformer_blocks,
                         no_data_parallel=False,

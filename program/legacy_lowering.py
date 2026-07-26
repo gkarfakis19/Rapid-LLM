@@ -13,11 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Legacy graph -> Program lowering (TRANSITIONAL — deleted at M8).
+"""Event graph -> Program emission-ordering pass (PERMANENT — kept at M8).
 
-``lower_to_program`` is an exact reproduction of converter Steps 1-7 of
+``lower_to_program`` turns a proto event DAG — the coarse schedule events
+(:mod:`program.schedule`) for the hierarchical pipeline emission
+(:func:`program.pipeline_coarse.lower_coarse_for_emission`) — into a
+validated, emission-ordered :class:`~program.ir.Program`. It is deliberately
+load-bearing after the legacy retirement: the pinned Chakra ET emission
+order (per-stage Kahn toposort keyed on ``op_id``, Step-11 transfer replay,
+collective label assignment) is defined over children-list adjacency order,
+which the uid-ordered coarse op list cannot represent, so the ordering pass
+over the events IS the single source of that order. The name records its
+lineage: it is an exact reproduction of converter Steps 1-7 of the deleted
 ``astrasim_lib.executor.convert_rapid_llm_graph_to_chakra_et`` (executor.py
-747-1334) over an *unchanged* legacy ``Node``/``Edge``/``Data_batch`` graph:
+747-1334), originally applied to the (retired) legacy
+``Node``/``Edge``/``Data_batch`` graphs, whose duck-typed attribute surface
+the schedule events preserve:
 
 * Step 1: DFS object collection order (preorder, children in list order);
 * Step 2: compute-node filter (``hw_id >= 0``, not ``flatten_placeholder``),

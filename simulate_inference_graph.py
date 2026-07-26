@@ -26,7 +26,6 @@ import shutil
 from typing import Any, Callable, Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
-from simulate_train_graph import Graph
 import llm_util
 from train_timing import LLMExecutionDispatcher
 
@@ -66,12 +65,17 @@ class DecodeSample:
     kv_cache_tokens: int
 
 
-class DecodeGraph(Graph):
+class DecodeGraph:
     """
-    Graph builder for autoregressive decode phase.
+    Sampled decode-phase driver.
 
-    Extends the base Graph class to handle step-by-step token generation
-    with evolving sequence lengths and KV-cache considerations.
+    Handles step-by-step token generation with evolving sequence lengths and
+    KV-cache considerations. M7 note: this used to inherit the legacy
+    ``simulate_train_graph.Graph``, which served purely as an attribute
+    carrier for ``llm_util.process_decode_gemm_shapes`` — every attribute the
+    shared GEMM utilities read (``use_moe``/``moe_*``/attention geometry/
+    ``run_type``) is set directly in ``__init__`` now, and each sampled step
+    re-enters the Program-core dispatcher via ``prepare_decode_graphs``.
     """
 
     def __init__(
@@ -83,10 +87,7 @@ class DecodeGraph(Graph):
         use_moe,
         num_experts,
         top_k,
-        *args,
-        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
         self.config = config
         self.hw_config = hw_config
         self.model_config = model_config
@@ -228,8 +229,6 @@ class DecodeGraph(Graph):
         )
         (
             pipeline_graph,
-            pipeline_root,
-            _,
             _,
             transformer_blocks,
             interconnect_params,
@@ -238,7 +237,6 @@ class DecodeGraph(Graph):
         dispatcher = LLMExecutionDispatcher(
             time_calc=temp_time_calc,
             pipeline_graph=pipeline_graph,
-            pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
             transformer_blocks=transformer_blocks,
         )
@@ -344,7 +342,6 @@ class InferenceEngine:
         self.config = config
         self.hw_config = hw_config
         self.model_config = model_config
-        self.prefill_graph: Optional[Graph] = None
         self.decode_graph: Optional[DecodeGraph] = None
         self.time_calc_cls = time_calc_cls
 
@@ -361,17 +358,6 @@ class InferenceEngine:
 
         self.decode_graph = DecodeGraph(
             config=self.config,
-            mode="inference",
-            dp=1,
-            pp=self.config.pp,
-            tp=self.config.tp,
-            cp=self.config.cp,
-            ep=self.config.moe_dp,
-            comp_times={},
-            comm_metadata={},
-            misc_metadata={
-                "sequence_parallel": self.config.tp_sp,
-            },
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,

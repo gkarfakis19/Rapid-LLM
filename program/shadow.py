@@ -13,35 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""M1 SHADOW verification — removed at M2 cutover.
+"""Chakra ET bundle comparison utilities.
 
-Called from the tail of ``convert_rapid_llm_graph_to_chakra_et`` when
-``RAPID_SHADOW_EMIT`` is truthy: re-derives the bundle through
-``lower_to_program`` + ``emit_chakra`` into ``<output_dir>/__shadow__/`` and
-compares it against the legacy bundle just written:
+:func:`compare_et_bundles` is the standard bundle comparator (born as the
+M1 shadow-emit verifier, now the shared assertion core of the builder
+differential/determinism tests). Two bundles are equivalent iff:
 
 (a) per-rank node sequences in final id order — node type + payload +
     sorted ctrl-dep ids must be identical, where payload is
     ``duration_micros`` for COMP, ``(comm_type, comm_size, resolved pg
     member set)`` for COLL, and ``(comm_size, dst/src rank)`` for
     SEND/RECV. Names and tag VALUES are excluded (design C R4/R19), but tag
-    PAIRING must be a bijection: every shadow ``((src,dst), tag)`` class
-    of node positions must coincide with exactly one legacy class;
+    PAIRING must be a bijection: every candidate ``((src,dst), tag)`` class
+    of node positions must coincide with exactly one reference class;
 (b) ``manifest.json`` byte-equal;
-(c) ``comm_groups.json`` equal as parsed JSON (the legacy file is not yet
-    written at hook time, so the reference is produced by calling the
-    legacy ``_write_comm_groups_json`` into a scratch dir).
+(c) ``comm_groups.json`` equal as parsed JSON.
 
-Any mismatch raises ``RuntimeError`` with a precise (rank, node index,
-field) diff; on success the ``__shadow__`` directory is deleted so the
-equivalence harness never sees it as an extra bundle.
+M8 note: ``run_shadow_comparison`` — the M1 hook that re-derived a shadow
+bundle through ``lower_to_program`` + ``emit_chakra`` and compared it
+in-process — was dead since the M6 mode cutovers completed and is deleted;
+:func:`load_comm_groups` stays as the bundle ``comm_groups.json`` reader.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from astrasim_lib.et_utils import chakra_decode, chakra_open, pb
@@ -261,56 +258,6 @@ def compare_et_bundles(
     return problems
 
 
-def run_shadow_comparison(
-    *,
-    graph_root: Any,
-    dp_size: int,
-    output_dir: str,
-    legacy_rank_ids: List[int],
-    legacy_manifest_path: str,
-    legacy_dp_count: int,
-) -> None:
-    # Imported lazily so this module stays inert unless the hook fires.
-    from program.et_emit import emit_chakra
-    from program.legacy_lowering import lower_to_program
-
-    del legacy_dp_count  # legacy comm_groups.json is read from the bundle since M2
-
-    shadow_dir = os.path.join(output_dir, "__shadow__")
-    if os.path.isdir(shadow_dir):
-        shutil.rmtree(shadow_dir, ignore_errors=True)
-    os.makedirs(shadow_dir, exist_ok=True)
-
-    program = lower_to_program(
-        graph_root,
-        dp_size,
-        getattr(graph_root, "_astrasim_rank_layout", None),
-        gmap_workdir=shadow_dir,
-    )
-    bundle = emit_chakra(program, shadow_dir, id_policy="legacy")
-
-    # Since the M2 cutover the "legacy" bundle in output_dir is itself
-    # emitted by emit_chakra, which writes comm_groups.json during
-    # conversion — read it instead of the deleted executor helper.
-    legacy_groups = load_comm_groups(output_dir)
-    shadow_groups = {str(k): sorted(int(r) for r in v) for k, v in bundle.comm_groups.items()}
-
-    problems = compare_et_bundles(
-        reference_dir=output_dir,
-        candidate_dir=shadow_dir,
-        reference_ranks=[int(r) for r in legacy_rank_ids],
-        candidate_ranks=[int(r) for r in bundle.rank_ids],
-        reference_manifest=legacy_manifest_path,
-        candidate_manifest=bundle.manifest_path,
-        reference_groups=legacy_groups,
-        candidate_groups=shadow_groups,
-    )
-    if problems:
-        _raise(problems, shadow_dir)
-
-    shutil.rmtree(shadow_dir, ignore_errors=True)
-
-
 def _manifest_diff_detail(legacy_bytes: bytes, shadow_bytes: bytes) -> str:
     try:
         legacy = json.loads(legacy_bytes)
@@ -337,15 +284,3 @@ def _manifest_diff_detail(legacy_bytes: bytes, shadow_bytes: bytes) -> str:
             if lop != sop:
                 return f"rank {rank} sorted-op {idx}: legacy={lop} shadow={sop}"
     return "byte-level difference with identical parsed content (formatting)"
-
-
-def _raise(problems: List[str], shadow_dir: str) -> None:
-    listed = problems[:_MAX_PROBLEMS]
-    suffix = "" if len(problems) <= _MAX_PROBLEMS else f"\n... and {len(problems) - _MAX_PROBLEMS} more"
-    raise RuntimeError(
-        "[M1 shadow] lowering+emitter bundle diverged from the legacy converter "
-        f"(shadow artifacts kept in {shadow_dir}; dump both with "
-        "astrasim_lib.executor._dump_et_text to diff):\n"
-        + "\n".join(f"  - {p}" for p in listed)
-        + suffix
-    )

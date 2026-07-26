@@ -736,7 +736,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         if prefill_len <= 0:
             print("Skipping prefill")
             self.pipeline_graph = None
-            self.pipeline_root = None
             self.pipeline_interconnect = None
             self.transformer_blocks = None
             self.transformer_analytical_time_forward = None
@@ -792,8 +791,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
             (
                 pipeline_graph,
-                pipeline_root,
-                _,
                 _,
                 transformer_blocks,
                 interconnect_params,
@@ -812,7 +809,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             )
 
             self.pipeline_graph = pipeline_graph
-            self.pipeline_root = pipeline_root
             self.pipeline_interconnect = interconnect_params
             self.transformer_blocks = transformer_blocks
             self.transformer_analytical_time_forward = node_breakdown.get("transformer_time_f")
@@ -821,7 +817,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
                 pipeline_graph=self.pipeline_graph,
-                pipeline_root=self.pipeline_root,
                 interconnect_params=self.pipeline_interconnect,
                 transformer_blocks=self.transformer_blocks,
             )
@@ -832,10 +827,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 raise NotImplementedError(
                     f"{exc}. Selected execution mode '{mode.value}'."
                 ) from exc
-
-            self.pipeline_graph = dispatcher.pipeline_graph
-            self.pipeline_root = result.graph_root
-            self.pipeline_interconnect = dispatcher.interconnect_params
 
             total_time = result.total_time
 
@@ -868,8 +859,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             )
             (
                 decode_pipeline_graph,
-                decode_pipeline_root,
-                _,
                 _,
                 decode_transformer_blocks,
                 decode_interconnect_params,
@@ -881,7 +870,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
                 pipeline_graph=decode_pipeline_graph,
-                pipeline_root=decode_pipeline_root,
                 interconnect_params=decode_interconnect_params,
                 transformer_blocks=decode_transformer_blocks,
             )

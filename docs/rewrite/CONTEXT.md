@@ -4,7 +4,35 @@ Authoritative shared context for the `rewrite_astra` effort. Read this before
 designing or implementing. Everything here was verified against the code and
 by experiment on 2026-07-26.
 
-## What is being replaced
+## Post-migration state (M8, current)
+
+The migration described below is COMPLETE through M8: all four execution
+modes, inference prefill + sampled decode, and memory estimation run on the
+typed Program core, and the legacy graph machinery
+(`simulate_train_graph.py` with `Node`/`Edge`/`Data_batch`/`Graph`,
+`construct_fwd_bwd_graph`, the converter, the flattener) is deleted.
+`train_timing._prepare_execution_graphs` assembles a
+`program.schedule.ScheduleInputs` carrier (parallelism degrees +
+comp_times/comm_metadata/misc_metadata); `LLMExecutionDispatcher` distills
+it into a `ScheduleSpec`, enumerates ONE GPipe schedule
+(`build_pipeline_events`), and builds per-mode Programs from it: COARSE
+(`pipeline_coarse` + `analytic_sim`/`retime` for analytical/hybrid,
+`lower_coarse_for_emission` for hierarchical emission), FINE
+(`pipeline_fine` for flattened execution and the `memory_sim` replay), and
+BLOCK (`block_program` for the transformer AstraSim runs) — all emitted
+through `et_emit`. Two deliberate non-goals of the retirement: the proto
+event graphs stay alive alongside the op lists (the analytical evaluator's
+tie discipline, the memory replay's FIFO order, and the pinned emission
+order are defined over children-list adjacency order), and
+`program.legacy_lowering.lower_to_program` stays as the permanent
+emission-ordering pass over those events (its name records its converter
+lineage). Module inventory: `program/__init__.py`.
+
+Everything below this section is HISTORICAL: it documents the legacy
+architecture as it existed when the rewrite began (the golden-gate
+contract, AstraSim workload rules, and design constraints remain valid).
+
+## What is being replaced (historical)
 
 The path from "model + hardware config" to "simulated time" currently flows:
 

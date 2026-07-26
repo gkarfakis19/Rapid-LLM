@@ -101,13 +101,57 @@ def _layer_to_stage(layers_per_stage: Tuple[int, ...]) -> Tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
+# ScheduleInputs — the pipeline schedule input carrier (M7)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(eq=False)  # identity semantics (and hashability), like the legacy carrier
+class ScheduleInputs:
+    """The pipeline schedule inputs produced by ``_prepare_execution_graphs``.
+
+    Typed replacement (M7) of the legacy ``simulate_train_graph.Graph``
+    carrier object: the dispatcher never consumed the constructed Node/Edge
+    graph after M6 — only these constructor inputs (parallelism degrees +
+    the three metadata dicts). ``comp_times`` stays a MUTABLE dict on
+    purpose: the hybrid/hierarchical modes write the AstraSim transformer
+    baselines back into it (``transformer_f``/``transformer_b``/...), and
+    the memory-path FINE build re-reads the updated values through
+    :meth:`ScheduleSpec.from_pipeline_graph` — exactly the legacy
+    write-back flow.
+    """
+
+    dp: int
+    pp: int
+    tp: int
+    cp: int
+    ep: int = 1
+    comp_times: Dict[str, Any] = None  # type: ignore[assignment]
+    comm_metadata: Dict[str, Any] = None  # type: ignore[assignment]
+    misc_metadata: Dict[str, Any] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.dp = int(self.dp)
+        self.pp = int(self.pp)
+        self.tp = int(self.tp)
+        self.cp = int(self.cp)
+        self.ep = int(self.ep)
+        if self.comp_times is None:
+            self.comp_times = {}
+        if self.comm_metadata is None:
+            self.comm_metadata = {}
+        if self.misc_metadata is None:
+            self.misc_metadata = {}
+
+
+# ---------------------------------------------------------------------------
 # ScheduleSpec
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ScheduleSpec:
-    """The pipeline schedule, distilled from the legacy Graph inputs."""
+    """The pipeline schedule, distilled from the :class:`ScheduleInputs`
+    carrier (formerly the legacy Graph inputs)."""
 
     mb: int
     num_layers: int
@@ -139,8 +183,9 @@ class ScheduleSpec:
         include_backward: bool,
         include_optimizer: bool = True,
     ) -> "ScheduleSpec":
-        """Distill from a legacy pipeline ``Graph`` (duck-typed attr reads
-        only; no simulate_train_graph import)."""
+        """Distill from a :class:`ScheduleInputs` carrier (duck-typed attr
+        reads — the historical name is kept from when the argument was the
+        legacy pipeline ``Graph``, which exposed the same surface)."""
         misc = getattr(pipeline_graph, "misc_metadata", None) or {}
         comp_times_raw = getattr(pipeline_graph, "comp_times", None) or {}
         comp_times = {

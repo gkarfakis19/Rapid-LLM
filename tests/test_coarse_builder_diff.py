@@ -25,18 +25,19 @@ final+no_dp, synthetic per-(dp, stage) retime overrides included), then
 again post-cutover against frozen verbatim reference copies of the deleted
 legacy methods. Per that plan, the reference copies died at M6 together
 with the legacy hierarchical retime write-back they mirrored
-(``_apply_transformer_time``/``_assign_transformer_durations``).
+(``_apply_transformer_time``/``_assign_transformer_durations``). The
+always-on structural differential against the LIVE legacy constructor
+(add_child-order isomorphism to the ``construct_fwd_bwd_graph`` Node/Edge
+graph, op_id sequence included) ran green through M6 and died at M7 with
+``construct_fwd_bwd_graph`` itself.
 
 What remains:
 
-* always-on synthetic tests pinning the coarse Program's typed surface and
-  the evaluator's legacy duration-index-0 semantics;
-* an always-on structural differential against the LIVE legacy constructor
-  (``construct_fwd_bwd_graph`` keeps building pipeline roots until M7):
-  the coarse schedule events must be add_child-order isomorphic to the
-  legacy Node/Edge graph INCLUDING the ``op_id`` sequence — the M6
-  hierarchical emission lowering (``lower_coarse_for_emission``) keys its
-  per-stage Kahn toposort and Step-11 transfer replay on those op_ids;
+* always-on synthetic tests pinning the coarse Program's typed surface,
+  the evaluator's legacy duration-index-0 semantics, and the schedule
+  events' determinism + ``op_id`` integrity (unique creation-order stamps
+  aligned with the op list — the hierarchical emission lowering keys its
+  per-stage Kahn toposort and Step-11 transfer replay on them);
 * an env-gated determinism sweep (``RAPID_COARSE_DIFF=1``): every
   analytical + hybrid golden spec builds and evaluates the coarse program
   twice (hybrid: retimed under synthetic block timings) — totals AND full
@@ -55,14 +56,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pytest
 
-import simulate_train_graph as llm_simulation
 from timing_model import CollectiveType
 from equiv.configs import MATRIX
 
 from program.analytic_sim import evaluate_detailed
 from program.pipeline_coarse import build_coarse_program
 from program.retime import BlockTimings, apply_block_timings
-from program.schedule import CommEvent, ComputeEvent, ScheduleSpec
+from program.schedule import CommEvent, ComputeEvent, ScheduleInputs, ScheduleSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_MODEL_CONFIG = (
@@ -81,44 +81,41 @@ _diff_gate = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Structural pairing (legacy graph <-> coarse events)
+# Event-stream description (determinism + op_id integrity)
 # ---------------------------------------------------------------------------
 
 
-def _assert_events_match_legacy(legacy_root: Any, program: Any) -> int:
-    """Pairwise DFS over the isomorphic graphs asserting names, kinds,
-    children arity, and — M6 — the legacy ``op_id`` sequence the emission
-    lowering depends on. Returns the number of paired events."""
+def _describe_event_stream(program: Any) -> List[Tuple[str, str, Optional[int], int]]:
+    """DFS-preorder description of the coarse schedule events: (kind, name,
+    op_id, children arity). Two builds from the same ScheduleSpec must
+    produce identical streams — the emission lowering keys its per-stage
+    Kahn toposort and Step-11 transfer replay on the op_ids."""
     events_root = program.meta.misc["coarse_proto_root"]
 
-    paired = 0
+    out: List[Tuple[str, str, Optional[int], int]] = []
     seen: Set[int] = set()
-    stack: List[Tuple[Any, Any]] = [(legacy_root, events_root)]
+    stack: List[Any] = [events_root]
     while stack:
-        legacy_obj, event_obj = stack.pop()
-        if id(legacy_obj) in seen:
+        event_obj = stack.pop()
+        if id(event_obj) in seen:
             continue
-        seen.add(id(legacy_obj))
-        paired += 1
-
-        assert getattr(legacy_obj, "name") == getattr(event_obj, "name")
-        if isinstance(legacy_obj, llm_simulation.Node):
-            assert isinstance(event_obj, ComputeEvent)
-        else:
-            assert isinstance(legacy_obj, llm_simulation.Edge)
+        seen.add(id(event_obj))
+        kind = "compute" if isinstance(event_obj, ComputeEvent) else "comm"
+        if kind == "comm":
             assert isinstance(event_obj, CommEvent)
-        assert legacy_obj.op_id == event_obj.op_id, (
-            f"op_id mismatch on '{legacy_obj.name}': "
-            f"legacy={legacy_obj.op_id} event={event_obj.op_id}"
-        )
+        out.append((kind, event_obj.name, event_obj.op_id, len(event_obj.children)))
+        stack.extend(reversed(event_obj.children))
+    return out
 
-        legacy_children = list(legacy_obj.children)
-        event_children = list(event_obj.children)
-        assert len(legacy_children) == len(event_children), (
-            f"children arity mismatch on '{legacy_obj.name}'"
-        )
-        stack.extend(zip(legacy_children, event_children))
-    return paired
+
+def _assert_op_id_integrity(program: Any) -> None:
+    """Every event carries a unique op_id stamp and the DFS stream is
+    aligned 1:1 with the coarse op list."""
+    stream = _describe_event_stream(program)
+    op_ids = [op_id for _, _, op_id, _ in stream]
+    assert all(op_id is not None for op_id in op_ids)
+    assert len(set(op_ids)) == len(op_ids), "op_ids must be unique"
+    assert len(stream) == len(program.ops)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +271,7 @@ def _synthetic_case(
     with_ep_sync: bool = False,
     model_type: str = "gpt",
 ):
-    """Build (legacy graph, legacy root, ScheduleSpec) from one input set."""
+    """Build (ScheduleInputs, ScheduleSpec) from one input set."""
     comp_times = {
         "linear_softmax_f": 0.002,
         "linear_softmax_b": 0.0025,
@@ -304,8 +301,7 @@ def _synthetic_case(
     }
     comm_metadata = _synthetic_comm_metadata(dp, ep, zero_stage, with_ep_sync)
 
-    graph = llm_simulation.Graph(
-        mode="pipeline",
+    inputs = ScheduleInputs(
         dp=dp,
         pp=pp,
         tp=tp,
@@ -315,16 +311,12 @@ def _synthetic_case(
         comm_metadata=comm_metadata,
         misc_metadata=misc_metadata,
     )
-    root = graph.construct_fwd_bwd_graph(
-        include_backward=include_backward,
-        include_optimizer=include_optimizer,
-    )
     spec = ScheduleSpec.from_pipeline_graph(
-        graph,
+        inputs,
         include_backward=include_backward,
         include_optimizer=include_optimizer,
     )
-    return graph, root, spec
+    return inputs, spec
 
 
 SYNTHETIC_CASES = {
@@ -361,22 +353,25 @@ class _Timing:
 
 
 @pytest.mark.parametrize("case_name", sorted(SYNTHETIC_CASES))
-def test_synthetic_coarse_events_match_legacy(case_name):
-    """The coarse schedule events are isomorphic to the live legacy
-    ``construct_fwd_bwd_graph`` output — names, kinds, children order, and
-    the op_id sequence (dies at M7 with the legacy constructor)."""
-    _, root, spec = _synthetic_case(**SYNTHETIC_CASES[case_name])
-    program = build_coarse_program(spec, None)
+def test_synthetic_coarse_events_deterministic(case_name):
+    """Two builds from the same ScheduleSpec produce identical schedule
+    event streams (names, kinds, children order, op_id stamps), and the
+    op_id stamps are unique and 1:1 with the coarse op list. (Successor of
+    the legacy-constructor isomorphism differential, which was verified
+    green through M6 and died at M7 with ``construct_fwd_bwd_graph``.)"""
+    _, spec = _synthetic_case(**SYNTHETIC_CASES[case_name])
+    program_a = build_coarse_program(spec, None)
+    program_b = build_coarse_program(spec, None)
 
-    paired = _assert_events_match_legacy(root, program)
-    assert paired == len(program.ops)
+    _assert_op_id_integrity(program_a)
+    assert _describe_event_stream(program_a) == _describe_event_stream(program_b)
 
 
 def test_coarse_program_shape():
     """Typed-surface checks: roles, metadata, transfers, zero-byte events."""
     from program.ir import CollectiveOp, ComputeOp, Direction, OpRole, TransferOp
 
-    _, _, spec = _synthetic_case(dp=2, pp=2, mb=2, layers=4, zero_stage=3)
+    _, spec = _synthetic_case(dp=2, pp=2, mb=2, layers=4, zero_stage=3)
     program = build_coarse_program(spec, None, dp_count=2)
 
     assert program.meta.misc["granularity"] == "coarse"
@@ -417,7 +412,7 @@ def test_coarse_program_shape():
 
 def test_evaluator_reads_duration_index_zero():
     """Legacy Node.duration property semantics: profiles evaluate at [0]."""
-    _, _, spec = _synthetic_case(dp=2, pp=2, mb=2, layers=4)
+    _, spec = _synthetic_case(dp=2, pp=2, mb=2, layers=4)
     program_scalar = build_coarse_program(spec, None)
     program_profile = build_coarse_program(spec, None)
 
@@ -478,7 +473,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=tc.pipeline_graph,
-            pipeline_root=tc.pipeline_root,
             interconnect_params=tc.pipeline_interconnect,
             transformer_blocks=tc.transformer_blocks,
             no_data_parallel=False,
@@ -489,7 +483,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
             dispatcher_no_dp = LLMExecutionDispatcher(
                 time_calc=tc,
                 pipeline_graph=tc.pipeline_graph_no_dp,
-                pipeline_root=tc.pipeline_root_no_dp,
                 interconnect_params=tc.pipeline_interconnect,
                 transformer_blocks=tc.transformer_blocks_no_dp or tc.transformer_blocks,
                 no_data_parallel=True,
@@ -517,8 +510,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         )
         (
             pipeline_graph,
-            pipeline_root,
-            _,
             _,
             transformer_blocks,
             interconnect_params,
@@ -536,7 +527,6 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=pipeline_graph,
-            pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
             transformer_blocks=transformer_blocks,
         )
@@ -547,8 +537,8 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
 @_diff_gate
 @pytest.mark.parametrize("spec", COARSE_SPECS, ids=lambda s: s.spec_id)
 def test_matrix_coarse_determinism(spec, tmp_path):
-    """Build + evaluate the coarse program twice per case: the events must
-    match the live legacy constructor (op_ids included) and totals + full
+    """Build + evaluate the coarse program twice per case: event streams and
+    op_id stamps must be identical across builds, and totals + full
     finish-time maps must be identical across builds (hybrid additionally
     retimed under synthetic block timings)."""
     from llm_execution import TransformerTimings
@@ -564,10 +554,12 @@ def test_matrix_coarse_determinism(spec, tmp_path):
         network_model = tc.network_model
         interconnect_params = dispatcher.interconnect_params
 
-        # Cross-check the events against the live legacy constructor.
+        # Event-stream determinism + op_id integrity across builds.
         program = dispatcher._build_coarse_program()
-        paired = _assert_events_match_legacy(dispatcher.pipeline_root, program)
-        assert paired == len(program.ops)
+        _assert_op_id_integrity(program)
+        assert _describe_event_stream(program) == _describe_event_stream(
+            dispatcher._build_coarse_program()
+        ), f"{spec.spec_id}[{label}]: event streams diverge across builds"
 
         timings = None
         if spec.backend == "hybrid":

@@ -49,8 +49,10 @@ floats, participants, interconnect labels — exactly the legacy ``Edge``
 attributes); the ops are the typed metadata + retiming surface
 (:mod:`program.retime` writes per-DP duration tuples onto layer COMPUTE ops
 selected by ``role``/``layer``/``micro_batch``/``direction``/
-``is_moe_layer``/``device``). Collapsing the events into the op list proper
-is M8 work (DESIGN.md §5).
+``is_moe_layer``/``device``). M8 resolution: the events are NOT collapsed
+into the op list — the adjacency-order-dependent consumers (the analytical
+evaluator's tie discipline and the emission ordering pass in
+:mod:`program.legacy_lowering`) keep reading the events by design.
 
 Validation note: the coarse Program is constructed with validation OFF and
 uids in first-encounter DFS order (the ``convert_comm_sizes_to_times``

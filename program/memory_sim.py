@@ -42,8 +42,8 @@ FineNode`/``FineEdge``) rather than the uid-ordered op list: the event
 loop's FIFO discipline depends on the children-list adjacency order, which
 uid order (the per-stage Kahn emission order) does not preserve. The proto
 root is the fine builder's own product — no legacy graph or flattener is
-involved — and collapsing this into the op list proper is M8 work
-(DESIGN.md §5).
+involved. M8 resolution: the proto graph is NOT collapsed into the op
+list — this adjacency-order dependence is why it stays, by design.
 """
 
 from __future__ import annotations

@@ -434,15 +434,20 @@ def test_emitted_bundle_matches_hand_built_et(tmp_path):
 
 def test_lowering_collective_only_stage_uses_pre_extension_rank_arithmetic():
     from program.legacy_lowering import lower_to_program
-    from simulate_train_graph import Edge, Node
+    from program.schedule import CommEvent, ComputeEvent
 
-    a = Node("A", 0, 0, 1.0)
-    edge = Edge(
-        "dp_sync", 2, 0.0,
+    # M8: synthetic graphs use the schedule events (the legacy Node/Edge
+    # classes are retired; the events expose the same duck-typed surface).
+    a = ComputeEvent("A", 0, 1.0)
+    a.op_id = 0
+    edge = CommEvent(
+        "dp_sync",
         comm_size_bytes=64, comm_type=AR, participants=2, comm_interconnect_type="dp",
+        local_hw_id=3,  # a stage no compute node lives on
     )
-    edge.local_hw_id = 3  # a stage no compute node lives on
-    b_node = Node("B", 1, 0, 2.0)
+    edge.op_id = 2
+    b_node = ComputeEvent("B", 0, 2.0)
+    b_node.op_id = 1
     a.add_child(edge)
     edge.add_child(b_node)
 
@@ -471,11 +476,14 @@ def test_lowering_collective_only_stage_uses_pre_extension_rank_arithmetic():
 
 def test_lowering_same_stage_pipeline_edge_becomes_same_device_transfer(tmp_path):
     from program.legacy_lowering import lower_to_program
-    from simulate_train_graph import Edge, Node
+    from program.schedule import CommEvent, ComputeEvent
 
-    a = Node("A", 0, 0, 1.0)
-    xl = Edge("cross_layer", 1, 0.0, comm_type=PIPE)
-    b_node = Node("B", 2, 0, 2.0)
+    a = ComputeEvent("A", 0, 1.0)
+    a.op_id = 0
+    xl = CommEvent("cross_layer", comm_type=PIPE)
+    xl.op_id = 1
+    b_node = ComputeEvent("B", 0, 2.0)
+    b_node.op_id = 2
     a.add_child(xl)
     xl.add_child(b_node)
 

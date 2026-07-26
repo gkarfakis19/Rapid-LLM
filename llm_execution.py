@@ -25,7 +25,7 @@ from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
 from program.block_program import TransformerBlockSpec
 from program.layout import RankLayout
-from simulate_train_graph import Graph
+from program.schedule import ScheduleInputs
 from util import log_message
 
 if TYPE_CHECKING:
@@ -60,6 +60,10 @@ class ExecutionMode(Enum):
 @dataclass
 class ExecutionResult:
     total_time: float
+    #: The Program the mode executed (COARSE for analytical/hybrid/
+    #: hierarchical, FINE for flattened). M7 note: this was the legacy
+    #: pipeline-graph root; callers only ever kept it for reference, so the
+    #: typed Program took its place when ``construct_fwd_bwd_graph`` retired.
     graph_root: Any
     mode: ExecutionMode
 
@@ -73,15 +77,17 @@ class LLMExecutionDispatcher:
     def __init__(
         self,
         time_calc: TimeCalculationLLM,  # somehow this works? TODO: fix this at some point so its not annotated by IDE.
-        pipeline_graph: Graph,
-        pipeline_root: Any,
+        pipeline_graph: ScheduleInputs,
         interconnect_params: Dict[str, Tuple[float, float]],
         transformer_blocks: Optional[TransformerBlockSpec] = None,
         no_data_parallel: bool = False,
     ) -> None:
         self.time_calc = time_calc
+        #: The pipeline schedule inputs (M7: ``program.schedule.
+        #: ScheduleInputs``, the typed carrier that replaced the legacy
+        #: ``simulate_train_graph.Graph`` object — same attribute surface:
+        #: parallelism degrees + comp_times/comm_metadata/misc_metadata).
         self.pipeline_graph = pipeline_graph
-        self.pipeline_root = pipeline_root
         self.interconnect_params = interconnect_params
         #: BLOCK template bundle (M4): dense/MoE BlockTemplates + cluster
         #: degrees, replacing the legacy transformer Graph + fwd/bwd roots.
@@ -487,14 +493,16 @@ class LLMExecutionDispatcher:
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
             # Render the coarse schedule events (converted comm durations +
             # retimed compute durations, like the legacy timed graph).
-            self.pipeline_graph.save_graph(
+            from program.viz import save_events_graph
+
+            save_events_graph(
                 coarse_program.meta.misc["coarse_proto_root"],
                 self.time_calc.output_dir,
                 filename,
             )
 
         total_time *= self._pipeline_interleave_scale()
-        return ExecutionResult(total_time=total_time, graph_root=self.pipeline_root, mode=declared_mode)
+        return ExecutionResult(total_time=total_time, graph_root=coarse_program, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
         from program.retime import apply_block_timings
@@ -561,8 +569,10 @@ class LLMExecutionDispatcher:
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
             # Render the coarse schedule events (retimed durations mirrored
             # by apply_block_timings, like the legacy retimed graph).
+            from program.viz import save_events_graph
+
             filename = "/pipeline_graph_hierarchical_no_dp" if self.no_data_parallel else "/pipeline_graph_hierarchical"
-            self.pipeline_graph.save_graph(
+            save_events_graph(
                 coarse_program.meta.misc["coarse_proto_root"],
                 self.time_calc.output_dir,
                 filename,
@@ -589,7 +599,7 @@ class LLMExecutionDispatcher:
         if max_sec <= 0:
             raise RuntimeError("AstraSim pipeline execution returned non-positive duration")
         max_sec *= self._pipeline_interleave_scale()
-        return ExecutionResult(total_time=max_sec, graph_root=self.pipeline_root, mode=ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
+        return ExecutionResult(total_time=max_sec, graph_root=coarse_program, mode=ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
         """Flattened execution via ``program.pipeline_fine.build_fine_program``.
@@ -604,8 +614,8 @@ class LLMExecutionDispatcher:
         """
         if self.transformer_blocks is not None and self.transformer_blocks.moe is not None:
             raise NotImplementedError("MoE is not supported with full AstraSim flattened execution.")
-        if not self.pipeline_root:
-            raise RuntimeError("Pipeline graph root is not available for flattening")
+        if not self.pipeline_graph:
+            raise RuntimeError("Pipeline schedule inputs are not available for flattening")
         if self.transformer_blocks is None:
             raise RuntimeError("Transformer graph metadata is required for flattening")
 
@@ -637,10 +647,16 @@ class LLMExecutionDispatcher:
                 axis_strides=dict(self._rank_layout.get("axis_strides", {})),
             )
 
-        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
+            # Render the un-expanded pipeline schedule (the coarse events —
+            # add_child-order isomorphic to the retired legacy pre-flatten
+            # pipeline root, same filename).
+            from program.schedule import build_pipeline_events
+            from program.viz import save_events_graph
+
             filename = "/pipeline_graph_pre_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_pre_flatten"
-            self.pipeline_graph.save_graph(
-                self.pipeline_root,
+            save_events_graph(
+                build_pipeline_events(spec).root,
                 self.time_calc.output_dir,
                 filename,
             )
@@ -709,7 +725,7 @@ class LLMExecutionDispatcher:
 
         return ExecutionResult(
             total_time=max_sec * self._pipeline_interleave_scale(),
-            graph_root=self.pipeline_root,
+            graph_root=program,
             mode=ExecutionMode.FULL_ASTRASIM_FLATTENED,
         )
 
@@ -741,8 +757,8 @@ class LLMExecutionDispatcher:
             self._memory_fine_program = self.fine_program
             return self._memory_fine_program
 
-        if not self.pipeline_root:
-            raise RuntimeError("Pipeline graph root is not available for memory flattening")
+        if not self.pipeline_graph:
+            raise RuntimeError("Pipeline schedule inputs are not available for memory flattening")
         if self.transformer_blocks is None:
             raise RuntimeError("Transformer graph metadata is required for memory flattening")
 
