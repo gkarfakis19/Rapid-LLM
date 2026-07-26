@@ -308,26 +308,18 @@ def apply_overlap_to_fine_root(
     tp_overlap: float,
     tp_sp_overlap: float,
     cp_overlap: float,
-    *,
-    node_cls: Any = None,
-    edge_cls: Any = None,
 ) -> Any:
     """Apply TP/TP-SP/CP overlap rewrites to a proto graph in place — the
     (only remaining) implementation of the legacy
     ``llm_execution.apply_overlap_transforms`` rewrite, run BEFORE lowering
     (same point in the legacy pipeline: flatten -> overlap -> propagate ->
-    lower).
+    lower). Operates on the ``FineNode``/``FineEdge`` proto elements shared
+    by the FINE builder (``program.pipeline_fine``) and the BLOCK builder
+    (``program.block_program``, M4)."""
+    from program.pipeline_fine import FineEdge, FineNode  # lazy
 
-    Defaults operate on the FINE builder's ``FineNode``/``FineEdge``
-    elements; ``node_cls``/``edge_cls`` let the (M4-transitional) legacy
-    transformer-graph path apply the identical rewrite to
-    ``simulate_train_graph.Node``/``Edge`` graphs — both class pairs share
-    the constructor signature and attribute surface the rewrite touches."""
-    if node_cls is None or edge_cls is None:
-        from program.pipeline_fine import FineEdge, FineNode  # lazy
-
-        node_cls = FineNode if node_cls is None else node_cls
-        edge_cls = FineEdge if edge_cls is None else edge_cls
+    node_cls = FineNode
+    edge_cls = FineEdge
 
     if root is None:
         return None

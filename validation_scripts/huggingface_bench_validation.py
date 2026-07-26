@@ -1290,9 +1290,7 @@ def run_rapid_estimation(
                     pipeline_graph=tc.pipeline_graph,
                     pipeline_root=tc.pipeline_root,
                     interconnect_params=tc.pipeline_interconnect,
-                    transformer_graph=tc.transformer_graph,
-                    transformer_forward_root=tc.transformer_forward_root,
-                    transformer_backward_root=tc.transformer_backward_root,
+                    transformer_blocks=tc.transformer_blocks,
                     no_data_parallel=False,
                 )
                 memory_program = dispatcher.build_fine_program_for_memory()
@@ -1512,9 +1510,7 @@ def _worker_process_row(
                         pipeline_graph=tc.pipeline_graph,
                         pipeline_root=tc.pipeline_root,
                         interconnect_params=tc.pipeline_interconnect,
-                        transformer_graph=tc.transformer_graph,
-                        transformer_forward_root=tc.transformer_forward_root,
-                        transformer_backward_root=tc.transformer_backward_root,
+                        transformer_blocks=tc.transformer_blocks,
                         no_data_parallel=False,
                     )
                     memory_program = dispatcher.build_fine_program_for_memory()

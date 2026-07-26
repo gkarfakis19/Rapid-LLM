@@ -27,8 +27,8 @@ the identical sequence. Reproduced rules, each pinned by the golden gates
 (DESIGN.md §6):
 
 * per-(tp*cp*ep)-rank GEMM chains from the BlockTemplate, comm collectives
-  chained serially in ``comm_keys`` order (placement pre/post is a
-  ``construct_transformer_graph`` concept the flattener never used);
+  chained serially in ``comm_keys`` order (placement pre/post is a BLOCK
+  builder concept — ``program.block_program`` — the flattener never used);
 * per-rank cross-stage pipeline transfers with ``ceil(total / par_degree)``
   bytes, anchored on BOTH the chain tail and the nearest compute ancestor
   (the compute-anchor double-dep);

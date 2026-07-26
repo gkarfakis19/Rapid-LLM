@@ -13,24 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""M3 fine-builder tests.
+"""M4 block-builder tests.
 
-The M3a legacy-flattener differential is gone with the legacy flattener
-(M3b deleted ``PipelineGraphFlattener`` and the ``RAPID_LEGACY_FLATTEN``
-path). What remains:
+The M4 legacy differential is gone with ``construct_transformer_graph``:
+before the cutover it compared, for every hybrid / hierarchical golden spec
+(17 specs — incl. both ``:moe:ep2`` specs, ``fault_tp``/``fault_pp``,
+``inf:hierarchical`` and the ViT spec), the legacy path (transformer graph
+-> ``lower_to_program`` -> ``emit_chakra``) against the new path
+(``build_block_program`` -> ``emit_chakra``) with
+``program.shadow.compare_et_bundles`` on every transformer program the
+dispatcher runs (dense fwd/bwd, MoE fwd/bwd) — all 17 specs matched.
 
-* an always-on unit test pinning the Program-level tp-overlap pass against
-  the proto-level (load-bearing) application on a synthetic block;
-* a determinism gate (``RAPID_FINE_DIFF=1``): for every flattened-family
-  spec in the golden matrix, build the FINE program twice and emit twice —
-  the op streams must compare equal and the emitted ET bundles (rank
-  ``.et`` files, manifest, ``comm_groups.json``) must be byte-identical.
-  This is the process-internal replacement for the old differential: the
-  builder has no hidden iteration-order dependence (the legacy Step-11
-  set-order tie was resolved deterministically in M3a).
+What remains (the M3a pattern):
+
+* an always-on unit test pinning the BLOCK Program shape on a synthetic
+  template (per-rank serial chains, dp_count == 1, pre/post placement);
+* a determinism gate (``RAPID_BLOCK_DIFF=1``): for every hybrid /
+  hierarchical spec in the golden matrix, build the transformer BLOCK
+  programs twice and emit twice — op streams must compare equal and the
+  emitted ET bundles must be byte-identical.
 
 Run:
-    RAPID_FINE_DIFF=1 ./.venv/bin/python -m pytest tests/test_fine_builder_diff.py -q
+    RAPID_BLOCK_DIFF=1 ./.venv/bin/python -m pytest tests/test_block_builder_diff.py -q
 """
 
 from __future__ import annotations
@@ -52,11 +56,11 @@ BASE_HW_CONFIG = (
     REPO_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB.yaml"
 )
 
-FLATTENED_SPECS = [spec for spec in MATRIX if spec.backend == "flattened"]
+BLOCK_SPECS = [spec for spec in MATRIX if spec.backend in ("hybrid", "hierarchical")]
 
-_determinism_gate = pytest.mark.skipif(
-    os.environ.get("RAPID_FINE_DIFF", "") != "1",
-    reason="fine-builder determinism sweep is a dev gate; set RAPID_FINE_DIFF=1 to run",
+_diff_gate = pytest.mark.skipif(
+    os.environ.get("RAPID_BLOCK_DIFF", "") != "1",
+    reason="block-builder determinism sweep is a dev gate; set RAPID_BLOCK_DIFF=1 to run",
 )
 
 
@@ -65,7 +69,6 @@ def _sanitize(name: str) -> str:
 
 
 def _parse_spec_configs(spec, tmp_path: Path):
-    """Merge the spec overrides onto the base validation configs and parse."""
     import config as config_mod
     from validation_scripts.validation_helpers import _deep_update, _load_yaml, _write_yaml
 
@@ -86,19 +89,18 @@ def _parse_spec_configs(spec, tmp_path: Path):
     return hw_config, model_config, mode
 
 
-def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
-    """Drive the legacy time-calculation objects far enough to obtain the
-    pipeline root(s) + transformer graph(s); returns [(label, tc, dispatcher)].
+def _transformer_cases(spec, hw_config, model_config, mode, out_dir: Path):
+    """Drive the time-calculation objects far enough to obtain the
+    TransformerBlockSpec bundle(s) plus the transformer sublayout; returns
+    (tc, layout_descriptor, [(label, template, degrees, direction)]).
     """
     from llm_execution import LLMExecutionDispatcher
 
-    cases = []
     if spec.run_type == "training":
         from train_timing import TimeCalculationLLM
 
         tc = TimeCalculationLLM(hw_config, model_config, mode, output_dir=str(out_dir))
         tc._build_training_graphs_and_memory_data()
-
         dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
             pipeline_graph=tc.pipeline_graph,
@@ -107,28 +109,17 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
             transformer_blocks=tc.transformer_blocks,
             no_data_parallel=False,
         )
-        cases.append(("final", tc, dispatcher))
-
-        if getattr(tc, "gradient_accumulation_steps", 1) > 1:
-            dispatcher_no_dp = LLMExecutionDispatcher(
-                time_calc=tc,
-                pipeline_graph=tc.pipeline_graph_no_dp,
-                pipeline_root=tc.pipeline_root_no_dp,
-                interconnect_params=tc.pipeline_interconnect,
-                transformer_blocks=tc.transformer_blocks_no_dp or tc.transformer_blocks,
-                no_data_parallel=True,
-            )
-            cases.append(("no_dp", tc, dispatcher_no_dp))
+        block_specs = [("", tc.transformer_blocks)]
+        if tc.transformer_blocks_no_dp is not None:
+            block_specs.append(("no_dp_", tc.transformer_blocks_no_dp))
     else:
         from inference_timing import TimeCalculationLLMInference
 
         tc = TimeCalculationLLMInference(hw_config, model_config, mode, output_dir=str(out_dir))
-        # Replicate the prefill graph construction of calc_time() up to (and
-        # including) _prepare_execution_graphs — no AstraSim involved.
         batch_size = tc._effective_transformer_batch()
         decode_len = tc.model.decode_len
         prefill_len = tc.seq_len - decode_len
-        assert prefill_len > 0, "determinism sweep requires a prefill phase"
+        assert prefill_len > 0, "block determinism sweep requires a prefill phase"
         num_SMs = tc.hw_config.tech_config.core.num_bundles
         transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
             batch_size,
@@ -141,6 +132,20 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
             num_SMs,
             use_moe_override=False,
         )
+        moe_transformer_timings = None
+        moe_node_breakdown = None
+        if tc.use_moe and any(getattr(tc, "moe_layer_mask", []) or []):
+            moe_transformer_timings, moe_node_breakdown = tc.compute_all_gemm_and_node_times(
+                batch_size,
+                tc.vocab_size,
+                tc.hidden_dim,
+                prefill_len,
+                tc.num_heads,
+                tc.kv_heads,
+                tc.moe_intermediate_size,
+                num_SMs,
+                use_moe_override=True,
+            )
         (
             pipeline_graph,
             pipeline_root,
@@ -151,6 +156,8 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         ) = tc._prepare_execution_graphs(
             node_breakdown=node_breakdown,
             transformer_timings=transformer_timings,
+            moe_node_breakdown=moe_node_breakdown,
+            moe_transformer_timings=moe_transformer_timings,
             batch_size=batch_size,
             seq_len=prefill_len,
             hidden_dim=tc.hidden_dim,
@@ -166,62 +173,41 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
             interconnect_params=interconnect_params,
             transformer_blocks=transformer_blocks,
         )
-        cases.append(("prefill", tc, dispatcher))
-    return cases
+        block_specs = [("", transformer_blocks)]
+
+    cases = []
+    for prefix, blocks in block_specs:
+        assert blocks is not None, f"{spec.spec_id}: missing transformer block spec"
+        degrees = (blocks.tp, blocks.cp, blocks.ep)
+        directions = ["forward"] + (["backward"] if blocks.include_backward else [])
+        for direction in directions:
+            cases.append((f"{prefix}dense_{direction}", blocks.dense, degrees, direction))
+            if blocks.moe is not None:
+                cases.append((f"{prefix}moe_{direction}", blocks.moe, degrees, direction))
+
+    layout_descriptor = getattr(dispatcher, "_transformer_rank_layout", None)
+    return tc, layout_descriptor, cases
 
 
-def _effective_dp(tc) -> int:
-    run_type = str(getattr(getattr(tc, "model", None), "run_type", "training")).lower()
-    return 1 if run_type == "inference" else max(1, getattr(tc, "dp", 1))
-
-
-def _fine_bundle(dispatcher, tc, out_dir: Path):
-    """The default flattened path up to (and including) ET emission."""
+def _emit_block(tc, template, degrees, direction, layout_descriptor, out_dir: Path):
+    from program.block_program import build_block_program
     from program.et_emit import emit_chakra
-    from program.layout import RankLayout
-    from program.pipeline_fine import build_fine_program
-    from program.schedule import ScheduleSpec
 
-    run_type = str(getattr(getattr(tc, "model", None), "run_type", "training")).lower()
-    include_backward = run_type != "inference"
-    misc = getattr(dispatcher.pipeline_graph, "misc_metadata", None) or {}
-    include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
-
-    spec_obj = ScheduleSpec.from_pipeline_graph(
-        dispatcher.pipeline_graph,
-        include_backward=include_backward,
-        include_optimizer=include_optimizer,
-    )
-    block_templates = {"dense": dispatcher.transformer_blocks.dense}
-
-    layout_obj = None
-    if dispatcher._rank_layout and dispatcher._rank_layout.get("axis_order"):
-        layout_obj = RankLayout(
-            axis_order=tuple(dispatcher._rank_layout.get("axis_order", [])),
-            axis_sizes=dict(dispatcher._rank_layout.get("axis_sizes", {})),
-            axis_strides=dict(dispatcher._rank_layout.get("axis_strides", {})),
-        )
-
+    tp, cp, ep = degrees
     out_dir.mkdir(parents=True, exist_ok=True)
-    program = build_fine_program(
-        spec_obj,
-        block_templates,
-        layout_obj,
-        no_data_parallel=dispatcher.no_data_parallel,
-        dp_count=_effective_dp(tc),
-        optimize_2dmap=(
-            dict(dispatcher._first_dim_optimize_cfg)
-            if dispatcher._first_dim_optimize_cfg
-            else None
-        ),
-        gmap_workdir=str(out_dir),
+    program = build_block_program(
+        template,
+        direction,
+        layout_descriptor,
+        tp=tp,
+        cp=cp,
+        ep=ep,
         parallelism_mode=tc.get_parallelism_mode(),
         tp_overlap=getattr(tc, "tp_overlap", 0.0),
         tp_sp_overlap=getattr(tc, "tp_sp_overlap", 0.0),
         cp_overlap=getattr(tc, "cp_overlap", 0.0),
     )
-    bundle = emit_chakra(program, str(out_dir), id_policy="legacy")
-    return program, bundle
+    return program, emit_chakra(program, str(out_dir), id_policy="legacy")
 
 
 def _describe_ops(program):
@@ -249,79 +235,105 @@ def _bundle_files(bundle_dir: Path):
     return [n for n in names if n.endswith(".et") or n.endswith(".json") or n.endswith(".txt")]
 
 
-def test_program_level_tp_overlap_matches_proto_level_when_exact():
-    """The Program->Program overlap passes are exact when split computes
-    feed no cross-device consumers (single stage, single microbatch — see
-    program/transforms.py's documented limitations). Verify against the
-    proto-level (load-bearing) application on a synthetic tp=2 block."""
+def test_block_program_shape_synthetic():
+    """Always-on pin of the BLOCK program shape: per-rank serial chains with
+    pre/post comm placement, dp_count == 1, granularity tag."""
     from timing_model import CollectiveType
     from program.block import BlockTemplate
-    from program.pipeline_fine import build_fine_program
-    from program.schedule import ScheduleSpec
-    from program.transforms import apply_tp_overlap
+    from program.block_program import build_block_program, build_block_root
+    from program.ir import CollectiveOp, ComputeOp
+    from program.pipeline_fine import FineNode
 
     comm_metadata = {
-        "qkv_proj_forward_all_reduce": {
+        "layernorm1_forward_all_gather": {
+            "size": 512,
+            "type": CollectiveType.ALL_GATHER,
+            "participants": 2,
+            "interconnect_type": "tp",
+            "placement": "pre",
+        },
+        "MLP_forward_all_reduce": {
             "size": 4096,
             "type": CollectiveType.ALL_REDUCE,
             "participants": 2,
             "interconnect_type": "tp",
-            "local_comp_time": 0,
+            "placement": "post",
         },
     }
     gemms = [
         {
-            "name": "qkv_proj",
-            "forward": {"duration": 1e-4, "comm_keys": ["qkv_proj_forward_all_reduce"]},
+            "name": "layernorm1",
+            "forward": {"duration": 1e-4, "comm_keys": ["layernorm1_forward_all_gather"]},
             "backward": {"duration": 2e-4, "comm_keys": []},
         },
         {
             "name": "MLP",
-            "forward": {"duration": 3e-4, "comm_keys": []},
+            "forward": {"duration": 3e-4, "comm_keys": ["MLP_forward_all_reduce"]},
             "backward": {"duration": 4e-4, "comm_keys": []},
         },
     ]
     template = BlockTemplate.from_gemm_entries(gemms, comm_metadata)
-    spec = ScheduleSpec(
-        mb=1, num_layers=1, pp=1, dp=1, tp=2, cp=1, ep=1,
-        layers_per_stage=(1,), moe_layer_mask=(), zero_stage=0,
-        dp_microbatch_mode="every_mb", grad_accum_cycle="final",
-        include_backward=True, include_optimizer=False,
-        full_recomputation=False, pipeline_style_recompute=False,
-        flattened_mode=True, model_type="gpt",
-        comp_times={
-            "embedding_f": 1e-5, "embedding_b": 1e-5,
-            "linear_softmax_f": 1e-5, "linear_softmax_b": 1e-5,
-            "transformer_f": 1e-3, "transformer_b": 2e-3,
-        },
-        comm_metadata={},
-    )
-    templates = {"dense": template}
+    program = build_block_program(template, "forward", None, tp=2, cp=1, ep=1)
 
-    proto_level = build_fine_program(
-        spec, templates, None,
-        parallelism_mode="tensor", tp_overlap=0.6, tp_sp_overlap=0.0, cp_overlap=0.0,
-    )
-    program_level = build_fine_program(spec, templates, None)
-    program_level = apply_tp_overlap(program_level, "tensor", 0.6, 0.0)
+    assert program.dp_count == 1
+    assert program.meta.misc.get("granularity") == "block"
+    assert program.devices == (0, 1)
 
-    assert _describe_ops(proto_level) == _describe_ops(program_level)
+    # Per rank: pre AG -> layernorm1 -> MLP -> post AR, serial.
+    for device in program.devices:
+        ops = [op for op in program.ops if getattr(op, "device", None) == device]
+        names = [op.name for op in ops]
+        assert names == [
+            "layernorm1_forward_all_gather",
+            f"layernorm1_fwd_rank{device}",
+            f"MLP_fwd_rank{device}",
+            "MLP_forward_all_reduce",
+        ]
+        assert isinstance(ops[0], CollectiveOp) and not ops[0].deps
+        for prev, cur in zip(ops, ops[1:]):
+            assert cur.deps == (prev.uid,)
+        assert isinstance(ops[1], ComputeOp) and isinstance(ops[2], ComputeOp)
+
+    # param_gather lives on the proto elements (memory-path attribute; the
+    # lowering never carried it into ET emission).
+    root = build_block_root(template, "forward", tp=2, cp=1, ep=1)
+    seen = set()
+    stack = list(root.children)
+    gemm_nodes = []
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, FineNode):
+            gemm_nodes.append(obj)
+        stack.extend(getattr(obj, "children", []))
+    flags = {node.name: node.param_gather for node in gemm_nodes}
+    assert flags == {
+        "layernorm1_fwd_rank0": True,
+        "MLP_fwd_rank0": False,
+        "layernorm1_fwd_rank1": True,
+        "MLP_fwd_rank1": False,
+    }
 
 
-@_determinism_gate
-@pytest.mark.parametrize("spec", FLATTENED_SPECS, ids=[s.spec_id for s in FLATTENED_SPECS])
-def test_fine_builder_deterministic(spec, tmp_path):
+@_diff_gate
+@pytest.mark.parametrize("spec", BLOCK_SPECS, ids=[s.spec_id for s in BLOCK_SPECS])
+def test_block_builder_deterministic(spec, tmp_path):
     """Build twice, emit twice: op streams equal, ET bundles byte-equal."""
     hw_config, model_config, mode = _parse_spec_configs(spec, tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    for label, tc, dispatcher in _graph_cases(spec, hw_config, model_config, mode, run_dir):
-        dir_a = tmp_path / f"fine_a_{_sanitize(label)}"
-        dir_b = tmp_path / f"fine_b_{_sanitize(label)}"
+    tc, layout_descriptor, cases = _transformer_cases(spec, hw_config, model_config, mode, run_dir)
+    assert cases, f"{spec.spec_id}: no transformer cases produced"
 
-        program_a, _bundle_a = _fine_bundle(dispatcher, tc, dir_a)
-        program_b, _bundle_b = _fine_bundle(dispatcher, tc, dir_b)
+    for label, template, degrees, direction in cases:
+        dir_a = tmp_path / f"block_a_{_sanitize(label)}"
+        dir_b = tmp_path / f"block_b_{_sanitize(label)}"
+
+        program_a, _bundle_a = _emit_block(tc, template, degrees, direction, layout_descriptor, dir_a)
+        program_b, _bundle_b = _emit_block(tc, template, degrees, direction, layout_descriptor, dir_b)
 
         assert _describe_ops(program_a) == _describe_ops(program_b), (
             f"{spec.spec_id} [{label}]: two builds produced different op streams"

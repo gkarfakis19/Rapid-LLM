@@ -25,13 +25,14 @@ A :class:`BlockTemplate` is the typed port of the two inputs
   ``train_timing._prepare_execution_graphs`` (size / CollectiveType /
   participants / interconnect / placement / MoE grouping / tp_shard).
 
-The flattener never reads the transformer graph's *node structure* (verified
-in docs/rewrite/panel — it only consumes the template + metadata), so these
+The flattener never read the transformer graph's *node structure* (verified
+in docs/rewrite/panel — it only consumed the template + metadata), so these
 two mappings are the complete block description. Dense and MoE variants are
-two templates built from the dense / MoE transformer graphs; the flattened
-expansion treats both as serial per-rank chains, exactly like the legacy
-flattener (MoE hot/cold joins exist only in ``construct_transformer_graph``
-and stay out of the flattened path, which rejects MoE upstream).
+two templates; the flattened expansion treats both as serial per-rank
+chains, exactly like the legacy flattener, while the BLOCK builder
+(:mod:`program.block_program`, M4) additionally realizes the MoE hot/cold
+joins + residual transfers the deleted ``construct_transformer_graph``
+used to build (the flattened path still rejects MoE upstream).
 
 ``CommMeta`` is shared with :mod:`program.schedule` for the pipeline graph's
 comm metadata (``cross_layer`` / dp reducers / ZeRO gathers / EP sync).
@@ -121,9 +122,9 @@ class GemmDirection:
 
     ``duration`` may be ``None`` when the legacy entry carried no duration —
     the flattened expansion raises the legacy error message in that case.
-    ``comm_keys`` keeps the legacy list order: the flattener chains them
+    ``comm_keys`` keeps the legacy list order: the fine expansion chains them
     serially after the GEMM node (it ignores pre/post placement — that is a
-    ``construct_transformer_graph``-only concept).
+    BLOCK-builder concept, see :mod:`program.block_program`).
     """
 
     duration: Optional[float]
@@ -150,20 +151,6 @@ class BlockTemplate:
 
     entries: Tuple[GemmEntry, ...]
     comm_metadata: Mapping[str, CommMeta]
-
-    @classmethod
-    def from_transformer_graph(cls, transformer_graph: Any) -> "BlockTemplate":
-        """Build from a legacy transformer ``Graph`` (duck-typed: only
-        ``transformer_cfg`` and ``comm_metadata`` are read — the same two
-        inputs ``PipelineGraphFlattener.__init__`` consumed)."""
-        transformer_cfg = getattr(transformer_graph, "transformer_cfg", None) or {}
-        gemm_entries = transformer_cfg.get("gemms")
-        if not gemm_entries:
-            raise ValueError("Transformer GEMM template is missing")
-        return cls.from_gemm_entries(
-            gemm_entries,
-            getattr(transformer_graph, "comm_metadata", None) or {},
-        )
 
     @classmethod
     def from_gemm_entries(

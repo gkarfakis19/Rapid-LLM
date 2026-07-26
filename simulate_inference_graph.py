@@ -231,12 +231,7 @@ class DecodeGraph(Graph):
             pipeline_root,
             _,
             _,
-            transformer_graph,
-            transformer_forward_root,
-            transformer_backward_root,
-            moe_transformer_graph,
-            moe_transformer_forward_root,
-            moe_transformer_backward_root,
+            transformer_blocks,
             interconnect_params,
         ) = execution_graphs
 
@@ -245,12 +240,7 @@ class DecodeGraph(Graph):
             pipeline_graph=pipeline_graph,
             pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
-            transformer_graph=transformer_graph,
-            transformer_forward_root=transformer_forward_root,
-            transformer_backward_root=transformer_backward_root,
-            moe_transformer_graph=moe_transformer_graph,
-            moe_transformer_forward_root=moe_transformer_forward_root,
-            moe_transformer_backward_root=moe_transformer_backward_root,
+            transformer_blocks=transformer_blocks,
         )
 
         result = dispatcher.run(temp_time_calc.execution_mode)

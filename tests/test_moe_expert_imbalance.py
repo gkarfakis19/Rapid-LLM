@@ -6,7 +6,9 @@ import pytest
 from astrasim_lib import is_astrasim_available
 import config
 from inference_timing import TimeCalculationLLMInference
-from simulate_train_graph import Edge, Graph, Node
+from program.block import BlockTemplate
+from program.block_program import build_block_program, build_block_root
+from program.pipeline_fine import FineEdge, FineNode
 from train_timing import MoECommDecomposition
 from timing_model import CollectiveType
 from train_timing import TimeCalculationLLM
@@ -311,31 +313,21 @@ def test_inference_moe_comm_decomposition_uses_pooled_tp_ep_groups():
 
 
 def test_training_moe_comm_graph_uses_local_joins_and_hot_join_fan_in_per_tp_slice():
-    graph = Graph(
-        mode="transformer",
-        dp=1,
-        pp=1,
-        tp=2,
-        cp=1,
-        ep=3,
-        comp_times={
-            "transformer": {
-                "gemms": [
-                    {
-                        "name": "moe_dispatch",
-                        "forward": {
-                            "duration": 0.0,
-                            "comm_keys": [
-                                "moe_dispatch_forward_base_all_to_all",
-                                "moe_dispatch_forward_residual_p2p",
-                            ],
-                        },
-                        "backward": {"duration": 0.0, "comm_keys": []},
-                    }
-                ]
+    template = BlockTemplate.from_gemm_entries(
+        [
+            {
+                "name": "moe_dispatch",
+                "forward": {
+                    "duration": 0.0,
+                    "comm_keys": [
+                        "moe_dispatch_forward_base_all_to_all",
+                        "moe_dispatch_forward_residual_p2p",
+                    ],
+                },
+                "backward": {"duration": 0.0, "comm_keys": []},
             }
-        },
-        comm_metadata={
+        ],
+        {
             "moe_dispatch_forward_base_all_to_all": {
                 "size": 944,
                 "type": CollectiveType.ALL_TO_ALL,
@@ -357,13 +349,12 @@ def test_training_moe_comm_graph_uses_local_joins_and_hot_join_fan_in_per_tp_sli
                 "moe_routing_mode": "ep",
             },
         },
-        misc_metadata={},
     )
-    root = graph.construct_transformer_graph(direction="forward")
+    root = build_block_root(template, "forward", tp=2, cp=1, ep=3)
     objects = _walk_graph(root)
 
-    joins = [obj for obj in objects if isinstance(obj, Node) and "dispatch_fwd_group_join" in obj.name]
-    residuals = [obj for obj in objects if isinstance(obj, Edge) and "residual_p2p_rank" in obj.name]
+    joins = [obj for obj in objects if isinstance(obj, FineNode) and "dispatch_fwd_group_join" in obj.name]
+    residuals = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p_rank" in obj.name]
 
     assert len(joins) == 6
     assert sorted(node.hw_id for node in joins) == [0, 1, 2, 3, 4, 5]
@@ -373,31 +364,21 @@ def test_training_moe_comm_graph_uses_local_joins_and_hot_join_fan_in_per_tp_sli
 
 
 def test_inference_moe_comm_graph_uses_local_joins_with_single_pooled_hot_rank():
-    graph = Graph(
-        mode="transformer",
-        dp=1,
-        pp=1,
-        tp=2,
-        cp=1,
-        ep=2,
-        comp_times={
-            "transformer": {
-                "gemms": [
-                    {
-                        "name": "moe_combine",
-                        "forward": {
-                            "duration": 0.0,
-                            "comm_keys": [
-                                "moe_combine_forward_base_all_to_all",
-                                "moe_combine_forward_residual_p2p",
-                            ],
-                        },
-                        "backward": {"duration": 0.0, "comm_keys": []},
-                    }
-                ]
+    template = BlockTemplate.from_gemm_entries(
+        [
+            {
+                "name": "moe_combine",
+                "forward": {
+                    "duration": 0.0,
+                    "comm_keys": [
+                        "moe_combine_forward_base_all_to_all",
+                        "moe_combine_forward_residual_p2p",
+                    ],
+                },
+                "backward": {"duration": 0.0, "comm_keys": []},
             }
-        },
-        comm_metadata={
+        ],
+        {
             "moe_combine_forward_base_all_to_all": {
                 "size": 928,
                 "type": CollectiveType.ALL_TO_ALL,
@@ -419,13 +400,12 @@ def test_inference_moe_comm_graph_uses_local_joins_with_single_pooled_hot_rank()
                 "moe_routing_mode": "tp_ep",
             },
         },
-        misc_metadata={},
     )
-    root = graph.construct_transformer_graph(direction="forward")
+    root = build_block_root(template, "forward", tp=2, cp=1, ep=2)
     objects = _walk_graph(root)
 
-    joins = [obj for obj in objects if isinstance(obj, Node) and "combine_fwd_group_join" in obj.name]
-    residuals = [obj for obj in objects if isinstance(obj, Edge) and "residual_p2p_rank" in obj.name]
+    joins = [obj for obj in objects if isinstance(obj, FineNode) and "combine_fwd_group_join" in obj.name]
+    residuals = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p_rank" in obj.name]
 
     assert len(joins) == 4
     assert sorted(node.hw_id for node in joins) == [0, 1, 2, 3]
@@ -451,11 +431,14 @@ def test_training_graph_build_path_registers_moe_parallel_comm_specs():
     tc = TimeCalculationLLM(hw_config, model, "LLM")
 
     tc._build_training_graphs_and_memory_data()
-    objects = _walk_graph(tc.transformer_forward_root_moe)
+    blocks = tc.transformer_blocks
+    assert blocks is not None and blocks.moe is not None
+    root = build_block_root(blocks.moe, "forward", tp=blocks.tp, cp=blocks.cp, ep=blocks.ep)
+    objects = _walk_graph(root)
 
-    base_edges = [obj for obj in objects if isinstance(obj, Edge) and "base_all_to_all" in obj.name]
-    residual_edges = [obj for obj in objects if isinstance(obj, Edge) and "residual_p2p" in obj.name]
-    joins = [obj for obj in objects if isinstance(obj, Node) and "_join_rank" in obj.name]
+    base_edges = [obj for obj in objects if isinstance(obj, FineEdge) and "base_all_to_all" in obj.name]
+    residual_edges = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p" in obj.name]
+    joins = [obj for obj in objects if isinstance(obj, FineNode) and "_join_rank" in obj.name]
 
     assert len(base_edges) == 12
     assert len(residual_edges) == 8
@@ -510,33 +493,24 @@ def test_astra_backed_pipeline_timing_uses_direct_point_to_point_formula():
 
 @pytest.mark.skipif(not is_astrasim_available(), reason="AstraSim ET conversion is unavailable")
 def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
-    from astrasim_lib.executor import _dump_et_text, convert_rapid_llm_graph_to_chakra_et
+    from astrasim_lib.executor import _dump_et_text
+    from program.et_emit import emit_chakra
 
-    graph = Graph(
-        mode="transformer",
-        dp=1,
-        pp=1,
-        tp=2,
-        cp=1,
-        ep=3,
-        comp_times={
-            "transformer": {
-                "gemms": [
-                    {
-                        "name": "moe_dispatch",
-                        "forward": {
-                            "duration": 0.0,
-                            "comm_keys": [
-                                "moe_dispatch_forward_base_all_to_all",
-                                "moe_dispatch_forward_residual_p2p",
-                            ],
-                        },
-                        "backward": {"duration": 0.0, "comm_keys": []},
-                    }
-                ]
+    template = BlockTemplate.from_gemm_entries(
+        [
+            {
+                "name": "moe_dispatch",
+                "forward": {
+                    "duration": 0.0,
+                    "comm_keys": [
+                        "moe_dispatch_forward_base_all_to_all",
+                        "moe_dispatch_forward_residual_p2p",
+                    ],
+                },
+                "backward": {"duration": 0.0, "comm_keys": []},
             }
-        },
-        comm_metadata={
+        ],
+        {
             "moe_dispatch_forward_base_all_to_all": {
                 "size": 944,
                 "type": CollectiveType.ALL_TO_ALL,
@@ -558,12 +532,12 @@ def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
                 "moe_routing_mode": "ep",
             },
         },
-        misc_metadata={},
     )
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
-        root = graph.construct_transformer_graph(direction="forward")
-        _, rank_ids, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
+        program = build_block_program(template, "forward", None, tp=2, cp=1, ep=3)
+        bundle = emit_chakra(program, tmpdir, id_policy="legacy")
+        rank_ids = bundle.rank_ids
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
 
@@ -592,33 +566,24 @@ def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
 
 @pytest.mark.skipif(not is_astrasim_available(), reason="AstraSim ET conversion is unavailable")
 def test_inference_hierarchical_et_blocks_cold_local_join_on_residual_send():
-    from astrasim_lib.executor import _dump_et_text, convert_rapid_llm_graph_to_chakra_et
+    from astrasim_lib.executor import _dump_et_text
+    from program.et_emit import emit_chakra
 
-    graph = Graph(
-        mode="transformer",
-        dp=1,
-        pp=1,
-        tp=2,
-        cp=1,
-        ep=2,
-        comp_times={
-            "transformer": {
-                "gemms": [
-                    {
-                        "name": "moe_combine",
-                        "forward": {
-                            "duration": 0.0,
-                            "comm_keys": [
-                                "moe_combine_forward_base_all_to_all",
-                                "moe_combine_forward_residual_p2p",
-                            ],
-                        },
-                        "backward": {"duration": 0.0, "comm_keys": []},
-                    }
-                ]
+    template = BlockTemplate.from_gemm_entries(
+        [
+            {
+                "name": "moe_combine",
+                "forward": {
+                    "duration": 0.0,
+                    "comm_keys": [
+                        "moe_combine_forward_base_all_to_all",
+                        "moe_combine_forward_residual_p2p",
+                    ],
+                },
+                "backward": {"duration": 0.0, "comm_keys": []},
             }
-        },
-        comm_metadata={
+        ],
+        {
             "moe_combine_forward_base_all_to_all": {
                 "size": 928,
                 "type": CollectiveType.ALL_TO_ALL,
@@ -640,12 +605,12 @@ def test_inference_hierarchical_et_blocks_cold_local_join_on_residual_send():
                 "moe_routing_mode": "tp_ep",
             },
         },
-        misc_metadata={},
     )
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
-        root = graph.construct_transformer_graph(direction="forward")
-        _, rank_ids, _ = convert_rapid_llm_graph_to_chakra_et(root, dp_size=1, output_dir=tmpdir)
+        program = build_block_program(template, "forward", None, tp=2, cp=1, ep=2)
+        bundle = emit_chakra(program, tmpdir, id_policy="legacy")
+        rank_ids = bundle.rank_ids
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
 

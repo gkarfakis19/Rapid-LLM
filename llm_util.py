@@ -921,12 +921,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             pipeline_root,
             _,
             _,
-            transformer_graph,
-            transformer_forward_root,
-            transformer_backward_root,
-            moe_transformer_graph,
-            moe_transformer_forward_root,
-            moe_transformer_backward_root,
+            transformer_blocks,
             interconnect_params,
         ) = tc._prepare_execution_graphs(
             node_breakdown=node_breakdown,
@@ -946,12 +941,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             pipeline_graph=pipeline_graph,
             pipeline_root=pipeline_root,
             interconnect_params=interconnect_params,
-            transformer_graph=transformer_graph,
-            transformer_forward_root=transformer_forward_root,
-            transformer_backward_root=transformer_backward_root,
-            moe_transformer_graph=moe_transformer_graph,
-            moe_transformer_forward_root=moe_transformer_forward_root,
-            moe_transformer_backward_root=moe_transformer_backward_root,
+            transformer_blocks=transformer_blocks,
         )
         prefill_program = dispatcher.build_fine_program_for_memory()
         prefill_memory_data = mem_estimator.build_memory_data(
@@ -986,12 +976,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             decode_pipeline_root,
             _,
             _,
-            decode_transformer_graph,
-            decode_transformer_forward_root,
-            decode_transformer_backward_root,
-            decode_moe_transformer_graph,
-            decode_moe_transformer_forward_root,
-            decode_moe_transformer_backward_root,
+            decode_transformer_blocks,
             decode_interconnect_params,
         ), _ = tc.prepare_decode_graphs(
             batch_size=batch_size,
@@ -1003,12 +988,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             pipeline_graph=decode_pipeline_graph,
             pipeline_root=decode_pipeline_root,
             interconnect_params=decode_interconnect_params,
-            transformer_graph=decode_transformer_graph,
-            transformer_forward_root=decode_transformer_forward_root,
-            transformer_backward_root=decode_transformer_backward_root,
-            moe_transformer_graph=decode_moe_transformer_graph,
-            moe_transformer_forward_root=decode_moe_transformer_forward_root,
-            moe_transformer_backward_root=decode_moe_transformer_backward_root,
+            transformer_blocks=decode_transformer_blocks,
         )
         decode_program = decode_dispatcher.build_fine_program_for_memory()
         decode_memory_data = mem_estimator.build_memory_data(

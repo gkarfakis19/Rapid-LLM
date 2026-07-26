@@ -738,12 +738,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.pipeline_graph = None
             self.pipeline_root = None
             self.pipeline_interconnect = None
-            self.transformer_graph = None
-            self.transformer_forward_root = None
-            self.transformer_backward_root = None
-            self.transformer_graph_moe = None
-            self.transformer_forward_root_moe = None
-            self.transformer_backward_root_moe = None
+            self.transformer_blocks = None
             self.transformer_analytical_time_forward = None
             self.transformer_analytical_time_backward = None
         else:
@@ -800,12 +795,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 pipeline_root,
                 _,
                 _,
-                transformer_graph,
-                transformer_forward_root,
-                transformer_backward_root,
-                moe_transformer_graph,
-                moe_transformer_forward_root,
-                moe_transformer_backward_root,
+                transformer_blocks,
                 interconnect_params,
             ) = self._prepare_execution_graphs(
                 node_breakdown=node_breakdown,
@@ -824,12 +814,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.pipeline_graph = pipeline_graph
             self.pipeline_root = pipeline_root
             self.pipeline_interconnect = interconnect_params
-            self.transformer_graph = transformer_graph
-            self.transformer_forward_root = transformer_forward_root
-            self.transformer_backward_root = None
-            self.transformer_graph_moe = moe_transformer_graph
-            self.transformer_forward_root_moe = moe_transformer_forward_root
-            self.transformer_backward_root_moe = moe_transformer_backward_root
+            self.transformer_blocks = transformer_blocks
             self.transformer_analytical_time_forward = node_breakdown.get("transformer_time_f")
             self.transformer_analytical_time_backward = None
 
@@ -838,12 +823,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 pipeline_graph=self.pipeline_graph,
                 pipeline_root=self.pipeline_root,
                 interconnect_params=self.pipeline_interconnect,
-                transformer_graph=self.transformer_graph,
-                transformer_forward_root=self.transformer_forward_root,
-                transformer_backward_root=self.transformer_backward_root,
-                moe_transformer_graph=self.transformer_graph_moe,
-                moe_transformer_forward_root=self.transformer_forward_root_moe,
-                moe_transformer_backward_root=self.transformer_backward_root_moe,
+                transformer_blocks=self.transformer_blocks,
             )
             mode = self.execution_mode
             try:
@@ -891,12 +871,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 decode_pipeline_root,
                 _,
                 _,
-                decode_transformer_graph,
-                decode_transformer_forward_root,
-                decode_transformer_backward_root,
-                decode_moe_transformer_graph,
-                decode_moe_transformer_forward_root,
-                decode_moe_transformer_backward_root,
+                decode_transformer_blocks,
                 decode_interconnect_params,
             ), _ = self.prepare_decode_graphs(
                 batch_size=batch_size,
@@ -908,12 +883,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 pipeline_graph=decode_pipeline_graph,
                 pipeline_root=decode_pipeline_root,
                 interconnect_params=decode_interconnect_params,
-                transformer_graph=decode_transformer_graph,
-                transformer_forward_root=decode_transformer_forward_root,
-                transformer_backward_root=decode_transformer_backward_root,
-                moe_transformer_graph=decode_moe_transformer_graph,
-                moe_transformer_forward_root=decode_moe_transformer_forward_root,
-                moe_transformer_backward_root=decode_moe_transformer_backward_root,
+                transformer_blocks=decode_transformer_blocks,
             )
             decode_memory_program = decode_dispatcher.build_fine_program_for_memory()
             decode_memory_data = mem_estimator.build_memory_data(

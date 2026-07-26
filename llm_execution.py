@@ -24,6 +24,7 @@ import simulate_train_graph as llm_simulation
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
+from program.block_program import TransformerBlockSpec
 from program.layout import RankLayout
 from simulate_train_graph import Graph
 from util import log_message
@@ -76,24 +77,16 @@ class LLMExecutionDispatcher:
         pipeline_graph: Graph,
         pipeline_root: Any,
         interconnect_params: Dict[str, Tuple[float, float]],
-        transformer_graph: Optional[Graph] = None,
-        transformer_forward_root: Optional[Any] = None,
-        transformer_backward_root: Optional[Any] = None,
-        moe_transformer_graph: Optional[Graph] = None,
-        moe_transformer_forward_root: Optional[Any] = None,
-        moe_transformer_backward_root: Optional[Any] = None,
+        transformer_blocks: Optional[TransformerBlockSpec] = None,
         no_data_parallel: bool = False,
     ) -> None:
         self.time_calc = time_calc
         self.pipeline_graph = pipeline_graph
         self.pipeline_root = pipeline_root
         self.interconnect_params = interconnect_params
-        self.transformer_graph = transformer_graph
-        self.transformer_forward_root = transformer_forward_root
-        self.transformer_backward_root = transformer_backward_root
-        self.moe_transformer_graph = moe_transformer_graph
-        self.moe_transformer_forward_root = moe_transformer_forward_root
-        self.moe_transformer_backward_root = moe_transformer_backward_root
+        #: BLOCK template bundle (M4): dense/MoE BlockTemplates + cluster
+        #: degrees, replacing the legacy transformer Graph + fwd/bwd roots.
+        self.transformer_blocks = transformer_blocks
         #: FINE Program built by the flattened execution path (reused by the
         #: memory path) and the memory path's own cached build (M3b).
         self.fine_program: Optional[Any] = None
@@ -426,54 +419,7 @@ class LLMExecutionDispatcher:
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
-        generate_graphs = _env_flag("RAPID_VISUALIZE_GRAPHS")
-
         transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
-
-        
-        if generate_graphs:
-            transformer_timed_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_forward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_backward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            self.transformer_graph.save_graph(
-                transformer_timed_forward_root,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer_forward",
-            )
-            self.transformer_graph.save_graph(
-                transformer_timed_backward_root,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer_backward",
-            )
-            if self.moe_transformer_graph and self.moe_transformer_forward_root:
-                moe_forward_root = self.moe_transformer_graph.convert_comm_sizes_to_times(
-                    self.moe_transformer_forward_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-                self.moe_transformer_graph.save_graph(
-                    moe_forward_root,
-                    self.time_calc.output_dir,
-                    "/hybrid_graph_transformer_forward_moe",
-                )
-            if self.moe_transformer_graph and self.moe_transformer_backward_root:
-                moe_backward_root = self.moe_transformer_graph.convert_comm_sizes_to_times(
-                    self.moe_transformer_backward_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-                self.moe_transformer_graph.save_graph(
-                    moe_backward_root,
-                    self.time_calc.output_dir,
-                    "/hybrid_graph_transformer_backward_moe",
-                )
 
         if transformer_time is not None or moe_transformer_time is not None:
             self._apply_transformer_time(transformer_time, moe_transformer_time)
@@ -483,51 +429,6 @@ class LLMExecutionDispatcher:
         transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
         if transformer_time is not None or moe_transformer_time is not None:
             self._apply_transformer_time(transformer_time, moe_transformer_time)
-
-        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.transformer_graph:
-            transformer_timed_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
-                self.transformer_forward_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
-            self.transformer_graph.save_graph(
-                transformer_timed_forward_root,
-                self.time_calc.output_dir,
-                "/hierarchical_graph_transformer_forward",
-            )
-            if self.transformer_backward_root is not None:
-                transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
-                    self.transformer_backward_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-                self.transformer_graph.save_graph(
-                    transformer_timed_backward_root,
-                    self.time_calc.output_dir,
-                    "/hierarchical_graph_transformer_backward",
-                )
-            if self.moe_transformer_graph and self.moe_transformer_forward_root:
-                moe_forward_root = self.moe_transformer_graph.convert_comm_sizes_to_times(
-                    self.moe_transformer_forward_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-                self.moe_transformer_graph.save_graph(
-                    moe_forward_root,
-                    self.time_calc.output_dir,
-                    "/hierarchical_graph_transformer_forward_moe",
-                )
-            if self.moe_transformer_graph and self.moe_transformer_backward_root:
-                moe_backward_root = self.moe_transformer_graph.convert_comm_sizes_to_times(
-                    self.moe_transformer_backward_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-                self.moe_transformer_graph.save_graph(
-                    moe_backward_root,
-                    self.time_calc.output_dir,
-                    "/hierarchical_graph_transformer_backward_moe",
-                )
 
         dp_count = getattr(self.time_calc, "dp", 1) or 1
         if not self.pipeline_root:
@@ -588,14 +489,13 @@ class LLMExecutionDispatcher:
         (``build_fine_program_for_memory``) reuses it. Flattened *execution*
         keeps rejecting MoE (the memory path accepts it — DESIGN.md §4).
         """
-        if self.moe_transformer_graph is not None:
+        if self.transformer_blocks is not None and self.transformer_blocks.moe is not None:
             raise NotImplementedError("MoE is not supported with full AstraSim flattened execution.")
         if not self.pipeline_root:
             raise RuntimeError("Pipeline graph root is not available for flattening")
-        if not self.transformer_graph:
+        if self.transformer_blocks is None:
             raise RuntimeError("Transformer graph metadata is required for flattening")
 
-        from program.block import BlockTemplate
         from program.pipeline_fine import build_fine_program
         from program.schedule import ScheduleSpec
 
@@ -612,9 +512,9 @@ class LLMExecutionDispatcher:
             include_backward=include_backward,
             include_optimizer=include_optimizer,
         )
-        block_templates = {"dense": BlockTemplate.from_transformer_graph(self.transformer_graph)}
-        if self.moe_transformer_graph is not None:  # pragma: no cover - rejected above
-            block_templates["moe"] = BlockTemplate.from_transformer_graph(self.moe_transformer_graph)
+        block_templates = {"dense": self.transformer_blocks.dense}
+        if self.transformer_blocks.moe is not None:  # pragma: no cover - rejected above
+            block_templates["moe"] = self.transformer_blocks.moe
 
         layout_obj: Optional[RankLayout] = None
         if self._rank_layout and self._rank_layout.get("axis_order"):
@@ -733,10 +633,9 @@ class LLMExecutionDispatcher:
 
         if not self.pipeline_root:
             raise RuntimeError("Pipeline graph root is not available for memory flattening")
-        if not self.transformer_graph:
+        if self.transformer_blocks is None:
             raise RuntimeError("Transformer graph metadata is required for memory flattening")
 
-        from program.block import BlockTemplate
         from program.pipeline_fine import build_fine_program
         from program.schedule import ScheduleSpec
 
@@ -751,9 +650,9 @@ class LLMExecutionDispatcher:
             include_backward=include_backward,
             include_optimizer=include_optimizer,
         )
-        block_templates = {"dense": BlockTemplate.from_transformer_graph(self.transformer_graph)}
-        if self.moe_transformer_graph is not None:
-            block_templates["moe"] = BlockTemplate.from_transformer_graph(self.moe_transformer_graph)
+        block_templates = {"dense": self.transformer_blocks.dense}
+        if self.transformer_blocks.moe is not None:
+            block_templates["moe"] = self.transformer_blocks.moe
 
         layout_obj: Optional[RankLayout] = None
         if self._rank_layout and self._rank_layout.get("axis_order"):
@@ -787,28 +686,56 @@ class LLMExecutionDispatcher:
         self._memory_fine_program = program
         return program
 
+    def _build_transformer_block_programs(
+        self,
+        template: Any,
+        *,
+        include_backward: bool,
+        label: str,
+    ) -> Tuple[Optional[Any], Optional[Any]]:
+        """Build the (forward, backward) BLOCK Programs for one template.
+
+        The overlap transforms are applied inside ``build_block_program`` at
+        the same point in the flow as the legacy path (train_timing applied
+        them to the freshly constructed transformer roots).
+        """
+        from program.block_program import build_block_program
+
+        blocks = self.transformer_blocks
+        layout = getattr(self, "_transformer_rank_layout", None)
+        tc = self.time_calc
+        common = dict(
+            tp=blocks.tp,
+            cp=blocks.cp,
+            ep=blocks.ep,
+            parallelism_mode=tc.get_parallelism_mode(),
+            tp_overlap=getattr(tc, "tp_overlap", 0.0),
+            tp_sp_overlap=getattr(tc, "tp_sp_overlap", 0.0),
+            cp_overlap=getattr(tc, "cp_overlap", 0.0),
+        )
+        forward_program = build_block_program(
+            template, "forward", layout, label=f"{label}_forward", **common
+        )
+        backward_program = None
+        if include_backward:
+            backward_program = build_block_program(
+                template, "backward", layout, label=f"{label}_backward", **common
+            )
+        return forward_program, backward_program
+
     def _run_transformer_astrasim(
         self,
         mode: ExecutionMode,
     ) -> Tuple[Optional[TransformerTimings], Optional[TransformerTimings]]:
         del mode  # mode currently unused but kept for signature consistency
 
-        has_dense = bool(self.transformer_forward_root or self.transformer_backward_root)
-        has_moe = bool(self.moe_transformer_forward_root or self.moe_transformer_backward_root)
+        blocks = self.transformer_blocks
+        has_dense = blocks is not None and blocks.dense is not None
+        has_moe = blocks is not None and blocks.moe is not None
         if not has_dense and not has_moe:
             if getattr(self, "_transformer_stage_dp_faults", {}):
                 raise ValueError("Transformer faults require transformer graph metadata, but none is available.")
             return None, None
-
-        layout = getattr(self, "_transformer_rank_layout", {})
-        if self.transformer_forward_root:
-            setattr(self.transformer_forward_root, "_astrasim_rank_layout", layout)
-        if self.transformer_backward_root:
-            setattr(self.transformer_backward_root, "_astrasim_rank_layout", layout)
-        if self.moe_transformer_forward_root:
-            setattr(self.moe_transformer_forward_root, "_astrasim_rank_layout", layout)
-        if self.moe_transformer_backward_root:
-            setattr(self.moe_transformer_backward_root, "_astrasim_rank_layout", layout)
 
         persist = self.time_calc.persist_astrasim_artifacts
         os.makedirs(self.time_calc.output_dir, exist_ok=True)
@@ -819,13 +746,16 @@ class LLMExecutionDispatcher:
 
         baseline_timings: Optional[TransformerTimings] = None
         if has_dense:
+            forward_program, backward_program = self._build_transformer_block_programs(
+                blocks.dense, include_backward=blocks.include_backward, label="block_dense"
+            )
             # Baseline run (no transformer faults)
             baseline_fwd_dir, baseline_bwd_dir = self._transformer_artifact_dirs(label=None, persist=persist)
             baseline_timings, baseline_fwd_per_rank, baseline_bwd_per_rank = self._execute_transformer_run(
                 baseline_fwd_dir,
                 baseline_bwd_dir,
-                forward_root=self.transformer_forward_root,
-                backward_root=self.transformer_backward_root,
+                forward_program=forward_program,
+                backward_program=backward_program,
                 faulty_links_override=(),
             )
             self._transformer_baseline_timings = baseline_timings
@@ -834,7 +764,9 @@ class LLMExecutionDispatcher:
             self.time_calc.transformer_astrasim_time_forward = baseline_timings.forward
             self.time_calc.transformer_astrasim_time_backward = baseline_timings.backward
 
-            # Per-stage fault runs (dense only)
+            # Per-stage fault runs (dense only): the fault links change the
+            # AstraSim network configs, never the emitted bundle, so the same
+            # Programs are re-emitted per variant (legacy reused the roots).
             stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
             for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
                 label = f"fault{fault_index}_dp{dp_idx}_stage{stage_id}"
@@ -842,21 +774,24 @@ class LLMExecutionDispatcher:
                 stage_timings, _, _ = self._execute_transformer_run(
                     stage_fwd_dir,
                     stage_bwd_dir,
-                    forward_root=self.transformer_forward_root,
-                    backward_root=self.transformer_backward_root,
+                    forward_program=forward_program,
+                    backward_program=backward_program,
                     faulty_links_override=fault_links,
                 )
                 self._transformer_stage_timings[(dp_idx, stage_id)] = stage_timings
 
         moe_timings: Optional[TransformerTimings] = None
         if has_moe:
+            moe_forward_program, moe_backward_program = self._build_transformer_block_programs(
+                blocks.moe, include_backward=blocks.include_backward, label="block_moe"
+            )
             stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
             moe_fwd_dir, moe_bwd_dir = self._transformer_artifact_dirs(label="moe", persist=persist)
             moe_timings, moe_fwd_per_rank, moe_bwd_per_rank = self._execute_transformer_run(
                 moe_fwd_dir,
                 moe_bwd_dir,
-                forward_root=self.moe_transformer_forward_root,
-                backward_root=self.moe_transformer_backward_root,
+                forward_program=moe_forward_program,
+                backward_program=moe_backward_program,
                 faulty_links_override=(),
             )
             self._transformer_moe_baseline_timings = moe_timings
@@ -870,8 +805,8 @@ class LLMExecutionDispatcher:
                 stage_timings, _, _ = self._execute_transformer_run(
                     stage_fwd_dir,
                     stage_bwd_dir,
-                    forward_root=self.moe_transformer_forward_root,
-                    backward_root=self.moe_transformer_backward_root,
+                    forward_program=moe_forward_program,
+                    backward_program=moe_backward_program,
                     faulty_links_override=fault_links,
                 )
                 self._transformer_stage_moe_timings[(dp_idx, stage_id)] = stage_timings
@@ -900,33 +835,37 @@ class LLMExecutionDispatcher:
         artifact_dir_fwd: str,
         artifact_dir_bwd: str,
         *,
-        forward_root: Optional[Any],
-        backward_root: Optional[Any],
+        forward_program: Optional[Any],
+        backward_program: Optional[Any],
         faulty_links_override: Optional[Tuple[Tuple[int, int, float], ...]],
     ) -> Tuple[TransformerTimings, Optional[List[float]], Optional[List[float]]]:
+        """Run the (forward, backward) BLOCK Programs through AstraSim.
+
+        The Program entry of ``run_astra_simulation_only_onepath`` reads
+        ``Program.dp_count`` (1 for block programs — the legacy
+        ``dp_override=1`` semantics live in the builder now).
+        """
         fwd_per_rank = None
         bwd_per_rank = None
         fwd_max = 0
         bwd_max = 0
 
-        if forward_root:
+        if forward_program is not None:
             fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
-                forward_root,
+                forward_program,
                 self.time_calc,
                 artifact_dir_fwd,
-                dp_override=1,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
                 faulty_links_override=faulty_links_override,
             )
             if fwd_max <= 0:
                 raise RuntimeError("AstraSim transformer forward execution returned non-positive duration")
 
-        if backward_root:
+        if backward_program is not None:
             bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
-                backward_root,
+                backward_program,
                 self.time_calc,
                 artifact_dir_bwd,
-                dp_override=1,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
                 faulty_links_override=faulty_links_override,
             )

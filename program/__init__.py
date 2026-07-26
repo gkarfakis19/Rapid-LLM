@@ -24,10 +24,13 @@ M1 shadow-mode stack — :mod:`program.ir` (the Program IR),
 :mod:`program.block` (``BlockTemplate``/``CommMeta``),
 :mod:`program.pipeline_fine` (``build_fine_program``, the direct flattened
 builder that replaced ``PipelineGraphFlattener``),
-:mod:`program.transforms` (TP/TP-SP/CP overlap) and the M3b memory replay
+:mod:`program.transforms` (TP/TP-SP/CP overlap), the M3b memory replay
 :mod:`program.memory_sim` (``simulate_memory`` over FINE Programs, the
-replacement of ``Graph.simulate_memory``). Heavier submodules are imported
-lazily by their consumers; this package import stays light.
+replacement of ``Graph.simulate_memory``), and the M4 BLOCK builder
+:mod:`program.block_program` (``build_block_program``, the replacement of
+``Graph.construct_transformer_graph`` powering the hybrid/hierarchical
+transformer AstraSim runs). Heavier submodules are imported lazily by
+their consumers; this package import stays light.
 """
 
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords

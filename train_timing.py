@@ -23,7 +23,8 @@ from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 import simulate_train_graph as llm_simulation
 from llm_execution import ExecutionMode, LLMExecutionDispatcher
-from program.transforms import apply_overlap_to_fine_root
+from program.block import BlockTemplate
+from program.block_program import TransformerBlockSpec
 from simulate_train_graph import Graph
 import llm_util
 from memory_estimation import MemoryEstimator
@@ -323,18 +324,10 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
-        self.transformer_graph: Optional[Graph] = None
-        self.transformer_forward_root: Optional[Any] = None
-        self.transformer_backward_root: Optional[Any] = None
-        self.transformer_graph_moe: Optional[Graph] = None
-        self.transformer_forward_root_moe: Optional[Any] = None
-        self.transformer_backward_root_moe: Optional[Any] = None
-        self.transformer_graph_no_dp: Optional[Graph] = None
-        self.transformer_forward_root_no_dp: Optional[Any] = None
-        self.transformer_backward_root_no_dp: Optional[Any] = None
-        self.transformer_graph_moe_no_dp: Optional[Graph] = None
-        self.transformer_forward_root_moe_no_dp: Optional[Any] = None
-        self.transformer_backward_root_moe_no_dp: Optional[Any] = None
+        #: BLOCK template bundles (M4): dense/MoE BlockTemplates + cluster
+        #: degrees, replacing the legacy transformer Graph/root twelve-tuple.
+        self.transformer_blocks: Optional[TransformerBlockSpec] = None
+        self.transformer_blocks_no_dp: Optional[TransformerBlockSpec] = None
         self.transformer_analytical_time_forward: Optional[float] = None
         self.transformer_analytical_time_backward: Optional[float] = None
         self.transformer_analytical_time_backward_combined: Optional[float] = None
@@ -4561,15 +4554,13 @@ class TimeCalculationLLM(TimeCalculation):
         Any,
         Optional[Graph],
         Optional[Any],
-        Optional[Graph],
-        Optional[Any],
-        Optional[Any],
-        Optional[Graph],
-        Optional[Any],
-        Optional[Any],
+        "TransformerBlockSpec",
         Dict[str, Tuple[float, float]],
     ]:
-        """Build pipeline/transformer graphs shared across training and inference."""
+        """Build the pipeline graphs + transformer BLOCK templates shared
+        across training and inference. The no-DP transformer twin (grad
+        accumulation with MoE EP sync) is stored on
+        ``self.transformer_blocks_no_dp``."""
         need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
 
         if not include_pipeline_backward and not include_transformer_backward:
@@ -4692,12 +4683,12 @@ class TimeCalculationLLM(TimeCalculation):
         group_members = {
             "MLP": ("ffn1", "gelu", "ffn2"),
         }
-        def _build_transformer_graph(
+        def _build_transformer_template(
             transformer_timings_local: Dict[str, OperationTiming],
             *,
             use_moe_layer: bool,
             ep_dense_sync_bytes: int,
-        ) -> Tuple[Optional[Graph], Optional[Any], Optional[Any]]:
+        ) -> BlockTemplate:
             participants_lookup = dict(participants_lookup_base)
             if use_moe_layer:
                 participants_lookup["ep"] = int(self._moe_routing_group())
@@ -4964,106 +4955,67 @@ class TimeCalculationLLM(TimeCalculation):
                     entry["backward"] = {"duration": 0.0, "reduction": 0.0, "comm_keys": []}
 
                 transformer_operation_entries.append(entry)
-            transformer_graph: Optional[Graph] = None
-            transformer_forward_root: Optional[Any] = None
-            transformer_backward_root: Optional[Any] = None
 
-            transformer_comp_times = {
-                "transformer": {
-                    "gemms": transformer_operation_entries,
-                }
-            }
-
-            transformer_graph = llm_simulation.Graph(
-                mode="transformer",
-                dp=self.dp,
-                pp=self.pp,
-                tp=self.tp,
-                cp=self.cp,
-                ep=graph_ep,
-                comp_times=transformer_comp_times,
-                comm_metadata=transformer_comm_metadata,
-                misc_metadata={"dp_zero_stage": self.zero_stage},
+            # BLOCK template (M4): the per-GEMM entries + CommSpec metadata
+            # ARE the complete block description; the legacy transformer
+            # Graph/root construction (construct_transformer_graph + the
+            # overlap rewrite) moved into program.block_program, where the
+            # dispatcher builds the per-direction BLOCK Programs.
+            return BlockTemplate.from_gemm_entries(
+                transformer_operation_entries,
+                transformer_comm_metadata,
             )
-            transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
-            if include_transformer_backward:
-                bwd_direction = "backward"
-                transformer_backward_root = transformer_graph.construct_transformer_graph(direction=bwd_direction)
 
-            # Same overlap rewrite as the FINE builder's proto pass, applied
-            # to the (M4-transitional) legacy transformer Node/Edge graphs.
-            transformer_forward_root = apply_overlap_to_fine_root(
-                transformer_forward_root,
-                parallelism_mode,
-                self.tp_overlap,
-                self.tp_sp_overlap,
-                self.cp_overlap,
-                node_cls=llm_simulation.Node,
-                edge_cls=llm_simulation.Edge,
-            )
-            if include_transformer_backward:
-                transformer_backward_root = apply_overlap_to_fine_root(
-                    transformer_backward_root,
-                    parallelism_mode,
-                    self.tp_overlap,
-                    self.tp_sp_overlap,
-                    self.cp_overlap,
-                    node_cls=llm_simulation.Node,
-                    edge_cls=llm_simulation.Edge,
-                )
-            return transformer_graph, transformer_forward_root, transformer_backward_root
-
-        transformer_graph, transformer_forward_root, transformer_backward_root = _build_transformer_graph(
+        transformer_template = _build_transformer_template(
             transformer_timings,
             use_moe_layer=False,
             ep_dense_sync_bytes=ep_dense_sync_bytes_dense,
         )
-        moe_transformer_graph: Optional[Graph] = None
-        moe_transformer_forward_root: Optional[Any] = None
-        moe_transformer_backward_root: Optional[Any] = None
+        moe_transformer_template: Optional[BlockTemplate] = None
         moe_layer_mask = list(getattr(self, "moe_layer_mask", []) or [])
         has_moe_layers = bool(self.use_moe and any(moe_layer_mask))
         if has_moe_layers:
             if not moe_transformer_timings or not moe_node_breakdown:
                 raise ValueError("MoE layer schedule requires moe_transformer_timings and moe_node_breakdown.")
-            (
-                moe_transformer_graph,
-                moe_transformer_forward_root,
-                moe_transformer_backward_root,
-            ) = _build_transformer_graph(
+            moe_transformer_template = _build_transformer_template(
                 moe_transformer_timings,
                 use_moe_layer=True,
                 ep_dense_sync_bytes=ep_dense_sync_bytes_moe,
             )
 
-        transformer_graph_no_dp = None
-        transformer_forward_root_no_dp = None
-        transformer_backward_root_no_dp = None
-        moe_transformer_graph_no_dp = None
-        moe_transformer_forward_root_no_dp = None
-        moe_transformer_backward_root_no_dp = None
+        transformer_blocks = TransformerBlockSpec(
+            dense=transformer_template,
+            moe=moe_transformer_template,
+            tp=self.tp,
+            cp=self.cp,
+            ep=graph_ep,
+            include_backward=include_transformer_backward,
+        )
+
+        transformer_blocks_no_dp: Optional[TransformerBlockSpec] = None
         if need_no_dp_variant and include_transformer_backward and self.use_moe and self.ep > 1:
-            (
-                transformer_graph_no_dp,
-                transformer_forward_root_no_dp,
-                transformer_backward_root_no_dp,
-            ) = _build_transformer_graph(
+            dense_template_no_dp = _build_transformer_template(
                 transformer_timings,
                 use_moe_layer=False,
                 ep_dense_sync_bytes=0,
             )
+            moe_template_no_dp: Optional[BlockTemplate] = None
             if has_moe_layers:
                 if not moe_transformer_timings or not moe_node_breakdown:
                     raise ValueError("MoE layer schedule requires moe_transformer_timings and moe_node_breakdown.")
-                (
-                    moe_transformer_graph_no_dp,
-                    moe_transformer_forward_root_no_dp,
-                    moe_transformer_backward_root_no_dp,
-                ) = _build_transformer_graph(
+                moe_template_no_dp = _build_transformer_template(
                     moe_transformer_timings,
                     use_moe_layer=True,
                     ep_dense_sync_bytes=0,
                 )
+            transformer_blocks_no_dp = TransformerBlockSpec(
+                dense=dense_template_no_dp,
+                moe=moe_template_no_dp,
+                tp=self.tp,
+                cp=self.cp,
+                ep=graph_ep,
+                include_backward=include_transformer_backward,
+            )
 
         dense_transformer_f = node_breakdown.get('transformer_time_f', 0.0)
         dense_transformer_b = node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0
@@ -5178,24 +5130,14 @@ class TimeCalculationLLM(TimeCalculation):
         
         interconnect_params = self._build_interconnect_params()
 
-        self.transformer_graph_no_dp = transformer_graph_no_dp
-        self.transformer_forward_root_no_dp = transformer_forward_root_no_dp
-        self.transformer_backward_root_no_dp = transformer_backward_root_no_dp
-        self.transformer_graph_moe_no_dp = moe_transformer_graph_no_dp
-        self.transformer_forward_root_moe_no_dp = moe_transformer_forward_root_no_dp
-        self.transformer_backward_root_moe_no_dp = moe_transformer_backward_root_no_dp
+        self.transformer_blocks_no_dp = transformer_blocks_no_dp
 
         return (
             pipeline_graph_obj,
             graph_root,
             pipeline_graph_obj_no_dp,
             graph_root_no_dp,
-            transformer_graph,
-            transformer_forward_root,
-            transformer_backward_root,
-            moe_transformer_graph,
-            moe_transformer_forward_root,
-            moe_transformer_backward_root,
+            transformer_blocks,
             interconnect_params,
         )
 
@@ -5348,12 +5290,7 @@ class TimeCalculationLLM(TimeCalculation):
             graph_root,
             pipeline_graph_obj_no_dp,
             graph_root_no_dp,
-            transformer_graph,
-            transformer_forward_root,
-            transformer_backward_root,
-            moe_transformer_graph,
-            moe_transformer_forward_root,
-            moe_transformer_backward_root,
+            transformer_blocks,
             interconnect_params,
         ) = self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
@@ -5376,12 +5313,7 @@ class TimeCalculationLLM(TimeCalculation):
             zero3_softmax_gather_bytes=zero3_softmax_gather_bytes,
         )
 
-        self.transformer_graph = transformer_graph
-        self.transformer_forward_root = transformer_forward_root
-        self.transformer_backward_root = transformer_backward_root
-        self.transformer_graph_moe = moe_transformer_graph
-        self.transformer_forward_root_moe = moe_transformer_forward_root
-        self.transformer_backward_root_moe = moe_transformer_backward_root
+        self.transformer_blocks = transformer_blocks
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         # Report backward including recompute overhead when enabled.
         self.transformer_analytical_time_backward_combined = node_breakdown['transformer_time_b_combined']
@@ -5414,27 +5346,13 @@ class TimeCalculationLLM(TimeCalculation):
         if self.gradient_accumulation_steps > 1:
             if not (self.pipeline_graph_no_dp and self.pipeline_root_no_dp):
                 raise RuntimeError("Gradient accumulation steps > 1 requires a non-final accumulation pipeline graph")
-            transformer_graph_no_dp = self.transformer_graph_no_dp or self.transformer_graph
-            transformer_forward_root_no_dp = self.transformer_forward_root_no_dp or self.transformer_forward_root
-            transformer_backward_root_no_dp = self.transformer_backward_root_no_dp or self.transformer_backward_root
-            moe_transformer_graph_no_dp = self.transformer_graph_moe_no_dp or self.transformer_graph_moe
-            moe_transformer_forward_root_no_dp = (
-                self.transformer_forward_root_moe_no_dp or self.transformer_forward_root_moe
-            )
-            moe_transformer_backward_root_no_dp = (
-                self.transformer_backward_root_moe_no_dp or self.transformer_backward_root_moe
-            )
+            transformer_blocks_no_dp = self.transformer_blocks_no_dp or self.transformer_blocks
             dispatcher_no_dp = LLMExecutionDispatcher(
                 time_calc=self,
                 pipeline_graph=self.pipeline_graph_no_dp,
                 pipeline_root=self.pipeline_root_no_dp,
                 interconnect_params=self.pipeline_interconnect,
-                transformer_graph=transformer_graph_no_dp,
-                transformer_forward_root=transformer_forward_root_no_dp,
-                transformer_backward_root=transformer_backward_root_no_dp,
-                moe_transformer_graph=moe_transformer_graph_no_dp,
-                moe_transformer_forward_root=moe_transformer_forward_root_no_dp,
-                moe_transformer_backward_root=moe_transformer_backward_root_no_dp,
+                transformer_blocks=transformer_blocks_no_dp,
                 no_data_parallel=True,
             )
             try:
@@ -5448,12 +5366,7 @@ class TimeCalculationLLM(TimeCalculation):
             pipeline_graph=self.pipeline_graph,
             pipeline_root=self.pipeline_root,
             interconnect_params=self.pipeline_interconnect,
-            transformer_graph=self.transformer_graph,
-            transformer_forward_root=self.transformer_forward_root,
-            transformer_backward_root=self.transformer_backward_root,
-            moe_transformer_graph=self.transformer_graph_moe,
-            moe_transformer_forward_root=self.transformer_forward_root_moe,
-            moe_transformer_backward_root=self.transformer_backward_root_moe,
+            transformer_blocks=self.transformer_blocks,
             no_data_parallel=False,
         )
         try:
@@ -5498,12 +5411,7 @@ class TimeCalculationLLM(TimeCalculation):
             pipeline_graph=self.pipeline_graph,
             pipeline_root=self.pipeline_root,
             interconnect_params=self.pipeline_interconnect,
-            transformer_graph=self.transformer_graph,
-            transformer_forward_root=self.transformer_forward_root,
-            transformer_backward_root=self.transformer_backward_root,
-            moe_transformer_graph=self.transformer_graph_moe,
-            moe_transformer_forward_root=self.transformer_forward_root_moe,
-            moe_transformer_backward_root=self.transformer_backward_root_moe,
+            transformer_blocks=self.transformer_blocks,
             no_data_parallel=False,
         )
         memory_program = dispatcher.build_fine_program_for_memory()
