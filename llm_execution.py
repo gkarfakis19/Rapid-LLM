@@ -27,6 +27,7 @@ from memory_estimation import mem_kind_from_op_name
 from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
+from program.layout import RankLayout, cluster_coords
 from simulate_train_graph import Graph
 from timing_model import CollectiveType
 from util import log_message
@@ -369,9 +370,7 @@ class PipelineGraphFlattener:
         par_degree = transformer_graph.tp * transformer_graph.cp * ep_size
         self._par_degree = max(1, int(par_degree))
         self._zero_stage = int(getattr(transformer_graph, "misc_metadata", {}).get("dp_zero_stage", 0))
-        self._layout_axis_order: Optional[List[str]] = None
-        self._layout_axis_sizes: Dict[str, int] = {}
-        self._layout_axis_strides: Dict[str, int] = {}
+        self._rank_layout_obj: Optional[RankLayout] = None
         self._tp_size = int(getattr(transformer_graph, "tp", 1))
         self._cp_size = int(getattr(transformer_graph, "cp", 1))
         self._ep_size = int(ep_size)
@@ -389,16 +388,18 @@ class PipelineGraphFlattener:
         axis_sizes = dict(descriptor.get("axis_sizes", {}))
         axis_strides = dict(descriptor.get("axis_strides", {}))
         if not axis_order:
-            self._layout_axis_order = None
+            self._rank_layout_obj = None
             return
-        self._layout_axis_order = axis_order
-        self._layout_axis_sizes = axis_sizes
         if not axis_strides:
             span = 1
             for axis in axis_order:
                 axis_strides[axis] = span
                 span *= axis_sizes.get(axis, 1)
-        self._layout_axis_strides = axis_strides
+        self._rank_layout_obj = RankLayout(
+            axis_order=tuple(axis_order),
+            axis_sizes=axis_sizes,
+            axis_strides=axis_strides,
+        )
         self._tp_size = max(1, axis_sizes.get("tp", self._tp_size))
         self._cp_size = max(1, axis_sizes.get("cp", self._cp_size))
         self._ep_size = max(1, axis_sizes.get("ep", self._ep_size))
@@ -977,32 +978,20 @@ class PipelineGraphFlattener:
         tp_rank_int = int(tp_rank)
         if tp_rank_int < 0 or tp_rank_int >= self._par_degree:
             raise ValueError(f"tp_rank {tp_rank_int} is out of range for par_degree {self._par_degree}")
-        if not self._layout_axis_order:
+        layout = self._rank_layout_obj
+        if layout is None:
             return stage_int * self._par_degree + tp_rank_int
 
-        coords: Dict[str, int] = {}
-        if "tp" in self._layout_axis_order:
-            coords["tp"] = tp_rank_int % self._tp_size
-        if "cp" in self._layout_axis_order:
-            coords["cp"] = (tp_rank_int // self._tp_size) % self._cp_size
-        if "ep" in self._layout_axis_order:
-            coords["ep"] = (tp_rank_int // max(1, self._tp_size * self._cp_size)) % self._ep_size
-        if "pp" in self._layout_axis_order:
-            if stage_int < 0 or stage_int >= self._pp_size:
-                raise ValueError(f"stage_id {stage_int} is out of range for pp={self._pp_size}")
-            coords["pp"] = stage_int % self._pp_size
-
-        linear_rank = 0
-        for axis in self._layout_axis_order:
-            coord = coords.get(axis, 0)
-            size = self._layout_axis_sizes.get(axis, 1)
-            if coord < 0 or coord >= size:
-                raise ValueError(f"Coordinate {coord} for axis '{axis}' is out of range <{size}")
-            stride = self._layout_axis_strides.get(axis)
-            if stride is None:
-                raise KeyError(f"Rank layout stride missing for axis '{axis}'")
-            linear_rank += coord * stride
-        return linear_rank
+        coords = cluster_coords(
+            layout.axis_order,
+            tp_rank_int,
+            stage_int,
+            tp_size=self._tp_size,
+            cp_size=self._cp_size,
+            ep_size=self._ep_size,
+            pp_size=self._pp_size,
+        )
+        return layout.linearize(coords)
     
     
 class LLMExecutionDispatcher:
@@ -1054,31 +1043,6 @@ class LLMExecutionDispatcher:
         if not dimensions:
             return {}
         self._network_dimensions = tuple(dimensions)
-        optimize_cfg: Optional[Dict[str, Any]] = None
-        for idx, dim in enumerate(dimensions):
-            if getattr(dim, "optimize_2dmap", False):
-                if idx != 0:
-                    raise ValueError("optimize_2dmap is only supported on the first network dimension.")
-                if optimize_cfg is not None:
-                    raise ValueError("Multiple network dimensions requested optimize_2dmap; only one is supported.")
-                topo_type = getattr(dim, "topology_type", None)
-                if not topo_type:
-                    raise ValueError("optimize_2dmap requires a topology type on the target dimension.")
-                size_value = getattr(dim, "size", None)
-                if size_value is None:
-                    raise ValueError("optimize_2dmap requires an explicit dimension size.")
-                dims_value = getattr(dim, "size_2d", None)
-                if dims_value is not None:
-                    dims_value = (int(dims_value[0]), int(dims_value[1]))
-                optimize_cfg = {
-                    "dimension_index": idx,
-                    "topology": str(topo_type),
-                    "size": int(size_value),
-                    "parallelisms": tuple(getattr(dim, "parallelisms", ()) or ()),
-                }
-                if dims_value:
-                    optimize_cfg["dims"] = dims_value
-        self._first_dim_optimize_cfg = optimize_cfg
 
         def _safe_int(value: Any, default: int = 1) -> int:
             try:
@@ -1094,124 +1058,27 @@ class LLMExecutionDispatcher:
         dp_size = _safe_int(getattr(self.time_calc, "dp", 1))
 
         axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "ep": ep_size, "pp": pp_size, "dp": dp_size}
-        axis_order: List[str] = []
 
-        # Enforce axis ordering for hierarchical/hybrid modes: the active
-        # {'tp','cp','ep'} axes must occupy the leading active network
-        # dimensions (one dim, or split across consecutive leading dims — e.g.
-        # dim0=[tp,cp] NVLink + dim1=[ep] inter-node), before any dimension
-        # carrying active 'pp'/'dp'. This matches the assumptions in the
-        # hierarchical graphs where a stage is a TP/CP/EP cluster replicated
-        # across PP (and potentially DP) axes; sub-graph simulations can only
-        # include whole network dimensions, never a slice of one.
         enforce_layout = self.time_calc.execution_mode in {
             ExecutionMode.HYBRID,
             ExecutionMode.FULL_ASTRASIM_HIERARCHICAL,
         }
-        if enforce_layout:
-            cluster_axes = sorted(axis for axis in ("tp", "cp", "ep") if axis_sizes[axis] > 1)
-            covered: List[str] = []
-            for dim in dimensions:
-                if sorted(set(covered)) == cluster_axes:
-                    break
-                if int(getattr(dim, "size", 1)) <= 1:
-                    continue
-                dim_axes_l = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
-                cluster_here = [
-                    axis for axis in dim_axes_l if axis in ("tp", "cp", "ep") and axis_sizes[axis] > 1
-                ]
-                sched_here = [
-                    axis for axis in dim_axes_l if axis in ("pp", "dp") and axis_sizes[axis] > 1
-                ]
-                if sched_here:
-                    raise ValueError(
-                        "For hierarchical/hybrid AstraSim modes, the active TP/CP/EP axes must "
-                        "occupy the leading active network dimensions (before any dimension "
-                        "carrying active PP/DP) to represent the transformer cluster. "
-                        f"Dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' carries "
-                        f"{sched_here} while the cluster axes {cluster_axes} are not yet fully mapped "
-                        f"(covered so far: {sorted(set(covered))})."
-                    )
-                covered.extend(cluster_here)
-            if cluster_axes and sorted(set(covered)) != cluster_axes:
-                raise ValueError(
-                    "For hierarchical/hybrid AstraSim modes, the leading active network dimensions "
-                    f"must jointly carry the active TP/CP/EP axes {cluster_axes} "
-                    f"(found only {sorted(set(covered))})."
-                )
+        rank_layout, optimize_cfg = RankLayout.from_network_layout(layout, axis_sizes, enforce_layout)
+        self._first_dim_optimize_cfg = optimize_cfg
 
-        for dim in dimensions:
-            dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
-            declared = int(getattr(dim, "size", 1))
-
-            for name in dim_axes:
-                if name not in axis_sizes:
-                    raise ValueError(
-                        f"Unsupported parallelism axis '{name}' in network layout. "
-                        "Supported axes for AstraSim integration are: tp, cp, ep, pp, dp."
-                    )
-                if name not in axis_order:
-                    axis_order.append(name)
-
-            expected = 1
-            for axis_name in dim_axes:
-                expected *= axis_sizes.get(axis_name, 1)
-            if expected != declared:
-                raise ValueError(
-                    f"Network dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' "
-                    f"size mismatch: declared {declared}, but parallelism factors imply {expected}."
-                )
-
-        if axis_order:
-            ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
-            axis_order = [axis for axis in ordered_axes if axis in axis_order]
-
-        # Ensure the layout covers active parallel axes
-        if tp_size > 1 and "tp" not in axis_order:
-            raise ValueError("Network layout must include 'tp' when tensor parallelism > 1.")
-        if cp_size > 1 and "cp" not in axis_order:
-            raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
-        if ep_size > 1 and "ep" not in axis_order:
-            raise ValueError("Network layout must include 'ep' when expert parallelism > 1.")
-        if pp_size > 1 and "pp" not in axis_order:
-            raise ValueError("Network layout must include 'pp' when pipeline parallelism > 1.")
-
-        axis_strides: Dict[str, int] = {}
-        span = 1
-        for axis in axis_order:
-            axis_strides[axis] = span
-            span *= axis_sizes[axis]
-
-        descriptor = {
-            "axis_order": axis_order,
-            "axis_sizes": axis_sizes,
-            "axis_strides": axis_strides,
-            "stage_span": span,
-        }
-
-        def _subset_layout(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
-            subset = [axis for axis in axis_order if axis in allowed and axis_sizes.get(axis, 1) >= 1]
-            if not subset:
+        def _subset_descriptor(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
+            subset = rank_layout.subset(allowed)
+            if not subset.axis_order:
                 return None
-            strides: Dict[str, int] = {}
-            span = 1
-            for axis in subset:
-                strides[axis] = span
-                span *= axis_sizes[axis]
-            return {
-                "axis_order": subset,
-                "axis_sizes": {axis: axis_sizes[axis] for axis in subset},
-                "axis_strides": strides,
-                "stage_span": span,
-            }
+            return subset.descriptor()
 
         # Transformer graphs only encode TP/CP axes; pipeline graphs encode PP
         # (DP replicas are handled externally). Store these subsets so callers
         # can attach the appropriate layout before invoking AstraSim.
-        self._transformer_rank_layout = _subset_layout(["tp", "cp", "ep"])
-        self._pipeline_rank_layout = _subset_layout(["pp", "dp"])
+        self._transformer_rank_layout = _subset_descriptor(["tp", "cp", "ep"])
+        self._pipeline_rank_layout = _subset_descriptor(["pp", "dp"])
 
-        return descriptor
+        return rank_layout.descriptor()
 
     def _attach_optimize_hint(self, root: Any) -> None:
         if root is None:

@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 import llm_util
+from program.layout import RankLayout, cluster_coords
 
 
 class MemKind(Enum):
@@ -286,7 +287,7 @@ class MemoryEstimator:
         if sw_config is not None:
             const_mem_offset_bytes = float(getattr(sw_config, "const_mem_offset", 0.0) or 0.0)
 
-        def _build_rank_layout():
+        def _build_rank_layout() -> Optional[RankLayout]:
             hw_config = getattr(tc, "hw_config", None)
             layout = getattr(hw_config, "network_layout", None)
             dimensions = getattr(layout, "dimensions", None) if layout is not None else None
@@ -295,79 +296,30 @@ class MemoryEstimator:
 
             ep = max(1, int(getattr(tc, "ep", 1)))
             axis_sizes = {"tp": tp, "cp": cp, "ep": ep, "pp": pp, "dp": dp_layout}
-            axis_order = []
-            for dim in dimensions:
-                dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ()) or ()]
-                for name in dim_axes:
-                    if name not in axis_sizes:
-                        raise ValueError(
-                            f"Unsupported parallelism axis '{name}' in network layout. "
-                            "Supported axes for memory estimation are: tp, cp, ep, pp, dp."
-                        )
-                    if name not in axis_order:
-                        axis_order.append(name)
+            rank_layout, _ = RankLayout.from_network_layout(
+                layout,
+                axis_sizes,
+                False,
+                extract_optimize_2dmap=False,
+                unsupported_axis_context="memory estimation",
+                empty_axis_order_is_none=True,
+            )
+            return rank_layout
 
-                declared = int(getattr(dim, "size", 1))
-                expected = 1
-                for axis_name in dim_axes:
-                    expected *= axis_sizes.get(axis_name, 1)
-                if expected != declared:
-                    raise ValueError(
-                        f"Network dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' "
-                        f"size mismatch: declared {declared}, but parallelism factors imply {expected}."
-                    )
-
-            if axis_order:
-                ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
-                axis_order = [axis for axis in ordered_axes if axis in axis_order]
-            if not axis_order:
-                return None
-            if tp > 1 and "tp" not in axis_order:
-                raise ValueError("Network layout must include 'tp' when tensor parallelism > 1.")
-            if cp > 1 and "cp" not in axis_order:
-                raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
-            if ep > 1 and "ep" not in axis_order:
-                raise ValueError("Network layout must include 'ep' when expert parallelism > 1.")
-            if pp > 1 and "pp" not in axis_order:
-                raise ValueError("Network layout must include 'pp' when pipeline parallelism > 1.")
-
-            axis_strides = {}
-            span = 1
-            for axis in axis_order:
-                axis_strides[axis] = span
-                span *= axis_sizes[axis]
-            return axis_order, axis_sizes, axis_strides
-
-        def _hw_id_for_rank(stage_id: int, tp_rank: int, layout):
+        def _hw_id_for_rank(stage_id: int, tp_rank: int, layout: Optional[RankLayout]):
             if layout is None:
                 return stage_id * par_degree + tp_rank
-            axis_order, axis_sizes, axis_strides = layout
-            coords = {}
-            tp_size = axis_sizes.get("tp", 1)
-            cp_size = axis_sizes.get("cp", 1)
-            ep_size = axis_sizes.get("ep", 1)
-            if "tp" in axis_order:
-                coords["tp"] = tp_rank % tp_size
-            if "cp" in axis_order:
-                coords["cp"] = (tp_rank // tp_size) % cp_size
-            if "ep" in axis_order:
-                coords["ep"] = (tp_rank // max(1, tp_size * cp_size)) % ep_size
-            if "pp" in axis_order:
-                if stage_id < 0 or stage_id >= axis_sizes.get("pp", 1):
-                    raise ValueError(f"stage_id {stage_id} is out of range for pp={axis_sizes.get('pp', 1)}")
-                coords["pp"] = stage_id % axis_sizes["pp"]
-
-            linear_rank = 0
-            for axis in axis_order:
-                coord = coords.get(axis, 0)
-                size = axis_sizes.get(axis, 1)
-                if coord < 0 or coord >= size:
-                    raise ValueError(f"Coordinate {coord} for axis '{axis}' is out of range <{size}")
-                stride = axis_strides.get(axis)
-                if stride is None:
-                    raise KeyError(f"Rank layout stride missing for axis '{axis}'")
-                linear_rank += coord * stride
-            return linear_rank
+            axis_sizes = layout.axis_sizes
+            coords = cluster_coords(
+                layout.axis_order,
+                tp_rank,
+                stage_id,
+                tp_size=axis_sizes.get("tp", 1),
+                cp_size=axis_sizes.get("cp", 1),
+                ep_size=axis_sizes.get("ep", 1),
+                pp_size=axis_sizes.get("pp", 1),
+            )
+            return layout.linearize(coords)
 
         par_degree = max(1, tp * cp * ep)
         layout = None
