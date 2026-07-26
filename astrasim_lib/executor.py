@@ -1392,7 +1392,21 @@ def convert_rapid_llm_graph_to_chakra_et(
     collective_et_ids: Dict[Tuple[Any, int], int] = {}
     pipeline_recv_cache: Dict[Tuple[Any, Any, int], int] = {}
     pipeline_send_cache: Dict[Tuple[Any, int, int, Any], int] = {}
-    tag_counter = itertools.count(start=1)
+    # AstraSim matches point-to-point messages by (src, dst, comm_tag), so the
+    # send and its recv MUST carry the same tag. Tags used to be derived
+    # independently on each side as getattr(edge_obj, "op_id", next(tag_counter)),
+    # which breaks in two ways whenever the edge lacks an op_id (tp/cp-split
+    # copies drop it, and node->node pipeline deps have edge_obj=None): the
+    # eagerly-evaluated getattr default draws the counter separately on the send
+    # and recv sides (off-by-one tags -> unmatched pairs -> AstraSim deadlocks
+    # with "returned zero time"), and per-object fallbacks collide for the
+    # shared None edge. Instead, the tag is decided once per logical pair inside
+    # _append_pipeline_send — keyed by the same tuple that dedupes the send —
+    # and the recv side reuses it, so the pairing can never drift. The fallback
+    # range sits far above real op_ids so the two tag spaces cannot collide on
+    # one (src, dst) pair.
+    fallback_tag_counter = itertools.count(start=10_000_000)
+    pipeline_send_tags: Dict[Tuple[Any, int, int, Any], int] = {}
 
     # Step 8 helper: materialise SEND/RECV control edges across stages whenever a
     # pipeline dependency exists between ``parent`` and ``target``.
@@ -1408,7 +1422,11 @@ def convert_rapid_llm_graph_to_chakra_et(
             return cached_send
 
         size = int(getattr(edge_obj, "comm_size_bytes", 0))
-        tag = getattr(edge_obj, "op_id", next(tag_counter))
+        tag = getattr(edge_obj, "op_id", None)
+        if tag is None:
+            tag = next(fallback_tag_counter)
+        tag = int(tag)
+        pipeline_send_tags[key] = tag
 
         src_rank = rank_for(parent_stage, dp_idx)
         dst_rank = rank_for(dst_stage, dp_idx)
@@ -1495,7 +1513,11 @@ def convert_rapid_llm_graph_to_chakra_et(
         dst_rank = rank_for(target_stage, dp_idx)
         recv_trace = rank_traces[dst_rank]
         size = int(getattr(edge_obj, "comm_size_bytes", 0))
-        tag = getattr(edge_obj, "op_id", next(tag_counter))
+        # Reuse the tag chosen when the paired send was materialised (the
+        # _append_pipeline_send call above shares this exact key) — never
+        # re-derive it here, or op_id-less edges would get a fresh counter draw
+        # and the pair would not match inside AstraSim.
+        tag = pipeline_send_tags[(parent, int(target_stage), int(dp_idx), edge_obj)]
         is_control = False
         if size == 0 or getattr(edge_obj, "comm_type", None) != CollectiveType.PIPELINE:
             size = 1
