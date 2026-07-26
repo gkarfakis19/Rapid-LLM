@@ -11,9 +11,43 @@
  "bundles": {
   "flat": {
    "bundle_hash": "19bb10965ed81418a0f7ff6c9edb73abb77c216fa3be2f6b9b50e1f147741b17",
+   "byte_hist_by_kind": {},
+   "bytes_by_kind": {},
+   "collectives_by_group": {},
+   "comm_groups": {},
+   "compute_micros_total": 52222,
+   "manifest": {
+    "npus": 1,
+    "ranks": {
+     "0": {
+      "COMP:1012": 2,
+      "COMP:102": 4,
+      "COMP:1097": 2,
+      "COMP:137": 4,
+      "COMP:1664": 1,
+      "COMP:169": 2,
+      "COMP:1943": 2,
+      "COMP:2120": 2,
+      "COMP:2928": 1,
+      "COMP:3447": 1,
+      "COMP:358": 2,
+      "COMP:432": 2,
+      "COMP:489": 2,
+      "COMP:938": 2
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "413e372ca190bb9b536a6342ef702a754c0d4ad0804f4b5113f49363f7c35634",
    "n_ranks": 2,
+   "n_recv": 0,
+   "n_transfers": 0,
    "ranks": {
     "0": {
+     "bytes_by_kind": {},
+     "compute_micros": 26111,
+     "critical_path_nodes": 29,
+     "critical_path_weight": 26111,
      "dag_hash": "24d760900021fb5ae69b91fc9a05475670ec735f41e4f8cc539354c2ecfc4219",
      "n_nodes": 29,
      "op_counts": {
@@ -22,6 +56,10 @@
      "ops_hash": "53aee7a25d12d631ffa9337bdaa73afc4843c32213a18fd59793279e656b7c91"
     },
     "1": {
+     "bytes_by_kind": {},
+     "compute_micros": 26111,
+     "critical_path_nodes": 29,
+     "critical_path_weight": 26111,
      "dag_hash": "24d760900021fb5ae69b91fc9a05475670ec735f41e4f8cc539354c2ecfc4219",
      "n_nodes": 29,
      "op_counts": {
@@ -36,7 +74,21 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "remaining_memory_headroom": 75.6,
+    "simulated_peak_memory_usage_per_gpu": 4.4,
+    "simulation_mode": "training"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {
+  "flat": true
+ },
  "phase_times": {},
  "spec_id": "train:flattened:dp1tp1cp1pp1mb1sp0",
  "status": "ok",

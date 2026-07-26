@@ -21,10 +21,18 @@ be proven equivalent:
 
 - ``equiv.configs``  — the named config matrix under test.
 - ``equiv.canonical`` — implementation-independent canonical form of Chakra ET
-  bundles (op multisets + dependency-DAG hashes; pg ids resolved to members).
-- ``equiv.runner``  — subprocess runner that executes one spec with isolated
-  caches and persisted artifacts, then collects metrics + canonical bundles.
+  bundles (op multisets + dependency-DAG hashes, pg ids resolved to members,
+  plus the id-independent T1 quantities: compute microseconds, byte
+  histograms by kind and axis, collectives per member set, critical path,
+  manifest content).
+- ``equiv.dlsim``   — causal replay of a bundle under AstraSim's scheduling
+  contract (deadlock detection).
+- ``equiv.ledger``  — T4 bug ledger: declared, justified exceptions.
+- ``equiv.runner``  — subprocess runner that executes one spec with NO cache
+  and persisted artifacts, then collects metrics + canonical bundles; the
+  comparison is split into ``compare_structural`` (T1) / ``compare_timing``
+  (T2) / ``compare_contract`` (T3) / ``apply_ledger`` (T4).
 - ``equiv.capture`` — CLI to record golden JSON files for the current code.
 - ``tests/test_equiv_golden.py`` — pytest gates comparing current code to the
-  recorded goldens at four levels (ops, DAG, AstraSim wall times, totals).
+  recorded goldens, tier by tier.
 """

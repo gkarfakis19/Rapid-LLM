@@ -237,10 +237,13 @@ class TestDiffBundles:
             str(_write_bundle(tmp_path / "c", {0: _comp_chain([5, 5, 5], {})}))
         ).summary()
         problems = diff_bundles(golden, cand)
-        assert len(problems) == 1
-        assert "op multiset differs" in problems[0]
-        assert "'COMP': 2" in problems[0]  # golden counts
-        assert "'COMP': 3" in problems[0]  # candidate counts
+        assert any("op multiset differs" in p for p in problems)
+        head = next(p for p in problems if "op multiset differs" in p)
+        assert "'COMP': 2" in head  # golden counts
+        assert "'COMP': 3" in head  # candidate counts
+        # T1 quantities localize the change instead of only hashing it.
+        assert any("compute_micros: golden=10 candidate=15" in p for p in problems)
+        assert any("compute_micros_total: golden=10 candidate=15" in p for p in problems)
 
     def test_dag_only_mismatch(self, tmp_path):
         golden = canonicalize_bundle(
@@ -250,8 +253,24 @@ class TestDiffBundles:
             str(_write_bundle(tmp_path / "c", {0: _comp_chain([1, 2, 3], {1: [0], 2: [0]})}))
         ).summary()
         problems = diff_bundles(golden, cand)
-        assert len(problems) == 1
-        assert "same ops but dependency DAG differs" in problems[0]
+        assert any("same ops but dependency DAG differs" in p for p in problems)
+        # Same op multiset, shorter chain: the critical path is what moved.
+        assert any("critical_path_nodes: golden=3 candidate=2" in p for p in problems)
+        assert any("critical_path_weight: golden=6 candidate=4" in p for p in problems)
+
+    def test_diff_fields_are_stable_ledger_keys(self, tmp_path):
+        from equiv.canonical import diff_bundles_detailed
+
+        golden = canonicalize_bundle(
+            str(_write_bundle(tmp_path / "g", {0: _comp_chain([1, 2, 3], {1: [0], 2: [1]})}))
+        ).summary()
+        cand = canonicalize_bundle(
+            str(_write_bundle(tmp_path / "c", {0: _comp_chain([1, 2, 9], {1: [0], 2: [1]})}))
+        ).summary()
+        fields = {field for field, _msg, _old, _new in diff_bundles_detailed(golden, cand)}
+        assert "rank/0/ops_hash" in fields
+        assert "rank/0/compute_micros" in fields
+        assert "compute_micros_total" in fields
 
 
 # ---------------------------------------------------------------------------
@@ -366,3 +385,238 @@ class TestDlsim:
         res = BundleSim(str(bundle)).simulate()
         assert res.completed
         assert res.done_counts == res.total_counts == {0: 2, 1: 1}
+
+
+# ---------------------------------------------------------------------------
+# 4. T1 extras: memory summaries and the axis sidecar
+# ---------------------------------------------------------------------------
+
+
+class TestMemorySummaries:
+    def _write(self, run_dir, mode_label, lines):
+        target = run_dir / "output" / mode_label / "memory-summary"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "memory_capacity_comparison.txt").write_text("\n".join(lines) + "\n")
+
+    def test_training_summary_parsed_into_floats(self, tmp_path):
+        from equiv.runner import _parse_memory_summaries
+
+        self._write(
+            tmp_path,
+            "LLM",
+            [
+                "Simulation mode: training",
+                "Hardware memory capacity (per gpu): 80.00 GiB",
+                "Simulated peak memory usage(per gpu): 1.51 GiB",
+                "Remaining memory headroom: 78.49 GiB",
+            ],
+        )
+        parsed = _parse_memory_summaries(tmp_path)
+        assert set(parsed) == {"LLM"}
+        fields = parsed["LLM"]["fields"]
+        assert fields["hardware_memory_capacity_per_gpu"] == 80.0
+        assert fields["simulated_peak_memory_usage_per_gpu"] == 1.51
+        assert fields["remaining_memory_headroom"] == 78.49
+        assert fields["simulation_mode"] == "training"
+        assert parsed["LLM"]["warnings"] == []
+
+    def test_capacity_violation_is_recorded_as_a_warning(self, tmp_path):
+        from equiv.runner import _parse_memory_summaries
+
+        self._write(
+            tmp_path,
+            "LLM",
+            [
+                "Simulation mode: training",
+                "Hardware memory capacity (per gpu): 80.00 GiB",
+                "Simulated peak memory usage(per gpu): 91.00 GiB",
+                "[WARN] Peak memory exceeds capacity by 11.00 GiB",
+            ],
+        )
+        parsed = _parse_memory_summaries(tmp_path)
+        assert parsed["LLM"]["warnings"] == [
+            "[WARN] Peak memory exceeds capacity by 11.00 GiB"
+        ]
+
+    def test_axis_histogram_absent_without_the_sidecar(self, tmp_path):
+        bundle = _write_bundle(
+            tmp_path / "noaxes",
+            {0: [_with_pg(new_comm_node(0, "c", pb.ALL_REDUCE, 512), "1")],
+             1: [_with_pg(new_comm_node(0, "c", pb.ALL_REDUCE, 512), "1")]},
+            {"1": [0, 1]},
+        )
+        summary = canonicalize_bundle(str(bundle)).summary()
+        assert "bytes_by_axis" not in summary
+        assert summary["bytes_by_kind"] == {"COLL": 1024}
+        assert summary["collectives_by_group"]["0,1"]["bytes"] == 1024
+
+    def test_axis_histogram_uses_the_sidecar_keyed_by_member_set(self, tmp_path):
+        bundle = _write_bundle(
+            tmp_path / "axes",
+            {0: [_with_pg(new_comm_node(0, "c", pb.ALL_REDUCE, 512), "1000")],
+             1: [_with_pg(new_comm_node(0, "c", pb.ALL_REDUCE, 512), "1000")]},
+            {"1000": [0, 1]},
+        )
+        (bundle / "comm_axes.json").write_text(
+            json.dumps({"version": "df-astra-comm-axes/1",
+                        "groups": {"1000": {"axes": ["tp"], "labels": ["x"]}}})
+        )
+        summary = canonicalize_bundle(str(bundle)).summary()
+        assert summary["bytes_by_axis"] == {"tp": 1024}
+
+
+# ---------------------------------------------------------------------------
+# 5. T3 property: p2p tag pairing on ONE bundle
+# ---------------------------------------------------------------------------
+
+
+class TestP2PPairing:
+    def test_paired_send_recv_is_clean(self, tmp_path):
+        bundle = _write_bundle(
+            tmp_path / "ok",
+            {
+                0: [new_send_node(0, "s", 64, dst_rank=1, tag=7)],
+                1: [new_recv_node(0, "r", 64, src_rank=0, tag=7)],
+            },
+        )
+        from program.shadow import p2p_pairing_problems
+
+        assert p2p_pairing_problems(str(bundle)) == []
+
+    def test_two_sends_sharing_one_identity_are_reported(self, tmp_path):
+        bundle = _write_bundle(
+            tmp_path / "dup",
+            {
+                0: [
+                    new_send_node(0, "s0", 64, dst_rank=1, tag=7),
+                    new_send_node(1, "s1", 64, dst_rank=1, tag=7),
+                ],
+                1: [new_recv_node(0, "r", 64, src_rank=0, tag=7)],
+            },
+        )
+        from program.shadow import p2p_pairing_problems
+
+        problems = p2p_pairing_problems(str(bundle), label="unit")
+        assert len(problems) == 1
+        assert "used by 2 SEND nodes" in problems[0]
+        assert "[unit]" in problems[0]
+
+    def test_recv_without_a_send_is_reported(self, tmp_path):
+        bundle = _write_bundle(
+            tmp_path / "orphan",
+            {
+                0: [new_send_node(0, "s", 64, dst_rank=1, tag=7)],
+                1: [new_recv_node(0, "r", 64, src_rank=0, tag=8)],
+            },
+        )
+        from program.shadow import p2p_pairing_problems
+
+        problems = p2p_pairing_problems(str(bundle))
+        assert len(problems) == 1
+        assert "no matching SEND" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# 6. T4 bug ledger
+# ---------------------------------------------------------------------------
+
+
+class TestBugLedger:
+    def _write(self, tmp_path, entries):
+        path = tmp_path / "bug_ledger.json"
+        path.write_text(json.dumps({"version": "df-bug-ledger/1", "entries": entries}))
+        return path
+
+    def test_shipped_ledger_parses(self):
+        from equiv.ledger import default_ledger_path, load_ledger
+
+        assert default_ledger_path().exists()
+        load_ledger()  # must not raise
+
+    def test_missing_file_means_no_exceptions(self, tmp_path):
+        from equiv.ledger import load_ledger
+
+        assert load_ledger(tmp_path / "absent.json") == []
+
+    def test_entry_absorbs_the_declared_difference(self, tmp_path):
+        from equiv.ledger import Mismatch, apply_ledger, load_ledger
+
+        path = self._write(
+            tmp_path,
+            [
+                {
+                    "spec": "s1",
+                    "level": "structural",
+                    "field": "bundles/flat/compute_micros_total",
+                    "old": 100,
+                    "new": 90,
+                    "commit": "A3",
+                    "justification": "double-counted MoE layer removed",
+                }
+            ],
+        )
+        entries = load_ledger(path)
+        mismatch = Mismatch("structural", "bundles/flat/compute_micros_total", "m", 100, 90)
+        failures, recorded, matched = apply_ledger("s1", [mismatch], entries)
+        assert failures == []
+        assert len(recorded) == 1 and "A3" in recorded[0]
+        assert matched == entries
+
+    def test_wrong_new_value_is_a_louder_failure(self, tmp_path):
+        from equiv.ledger import Mismatch, apply_ledger, load_ledger
+
+        entries = load_ledger(
+            self._write(
+                tmp_path,
+                [
+                    {
+                        "spec": "s1",
+                        "level": "timing",
+                        "field": "total_time",
+                        "old": 1.0,
+                        "new": 0.9,
+                        "commit": "A2",
+                        "justification": "dp collectives now on every rank",
+                    }
+                ],
+            )
+        )
+        mismatch = Mismatch("timing", "total_time", "total_time moved", 1.0, 0.5)
+        failures, recorded, _matched = apply_ledger("s1", [mismatch], entries)
+        assert recorded == []
+        assert len(failures) == 1
+        assert "LEDGER MISMATCH" in failures[0].message
+
+    def test_entry_expires_when_old_stops_matching(self, tmp_path):
+        from equiv.ledger import Mismatch, apply_ledger, expired_entries, load_ledger
+
+        entries = load_ledger(
+            self._write(
+                tmp_path,
+                [
+                    {
+                        "spec": "s1",
+                        "level": "timing",
+                        "field": "total_time",
+                        "old": 1.0,
+                        "new": 0.9,
+                        "commit": "A2",
+                        "justification": "recaptured",
+                    }
+                ],
+            )
+        )
+        # goldens were recaptured: the golden value is now 0.9, so nothing
+        # matches 'old' any more and the entry is dead weight.
+        failures, recorded, matched = apply_ledger("s1", [], entries)
+        assert failures == [] and recorded == []
+        assert expired_entries(entries, matched) == entries
+
+    def test_malformed_entries_are_rejected(self, tmp_path):
+        from equiv.ledger import LedgerError, load_ledger
+
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps({"version": "df-bug-ledger/1",
+                                   "entries": [{"spec": "s", "level": "nope"}]}))
+        with pytest.raises(LedgerError):
+            load_ledger(bad)

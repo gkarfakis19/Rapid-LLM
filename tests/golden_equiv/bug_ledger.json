@@ -1,0 +1,5 @@
+{
+ "version": "df-bug-ledger/1",
+ "_doc": "T4 recorded exceptions. Each entry declares ONE (spec, level, field) difference between the recorded golden and the current code, with the value it moves from, the value it moves to, the commit/bug id making the change, and why the new value is correct. While an entry is live the equivalence harness reports that difference as a RECORDED EXCEPTION instead of a failure, so the rest of the matrix keeps gating. Entries expire the moment 'old' stops matching (i.e. once the goldens are recaptured) and tests/test_equiv_golden.py::test_bug_ledger_entries_are_live then demands they be pruned. Schema and matching rules: equiv/ledger.py. Empty is the correct steady state.",
+ "entries": []
+}

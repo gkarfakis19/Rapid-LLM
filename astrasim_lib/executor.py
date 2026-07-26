@@ -460,6 +460,10 @@ def run_astra_simulation_only_onepath(
         cache_override_env = os.environ.pop("ASTRA_CACHE_DIR", None)
         local_cache_dir = work_dir
         local_cache_path = os.path.join(work_dir, "cache.json")
+        # Result LOG (not a cache): written next to the traces whenever the
+        # artifacts are persisted, in every cache mode, so a NO_CACHE run
+        # still leaves its per-rank wall seconds for the equivalence harness.
+        result_record_path = os.path.join(work_dir, "astra_runs.json") if persist else None
         try:
             fwd_times, fwd_total = run_cache_astrasim(
                 time_calc_obj.hw_config,
@@ -473,6 +477,7 @@ def run_astra_simulation_only_onepath(
                 comm_group_json=comm_groups_path,
                 axes_filter=axes_filter,
                 files=astra_configs,
+                result_record_path=result_record_path,
             )
         finally:
             if cache_override_env is not None:

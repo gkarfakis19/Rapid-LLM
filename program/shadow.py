@@ -29,6 +29,10 @@ differential/determinism tests). Two bundles are equivalent iff:
 (b) ``manifest.json`` byte-equal;
 (c) ``comm_groups.json`` equal as parsed JSON.
 
+:func:`p2p_pairing_problems` states the tag-pairing clause as a STANDALONE
+per-bundle property, so it can be checked on a single emitted bundle with no
+reference to compare against (restructure T3, always-on).
+
 M8 note: ``run_shadow_comparison`` — the M1 hook that re-derived a shadow
 bundle through ``lower_to_program`` + ``emit_chakra`` and compared it
 in-process — was dead since the M6 mode cutovers completed and is deleted;
@@ -39,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from astrasim_lib.et_utils import chakra_decode, chakra_open, pb
@@ -113,6 +118,80 @@ def load_comm_groups(bundle_dir: str) -> Dict[str, List[int]]:
         return {}
     with open(path) as fh:
         return {str(k): sorted(int(r) for r in v) for k, v in json.load(fh).items()}
+
+
+_RANK_ET_RE = re.compile(r"^(?P<prefix>.+)\.(?P<rank>\d+)\.et$")
+
+
+def p2p_pairing_problems(
+    bundle_dir: str, prefix: str = "llm_graph", label: str = "bundle"
+) -> List[str]:
+    """ONE bundle's p2p tag-pairing property (T3 contract, always-on).
+
+    :func:`compare_et_bundles` checks tag pairing *relatively* — that two
+    bundles' ``((src,dst), tag)`` classes cover the same node positions. That
+    only works when a reference bundle exists. The underlying invariant is
+    absolute and holds of a single bundle: a p2p identity names exactly one
+    logical transfer, so for every ``(src, dst, tag)``
+
+      * ``src`` carries at most one SEND with that identity,
+      * ``dst`` carries at most one RECV with that identity, and
+      * every RECV has a matching SEND.
+
+    Violating the first two makes AstraSim pair a RECV with the wrong SEND
+    (the tag is all it matches on); violating the third deadlocks the rank
+    silently. This is the property the M-era p2p fix established by giving
+    each transfer ONE identity (``TransferOp.uid``); it is stated here so
+    every emitted bundle is checked, not only differentially compared ones.
+
+    Returns the list of problems (empty == the property holds).
+    """
+    problems: List[str] = []
+    rank_paths: Dict[int, str] = {}
+    if not os.path.isdir(bundle_dir):
+        return [f"[{label}] bundle dir {bundle_dir} does not exist"]
+    for entry in os.listdir(bundle_dir):
+        match = _RANK_ET_RE.match(entry)
+        if match and match.group("prefix") == prefix:
+            rank_paths[int(match.group("rank"))] = os.path.join(bundle_dir, entry)
+    if not rank_paths:
+        return [f"[{label}] no {prefix}.<rank>.et files in {bundle_dir}"]
+
+    sends: Dict[Tuple[int, int, int], List[str]] = {}
+    recvs: Dict[Tuple[int, int, int], List[str]] = {}
+    for rank in sorted(rank_paths):
+        try:
+            nodes = _load_et_nodes(rank_paths[rank])
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"[{label}] rank {rank}: failed to read ET: {exc}")
+            continue
+        for node in nodes:
+            attrs = _attr_map(node)
+            if node.type == pb.COMM_SEND_NODE:
+                key = (rank, int(attrs.get("comm_dst", -1)), int(attrs.get("comm_tag", -1)))
+                sends.setdefault(key, []).append(f"r{rank}#{node.id}:{node.name}")
+            elif node.type == pb.COMM_RECV_NODE:
+                key = (int(attrs.get("comm_src", -1)), rank, int(attrs.get("comm_tag", -1)))
+                recvs.setdefault(key, []).append(f"r{rank}#{node.id}:{node.name}")
+
+    for key, nodes in sorted(sends.items()):
+        if len(nodes) > 1:
+            problems.append(
+                f"[{label}] p2p identity (src,dst,tag)={key} is used by "
+                f"{len(nodes)} SEND nodes: {nodes}"
+            )
+    for key, nodes in sorted(recvs.items()):
+        if len(nodes) > 1:
+            problems.append(
+                f"[{label}] p2p identity (src,dst,tag)={key} is used by "
+                f"{len(nodes)} RECV nodes: {nodes}"
+            )
+        if key not in sends:
+            problems.append(
+                f"[{label}] RECV {nodes} has no matching SEND for "
+                f"(src,dst,tag)={key} (deadlocks AstraSim silently)"
+            )
+    return problems
 
 
 def compare_et_bundles(

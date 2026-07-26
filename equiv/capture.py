@@ -97,7 +97,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if golden["status"] == "ok":
             ok += 1
             deadlocked = [k for k, v in golden["dlsim_ok"].items() if not v]
+            unpaired = [k for k, v in golden["p2p_ok"].items() if not v]
             extra = f" DLSIM-FAIL:{deadlocked}" if deadlocked else ""
+            extra += f" P2P-FAIL:{unpaired}" if unpaired else ""
             print(f"[equiv]  ok    {spec.spec_id} total={golden['total_time']}{extra}")
         else:
             errors += 1

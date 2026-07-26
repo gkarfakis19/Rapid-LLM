@@ -3,7 +3,21 @@
  "bundles": {},
  "dlsim_ok": {},
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "final_decode_peak_memory_usage_per_gpu": 0.43,
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "max_peak_memory_usage_per_gpu": 0.44,
+    "prefill_peak_memory_usage_per_gpu": 0.44,
+    "remaining_memory_headroom": 79.56,
+    "simulation_mode": "inference"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {},
  "phase_times": {
   "decode": 0.251,
   "prefill": 0.01

@@ -18,9 +18,49 @@
  "bundles": {
   "hier": {
    "bundle_hash": "21e86dff08d333f0955de5ba4a18399a83cc9e2a136723691caf541288706367",
+   "byte_hist_by_kind": {
+    "RECV": {
+     "8388608": 2
+    },
+    "SEND": {
+     "8388608": 2
+    }
+   },
+   "bytes_by_kind": {
+    "RECV": 16777216,
+    "SEND": 16777216
+   },
+   "collectives_by_group": {},
+   "comm_groups": {},
+   "compute_micros_total": 12502,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMP:1428": 4,
+      "COMP:44": 2,
+      "SEND:8388608": 2
+     },
+     "1": {
+      "COMP:1428": 4,
+      "COMP:495": 2,
+      "RECV:8388608": 2
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "cf1668e7d0f7a95d42e6c04d2b45ae551595441a8f6156d82f7c02f7995cb9e6",
    "n_ranks": 2,
+   "n_recv": 2,
+   "n_transfers": 2,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "SEND": 16777216
+     },
+     "compute_micros": 5800,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 8394408,
      "dag_hash": "5dd049067a2dec4576f97a6ea108eb705bb94df1cfbf082fbf5f10d192b945d6",
      "n_nodes": 8,
      "op_counts": {
@@ -30,6 +70,12 @@
      "ops_hash": "fd93761ef21d247da190b5e561d363aea40468cfaaa47587e6accc0686ff5b0e"
     },
     "1": {
+     "bytes_by_kind": {
+      "RECV": 16777216
+     },
+     "compute_micros": 6702,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 8395310,
      "dag_hash": "c85aa7fac9b4e74a2234835d78d9a98ea126b9f3ce3a5c37e6ecfc9cd2a85bd0",
      "n_nodes": 8,
      "op_counts": {
@@ -42,9 +88,74 @@
   },
   "hier/fwd": {
    "bundle_hash": "baa79f1d999bf37befcda8d01f042f1c7ea2df53828262e2b94eec459ae564a3",
+   "byte_hist_by_kind": {
+    "COLL": {
+     "8388608": 4
+    }
+   },
+   "bytes_by_axis": {
+    "tp": 33554432
+   },
+   "bytes_by_kind": {
+    "COLL": 33554432
+   },
+   "collectives_by_group": {
+    "0,1": {
+     "by_kind": {
+      "0": {
+       "bytes": 33554432,
+       "n": 4
+      }
+     },
+     "bytes": 33554432,
+     "n_ops": 4
+    }
+   },
+   "comm_groups": {
+    "1000": [
+     0,
+     1
+    ]
+   },
+   "compute_micros_total": 2856,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMM:-1:8388608:null": 2,
+      "COMP:102": 2,
+      "COMP:203": 1,
+      "COMP:262": 1,
+      "COMP:304": 1,
+      "COMP:361": 1,
+      "COMP:38": 1,
+      "COMP:56": 1
+     },
+     "1": {
+      "COMM:-1:8388608:null": 2,
+      "COMP:102": 2,
+      "COMP:203": 1,
+      "COMP:262": 1,
+      "COMP:304": 1,
+      "COMP:361": 1,
+      "COMP:38": 1,
+      "COMP:56": 1
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "260a1d7b30e5b3b891542dc6af8bffb6c6d0042afdb469f371dd089f3398cd2a",
    "n_ranks": 2,
+   "n_recv": 0,
+   "n_transfers": 0,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "COLL": 16777216
+     },
+     "compute_micros": 1428,
+     "critical_path_nodes": 8,
+     "critical_path_weight": 1428,
      "dag_hash": "5c808eb9e2d889ed128cc8f8cd371fc652817f8122befd656d57cdc248000c22",
      "n_nodes": 10,
      "op_counts": {
@@ -54,6 +165,12 @@
      "ops_hash": "4e353cfa9717f7a5a4d05017a6f655e83e24ea300100d5aa82fef569341b8c3e"
     },
     "1": {
+     "bytes_by_kind": {
+      "COLL": 16777216
+     },
+     "compute_micros": 1428,
+     "critical_path_nodes": 8,
+     "critical_path_weight": 1428,
      "dag_hash": "5c808eb9e2d889ed128cc8f8cd371fc652817f8122befd656d57cdc248000c22",
      "n_nodes": 10,
      "op_counts": {
@@ -70,7 +187,24 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "VIT": {
+   "fields": {
+    "final_decode_peak_memory_usage_per_gpu": 0.56,
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "max_peak_memory_usage_per_gpu": 0.56,
+    "prefill_peak_memory_usage_per_gpu": 0.56,
+    "remaining_memory_headroom": 79.44,
+    "simulation_mode": "inference"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {
+  "hier": true,
+  "hier/fwd": true
+ },
  "phase_times": {
   "decode": 0.0,
   "prefill": 0.01

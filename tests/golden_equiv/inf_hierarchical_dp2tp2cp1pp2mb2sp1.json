@@ -60,9 +60,49 @@
  "bundles": {
   "hier": {
    "bundle_hash": "dbb1c4dd288c189f5d3494ab4975c646b13a4772cbf67cce73f4cbc2da738606",
+   "byte_hist_by_kind": {
+    "RECV": {
+     "32768": 2
+    },
+    "SEND": {
+     "32768": 2
+    }
+   },
+   "bytes_by_kind": {
+    "RECV": 65536,
+    "SEND": 65536
+   },
+   "collectives_by_group": {},
+   "comm_groups": {},
+   "compute_micros_total": 4320,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMP:0": 2,
+      "COMP:426": 4,
+      "SEND:32768": 2
+     },
+     "1": {
+      "COMP:426": 4,
+      "COMP:456": 2,
+      "RECV:32768": 2
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "998dee42fd8acddcb05b337e9539d1befe9bfe3bdeb4a6c32fa58c45b4b7a868",
    "n_ranks": 2,
+   "n_recv": 2,
+   "n_transfers": 2,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "SEND": 65536
+     },
+     "compute_micros": 1704,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 34472,
      "dag_hash": "49edc3bc17e4e7182d8daa2f6a37ea7424d75f357d8728940ab8fc20f40dc08f",
      "n_nodes": 8,
      "op_counts": {
@@ -72,6 +112,12 @@
      "ops_hash": "0d788e9830fca7ceb6b3d31a3cb7dd458606c4a3110a183374402b084a120161"
     },
     "1": {
+     "bytes_by_kind": {
+      "RECV": 65536
+     },
+     "compute_micros": 2616,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 35384,
      "dag_hash": "27425d783d31d82f805d65c2e4c4bd79b1bb16a885dbddd6ca4387c5fa88ef9b",
      "n_nodes": 8,
      "op_counts": {
@@ -84,9 +130,80 @@
   },
   "hier/fwd": {
    "bundle_hash": "aac87eacce595372e891af7c1023c4b1bb59f1810c9501bb1074e6211db456d8",
+   "byte_hist_by_kind": {
+    "COLL": {
+     "32768": 8
+    }
+   },
+   "bytes_by_axis": {
+    "tp": 262144
+   },
+   "bytes_by_kind": {
+    "COLL": 262144
+   },
+   "collectives_by_group": {
+    "0,1": {
+     "by_kind": {
+      "2": {
+       "bytes": 131072,
+       "n": 4
+      },
+      "7": {
+       "bytes": 131072,
+       "n": 4
+      }
+     },
+     "bytes": 262144,
+     "n_ops": 8
+    }
+   },
+   "comm_groups": {
+    "1000": [
+     0,
+     1
+    ]
+   },
+   "compute_micros_total": 852,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMM:2:32768:null": 2,
+      "COMM:7:32768:null": 2,
+      "COMP:112": 1,
+      "COMP:13": 3,
+      "COMP:22": 1,
+      "COMP:23": 2,
+      "COMP:53": 1,
+      "COMP:66": 1,
+      "COMP:88": 1
+     },
+     "1": {
+      "COMM:2:32768:null": 2,
+      "COMM:7:32768:null": 2,
+      "COMP:112": 1,
+      "COMP:13": 3,
+      "COMP:22": 1,
+      "COMP:23": 2,
+      "COMP:53": 1,
+      "COMP:66": 1,
+      "COMP:88": 1
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "6d791c6482cee3e2fe6189ad15b7b010d86e406a5bddc86ac44d18ed79ca7d4f",
    "n_ranks": 2,
+   "n_recv": 0,
+   "n_transfers": 0,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "COLL": 131072
+     },
+     "compute_micros": 426,
+     "critical_path_nodes": 10,
+     "critical_path_weight": 426,
      "dag_hash": "5accabc65151734b67d5d35fa360cb3fc59fa1ae398db61e7a1f4b66057e261f",
      "n_nodes": 14,
      "op_counts": {
@@ -96,6 +213,12 @@
      "ops_hash": "3aa9eb099ecdb015418121b347c3d96f3eb3bc7aed4f7f4ad2a564748029b721"
     },
     "1": {
+     "bytes_by_kind": {
+      "COLL": 131072
+     },
+     "compute_micros": 426,
+     "critical_path_nodes": 10,
+     "critical_path_weight": 426,
      "dag_hash": "5accabc65151734b67d5d35fa360cb3fc59fa1ae398db61e7a1f4b66057e261f",
      "n_nodes": 14,
      "op_counts": {
@@ -112,7 +235,24 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "final_decode_peak_memory_usage_per_gpu": 0.43,
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "max_peak_memory_usage_per_gpu": 0.44,
+    "prefill_peak_memory_usage_per_gpu": 0.44,
+    "remaining_memory_headroom": 79.56,
+    "simulation_mode": "inference"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {
+  "hier": true,
+  "hier/fwd": true
+ },
  "phase_times": {
   "decode": 0.222,
   "prefill": 0.009

@@ -13,9 +13,22 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 ## A-list (confirmed bugs, ranked by impact)
 
+> **A1 is fixed (restructure W1 / P0).** `cache_key = sha256("df-astra-cache/2|" ‖ workload_sig ‖ et_sig)`
+> where `workload_sig` is the old formula (manifest + system + network + remote memory + comm groups)
+> and `et_sig` is a name-bound digest of every emitted `llm_graph.<rank>.et`
+> (`astrasim_lib/integration.py::_hash_workload_files`). Two workloads with equal op multisets but
+> different dependencies, node-id priority order, p2p tags or rank assignment no longer collide —
+> pinned by `tests/test_astrasim_cache_key.py`. `workload_sig` survives as the stable per-bundle RUN
+> IDENTITY in the new `astra_runs.json` result log (written in every cache mode), which is what let
+> the golden recapture stay a strict superset. Two enabling fixes shipped with it: `run_perf.py` now
+> HONORS an inherited `RAPID_ASTRA_CACHE_MODE` (its map keys used spaces, so the declared `NO_CACHE`
+> silently resolved to `CACHE_READWRITE` and *overrode* every caller — the golden gate's
+> `RAPID_ASTRA_CACHE_MODE=NO_CACHE` never reached the subprocess), and `equiv/runner.py` now forces
+> `NO_CACHE` explicitly instead of `CACHE_READWRITE`. No modeling output changed.
+
 | id | Bug | Site | Correct behavior · expected delta |
 |---|---|---|---|
-| **A1** | **AstraSim result-cache key omits all DAG structure.** `cache_key = sha256(manifest ‖ system ‖ network ‖ remote_mem ‖ comm_groups)`; the `.et` files are never hashed, and the manifest is a *sorted multiset* with no deps, no order, no p2p peer, no tag. | `astrasim_lib/integration.py:456-466`, `_hash_file_bundle:140-153`; manifest `program/et_emit.py:560-606` | Two workloads with equal op multisets but different dependency structure / priority order / p2p pairing **collide** and a stale wall time is returned silently. Hash the emitted ET bytes (or add deps+peers+order to the manifest). **No model change; makes staleness loud.** ⚠ This masks exactly the kind of change the restructure makes — fix FIRST. |
+| **A1** ✅ FIXED (W1) | **AstraSim result-cache key omits all DAG structure.** `cache_key = sha256(manifest ‖ system ‖ network ‖ remote_mem ‖ comm_groups)`; the `.et` files are never hashed, and the manifest is a *sorted multiset* with no deps, no order, no p2p peer, no tag. | `astrasim_lib/integration.py:456-466`, `_hash_file_bundle:140-153`; manifest `program/et_emit.py:560-606` | Two workloads with equal op multisets but different dependency structure / priority order / p2p pairing **collide** and a stale wall time is returned silently. Hash the emitted ET bytes (or add deps+peers+order to the manifest). **No model change; makes staleness loud.** ⚠ This masks exactly the kind of change the restructure makes — fix FIRST. |
 | **A2** | **DP collectives attached to `rank_tails[0]` only.** One cluster rank bears the whole grad all-reduce/reduce-scatter; the other `par_degree-1` ranks emit nothing. | `program/pipeline_fine.py:616-629`, placement at `:829-849` | Correct: one dp collective per (stage, cluster-rank) on `par_degree` disjoint dp-axis communicators. Fixing **increases** dp traffic by `par_degree`×. Error is in **contention, not the serial critical path** (max-over-ranks may hide it) — measure per-link busy time, not just totals. |
 | **A3** | **tp-overlap head drops `is_moe_layer` → memory DOUBLE-COUNT** (not misclassification): tail files layer L under moe, head files the same L under dense, and the census sums both. | `program/pipeline_fine.py:186-196` (`OVERLAP_NODE_COPY_ATTRS`), census `program/memory_sim.py:352-368`, `:412`/`:432` | Add `is_moe_layer` to the overlap copy list. Reported peak/static memory **decreases** by one dense layer's worth per split MoE layer per device; can flip capacity warnings. **Timing unaffected.** Path is live (`llm_execution.py:776-787` passes MoE templates *and* tp_overlap). |
 | **A4** | **Collective-only stage rank collision.** `rank = dp_idx*num_stages_initial + stage_idx` with a pre-extension count: `rank(first_ext, dp=0) == rank(devices[0], dp=1)`. | `program/legacy_lowering.py:327`, `:604-613`; `program/ir.py:235-242` | Asserted verbatim today in `tests/test_program_ir.py:490-493`. At dp≥2 the collective is silently appended to another replica's trace. Correct: use the post-extension device count, or refuse collectives on non-compute devices. **Dormant — no reachable config found** (all ZeRO-3 ±pp hops are one-stage between adjacent host/target pairs, and `program/layout.py:113-114` bounds-checks). |

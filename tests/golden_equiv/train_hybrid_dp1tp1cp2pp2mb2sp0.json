@@ -18,9 +18,76 @@
  "bundles": {
   "hier/bwd": {
    "bundle_hash": "45891f86846d8e7258d3cb3d90c18522665e9d7624f08eed26ce200e753b9083",
+   "byte_hist_by_kind": {
+    "COLL": {
+     "8388608": 4
+    }
+   },
+   "bytes_by_axis": {
+    "cp": 33554432
+   },
+   "bytes_by_kind": {
+    "COLL": 33554432
+   },
+   "collectives_by_group": {
+    "0,1": {
+     "by_kind": {
+      "2": {
+       "bytes": 16777216,
+       "n": 2
+      },
+      "7": {
+       "bytes": 16777216,
+       "n": 2
+      }
+     },
+     "bytes": 33554432,
+     "n_ops": 4
+    }
+   },
+   "comm_groups": {
+    "1000": [
+     0,
+     1
+    ]
+   },
+   "compute_micros_total": 4202,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMM:2:8388608:null": 1,
+      "COMM:7:8388608:null": 1,
+      "COMP:147": 1,
+      "COMP:396": 1,
+      "COMP:68": 2,
+      "COMP:694": 1,
+      "COMP:728": 1
+     },
+     "1": {
+      "COMM:2:8388608:null": 1,
+      "COMM:7:8388608:null": 1,
+      "COMP:147": 1,
+      "COMP:396": 1,
+      "COMP:68": 2,
+      "COMP:694": 1,
+      "COMP:728": 1
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "b4f30b91141be6e5b551133e05dc2779bd19cdf5f52fba69e4d257d878094995",
    "n_ranks": 2,
+   "n_recv": 0,
+   "n_transfers": 0,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "COLL": 16777216
+     },
+     "compute_micros": 2101,
+     "critical_path_nodes": 8,
+     "critical_path_weight": 2110,
      "dag_hash": "9afc1b6f1cc05ff373f50bbcbc94d6eb229cbb2bb949061707030ce163715110",
      "n_nodes": 8,
      "op_counts": {
@@ -30,6 +97,12 @@
      "ops_hash": "e3f68f0113122f3cc89383d7e5a90a1ac5051ec4c030964c18b058df44e34185"
     },
     "1": {
+     "bytes_by_kind": {
+      "COLL": 16777216
+     },
+     "compute_micros": 2101,
+     "critical_path_nodes": 8,
+     "critical_path_weight": 2110,
      "dag_hash": "9afc1b6f1cc05ff373f50bbcbc94d6eb229cbb2bb949061707030ce163715110",
      "n_nodes": 8,
      "op_counts": {
@@ -42,9 +115,70 @@
   },
   "hier/fwd": {
    "bundle_hash": "effa8d8110d12273f9b40883c3abff80c03a99028d84a944313f77b8b737ae0d",
+   "byte_hist_by_kind": {
+    "COLL": {
+     "8388608": 2
+    }
+   },
+   "bytes_by_axis": {
+    "cp": 16777216
+   },
+   "bytes_by_kind": {
+    "COLL": 16777216
+   },
+   "collectives_by_group": {
+    "0,1": {
+     "by_kind": {
+      "2": {
+       "bytes": 16777216,
+       "n": 2
+      }
+     },
+     "bytes": 16777216,
+     "n_ops": 2
+    }
+   },
+   "comm_groups": {
+    "1000": [
+     0,
+     1
+    ]
+   },
+   "compute_micros_total": 1886,
+   "manifest": {
+    "npus": 2,
+    "ranks": {
+     "0": {
+      "COMM:2:8388608:null": 1,
+      "COMP:136": 1,
+      "COMP:281": 1,
+      "COMP:338": 1,
+      "COMP:59": 2,
+      "COMP:70": 1
+     },
+     "1": {
+      "COMM:2:8388608:null": 1,
+      "COMP:136": 1,
+      "COMP:281": 1,
+      "COMP:338": 1,
+      "COMP:59": 2,
+      "COMP:70": 1
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "feb939ce42e2abaf7d48914cae92c1c60443ce77429cc9a8a5d69610eee08aea",
    "n_ranks": 2,
+   "n_recv": 0,
+   "n_transfers": 0,
    "ranks": {
     "0": {
+     "bytes_by_kind": {
+      "COLL": 8388608
+     },
+     "compute_micros": 943,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 945,
      "dag_hash": "4cc93fac6cf0417dede4cb62a72ec2c4fd847ca13d44e4a3b292d0743476a9a3",
      "n_nodes": 7,
      "op_counts": {
@@ -54,6 +188,12 @@
      "ops_hash": "105a75ae3f78a12d243473a29d3d4e1127ee8b1eef4b75f414b64c62096be79f"
     },
     "1": {
+     "bytes_by_kind": {
+      "COLL": 8388608
+     },
+     "compute_micros": 943,
+     "critical_path_nodes": 7,
+     "critical_path_weight": 945,
      "dag_hash": "4cc93fac6cf0417dede4cb62a72ec2c4fd847ca13d44e4a3b292d0743476a9a3",
      "n_nodes": 7,
      "op_counts": {
@@ -70,7 +210,22 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "remaining_memory_headroom": 75.76,
+    "simulated_peak_memory_usage_per_gpu": 4.24,
+    "simulation_mode": "training"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {
+  "hier/bwd": true,
+  "hier/fwd": true
+ },
  "phase_times": {},
  "spec_id": "train:hybrid:dp1tp1cp2pp2mb2sp0",
  "status": "ok",

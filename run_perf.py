@@ -36,15 +36,25 @@ from inference_timing import TimeCalculationLLMInference
 from memory_estimation import estimate_memory
 
 # Cache handling policy for AstraSim integration.
-# Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
-cache_handling = "NO_CACHE"
-_CACHE_MODE_MAP = {
-    "NO CACHE": "NO_CACHE",
-    "CACHE READONLY": "CACHE_READONLY",
-    "CACHE READWRITE": "CACHE_READWRITE",
-}
-os.environ["RAPID_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
-    cache_handling.strip().upper(), "CACHE_READWRITE"
+# Options: "NO_CACHE", "CACHE_READONLY", "CACHE_READWRITE" (spaces accepted).
+#
+# An inherited ``RAPID_ASTRA_CACHE_MODE`` WINS over the module default: every
+# caller that spawns run_perf.py as a subprocess (validation_helpers, the
+# equivalence runner, the sweep drivers) selects the mode through the
+# environment, and silently overriding it here is how a stale AstraSim result
+# cache survives a workload change (restructure BUG_LEDGER A1).
+cache_handling = "CACHE_READWRITE"
+_CACHE_MODES = ("NO_CACHE", "CACHE_READONLY", "CACHE_READWRITE")
+
+
+def _normalize_cache_mode(value, default):
+    normalized = str(value or "").strip().upper().replace(" ", "_")
+    return normalized if normalized in _CACHE_MODES else default
+
+
+os.environ["RAPID_ASTRA_CACHE_MODE"] = _normalize_cache_mode(
+    os.environ.get("RAPID_ASTRA_CACHE_MODE"),
+    _normalize_cache_mode(cache_handling, "CACHE_READWRITE"),
 )
 
 # Default location for artifacts emitted by run_perf.

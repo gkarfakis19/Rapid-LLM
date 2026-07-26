@@ -138,7 +138,13 @@ def _hash_sig(canonical: str) -> str:
 
 
 def _hash_file_bundle(paths: Iterable[str]) -> str:
-    """Hash the contents of all existing files in ``paths`` for cache lookups."""
+    """Hash the contents of all existing files in ``paths`` for cache lookups.
+
+    This is the *workload signature*: manifest + system + network + remote
+    memory + comm groups. It identifies WHICH simulation was asked for, and is
+    the stable per-bundle run identity recorded in ``astra_runs.json``. It is
+    NOT sufficient as a cache key on its own — see :func:`_hash_workload_files`.
+    """
 
     h = hashlib.sha256()
     for path in sorted(set(paths)):
@@ -151,6 +157,94 @@ def _hash_file_bundle(paths: Iterable[str]) -> str:
                     break
                 h.update(chunk)
     return h.hexdigest()
+
+
+def _workload_et_paths(workload_prefix: Optional[str]) -> List[str]:
+    """Every ``<prefix>.<rank>.et`` file belonging to ``workload_prefix``."""
+
+    if not workload_prefix:
+        return []
+    directory = os.path.dirname(workload_prefix) or "."
+    base = os.path.basename(workload_prefix)
+    if not os.path.isdir(directory):
+        return []
+    pattern = re.compile(rf"^{re.escape(base)}\.(\d+)\.et$")
+    found: List[str] = []
+    for entry in os.listdir(directory):
+        if pattern.match(entry):
+            found.append(os.path.join(directory, entry))
+    return sorted(found)
+
+
+def _hash_workload_files(paths: Iterable[str]) -> str:
+    """Hash the emitted execution traces, BINDING NAME TO CONTENT.
+
+    BUG_LEDGER A1: the graph-mode cache key used to hash only the manifest
+    (a *sorted multiset* of ops with no deps, no order, no p2p peer and no
+    tag) plus the config files. Two workloads with equal op multisets but
+    different dependency structure, node-id priority order or p2p pairing
+    therefore COLLIDED, and a stale wall time was returned silently — which
+    is exactly the class of change the restructure phases make. The ET bytes
+    are the DAG, so they belong in the key.
+
+    Unlike :func:`_hash_file_bundle` this mixes each file's basename into the
+    digest, so two ranks swapping traces cannot hash equal.
+    """
+
+    h = hashlib.sha256()
+    h.update(b"df-astra-et/1")
+    for path in sorted(set(paths)):
+        if not path or not os.path.exists(path):
+            continue
+        h.update(b"\x00")
+        h.update(os.path.basename(path).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(str(os.path.getsize(path)).encode("utf-8"))
+        h.update(b"\x00")
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+    return h.hexdigest()
+
+
+def _record_astrasim_run(
+    record_path: Optional[str],
+    workload_sig: str,
+    entry: Dict[str, Any],
+) -> None:
+    """Append one AstraSim result to a per-bundle run record.
+
+    The record is written REGARDLESS of the cache mode: it is a result log,
+    not a cache, so a ``NO_CACHE`` run (the only honest mode for validation,
+    see A1) still leaves its per-rank wall seconds next to the traces for the
+    equivalence harness to pin. Keyed by the workload signature so the
+    multi-run bundles (grad-accumulation's two dispatchers, inference prefill
+    plus decode samples) each keep their own entry.
+    """
+
+    if not record_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(record_path) or ".", exist_ok=True)
+        record: Dict[str, Any] = {}
+        if os.path.exists(record_path):
+            try:
+                with open(record_path, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    record = loaded
+            except (OSError, json.JSONDecodeError):
+                record = {}
+        record[workload_sig] = entry
+        tmp_path = record_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2, sort_keys=True)
+        os.replace(tmp_path, record_path)
+    except OSError:
+        pass
 
 
 def _path_within_dir(path: Optional[str], directory: str) -> bool:
@@ -351,8 +445,14 @@ def run_cache_astrasim(
     axes_filter: Optional[Sequence[str]] = None,
     transform_2d_to_1d: bool = False,
     files = None,
+    result_record_path: Optional[str] = None,
 ) -> Tuple[List[float], float]:
-    """Run AstraSim with caching to avoid recomputation when inputs match."""
+    """Run AstraSim with caching to avoid recomputation when inputs match.
+
+    ``result_record_path`` (when given) receives one entry per invocation
+    keyed by the workload signature, independently of the cache mode; see
+    :func:`_record_astrasim_run`.
+    """
 
     if isinstance(hw_obj, str):
         raise TypeError("run_cache_astrasim expects a parsed HWConfig object, not a path")
@@ -453,6 +553,7 @@ def run_cache_astrasim(
 
         remote_mem_path = get_remote_memory_path()
 
+        et_sig: Optional[str] = None
         if manifest_json_path:
             bundle_list: List[str] = [manifest_json_path]
             for path in (files["system_json"], files["network_yaml"]):
@@ -462,9 +563,37 @@ def run_cache_astrasim(
                 bundle_list.append(remote_mem_path)
             if comm_group_json and os.path.exists(comm_group_json):
                 bundle_list.append(comm_group_json)
-            cache_key = _hash_file_bundle(bundle_list)
+            # The workload signature says WHICH simulation was requested; the
+            # ET digest says what the DAG actually is. A1: the key must cover
+            # both, or a dependency/order/p2p-pairing change silently reuses a
+            # stale wall time.
+            workload_sig = _hash_file_bundle(bundle_list)
+            et_paths = _workload_et_paths(workload_prefix)
+            if not et_paths:
+                raise RuntimeError(
+                    "AstraSim graph run has a manifest but no execution traces at "
+                    f"'{workload_prefix}.<rank>.et' — refusing to key a result cache "
+                    "on the manifest alone (BUG_LEDGER A1)."
+                )
+            et_sig = _hash_workload_files(et_paths)
+            cache_key = _hash_sig(f"df-astra-cache/2|{workload_sig}|{et_sig}")
         else:
-            cache_key = _hash_sig(canonical)
+            workload_sig = _hash_sig(canonical)
+            cache_key = workload_sig
+
+        def _record(per_node: List[float], total: float, source: str) -> None:
+            _record_astrasim_run(
+                result_record_path,
+                workload_sig,
+                {
+                    "per_node_sec": list(per_node),
+                    "max_sec": float(total),
+                    "source": source,
+                    "cache_key": cache_key,
+                    "et_sig": et_sig,
+                    "workload_prefix": workload_prefix,
+                },
+            )
 
         if allow_read:
             cache = _load_cache(cache_path)
@@ -480,6 +609,7 @@ def run_cache_astrasim(
                             )
                         except Exception:
                             pass
+                    _record(cached_per, cached_max, "cache")
                     return cached_per, cached_max
                 if allow_write and cache_key in cache:
                     try:
@@ -536,15 +666,18 @@ def run_cache_astrasim(
             "workload_prefix": workload_prefix,
             "system_json": files["system_json"],
             "network_yaml": files["network_yaml"],
+            "workload_sig": workload_sig,
         }
         if manifest_json_path:
             cache_entry["manifest_path"] = manifest_json_path
+            cache_entry["et_sig"] = et_sig
 
         if allow_write:
             cache = _load_cache(cache_path)
             cache[cache_key] = cache_entry
             _save_cache(cache_path, cache)
 
+        _record(per_node_sec, max_sec, "run")
         return per_node_sec, max_sec
     finally:
         if ephemeral_paths:

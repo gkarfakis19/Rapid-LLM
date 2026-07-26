@@ -229,6 +229,12 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
     label_dp_gid: Dict[Tuple[str, int], str] = {}
     members_to_gid: Dict[Tuple[int, ...], str] = {}
     gid_members: Dict[str, List[int]] = {}
+    # gid -> the parallelism axes / labels its collectives were built for.
+    # Communicator *ids* are an emitter choice, so this sidecar is what lets a
+    # consumer attribute bytes to an interconnect axis without re-inferring it
+    # from participant counts.
+    gid_axes: Dict[str, set] = defaultdict(set)
+    gid_labels: Dict[str, set] = defaultdict(set)
     gid_counter = itertools.count(start=_WIRE_GROUP_BASE_ID)
     for label in sorted(label_tokens.keys()):
         for axis, dp_idx, members_tuple in sorted(label_tokens[label]):
@@ -253,6 +259,8 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
                     "identify exactly one communicator per dp index."
                 )
             label_dp_gid[(label, dp_idx)] = gid
+            gid_axes[gid].add(str(axis))
+            gid_labels[gid].add(str(label))
 
     # --- Phase A: main ops in uid order ------------------------------------
     et_ids: Dict[Tuple[int, int], int] = {}
@@ -472,6 +480,7 @@ def emit_chakra(program: Program, output_dir: str, id_policy: str = "legacy") ->
 
     manifest_path = _write_manifest(output_dir, traces, rank_ids)
     comm_groups, comm_groups_path = _write_comm_groups(output_dir, dp_count, rank_ids, gid_members)
+    _write_comm_axes(output_dir, comm_groups, gid_axes, gid_labels)
 
     return EmittedBundle(
         et_prefix=et_prefix,
@@ -642,3 +651,43 @@ def _write_comm_groups(
     with open(path, "w") as fh:
         json.dump(groups, fh, indent=2)
     return groups, path
+
+
+def _write_comm_axes(
+    output_dir: str,
+    comm_groups: Dict[str, List[int]],
+    gid_axes: Dict[str, Any],
+    gid_labels: Dict[str, Any],
+) -> Optional[str]:
+    """Write the ``comm_axes.json`` SIDECAR: gid -> parallelism axes/labels.
+
+    AstraSim never reads this file (``comm_groups.json`` stays exactly the
+    ``{gid: [ranks]}`` map the binary is given). It exists so that consumers —
+    the T1 structural gate's per-axis byte histogram, the viz/report layer —
+    can attribute communication to an axis that construction already knew,
+    instead of re-inferring it from participant counts
+    (``legacy_lowering.py:243-248``, the inference the restructure deletes).
+
+    Wire-group axes come from each collective's ``GroupKey.axis``; the dp
+    stage groups (numeric ids below the wire base) are the dp communicators.
+    """
+    if not comm_groups:
+        return None
+    entries: Dict[str, Dict[str, List[str]]] = {}
+    for gid in sorted(comm_groups, key=lambda g: (len(g), g)):
+        axes = sorted(str(a) for a in gid_axes.get(gid, ()))
+        labels = sorted(str(la) for la in gid_labels.get(gid, ()))
+        if not axes:
+            # A group with no recorded GroupKey is a dp stage group: its
+            # members are the dp replicas of one stage (_write_comm_groups).
+            axes = ["dp"]
+        entries[str(gid)] = {"axes": axes, "labels": labels}
+    path = os.path.join(output_dir, "comm_axes.json")
+    with open(path, "w") as fh:
+        json.dump(
+            {"version": "df-astra-comm-axes/1", "groups": entries},
+            fh,
+            indent=2,
+            sort_keys=True,
+        )
+    return path

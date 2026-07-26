@@ -3,7 +3,19 @@
  "bundles": {},
  "dlsim_ok": {},
  "error_tail": "",
- "git_rev": "7cf6f65",
+ "git_rev": "d4f92ed",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "remaining_memory_headroom": 75.76,
+    "simulated_peak_memory_usage_per_gpu": 4.24,
+    "simulation_mode": "training"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {},
  "phase_times": {},
  "spec_id": "train:analytical:dp1tp1cp2pp2mb2sp0",
  "status": "ok",
