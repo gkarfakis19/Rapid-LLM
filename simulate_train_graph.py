@@ -14,16 +14,13 @@
 # limitations under the License.
 
 import math
-from heapq import heappush, heappop
-import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from graphviz import Digraph
 import os
 
 import util
 from timing_model import CollectiveType
-from memory_estimation import MemKind, mem_kind_from_op_name
-debug = False
+from memory_estimation import MemKind
 
 
 class Node:
@@ -285,81 +282,13 @@ class Graph:
 
         return comm_edge
 
-    @staticmethod
-    def _reset_execution_state(root: Any) -> None:
-        """Clear scheduling metadata so the graph can be re-simulated."""
-        if root is None:
-            return
-
-        visited: Set[int] = set()
-        if isinstance(root, (list, tuple, set)):
-            stack: List[Any] = list(root)
-        else:
-            stack = [root]
-
-        while stack:
-            obj = stack.pop()
-            obj_id = id(obj)
-            if obj_id in visited:
-                continue
-            visited.add(obj_id)
-
-            if hasattr(obj, "done"):
-                setattr(obj, "done", False)
-            if hasattr(obj, "scheduled"):
-                setattr(obj, "scheduled", False)
-            if hasattr(obj, "finish_time"):
-                setattr(obj, "finish_time", -1)
-
-            stack.extend(getattr(obj, "children", []))
-
-    def convert_comm_sizes_to_times(self, roots, network_model, interconnect_params):
-        """
-        Args:
-            network_model: NetworkModel instance for collective timing
-            interconnect_params: Dict with bandwidth/latency for each type
-                                {'dp': (ib, ll), 'pp': (ib, ll), 'tp': (ib, ll)}
-        """
-        def traverse_and_convert(node, visited=None):
-            if visited is None:
-                visited = set()
-            if id(node) in visited:
-                return
-            visited.add(id(node))
-
-            # Process children (edges and nodes)
-            for child in node.children:
-                # If it's an edge with communication size, convert to time
-                if hasattr(child, 'comm_size_bytes') and child.comm_size_bytes > 0:
-                    # Get the appropriate bandwidth/latency for this interconnect type
-                    interconnect_type = child.comm_interconnect_type
-                    if interconnect_type and interconnect_type in interconnect_params:
-                        ib, ll = interconnect_params[interconnect_type]
-                    else:
-                        raise ValueError(f"Invalid interconnect type: {interconnect_type}") 
-                    if not isinstance(child.comm_type, CollectiveType):
-                        raise TypeError(
-                            f"Comm edge {getattr(child, 'name', '<unnamed>')} missing CollectiveType comm_type"
-                        )
-
-                    child.duration = network_model.collective(
-                        kind=child.comm_type,
-                        size_bytes=child.comm_size_bytes,
-                        participants=child.participants,
-                        ib=ib,
-                        ll=ll,
-                        local_bytes=0.0,
-                        local_ops=0.0,
-                        debug_label=f"{child.name}_conversion"
-                    )
-                    # print(f"Converted {child.name} size {child.comm_size_bytes} bytes to duration {child.duration:.6f} sec using {interconnect_type} (ib={ib}, ll={ll})")
-
-                # Recursively process this child
-                traverse_and_convert(child, visited)
-
-        traverse_and_convert(roots)
-        return roots
-
+    # M5 note: ``convert_comm_sizes_to_times`` and ``simulate`` (the
+    # analytical comm conversion + list scheduler) moved to
+    # ``program/analytic_sim.py``, operating on the COARSE Program built by
+    # ``program/pipeline_coarse.py``. This class keeps only graph
+    # construction (``construct_fwd_bwd_graph`` feeds the HIERARCHICAL
+    # AstraSim pipeline path and the inference decode graphs until M6/M7)
+    # and visualization.
     def construct_fwd_bwd_graph(self, include_backward: bool = True, include_optimizer: bool = False):
         embedding_node = []
         data_batch_node = []
@@ -995,120 +924,6 @@ class Graph:
 
         return root_forward_entry
 
-    def simulate(self, root):
-        time = 0
-        counter = 0
-        event_queue = []
-        ready_list = []
-
-        self._reset_execution_state(root)
-
-        ready_list.append(root)
-        root.scheduled = True
-        ###find number of devices needed
-        base_devices = max(1, int(self.pp) if self.pp else 1)
-        max_hw_id = -1
-        visited_nodes: Set[int] = set()
-        stack = list(root if isinstance(root, (list, tuple)) else [root])
-        while stack:
-            node = stack.pop()
-            node_id = id(node)
-            if node_id in visited_nodes:
-                continue
-            visited_nodes.add(node_id)
-
-            hw_id = getattr(node, "hw_id", None)
-            if hw_id is not None:
-                try:
-                    hw_val = int(hw_id)
-                except (TypeError, ValueError):
-                    hw_val = None
-                if hw_val is not None and hw_val >= 0:
-                    max_hw_id = max(max_hw_id, hw_val)
-
-            stack.extend(getattr(node, "children", []))
-
-        if max_hw_id >= 0:
-            base_devices = max(base_devices, max_hw_id + 1)
-
-        GPU_list = [True for _ in range(base_devices)]
-        data_list = [False for i in range(0, self.num_batch)]
-
-        heappush(event_queue, (root.duration, counter, root))
-        if debug:
-            print("{} enqueued at time {} batch id {}".format(root.name, 0, root.batch_id))
-        ready_list.remove(root)
-        counter = counter + 1
-
-        while len(event_queue) > 0:
-            time, _, event = heappop(event_queue)
-            event.done = True
-            event.scheduled = False
-            event.finish_time = time
-            if debug:
-                print("Event {} finished at time {}".format(event.name, time))
-
-            for child in event.children:
-
-                is_ready = True
-                max_time = -1
-                for parent in child.parents:
-                    if parent.done == False:
-                        is_ready = False
-                    else:
-                        max_time = max(max_time, parent.finish_time)
-                # if is_ready == True:
-                if is_ready and (child not in ready_list) and (not child.done) and (not child.scheduled):
-                    ready_list.append(child)
-                    if debug:
-                        print("child {}  ready at time {} ".format(child.name, time))
-
-            if isinstance(event, Node):
-                GPU_list[int(event.hw_id)] = True
-
-                
-
-
-
-            for event in ready_list[:]:
-                enqueued = False
-                if isinstance(event, Data_batch):
-                    # if GPU_list[event.hw_id] == True:
-                    new_time = time + event.duration
-                    heappush(event_queue, (new_time, counter, event))
-                    event.scheduled = True
-                    enqueued = True
-                    if debug:
-                        print("{} enqueued at time".format(event.name,  time))
-                    counter = counter + 1
-                    data_list[event.batch_id] = True #data batch sent to gpu
-                    # GPU_list[event.hw_id] = False
-                    ready_list.remove(event)
-
-                elif isinstance(event, Node): 
-                    if GPU_list[int(event.hw_id)] == True:
-                        new_time = time + event.duration
-                        heappush(event_queue, (new_time, counter, event))
-                        event.scheduled = True
-                        enqueued = True
-                        if debug:
-                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
-                        counter = counter + 1
-                        GPU_list[int(event.hw_id)] = False
-                        ready_list.remove(event)
-                elif isinstance(event, Edge): 
-                    new_time = time + event.duration
-                    heappush(event_queue, (new_time, counter, event))
-                    event.scheduled = True
-                    if debug:
-                        print("{}.{} enqueued at time {}".format(event.name, event.op_id, time))
-                    enqueued = True
-                    counter = counter + 1
-                    ready_list.remove(event)
-
-
-        return time
-    
     def save_graph(self, roots, output_folder = "output/LLM/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
 
@@ -1172,6 +987,16 @@ def visualize_graph(roots, filename="graph"):
                     return "white"
                 else:
                     return "yellow"
+        # M5 coarse schedule events (duck-typed: CommEvent carries
+        # comm_size_bytes, ComputeEvent carries hw_id).
+        if hasattr(node, "comm_size_bytes"):
+            if getattr(node, "is_dp", False):
+                return "green"
+            if getattr(node, "comm_type", None) == CollectiveType.PIPELINE:
+                return "white"
+            return "yellow"
+        if hasattr(node, "hw_id"):
+            return "lightblue" if getattr(node, "fwd", True) else "lightcoral"
         return "mediumorchid"
 
     def _node_label(node) -> str:
@@ -1191,6 +1016,17 @@ def visualize_graph(roots, filename="graph"):
                     f"dur={duration_display})"
                 )
             return f"{node.name}\n(op_id={node.op_id}, dur={duration_display})"
+        # M5 coarse schedule events (see _node_color).
+        if hasattr(node, "comm_size_bytes"):
+            duration_display = _format_duration(node.duration)
+            if getattr(node, "local_hw_id", None) is not None:
+                return f"{node.name}\n(local_hw_id={node.local_hw_id}, dur={duration_display})"
+            return f"{node.name}\n(dur={duration_display})"
+        if hasattr(node, "hw_id"):
+            duration = node.duration
+            profile = tuple(duration) if isinstance(duration, (tuple, list)) else None
+            value = profile[0] if profile else duration
+            return f"{node.name}\n(hw_id={node.hw_id}, dur={_format_duration(value, profile)})"
         return str(node)
 
     def _visit(node):

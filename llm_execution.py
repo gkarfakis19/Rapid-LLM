@@ -91,6 +91,8 @@ class LLMExecutionDispatcher:
         #: memory path) and the memory path's own cached build (M3b).
         self.fine_program: Optional[Any] = None
         self._memory_fine_program: Optional[Any] = None
+        #: COARSE Program evaluated by the analytical/hybrid modes (M5).
+        self.coarse_program: Optional[Any] = None
         #: True once _run_pipeline_with_analytical_comm converted the coarse
         #: graph's comm sizes to times in place (analytical/hybrid modes) —
         #: the legacy memory flatten inherited those durations, so the FINE
@@ -385,45 +387,142 @@ class LLMExecutionDispatcher:
             return 1.0
         return (mb + (pp - 1) / float(v)) / float(mb + pp - 1)
 
-    def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
+    def _run_type(self) -> str:
+        return str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+
+    def _retime_dp_count(self) -> int:
+        """Per-DP duration-profile length (legacy ``_apply_transformer_time``
+        rule: inference forces 1, training uses the dp degree)."""
+        if self._run_type() == "inference":
+            return 1
+        return max(1, getattr(self.time_calc, "dp", 1))
+
+    def _build_coarse_program(self) -> Any:
+        """Build the COARSE pipeline Program (M5) for analytical/hybrid.
+
+        Reads the SAME inputs the legacy ``construct_fwd_bwd_graph`` call in
+        ``_prepare_execution_graphs`` consumed: the pipeline graph's
+        comp_times/comm_metadata/misc_metadata, ``include_backward`` from the
+        run type and ``include_optimizer`` from the grad-accum cycle (the
+        nonfinal no-DP graph is built without the optimizer tail).
+        """
+        from program.pipeline_coarse import build_coarse_program
+        from program.schedule import ScheduleSpec
+
+        run_type = self._run_type()
+        include_backward = run_type != "inference"
+        misc = getattr(self.pipeline_graph, "misc_metadata", None) or {}
+        include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
+
+        spec = ScheduleSpec.from_pipeline_graph(
+            self.pipeline_graph,
+            include_backward=include_backward,
+            include_optimizer=include_optimizer,
+        )
+
+        layout_obj: Optional[RankLayout] = None
+        pipeline_layout = getattr(self, "_pipeline_rank_layout", None)
+        if pipeline_layout and pipeline_layout.get("axis_order"):
+            layout_obj = RankLayout(
+                axis_order=tuple(pipeline_layout.get("axis_order", [])),
+                axis_sizes=dict(pipeline_layout.get("axis_sizes", {})),
+                axis_strides=dict(pipeline_layout.get("axis_strides", {})),
+            )
+
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        return build_coarse_program(
+            spec,
+            layout_obj,
+            dp_count=effective_dp,
+            label="coarse_no_dp" if self.no_data_parallel else "coarse",
+        )
+
+    def _collect_block_timings(
+        self,
+        timings: Optional[TransformerTimings],
+        moe_timings: Optional[TransformerTimings],
+    ) -> "Any":
+        """Bundle the AstraSim block timings for ``program.retime`` (same
+        baseline fallbacks as the legacy ``_apply_transformer_time``)."""
+        from program.retime import BlockTimings
+
+        return BlockTimings(
+            dense=timings or self._transformer_baseline_timings,
+            moe=moe_timings or self._transformer_moe_baseline_timings,
+            stage_dense=dict(getattr(self, "_transformer_stage_timings", {})),
+            stage_moe=dict(getattr(self, "_transformer_stage_moe_timings", {})),
+        )
+
+    def _run_pipeline_with_analytical_comm(
+        self,
+        declared_mode: ExecutionMode,
+        coarse_program: Optional[Any] = None,
+    ) -> ExecutionResult:
+        """Analytical pipeline evaluation over the COARSE Program (M5).
+
+        Replaces the legacy ``convert_comm_sizes_to_times`` +
+        ``Graph.simulate`` pair: ``program.pipeline_coarse`` builds the typed
+        coarse program from the same schedule events, and
+        ``program.analytic_sim.evaluate`` replays the exact legacy
+        conversion + list-scheduler discipline over it. The hybrid mode
+        passes its retimed program in ``coarse_program``.
+        """
+        from program import analytic_sim
+
         if declared_mode == ExecutionMode.HYBRID:
             if self.no_data_parallel:
                 filename = "/hybrid_graph_no_dp"
             else:
                 filename = "/hybrid_graph"
-            timed_root = self.pipeline_root
         else: # must be "ANALYTICAL"
             if self.no_data_parallel:
                 filename = "/analytical_graph_no_dp"
             else:
                 filename = "/analytical_graph"
-        timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
-            self.pipeline_root,
+
+        if coarse_program is None:
+            coarse_program = self._build_coarse_program()
+        self.coarse_program = coarse_program
+
+        total_time = analytic_sim.evaluate(
+            coarse_program,
             self.time_calc.network_model,
             self.interconnect_params,
         )
+        #: the memory-path FINE build replays the comm-size conversion on
+        #: its own coarse events (legacy flatten inherited the durations).
         self._comm_sizes_converted = True
 
-        generate_graphs = _env_flag("RAPID_VISUALIZE_GRAPHS")
-        if generate_graphs:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
+            # Render the coarse schedule events (converted comm durations +
+            # retimed compute durations, like the legacy timed graph).
             self.pipeline_graph.save_graph(
-                self.pipeline_root,
+                coarse_program.meta.misc["coarse_proto_root"],
                 self.time_calc.output_dir,
                 filename,
             )
 
-        # Persist timed root for any downstream consumer
-        self.pipeline_root = timed_root
-        total_time = self.pipeline_graph.simulate(timed_root)
         total_time *= self._pipeline_interleave_scale()
-        return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
+        return ExecutionResult(total_time=total_time, graph_root=self.pipeline_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
+        from program.retime import apply_block_timings
+
         transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
 
+        # Build from the pristine analytical comp_times (the legacy pipeline
+        # graph predated the write-back), then retime the layer ops.
+        coarse_program = self._build_coarse_program()
         if transformer_time is not None or moe_transformer_time is not None:
-            self._apply_transformer_time(transformer_time, moe_transformer_time)
-        return self._run_pipeline_with_analytical_comm(ExecutionMode.HYBRID)
+            self._update_comp_times_from_timings(transformer_time, moe_transformer_time)
+            apply_block_timings(
+                coarse_program,
+                self._collect_block_timings(transformer_time, moe_transformer_time),
+                self._retime_dp_count(),
+            )
+        return self._run_pipeline_with_analytical_comm(
+            ExecutionMode.HYBRID, coarse_program=coarse_program
+        )
 
     def _run_full_astrasim_hierarchical(self) -> ExecutionResult:
         transformer_time, moe_transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
@@ -664,8 +763,10 @@ class LLMExecutionDispatcher:
 
         events_hook = None
         if self._comm_sizes_converted:
+            from program.analytic_sim import convert_comm_sizes_to_times
+
             def events_hook(events_root: Any) -> None:
-                self.pipeline_graph.convert_comm_sizes_to_times(
+                convert_comm_sizes_to_times(
                     events_root,
                     self.time_calc.network_model,
                     self.interconnect_params,
@@ -874,11 +975,15 @@ class LLMExecutionDispatcher:
 
         return TransformerTimings(forward=fwd_max, backward=bwd_max), fwd_per_rank, bwd_per_rank
 
-    def _apply_transformer_time(
+    def _update_comp_times_from_timings(
         self,
         timings: Optional[TransformerTimings],
         moe_timings: Optional[TransformerTimings] = None,
     ) -> None:
+        """Write the AstraSim transformer baselines into the pipeline graph's
+        ``comp_times`` (shared hybrid/hierarchical half of the legacy
+        ``_apply_transformer_time``; the memory-path FINE build reads these).
+        """
         if timings is None and moe_timings is None:
             return
         if timings is not None and (timings.forward < 0 or timings.backward < 0):
@@ -888,8 +993,6 @@ class LLMExecutionDispatcher:
 
         baseline_timings = timings or self._transformer_baseline_timings
         moe_baseline_timings = moe_timings or self._transformer_moe_baseline_timings
-        stage_timings = getattr(self, "_transformer_stage_timings", {})
-        stage_moe_timings = getattr(self, "_transformer_stage_moe_timings", {})
 
         comp_times = getattr(self.pipeline_graph, "comp_times", None)
         if isinstance(comp_times, dict):
@@ -901,6 +1004,24 @@ class LLMExecutionDispatcher:
             if moe_baseline_timings:
                 comp_times["transformer_f_moe"] = moe_baseline_timings.forward
                 comp_times["transformer_b_moe"] = moe_baseline_timings.backward
+
+    # dies at M6: the legacy-graph duration walk below retimes the legacy
+    # pipeline Node graph, which only the HIERARCHICAL mode still feeds to
+    # AstraSim. The hybrid/analytical coarse-program path uses
+    # program.retime.apply_block_timings instead.
+    def _apply_transformer_time(
+        self,
+        timings: Optional[TransformerTimings],
+        moe_timings: Optional[TransformerTimings] = None,
+    ) -> None:
+        if timings is None and moe_timings is None:
+            return
+        self._update_comp_times_from_timings(timings, moe_timings)
+
+        baseline_timings = timings or self._transformer_baseline_timings
+        moe_baseline_timings = moe_timings or self._transformer_moe_baseline_timings
+        stage_timings = getattr(self, "_transformer_stage_timings", {})
+        stage_moe_timings = getattr(self, "_transformer_stage_moe_timings", {})
 
         visited: Set[int] = set()
         roots: List[Any]
@@ -926,6 +1047,8 @@ class LLMExecutionDispatcher:
                 dp_count,
             )
 
+    # dies at M6 (see _apply_transformer_time): legacy name-prefix walk kept
+    # for the HIERARCHICAL legacy pipeline graph only.
     def _assign_transformer_durations(
         self,
         node: Any,

@@ -29,8 +29,14 @@ builder that replaced ``PipelineGraphFlattener``),
 replacement of ``Graph.simulate_memory``), and the M4 BLOCK builder
 :mod:`program.block_program` (``build_block_program``, the replacement of
 ``Graph.construct_transformer_graph`` powering the hybrid/hierarchical
-transformer AstraSim runs). Heavier submodules are imported lazily by
-their consumers; this package import stays light.
+transformer AstraSim runs), and the M5 coarse stack:
+:mod:`program.pipeline_coarse` (``build_coarse_program``, the typed COARSE
+pipeline program over the same schedule events), :mod:`program.analytic_sim`
+(the analytical evaluator replacing ``Graph.simulate`` +
+``convert_comm_sizes_to_times``), and :mod:`program.retime`
+(``apply_block_timings``, the hybrid per-DP write-back replacing the
+coarse-graph half of ``_assign_transformer_durations``). Heavier submodules
+are imported lazily by their consumers; this package import stays light.
 """
 
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords
