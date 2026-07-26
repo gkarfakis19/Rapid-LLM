@@ -1,0 +1,74 @@
+{
+ "astra_times": {
+  "hier/bwd": {
+   "max_sec": 0.001971,
+   "per_rank_sec": [
+    0.001971,
+    0.001971
+   ]
+  },
+  "hier/fwd": {
+   "max_sec": 0.0009450000000000001,
+   "per_rank_sec": [
+    0.0009450000000000001,
+    0.0009450000000000001
+   ]
+  }
+ },
+ "bundles": {
+  "hier/bwd": {
+   "bundle_hash": "89351ac1143a0f83d090328a3f50dabb4748935c01feed11a1e9135245bbb964",
+   "n_ranks": 2,
+   "ranks": {
+    "0": {
+     "dag_hash": "380b1b16b461b4ad34f48b224d943b9ae92da7b8849cc47def8e109ed57e8c88",
+     "n_nodes": 6,
+     "op_counts": {
+      "COMP": 6
+     },
+     "ops_hash": "4942343fc11581684d5f111761b9a6ceebe050d90379bc6c569115ebf53fca45"
+    },
+    "1": {
+     "dag_hash": "380b1b16b461b4ad34f48b224d943b9ae92da7b8849cc47def8e109ed57e8c88",
+     "n_nodes": 6,
+     "op_counts": {
+      "COMP": 6
+     },
+     "ops_hash": "4942343fc11581684d5f111761b9a6ceebe050d90379bc6c569115ebf53fca45"
+    }
+   }
+  },
+  "hier/fwd": {
+   "bundle_hash": "a8a14bca0c9532a560e1e5aefe435e3c2583c619899c9b7e950d82221410f7c4",
+   "n_ranks": 2,
+   "ranks": {
+    "0": {
+     "dag_hash": "8a72c3d4bbd115c4ed11612b094f478684fcbe0040b6414b153ebf7d6ee7d7f4",
+     "n_nodes": 6,
+     "op_counts": {
+      "COMP": 6
+     },
+     "ops_hash": "486788e3f7dc7a072fe88be44946f73bcf403d6ed9e43924278777adddce8a4e"
+    },
+    "1": {
+     "dag_hash": "8a72c3d4bbd115c4ed11612b094f478684fcbe0040b6414b153ebf7d6ee7d7f4",
+     "n_nodes": 6,
+     "op_counts": {
+      "COMP": 6
+     },
+     "ops_hash": "486788e3f7dc7a072fe88be44946f73bcf403d6ed9e43924278777adddce8a4e"
+    }
+   }
+  }
+ },
+ "dlsim_ok": {
+  "hier/bwd": true,
+  "hier/fwd": true
+ },
+ "error_tail": "",
+ "git_rev": "85894c6",
+ "phase_times": {},
+ "spec_id": "train:hybrid:dp2tp1cp1pp2mb2sp0",
+ "status": "ok",
+ "total_time": 0.0270885
+}

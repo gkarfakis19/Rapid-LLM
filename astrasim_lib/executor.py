@@ -1732,9 +1732,11 @@ def convert_rapid_llm_graph_to_chakra_et(
                 continue
 
             for dp_idx, rank in enumerate(stage_to_ranks[stage]):
-                # Ensure SEND/RECV nodes exist and collect RECV ids local to this rank
+                # Ensure SEND/RECV nodes exist and collect RECV ids local to this rank.
+                # Iterate in op_id order: these are sets, and the creation order
+                # assigns ET node ids, which are scheduling priorities in AstraSim.
                 recv_ids: List[int] = []
-                for parent in info["pipeline_deps"]:
+                for parent in sorted(info["pipeline_deps"], key=lambda p: int(getattr(p, "op_id", 0) or 0)):
                     if parent not in collective_info and parent not in compute_info:
                         # orphaned parent, ignore
                         # TODO: debug and make sure this never happens?!??!?!
@@ -1763,7 +1765,10 @@ def convert_rapid_llm_graph_to_chakra_et(
                         node.ctrl_deps.append(rid)
 
                 local_send_ids: List[int] = []
-                for edge_obj in info.get("local_pipeline_deps", set()):
+                for edge_obj in sorted(
+                    info.get("local_pipeline_deps", set()),
+                    key=lambda e: int(getattr(e, "op_id", 0) or 0),
+                ):
                     local_send_ids.extend(ensure_local_pipeline_sends(edge_obj, task, dp_idx))
 
                 unique_local_send_ids: List[int] = []

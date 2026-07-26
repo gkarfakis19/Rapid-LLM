@@ -1,0 +1,44 @@
+{
+ "astra_times": {
+  "flat": {
+   "max_sec": 0.026111000000000002,
+   "per_rank_sec": [
+    0.026111000000000002,
+    0.026111000000000002
+   ]
+  }
+ },
+ "bundles": {
+  "flat": {
+   "bundle_hash": "19bb10965ed81418a0f7ff6c9edb73abb77c216fa3be2f6b9b50e1f147741b17",
+   "n_ranks": 2,
+   "ranks": {
+    "0": {
+     "dag_hash": "24d760900021fb5ae69b91fc9a05475670ec735f41e4f8cc539354c2ecfc4219",
+     "n_nodes": 29,
+     "op_counts": {
+      "COMP": 29
+     },
+     "ops_hash": "53aee7a25d12d631ffa9337bdaa73afc4843c32213a18fd59793279e656b7c91"
+    },
+    "1": {
+     "dag_hash": "24d760900021fb5ae69b91fc9a05475670ec735f41e4f8cc539354c2ecfc4219",
+     "n_nodes": 29,
+     "op_counts": {
+      "COMP": 29
+     },
+     "ops_hash": "53aee7a25d12d631ffa9337bdaa73afc4843c32213a18fd59793279e656b7c91"
+    }
+   }
+  }
+ },
+ "dlsim_ok": {
+  "flat": true
+ },
+ "error_tail": "",
+ "git_rev": "85894c6",
+ "phase_times": {},
+ "spec_id": "train:flattened:dp1tp1cp1pp1mb1sp0",
+ "status": "ok",
+ "total_time": 0.026111
+}

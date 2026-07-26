@@ -1,0 +1,14 @@
+{
+ "astra_times": {},
+ "bundles": {},
+ "dlsim_ok": {},
+ "error_tail": "",
+ "git_rev": "85894c6",
+ "phase_times": {
+  "decode": 0.251,
+  "prefill": 0.01
+ },
+ "spec_id": "inf:analytical:dp2tp2cp1pp2mb2sp1",
+ "status": "ok",
+ "total_time": 0.26
+}

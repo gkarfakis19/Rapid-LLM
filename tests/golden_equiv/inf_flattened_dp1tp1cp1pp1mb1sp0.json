@@ -1,0 +1,43 @@
+{
+ "astra_times": {
+  "flat": {
+   "error": "3 cache entries; expected 1 (isolated run)"
+  }
+ },
+ "bundles": {
+  "flat": {
+   "bundle_hash": "fc1c7caa66c2823491f2fe5f2c712e8d054e9e4e930cee1f9f50c23be230e391",
+   "n_ranks": 2,
+   "ranks": {
+    "0": {
+     "dag_hash": "2fd1fd8a922bb17a6a57d2e6dbcf9070a19c0b7b5169b58b2ca983d3aa0a1c77",
+     "n_nodes": 14,
+     "op_counts": {
+      "COMP": 14
+     },
+     "ops_hash": "ddf8f46e7f1952c167dc03fc1dc7759b14776b0948e42ae111550c3f531f25cf"
+    },
+    "1": {
+     "dag_hash": "2fd1fd8a922bb17a6a57d2e6dbcf9070a19c0b7b5169b58b2ca983d3aa0a1c77",
+     "n_nodes": 14,
+     "op_counts": {
+      "COMP": 14
+     },
+     "ops_hash": "ddf8f46e7f1952c167dc03fc1dc7759b14776b0948e42ae111550c3f531f25cf"
+    }
+   }
+  }
+ },
+ "dlsim_ok": {
+  "flat": true
+ },
+ "error_tail": "",
+ "git_rev": "85894c6",
+ "phase_times": {
+  "decode": 0.125,
+  "prefill": 0.011
+ },
+ "spec_id": "inf:flattened:dp1tp1cp1pp1mb1sp0",
+ "status": "ok",
+ "total_time": 0.14
+}

@@ -1,0 +1,71 @@
+{
+ "astra_times": {
+  "flat": {
+   "error": "3 cache entries; expected 1 (isolated run)"
+  }
+ },
+ "bundles": {
+  "flat": {
+   "bundle_hash": "71efc0507e051e00af2d73d3a8534e21fe0dd99d647451dbaa0bb5ed73822a37",
+   "n_ranks": 4,
+   "ranks": {
+    "0": {
+     "dag_hash": "5f8e4468e7b8440ff01e10c96848e63c86a4ae3e78f26f047920d948975cba34",
+     "n_nodes": 64,
+     "op_counts": {
+      "COLL": 16,
+      "COMP": 42,
+      "RECV": 2,
+      "SEND": 4
+     },
+     "ops_hash": "e84f073f8e590eee8c8e4f8d283395751ac64af00aa6a101a12a3e75b6f71884"
+    },
+    "1": {
+     "dag_hash": "257facdc8f26905b0e413bbd7f045a0f2721cd9a3ea827d4e46561c4498d19db",
+     "n_nodes": 62,
+     "op_counts": {
+      "COLL": 16,
+      "COMP": 40,
+      "RECV": 2,
+      "SEND": 4
+     },
+     "ops_hash": "b9c88882789683ac53d6f060b44cc42f91902d1f195c6c271ce93ce7650638fa"
+    },
+    "2": {
+     "dag_hash": "df6d07be17e25fb8e3d1510dfff4b1ec870592b6a1ad3a046d7a8ff5ec34caa6",
+     "n_nodes": 63,
+     "op_counts": {
+      "COLL": 16,
+      "COMP": 42,
+      "RECV": 4,
+      "SEND": 1
+     },
+     "ops_hash": "5370ae8c8096e284a540ca7494e44cd11ccdc17bc970fe4bda5c1dd5bfdbdefc"
+    },
+    "3": {
+     "dag_hash": "c3469f8a61811aa340404eac7064a87fa630c467d357a0b79b8d27f07d3a1b83",
+     "n_nodes": 61,
+     "op_counts": {
+      "COLL": 16,
+      "COMP": 40,
+      "RECV": 3,
+      "SEND": 2
+     },
+     "ops_hash": "a5e0697a027efb7f6cb3e314649fc49e18cb0fa1bc47c5cbc1923ebcb575650e"
+    }
+   }
+  }
+ },
+ "dlsim_ok": {
+  "flat": true
+ },
+ "error_tail": "",
+ "git_rev": "85894c6",
+ "phase_times": {
+  "decode": 0.224,
+  "prefill": 0.009
+ },
+ "spec_id": "inf:flattened:dp2tp2cp1pp2mb2sp1",
+ "status": "ok",
+ "total_time": 0.23
+}
