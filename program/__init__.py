@@ -23,9 +23,11 @@ M1 shadow-mode stack — :mod:`program.ir` (the Program IR),
 :mod:`program.schedule` (``ScheduleSpec`` + the GPipe event enumeration),
 :mod:`program.block` (``BlockTemplate``/``CommMeta``),
 :mod:`program.pipeline_fine` (``build_fine_program``, the direct flattened
-builder that replaced ``PipelineGraphFlattener`` on the execution path) and
-:mod:`program.transforms` (TP/TP-SP/CP overlap). Heavier submodules are
-imported lazily by their consumers; this package import stays light.
+builder that replaced ``PipelineGraphFlattener``),
+:mod:`program.transforms` (TP/TP-SP/CP overlap) and the M3b memory replay
+:mod:`program.memory_sim` (``simulate_memory`` over FINE Programs, the
+replacement of ``Graph.simulate_memory``). Heavier submodules are imported
+lazily by their consumers; this package import stays light.
 """
 
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords

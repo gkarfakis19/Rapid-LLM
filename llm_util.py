@@ -953,7 +953,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             moe_transformer_forward_root=moe_transformer_forward_root,
             moe_transformer_backward_root=moe_transformer_backward_root,
         )
-        prefill_root = dispatcher.build_flattened_root_for_memory()
+        prefill_program = dispatcher.build_fine_program_for_memory()
         prefill_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,
@@ -962,7 +962,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         )
         tc.pipeline_graph = pipeline_graph
         _, prefill_peak_gb = mem_estimator.simulate_peak(
-            prefill_root,
+            prefill_program,
             prefill_memory_data,
             mode="inference",
             filename="memory_graph_prefill",
@@ -1010,7 +1010,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             moe_transformer_forward_root=decode_moe_transformer_forward_root,
             moe_transformer_backward_root=decode_moe_transformer_backward_root,
         )
-        decode_root = decode_dispatcher.build_flattened_root_for_memory()
+        decode_program = decode_dispatcher.build_fine_program_for_memory()
         decode_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,
@@ -1020,7 +1020,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         )
         tc.pipeline_graph = decode_pipeline_graph
         _, decode_peak_gb = mem_estimator.simulate_peak(
-            decode_root,
+            decode_program,
             decode_memory_data,
             mode="inference",
             filename="memory_graph_decode",

@@ -170,9 +170,7 @@ def _copy_fine_edge_metadata(source: Any, target: Any) -> None:
             setattr(target, attr, getattr(source, attr))
 
 
-def _split_tp_node_fine(node: Any, tp_children: List[Any], overlap: float) -> None:
-    from program.pipeline_fine import FineNode  # lazy: avoids an import cycle
-
+def _split_tp_node_fine(node: Any, tp_children: List[Any], overlap: float, node_cls: Any) -> None:
     if overlap <= 0.0 or not tp_children:
         return
 
@@ -200,7 +198,7 @@ def _split_tp_node_fine(node: Any, tp_children: List[Any], overlap: float) -> No
 
     tail = node
     tail.duration = tail_duration
-    head = FineNode(
+    head = node_cls(
         name=f"{tail.name}_head",
         # THE op-id-reuse quirk: the head shares the source's op_id.
         op_id=getattr(tail, "op_id", 0),
@@ -224,12 +222,10 @@ def _split_tp_node_fine(node: Any, tp_children: List[Any], overlap: float) -> No
             _connect_edge(tail, succ)
 
 
-def _split_cp_edge_fine(edge: Any, overlap: float) -> None:
-    from program.pipeline_fine import FineEdge, FineNode  # lazy
-
+def _split_cp_edge_fine(edge: Any, overlap: float, node_cls: Any, edge_cls: Any) -> None:
     attention_children = [
         child for child in getattr(edge, "children", [])
-        if isinstance(child, FineNode) and "attention" in str(getattr(child, "name", "")).lower()
+        if isinstance(child, node_cls) and "attention" in str(getattr(child, "name", "")).lower()
     ]
     if not attention_children:
         return
@@ -254,10 +250,10 @@ def _split_cp_edge_fine(edge: Any, overlap: float) -> None:
     block_bytes = int(math.ceil(total_bytes * (1.0 - overlap)))
     ovlp_bytes = max(0, total_bytes - block_bytes)
     if block_bytes <= 0:
-        _split_cp_edge_fine(edge, 1.0)
+        _split_cp_edge_fine(edge, 1.0, node_cls, edge_cls)
         return
 
-    block_edge = FineEdge(
+    block_edge = edge_cls(
         name=f"{edge.name}_block",
         # THE op-id-reuse quirk: block reuses the source edge's op_id.
         op_id=getattr(edge, "op_id", 0),
@@ -270,7 +266,7 @@ def _split_cp_edge_fine(edge: Any, overlap: float) -> None:
     )
     ovlp_edge = None
     if ovlp_bytes > 0:
-        ovlp_edge = FineEdge(
+        ovlp_edge = edge_cls(
             name=f"{edge.name}_ovlp",
             op_id=getattr(edge, "op_id", 0),
             duration=0,
@@ -312,12 +308,26 @@ def apply_overlap_to_fine_root(
     tp_overlap: float,
     tp_sp_overlap: float,
     cp_overlap: float,
+    *,
+    node_cls: Any = None,
+    edge_cls: Any = None,
 ) -> Any:
-    """Apply TP/TP-SP/CP overlap rewrites to a fine proto graph — the
-    counterpart of ``llm_execution.apply_overlap_transforms`` for the FINE
-    builder's elements, run BEFORE lowering (same point in the legacy
-    pipeline: flatten -> overlap -> propagate -> lower)."""
-    from program.pipeline_fine import FineEdge, FineNode  # lazy
+    """Apply TP/TP-SP/CP overlap rewrites to a proto graph in place — the
+    (only remaining) implementation of the legacy
+    ``llm_execution.apply_overlap_transforms`` rewrite, run BEFORE lowering
+    (same point in the legacy pipeline: flatten -> overlap -> propagate ->
+    lower).
+
+    Defaults operate on the FINE builder's ``FineNode``/``FineEdge``
+    elements; ``node_cls``/``edge_cls`` let the (M4-transitional) legacy
+    transformer-graph path apply the identical rewrite to
+    ``simulate_train_graph.Node``/``Edge`` graphs — both class pairs share
+    the constructor signature and attribute surface the rewrite touches."""
+    if node_cls is None or edge_cls is None:
+        from program.pipeline_fine import FineEdge, FineNode  # lazy
+
+        node_cls = FineNode if node_cls is None else node_cls
+        edge_cls = FineEdge if edge_cls is None else edge_cls
 
     if root is None:
         return None
@@ -341,7 +351,7 @@ def apply_overlap_to_fine_root(
             if obj_id in visited:
                 continue
             visited.add(obj_id)
-            if isinstance(obj, FineNode):
+            if isinstance(obj, node_cls):
                 nodes_to_process.append(obj)
             for child in getattr(obj, "children", []):
                 stack.append(child)
@@ -349,12 +359,12 @@ def apply_overlap_to_fine_root(
         for node in nodes_to_process:
             tp_children = [
                 child for child in getattr(node, "children", [])
-                if isinstance(child, FineEdge)
+                if isinstance(child, edge_cls)
                 and getattr(child, "comm_interconnect_type", None) == "tp"
             ]
             if not tp_children:
                 continue
-            _split_tp_node_fine(node, tp_children, tp_value)
+            _split_tp_node_fine(node, tp_children, tp_value, node_cls)
 
     # -- cp ---------------------------------------------------------------
     if mode in {"context", "tensor_context_hybrid"} and cp_overlap > 0.0:
@@ -367,13 +377,13 @@ def apply_overlap_to_fine_root(
             if obj_id in visited:
                 continue
             visited.add(obj_id)
-            if isinstance(obj, FineEdge) and getattr(obj, "comm_interconnect_type", None) == "cp":
+            if isinstance(obj, edge_cls) and getattr(obj, "comm_interconnect_type", None) == "cp":
                 cp_edges.append(obj)
             for child in getattr(obj, "children", []):
                 stack.append(child)
 
         for edge in cp_edges:
-            _split_cp_edge_fine(edge, cp_overlap)
+            _split_cp_edge_fine(edge, cp_overlap, node_cls, edge_cls)
 
     return root
 

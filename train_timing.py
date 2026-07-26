@@ -22,7 +22,8 @@ from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 import simulate_train_graph as llm_simulation
-from llm_execution import ExecutionMode, LLMExecutionDispatcher, apply_overlap_transforms
+from llm_execution import ExecutionMode, LLMExecutionDispatcher
+from program.transforms import apply_overlap_to_fine_root
 from simulate_train_graph import Graph
 import llm_util
 from memory_estimation import MemoryEstimator
@@ -4989,20 +4990,26 @@ class TimeCalculationLLM(TimeCalculation):
                 bwd_direction = "backward"
                 transformer_backward_root = transformer_graph.construct_transformer_graph(direction=bwd_direction)
 
-            transformer_forward_root = apply_overlap_transforms(
+            # Same overlap rewrite as the FINE builder's proto pass, applied
+            # to the (M4-transitional) legacy transformer Node/Edge graphs.
+            transformer_forward_root = apply_overlap_to_fine_root(
                 transformer_forward_root,
                 parallelism_mode,
                 self.tp_overlap,
                 self.tp_sp_overlap,
                 self.cp_overlap,
+                node_cls=llm_simulation.Node,
+                edge_cls=llm_simulation.Edge,
             )
             if include_transformer_backward:
-                transformer_backward_root = apply_overlap_transforms(
+                transformer_backward_root = apply_overlap_to_fine_root(
                     transformer_backward_root,
                     parallelism_mode,
                     self.tp_overlap,
                     self.tp_sp_overlap,
                     self.cp_overlap,
+                    node_cls=llm_simulation.Node,
+                    edge_cls=llm_simulation.Edge,
                 )
             return transformer_graph, transformer_forward_root, transformer_backward_root
 
@@ -5460,8 +5467,8 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph = dispatcher.pipeline_graph
         self.pipeline_root = pipeline_root
         self.pipeline_interconnect = dispatcher.interconnect_params
-        memory_root = dispatcher.build_flattened_root_for_memory()
-        _, training_peak_gb = mem_estimator.simulate_peak(memory_root, memory_data, mode="training", filename="memory_graph_training") 
+        memory_program = dispatcher.build_fine_program_for_memory()
+        _, training_peak_gb = mem_estimator.simulate_peak(memory_program, memory_data, mode="training", filename="memory_graph_training")
 
 
 
@@ -5499,9 +5506,9 @@ class TimeCalculationLLM(TimeCalculation):
             moe_transformer_backward_root=self.transformer_backward_root_moe,
             no_data_parallel=False,
         )
-        memory_root = dispatcher.build_flattened_root_for_memory()
+        memory_program = dispatcher.build_fine_program_for_memory()
         _, training_peak_gb = mem_estimator.simulate_peak(
-            memory_root,
+            memory_program,
             memory_data,
             mode="training",
             filename="memory_graph_training",
@@ -5516,17 +5523,18 @@ class TimeCalculationLLM(TimeCalculation):
             "output_dir": self.output_dir,
         }
         
-    def _simulate_with_memory( 
+    def _simulate_with_memory(
         self,
-        graph_root: Any,
+        memory_program: Any,
         memory_data: Dict[str, Any],
         mode: str = "training", #training or inference
         filename: Optional[str] = None,
     ) -> Tuple[float, float]:
         """Run memory-aware simulation and report duration plus peak usage."""
+        from program.memory_sim import simulate_memory
 
-        time_with_memory, peak_mem = self.pipeline_graph.simulate_memory(
-            graph_root,
+        time_with_memory, peak_mem = simulate_memory(
+            memory_program,
             memory_data,
             mode,
             self.output_dir,

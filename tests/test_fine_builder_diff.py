@@ -13,30 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""M3a fine-builder differential (dev gate; set ``RAPID_FINE_DIFF=1``).
+"""M3 fine-builder tests.
 
-For every flattened-family spec in the golden matrix (``equiv.configs``,
-backend == "flattened" — this includes the zero2/zero3/ga2/recompute/gqa/
-mesh2d/fault variants and the flattened inference prefill rows), build the
-legacy in-process graphs (TimeCalculationLLM / TimeCalculationLLMInference
-driven exactly far enough to obtain the pipeline root + transformer graph;
-no AstraSim execution), then produce BOTH ET bundles:
+The M3a legacy-flattener differential is gone with the legacy flattener
+(M3b deleted ``PipelineGraphFlattener`` and the ``RAPID_LEGACY_FLATTEN``
+path). What remains:
 
-* legacy: ``PipelineGraphFlattener.build`` -> ``apply_overlap_transforms``
-  -> ``_propagate_local_hw_ids`` -> ``convert_rapid_llm_graph_to_chakra_et``
-  (lower + emit) — the RAPID_LEGACY_FLATTEN=1 path;
-* fine:   ``ScheduleSpec``/``BlockTemplate`` -> ``build_fine_program`` ->
-  ``program.transforms.apply_overlap_transforms`` -> ``emit_chakra`` — the
-  default path,
-
-and compare them with the shadow comparator's standard (per-rank node
-sequences in final id order: type + payload + sorted deps; manifest bytes;
-comm_groups; tag pairing bijective — ``program.shadow.compare_et_bundles``).
-
-Grad-accumulation specs additionally compare the no-DP (nonfinal-cycle)
-graph pair. Decode graphs are structurally identical to prefill (forward-
-only, seq_len=1 with decode GEMM shapes) and are covered by the prefill
-rows plus the golden gates.
+* an always-on unit test pinning the Program-level tp-overlap pass against
+  the proto-level (load-bearing) application on a synthetic block;
+* a determinism gate (``RAPID_FINE_DIFF=1``): for every flattened-family
+  spec in the golden matrix, build the FINE program twice and emit twice —
+  the op streams must compare equal and the emitted ET bundles (rank
+  ``.et`` files, manifest, ``comm_groups.json``) must be byte-identical.
+  This is the process-internal replacement for the old differential: the
+  builder has no hidden iteration-order dependence (the legacy Step-11
+  set-order tie was resolved deterministically in M3a).
 
 Run:
     RAPID_FINE_DIFF=1 ./.venv/bin/python -m pytest tests/test_fine_builder_diff.py -q
@@ -45,15 +36,11 @@ Run:
 from __future__ import annotations
 
 import copy
+import filecmp
 import os
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RAPID_FINE_DIFF", "") != "1",
-    reason="fine-builder differential is a dev gate; set RAPID_FINE_DIFF=1 to run",
-)
 
 from equiv.configs import MATRIX  # noqa: E402
 
@@ -66,6 +53,11 @@ BASE_HW_CONFIG = (
 )
 
 FLATTENED_SPECS = [spec for spec in MATRIX if spec.backend == "flattened"]
+
+_determinism_gate = pytest.mark.skipif(
+    os.environ.get("RAPID_FINE_DIFF", "") != "1",
+    reason="fine-builder determinism sweep is a dev gate; set RAPID_FINE_DIFF=1 to run",
+)
 
 
 def _sanitize(name: str) -> str:
@@ -142,7 +134,7 @@ def _graph_cases(spec, hw_config, model_config, mode, out_dir: Path):
         batch_size = tc._effective_transformer_batch()
         decode_len = tc.model.decode_len
         prefill_len = tc.seq_len - decode_len
-        assert prefill_len > 0, "differential requires a prefill phase"
+        assert prefill_len > 0, "determinism sweep requires a prefill phase"
         num_SMs = tc.hw_config.tech_config.core.num_bundles
         transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
             batch_size,
@@ -196,40 +188,8 @@ def _effective_dp(tc) -> int:
     return 1 if run_type == "inference" else max(1, getattr(tc, "dp", 1))
 
 
-def _legacy_bundle(dispatcher, tc, out_dir: Path):
-    """The RAPID_LEGACY_FLATTEN path up to (and including) ET conversion."""
-    from astrasim_lib.executor import convert_rapid_llm_graph_to_chakra_et
-    from llm_execution import PipelineGraphFlattener, apply_overlap_transforms
-
-    flattener = PipelineGraphFlattener(
-        pipeline_graph=dispatcher.pipeline_graph,
-        transformer_graph=dispatcher.transformer_graph,
-        moe_transformer_graph=None,
-        rank_layout=dispatcher._rank_layout,
-    )
-    flattened_root = flattener.build(dispatcher.pipeline_root)
-    flattened_root = apply_overlap_transforms(
-        flattened_root,
-        tc.get_parallelism_mode(),
-        getattr(tc, "tp_overlap", 0.0),
-        getattr(tc, "tp_sp_overlap", 0.0),
-        getattr(tc, "cp_overlap", 0.0),
-    )
-    flattener._propagate_local_hw_ids(flattened_root)
-    setattr(flattened_root, "_astrasim_rank_layout", dispatcher._rank_layout)
-    dispatcher._attach_optimize_hint(flattened_root)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _prefix, rank_ids, manifest = convert_rapid_llm_graph_to_chakra_et(
-        flattened_root,
-        _effective_dp(tc),
-        str(out_dir),
-    )
-    return rank_ids, manifest
-
-
 def _fine_bundle(dispatcher, tc, out_dir: Path):
-    """The default (M3a) path up to (and including) ET emission."""
+    """The default flattened path up to (and including) ET emission."""
     from program.block import BlockTemplate
     from program.et_emit import emit_chakra
     from program.layout import RankLayout
@@ -275,7 +235,7 @@ def _fine_bundle(dispatcher, tc, out_dir: Path):
         cp_overlap=getattr(tc, "cp_overlap", 0.0),
     )
     bundle = emit_chakra(program, str(out_dir), id_policy="legacy")
-    return bundle.rank_ids, bundle.manifest_path
+    return program, bundle
 
 
 def _describe_ops(program):
@@ -296,6 +256,11 @@ def _describe_ops(program):
         else:
             out.append(("COMP", op.name, op.device, op.duration, op.deps, op.legacy_op_id))
     return out
+
+
+def _bundle_files(bundle_dir: Path):
+    names = sorted(p.name for p in bundle_dir.iterdir() if p.is_file())
+    return [n for n in names if n.endswith(".et") or n.endswith(".json") or n.endswith(".txt")]
 
 
 def test_program_level_tp_overlap_matches_proto_level_when_exact():
@@ -357,35 +322,32 @@ def test_program_level_tp_overlap_matches_proto_level_when_exact():
     assert _describe_ops(proto_level) == _describe_ops(program_level)
 
 
+@_determinism_gate
 @pytest.mark.parametrize("spec", FLATTENED_SPECS, ids=[s.spec_id for s in FLATTENED_SPECS])
-def test_fine_builder_matches_legacy_flatten(spec, tmp_path):
-    from program.shadow import compare_et_bundles, load_comm_groups
-
+def test_fine_builder_deterministic(spec, tmp_path):
+    """Build twice, emit twice: op streams equal, ET bundles byte-equal."""
     hw_config, model_config, mode = _parse_spec_configs(spec, tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for label, tc, dispatcher in _graph_cases(spec, hw_config, model_config, mode, run_dir):
-        legacy_dir = tmp_path / f"legacy_{_sanitize(label)}"
-        fine_dir = tmp_path / f"fine_{_sanitize(label)}"
+        dir_a = tmp_path / f"fine_a_{_sanitize(label)}"
+        dir_b = tmp_path / f"fine_b_{_sanitize(label)}"
 
-        legacy_ranks, legacy_manifest = _legacy_bundle(dispatcher, tc, legacy_dir)
-        fine_ranks, fine_manifest = _fine_bundle(dispatcher, tc, fine_dir)
+        program_a, _bundle_a = _fine_bundle(dispatcher, tc, dir_a)
+        program_b, _bundle_b = _fine_bundle(dispatcher, tc, dir_b)
 
-        problems = compare_et_bundles(
-            reference_dir=str(legacy_dir),
-            candidate_dir=str(fine_dir),
-            reference_ranks=list(legacy_ranks),
-            candidate_ranks=list(fine_ranks),
-            reference_manifest=legacy_manifest,
-            candidate_manifest=fine_manifest,
-            reference_groups=load_comm_groups(str(legacy_dir)),
-            candidate_groups=load_comm_groups(str(fine_dir)),
-            reference_label="legacy",
-            candidate_label="fine",
+        assert _describe_ops(program_a) == _describe_ops(program_b), (
+            f"{spec.spec_id} [{label}]: two builds produced different op streams"
         )
-        assert not problems, (
-            f"{spec.spec_id} [{label}]: fine builder diverged from the legacy "
-            f"flatten path (dirs: {legacy_dir} vs {fine_dir}):\n"
-            + "\n".join(f"  - {p}" for p in problems)
+
+        files_a = _bundle_files(dir_a)
+        files_b = _bundle_files(dir_b)
+        assert files_a == files_b, (
+            f"{spec.spec_id} [{label}]: bundle file sets differ: {files_a} vs {files_b}"
         )
+        for name in files_a:
+            assert filecmp.cmp(dir_a / name, dir_b / name, shallow=False), (
+                f"{spec.spec_id} [{label}]: bundle file {name} is not byte-identical "
+                f"across two builds ({dir_a} vs {dir_b})"
+            )

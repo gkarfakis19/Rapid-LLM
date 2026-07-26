@@ -865,9 +865,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 seq_len=prefill_len,
                 kv_cache_tokens=0 if getattr(self, "disable_kv_cache", False) else prefill_len,
             )
-            prefill_root = dispatcher.build_flattened_root_for_memory()
+            prefill_program = dispatcher.build_fine_program_for_memory()
             _, prefill_peak_gb = mem_estimator.simulate_peak(
-                prefill_root,
+                prefill_program,
                 prefill_memory_data,
                 mode="inference",
                 filename="memory_graph_prefill",
@@ -915,7 +915,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 moe_transformer_forward_root=decode_moe_transformer_forward_root,
                 moe_transformer_backward_root=decode_moe_transformer_backward_root,
             )
-            decode_memory_root = decode_dispatcher.build_flattened_root_for_memory()
+            decode_memory_program = decode_dispatcher.build_fine_program_for_memory()
             decode_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
                 batch_size=batch_size,
@@ -923,17 +923,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 gemm_shapes=decode_gemm_shapes,
                 kv_cache_tokens=self.seq_len,
             )
-            original_pipeline_graph = self.pipeline_graph
-            try:
-                self.pipeline_graph = decode_pipeline_graph
-                _, decode_peak_gb = mem_estimator.simulate_peak(
-                    decode_memory_root,
-                    decode_memory_data,
-                    mode="inference",
-                    filename="memory_graph_decode",
-                )
-            finally:
-                self.pipeline_graph = original_pipeline_graph
+            _, decode_peak_gb = mem_estimator.simulate_peak(
+                decode_memory_program,
+                decode_memory_data,
+                mode="inference",
+                filename="memory_graph_decode",
+            )
 
         max_peak_gb = max(prefill_peak_gb, decode_peak_gb)
         self.memory_peak_gb = max_peak_gb

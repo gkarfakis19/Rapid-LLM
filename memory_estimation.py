@@ -649,47 +649,29 @@ class MemoryEstimator:
 
     def simulate_peak(
         self,
-        graph_root: Any,
+        memory_program: Any,
         memory_data: Dict[str, Any],
         *,
         mode: str,
         filename: Optional[str] = None,
     ) -> Any:
-        """Run memory simulation on the provided graph root."""
-        def _is_non_flattened(root: Any) -> bool:
-            stack = list(root if isinstance(root, (list, tuple)) else [root])
-            visited = set()
-            while stack:
-                current = stack.pop()
-                if current is None:
-                    continue
-                current_id = id(current)
-                if current_id in visited:
-                    continue
-                visited.add(current_id)
+        """Run memory simulation on the provided FINE Program.
 
-                name = getattr(current, "name", "")
-                if isinstance(name, str) and (
-                    name.startswith("transformer_layer") or name.startswith("vit_block")
-                ):
-                    mem_kind = getattr(current, "mem_kind", None)
-                    if mem_kind == MemKind.TRANSFORMER:
-                        return True
+        The legacy ``_is_non_flattened`` graph walk (name sniffing for
+        unexpanded transformer nodes) is replaced by a typed granularity
+        check on the Program (M3b).
+        """
+        from program.ir import Program
 
-                children = getattr(current, "children", None)
-                if isinstance(children, (list, tuple)):
-                    stack.extend(children)
-                elif children is not None:
-                    stack.append(children)
-            return False
-
-        if _is_non_flattened(graph_root):
+        if not isinstance(memory_program, Program) or (
+            memory_program.meta.misc.get("granularity") != "fine"
+        ):
             raise RuntimeError(
-                "Memory simulation requires a flattened graph. "
-                "Use LLMExecutionDispatcher.build_flattened_root_for_memory()."
+                "Memory simulation requires a FINE program. "
+                "Use LLMExecutionDispatcher.build_fine_program_for_memory()."
             )
         return self.time_calc._simulate_with_memory(
-            graph_root,
+            memory_program,
             memory_data,
             mode=mode,
             filename=filename,

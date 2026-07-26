@@ -56,7 +56,7 @@ collapse the shared pass into the builder when the legacy graph path dies.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from memory_estimation import mem_kind_from_op_name
 from timing_model import CollectiveType
@@ -818,13 +818,24 @@ def build_fine_root(
     tp_overlap: float = 0.0,
     tp_sp_overlap: float = 0.0,
     cp_overlap: float = 0.0,
+    events_hook: Optional[Callable[[Any], None]] = None,
 ) -> Any:
     """Enumerate the schedule and return the fine proto-graph root (exposed
     separately for the differential tests). The overlap rewrite happens at
-    the legacy pipeline position: build -> overlap -> propagate."""
+    the legacy pipeline position: build -> overlap -> propagate.
+
+    ``events_hook`` (memory path, M3b) is invoked with the coarse events
+    root between enumeration and expansion — the exact point where the
+    legacy pipeline mutated the coarse graph before flattening. The memory
+    dispatcher uses it to replay ``convert_comm_sizes_to_times`` for the
+    analytical/hybrid modes, whose coarse comm edges carried converted
+    durations into the legacy memory flatten.
+    """
     from program.transforms import apply_overlap_to_fine_root
 
     events = build_pipeline_events(schedule_spec)
+    if events_hook is not None:
+        events_hook(events.root)
     expander = _FineExpander(schedule_spec, block_templates, layout)
     fine_root = expander.build(events.root)
     if fine_root is None:
@@ -854,6 +865,7 @@ def build_fine_program(
     tp_overlap: float = 0.0,
     tp_sp_overlap: float = 0.0,
     cp_overlap: float = 0.0,
+    events_hook: Optional[Callable[[Any], None]] = None,
 ) -> Program:
     """Build the flattened FINE :class:`Program` directly from the schedule.
 
@@ -879,6 +891,7 @@ def build_fine_program(
         tp_overlap=tp_overlap,
         tp_sp_overlap=tp_sp_overlap,
         cp_overlap=cp_overlap,
+        events_hook=events_hook,
     )
 
     layout_descriptor = layout.descriptor() if layout is not None and layout.axis_order else None
@@ -897,4 +910,14 @@ def build_fine_program(
     program.meta.label = "fine_no_dp" if no_data_parallel else "fine"
     if optimize_2dmap:
         program.meta.optimize_2dmap = dict(optimize_2dmap)
+    # M3b: the memory replay (program/memory_sim.py) consumes the builder's
+    # own proto graph — the event-loop replica needs the children-list
+    # adjacency order, which the uid-ordered op list does not preserve (uid
+    # order is the per-stage Kahn emission order). The proto root is a fine
+    # builder product (no legacy Graph involved); collapsing it into the op
+    # list is M8 work. ``granularity`` is the typed replacement of the legacy
+    # ``_is_non_flattened`` name-sniffing guard in MemoryEstimator.
+    program.meta.misc["granularity"] = "fine"
+    program.meta.misc["fine_proto_root"] = fine_root
+    program.meta.misc["fine_pp"] = int(schedule_spec.pp)
     return program

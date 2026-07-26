@@ -1295,9 +1295,9 @@ def run_rapid_estimation(
                     transformer_backward_root=tc.transformer_backward_root,
                     no_data_parallel=False,
                 )
-                memory_root = dispatcher.build_flattened_root_for_memory()
+                memory_program = dispatcher.build_fine_program_for_memory()
                 _, training_peak_gb = mem_estimator.simulate_peak(
-                    memory_root,
+                    memory_program,
                     memory_data,
                     mode="training",
                     filename="memory_graph_training",
@@ -1517,9 +1517,9 @@ def _worker_process_row(
                         transformer_backward_root=tc.transformer_backward_root,
                         no_data_parallel=False,
                     )
-                    memory_root = dispatcher.build_flattened_root_for_memory()
+                    memory_program = dispatcher.build_fine_program_for_memory()
                     _, training_peak_gb = mem_estimator.simulate_peak(
-                        memory_root,
+                        memory_program,
                         memory_data,
                         mode="training",
                         filename="memory_graph_training",
