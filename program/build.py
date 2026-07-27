@@ -489,6 +489,11 @@ class _Builder:
         self._chain_by_device: Dict[Tuple[WorkItem, int], ExpandedChain] = {}
         #: ``SyncKey -> the node ids the requirement materialized on``.
         self._sync_nodes: Dict[SyncKey, List[int]] = {}
+        #: R5/R5b edges, recorded so **D1** stays checkable on the artifact:
+        #: R3 eliminates an edge only against the graph R3 SAW, and R5 runs
+        #: after R4, so an R3 edge can be subsumed later without R3 having
+        #: been wrong. The test skips these when re-deriving reachability.
+        self._r5_edges: List[Tuple[int, int]] = []
         #: overlap work list: ``(collective nid, decl, producing compute nid)``.
         self._overlap_sites: List[Tuple[int, OverlapDecl, Optional[int]]] = []
         self._xfer_seq = 0
@@ -1323,9 +1328,24 @@ class _Builder:
         sync lattice's own edges count as implications and so no ``via`` scan
         can see an R5 edge.
 
-        **Not** in scope: "the optimizer runs after its stage's GRADIENT
-        REDUCER" (audit item D11). That edge is absent in legacy and in the new
-        core alike; it is a modeling question for the owner, not a regression.
+        **R5b** (2026-07-27, ledger item 11) — ``OPTIMIZER(stage s)`` ALSO runs
+        after every ``SyncPhase.GRAD`` collective of stage ``s`` on its own
+        device. Until this existed, every gradient reducer was a graph SINK
+        (measured: 6/6 dp collectives on ``dp2tp1cp1pp2``, 24/24 on
+        ``dp2tp2cp2pp2`` FINE, at COARSE and FINE alike), so AstraSim — one COMP
+        slot and one COMM slot per rank — issued the weight update CONCURRENTLY
+        with the all-reduce producing the gradients it applies. That is not a
+        modeling simplification; it is the one interleaving the hardware cannot
+        do, and it let 10b's optimizer duration hide entirely inside the dp
+        collective at ``dp > 1``.
+
+        Only the REDUCER is a source. ZeRO-2's post-reduce parameter all-gather
+        (``after_reducer``) is not: it is ``AFTER(reducer)`` and therefore still
+        parallel to the optimizer, which understates ZeRO-2 by one gather. Fixing
+        that means re-anchoring the gather on the optimizer (``reducer ->
+        optimizer -> gather``), which needs an anchor vocabulary for "the work
+        item's optimizer" that :class:`SyncAnchor` does not have. Left as ledger
+        item 14.
         """
         if not self._fw.spec.run.include_backward:
             return
@@ -1340,6 +1360,23 @@ class _Builder:
             if item.direction is Direction.BACKWARD
             and item.kind in _R5_GRADIENT_KINDS
         ]
+        # R5b sources: every GRAD-phase collective, indexed by (stage, device).
+        # ``_ProtoCollective.work`` is the requirement's ``place_on``, so the
+        # stage is read from the schedule exactly as it is for a work item —
+        # nothing is inferred from the node's name or comm key.
+        reducers: Dict[Tuple[int, int], List[int]] = {}
+        for key, nids in self._sync_nodes.items():
+            if key.phase is not SyncPhase.GRAD:
+                continue
+            for nid in nids:
+                node = self._nodes[nid]
+                work = getattr(node, "work", None)
+                if work is None:
+                    continue
+                reducers.setdefault(
+                    (int(self._schedule.stage_of(work)), int(node.device)), []
+                ).append(nid)
+
         for optimizer in sorted(optimizers, key=WorkItem.sort_key):
             stage = int(self._schedule.stage_of(optimizer))
             for chain in self._chains.get(optimizer, ()):
@@ -1355,6 +1392,19 @@ class _Builder:
                     if source == target or self._reaches(source, target):
                         continue
                     self._add_dep(source, target, DepClass.DATA_FLOW)
+                    self._r5_edges.append((source, target))
+                # R5b — the gradient the optimizer applies is the REDUCED one.
+                for source in sorted(reducers.get((stage, device), ())):
+                    if source == target or self._reaches(source, target):
+                        continue
+                    if self._reaches(target, source):
+                        raise BuildError(
+                            f"R5b would close a cycle: OPTIMIZER node {target} "
+                            f"already reaches its own gradient reducer {source} "
+                            f"(stage {stage}, device {device})"
+                        )
+                    self._add_dep(source, target, DepClass.DATA_FLOW)
+                    self._r5_edges.append((source, target))
 
     # ------------------------------------------------------------------
     # phase 9 — overlap realization (INTERFACES §4.5)
@@ -1651,6 +1701,16 @@ class _Builder:
                         (uid_of[source], uid_of[target])
                         for (source, target), classes in self._edges.items()
                         if DepClass.SCHEDULE in classes
+                    )
+                ),
+                # R5/R5b edges (post-R3), so **D1** can be re-derived exactly:
+                # see ``_r5_edges``. Recorded as surviving edges only, for the
+                # same staleness reason as ``schedule_edges`` above.
+                "r5_edges": tuple(
+                    sorted(
+                        (uid_of[source], uid_of[target])
+                        for (source, target) in self._r5_edges
+                        if (source, target) in self._edges
                     )
                 ),
                 "dropped_requirements": tuple(self._dropped_requirements),

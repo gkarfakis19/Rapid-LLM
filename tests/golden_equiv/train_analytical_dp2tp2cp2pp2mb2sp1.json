@@ -3,7 +3,7 @@
  "bundles": {},
  "dlsim_ok": {},
  "error_tail": "",
- "git_rev": "3220a3f",
+ "git_rev": "ccc8f64",
  "memory": {
   "LLM": {
    "fields": {
@@ -19,5 +19,5 @@
  "phase_times": {},
  "spec_id": "train:analytical:dp2tp2cp2pp2mb2sp1",
  "status": "ok",
- "total_time": 0.02544255
+ "total_time": 0.03032635
 }

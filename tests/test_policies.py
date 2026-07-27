@@ -1300,6 +1300,42 @@ def test_optimizer_duration_prices_each_layer_with_its_own_kind() -> None:
     assert duration_for(optimizer0, no_moe_price) == pytest.approx(2 * dense)
 
 
+def test_optimizer_duration_charges_the_endpoint_parameters_once() -> None:
+    """BUG_LEDGER 12. The embedding (stage 0) and the vocab projection (stage
+    ``pp-1``) are parameters a stage owns, and the model all-reduces their
+    gradients — so their apply-grad time must be charged exactly once, on the
+    stage that owns them, and NOT per layer."""
+    dense = COMP_TIMES["optimizer"]
+    emb, sm = 3.0, 5.0
+    priced = DurationTable(
+        {**COMP_TIMES, "optimizer_embedding": emb, "optimizer_softmax": sm}
+    )
+
+    def durations(cfg: Cfg) -> Dict[int, float]:
+        fw = make_workload(cfg).with_(durations=priced).freeze()
+        work = enumerate_work(fw, NoRecompute())
+        return {
+            int(item.stage): duration_for(item, fw)
+            for item in work.of_kind(WorkKind.OPTIMIZER)
+        }
+
+    # pp=4, L=8 -> 2 layers per stage. Only the ENDS carry the extra terms.
+    assert durations(Cfg(pp=4, num_layers=8, mb=1)) == {
+        0: 2 * dense + emb,
+        1: 2 * dense,
+        2: 2 * dense,
+        3: 2 * dense + sm,
+    }
+
+    # pp=1: the single stage owns both, and each is still charged ONCE — not
+    # once per layer, which is the whole point of a separate key.
+    assert durations(Cfg(pp=1, num_layers=8, mb=1)) == {0: 8 * dense + emb + sm}
+
+    # A producer that never registered them (inference, pre-item-12
+    # ``comp_times``) contributes 0.0 rather than raising: 10b behavior.
+    assert _optimizer_durations(Cfg(pp=1, num_layers=8, mb=1)) == {0: 8 * dense}
+
+
 def test_stage_layers_follows_the_supplied_layer_assignment() -> None:
     """The per-stage layer set is read from the AUTHORITATIVE
     ``LayerAssignment`` when one is supplied, and reconstructed with the same

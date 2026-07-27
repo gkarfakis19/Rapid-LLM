@@ -1,10 +1,10 @@
 {
  "astra_times": {
   "hier": {
-   "max_sec": 0.029558,
+   "max_sec": 0.032431,
    "per_rank_sec": [
-    0.029558,
-    0.029558
+    0.032431,
+    0.032431
    ]
   },
   "hier/bwd": {
@@ -24,12 +24,12 @@
  },
  "bundles": {
   "hier": {
-   "bundle_hash": "9c71824ff90e0b413cb0ae5bc8c9aa1c5c3b924ecf6d18012500dba0a13d2964",
+   "bundle_hash": "0578f2029684485951e4e202cb31bdeec2ba75f68097eed7d9711b095c175bfb",
    "byte_hist_by_kind": {},
    "bytes_by_kind": {},
    "collectives_by_group": {},
    "comm_groups": {},
-   "compute_micros_total": 59116,
+   "compute_micros_total": 64862,
    "manifest": {
     "npus": 1,
     "ranks": {
@@ -39,39 +39,39 @@
       "COMP:2928": 1,
       "COMP:432": 2,
       "COMP:5707": 2,
-      "COMP:6894": 1
+      "COMP:9767": 1
      }
     },
     "version": "df-astra-manifest/1"
    },
-   "manifest_sha256": "6a9ff6b950821601cc2dd07cf02690482e981b6fba268346073311a4b6ba167b",
+   "manifest_sha256": "2777ba90fa6fa4f38483298e14f568d4c51ee20650d17001a0d530a6ecf3f482",
    "n_ranks": 2,
    "n_recv": 0,
    "n_transfers": 0,
    "ranks": {
     "0": {
      "bytes_by_kind": {},
-     "compute_micros": 29558,
+     "compute_micros": 32431,
      "critical_path_nodes": 9,
-     "critical_path_weight": 29558,
-     "dag_hash": "89df97f40ff8c1fadff0807eb488c1bfb12ca5a590c3cddec0e212d85e40941a",
+     "critical_path_weight": 32431,
+     "dag_hash": "213525550fcfa77509e5830adbd1b04490fa65f57c4d7aac91bd8261f61bd8c7",
      "n_nodes": 9,
      "op_counts": {
       "COMP": 9
      },
-     "ops_hash": "cf96b4edc7fdd736fac1c7abc122986dc9958e0146774d908ed2ca2529cc1420"
+     "ops_hash": "d168baa6c1be02175998f409ff52b08f1a759ddda7a9c40aee4a0cb0d0c204e3"
     },
     "1": {
      "bytes_by_kind": {},
-     "compute_micros": 29558,
+     "compute_micros": 32431,
      "critical_path_nodes": 9,
-     "critical_path_weight": 29558,
-     "dag_hash": "89df97f40ff8c1fadff0807eb488c1bfb12ca5a590c3cddec0e212d85e40941a",
+     "critical_path_weight": 32431,
+     "dag_hash": "213525550fcfa77509e5830adbd1b04490fa65f57c4d7aac91bd8261f61bd8c7",
      "n_nodes": 9,
      "op_counts": {
       "COMP": 9
      },
-     "ops_hash": "cf96b4edc7fdd736fac1c7abc122986dc9958e0146774d908ed2ca2529cc1420"
+     "ops_hash": "d168baa6c1be02175998f409ff52b08f1a759ddda7a9c40aee4a0cb0d0c204e3"
     }
    }
   },
@@ -184,7 +184,7 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "3220a3f",
+ "git_rev": "ccc8f64",
  "memory": {
   "LLM": {
    "fields": {
@@ -204,5 +204,5 @@
  "phase_times": {},
  "spec_id": "train:hierarchical:dp1tp1cp1pp1mb1sp0",
  "status": "ok",
- "total_time": 0.029558
+ "total_time": 0.032431
 }

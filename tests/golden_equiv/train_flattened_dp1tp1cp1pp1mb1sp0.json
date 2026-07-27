@@ -1,21 +1,21 @@
 {
  "astra_times": {
   "flat": {
-   "max_sec": 0.029558,
+   "max_sec": 0.032431,
    "per_rank_sec": [
-    0.029558,
-    0.029558
+    0.032431,
+    0.032431
    ]
   }
  },
  "bundles": {
   "flat": {
-   "bundle_hash": "788d53293491f9de0eaac6dd07df573b6124439f4dfab2fcd75a2c0f1ad061dc",
+   "bundle_hash": "65101997400d3e86ccd58735200f540afd1294a9d19534049d1b09bb33dbdeb6",
    "byte_hist_by_kind": {},
    "bytes_by_kind": {},
    "collectives_by_group": {},
    "comm_groups": {},
-   "compute_micros_total": 59116,
+   "compute_micros_total": 64862,
    "manifest": {
     "npus": 1,
     "ranks": {
@@ -32,40 +32,40 @@
       "COMP:358": 2,
       "COMP:432": 2,
       "COMP:489": 2,
-      "COMP:6894": 1,
-      "COMP:938": 2
+      "COMP:938": 2,
+      "COMP:9767": 1
      }
     },
     "version": "df-astra-manifest/1"
    },
-   "manifest_sha256": "0f03a68d215306e1d3651fa5527a83957f7d330b9b7bea8f79d8868981119672",
+   "manifest_sha256": "a6701c96f2c5e448b718cff40dd30a0ed9d33452189ba07c89f1647d62dfc811",
    "n_ranks": 2,
    "n_recv": 0,
    "n_transfers": 0,
    "ranks": {
     "0": {
      "bytes_by_kind": {},
-     "compute_micros": 29558,
+     "compute_micros": 32431,
      "critical_path_nodes": 29,
-     "critical_path_weight": 29558,
-     "dag_hash": "501fc3ac4ed93949acb46aa5784e3332a173e4dddbcc1a00abf3661e3a10d51a",
+     "critical_path_weight": 32431,
+     "dag_hash": "4bdfc1db92205f87941b34f2ab9414acb2c28735ae8cadc04be990e1b591d6a9",
      "n_nodes": 29,
      "op_counts": {
       "COMP": 29
      },
-     "ops_hash": "cea19b6b5b3afcd2aa0ce75ae7d77df623e7a0b4d15ab109290619d2f2d0919d"
+     "ops_hash": "620e3658d79a0382eff03fe0cb08382ea0977cf231533bba30c212e35e83f58a"
     },
     "1": {
      "bytes_by_kind": {},
-     "compute_micros": 29558,
+     "compute_micros": 32431,
      "critical_path_nodes": 29,
-     "critical_path_weight": 29558,
-     "dag_hash": "501fc3ac4ed93949acb46aa5784e3332a173e4dddbcc1a00abf3661e3a10d51a",
+     "critical_path_weight": 32431,
+     "dag_hash": "4bdfc1db92205f87941b34f2ab9414acb2c28735ae8cadc04be990e1b591d6a9",
      "n_nodes": 29,
      "op_counts": {
       "COMP": 29
      },
-     "ops_hash": "cea19b6b5b3afcd2aa0ce75ae7d77df623e7a0b4d15ab109290619d2f2d0919d"
+     "ops_hash": "620e3658d79a0382eff03fe0cb08382ea0977cf231533bba30c212e35e83f58a"
     }
    }
   }
@@ -74,7 +74,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "3220a3f",
+ "git_rev": "ccc8f64",
  "memory": {
   "LLM": {
    "fields": {
@@ -92,5 +92,5 @@
  "phase_times": {},
  "spec_id": "train:flattened:dp1tp1cp1pp1mb1sp0",
  "status": "ok",
- "total_time": 0.029558
+ "total_time": 0.032431
 }

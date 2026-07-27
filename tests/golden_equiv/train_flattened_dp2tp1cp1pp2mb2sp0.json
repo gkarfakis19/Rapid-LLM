@@ -1,18 +1,18 @@
 {
  "astra_times": {
   "flat": {
-   "max_sec": 0.052758791000000006,
+   "max_sec": 0.062525791,
    "per_rank_sec": [
-    0.032037047,
-    0.032037047,
-    0.052758791000000006,
-    0.052758791000000006
+    0.038847922,
+    0.038847922,
+    0.062525791,
+    0.062525791
    ]
   }
  },
  "bundles": {
   "flat": {
-   "bundle_hash": "50ec2aa62862ae807a80222d0e9d057a12a40e160c02c6a50f8bf9afc7457e4e",
+   "bundle_hash": "24d1aa7d590c98b2dfd3722bcbb352fa5c8ed1fe07427f083b8345a51aa4ef1f",
    "byte_hist_by_kind": {
     "COLL": {
      "262144000": 2,
@@ -67,7 +67,7 @@
      3
     ]
    },
-   "compute_micros_total": 83868,
+   "compute_micros_total": 89614,
    "manifest": {
     "npus": 4,
     "ranks": {
@@ -83,9 +83,9 @@
       "COMP:53": 8,
       "COMP:564": 4,
       "COMP:68": 8,
-      "COMP:6894": 1,
       "COMP:70": 4,
       "COMP:728": 4,
+      "COMP:9767": 1,
       "RECV:2097152": 2,
       "SEND:2097152": 2
      },
@@ -120,9 +120,9 @@
       "COMP:53": 8,
       "COMP:564": 4,
       "COMP:68": 8,
-      "COMP:6894": 1,
       "COMP:70": 4,
       "COMP:728": 4,
+      "COMP:9767": 1,
       "RECV:2097152": 2,
       "SEND:2097152": 2
      },
@@ -148,7 +148,7 @@
     },
     "version": "df-astra-manifest/1"
    },
-   "manifest_sha256": "3773089a13e408286d2dec2bb8b6955de1d8543b2fd3e85cc1591661e37cf6ca",
+   "manifest_sha256": "299d35ae0a510ad90ed765ce8564b389bb155c27ab4725b8ea3d6da616856a73",
    "n_ranks": 4,
    "n_recv": 8,
    "n_transfers": 8,
@@ -159,10 +159,10 @@
       "RECV": 4194304,
       "SEND": 4194304
      },
-     "compute_micros": 20246,
-     "critical_path_nodes": 28,
-     "critical_path_weight": 2112774,
-     "dag_hash": "2b609b4b5e80a902bc4aa670e644c38a79c059928dda6a3e0e18f564d63cf877",
+     "compute_micros": 23119,
+     "critical_path_nodes": 29,
+     "critical_path_weight": 2115647,
+     "dag_hash": "ab6f49b228a56ae768d56391a1105d71f05ce288f1a58842ff22be928632c1e3",
      "n_nodes": 60,
      "op_counts": {
       "COLL": 3,
@@ -170,7 +170,7 @@
       "RECV": 2,
       "SEND": 2
      },
-     "ops_hash": "04392ac5fb043fcdb7d150f3963050486fa26a2048a4cb5b7ccd7b03f4b2555a"
+     "ops_hash": "6da19c5ac47c66add171a3282a56fddbef318f2d72b326823ac27942103d4198"
     },
     "1": {
      "bytes_by_kind": {
@@ -179,9 +179,9 @@
       "SEND": 4194304
      },
      "compute_micros": 21688,
-     "critical_path_nodes": 54,
+     "critical_path_nodes": 55,
      "critical_path_weight": 4209098,
-     "dag_hash": "aa85d90b35b3ddbbd839ef3b4b5a31d19b3ce10d300ee1ed424e81c98b469c80",
+     "dag_hash": "e5ee3060c9bc8005189628a340b1c1c4ece5be96791c8e5a9b6d4b51a372a596",
      "n_nodes": 60,
      "op_counts": {
       "COLL": 3,
@@ -197,10 +197,10 @@
       "RECV": 4194304,
       "SEND": 4194304
      },
-     "compute_micros": 20246,
-     "critical_path_nodes": 28,
-     "critical_path_weight": 2112774,
-     "dag_hash": "adc0accec7d6aa9f85d4b688360e848757ab0216b4294d629c69d0d09af846ba",
+     "compute_micros": 23119,
+     "critical_path_nodes": 29,
+     "critical_path_weight": 2115647,
+     "dag_hash": "25d62a7b4f7ba5b0342183767ddb7af4222c17ab40037912865d9cd0a68065b3",
      "n_nodes": 60,
      "op_counts": {
       "COLL": 3,
@@ -208,7 +208,7 @@
       "RECV": 2,
       "SEND": 2
      },
-     "ops_hash": "c5380a28b0ed8d69f74bf744cd0c663c0ce7b93af080d1363f47468dc52bca84"
+     "ops_hash": "eb77387f25eaa6257e75fde95f48b41d042c45b1dd0908192ece487e39673fda"
     },
     "3": {
      "bytes_by_kind": {
@@ -217,9 +217,9 @@
       "SEND": 4194304
      },
      "compute_micros": 21688,
-     "critical_path_nodes": 54,
+     "critical_path_nodes": 55,
      "critical_path_weight": 4209098,
-     "dag_hash": "6696b29a0c8b9ab3866785c131e08dae220ec5e2cc19c81fc2aed41c82bf0bc6",
+     "dag_hash": "7747ce767632cf983750cfee1385851bf7d5c0d43943046c3489eb97f5fca16e",
      "n_nodes": 60,
      "op_counts": {
       "COLL": 3,
@@ -236,7 +236,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "3220a3f",
+ "git_rev": "ccc8f64",
  "memory": {
   "LLM": {
    "fields": {
@@ -254,5 +254,5 @@
  "phase_times": {},
  "spec_id": "train:flattened:dp2tp1cp1pp2mb2sp0",
  "status": "ok",
- "total_time": 0.05275879
+ "total_time": 0.06252579
 }

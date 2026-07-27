@@ -575,3 +575,63 @@ env RAPID_BUILD_DIFF=1 RAPID_ASTRA_CACHE_MODE=NO_CACHE LD_LIBRARY_PATH=... \
 This is the **only** surviving builder sweep. The four `RAPID_{FINE,BLOCK,COARSE,HIER}_DIFF`
 sweeps were deleted with the builders they differentially compared (`f06ef6f`); see
 `docs/rewrite/TESTING.md` §Tier 3 for what replaced them.
+
+---
+
+# Rebaseline 3 (2026-07-27) — ledger items 11, 12, 13
+
+Three modeling fixes in the weight-update / gradient path, landed together because they interact:
+one is a divisor (13), one is a missing dependency (11) and one is a missing term (12), and each
+masks part of the others' effect. See `BUG_LEDGER.md` for the evidence per item.
+
+* **13** — the dense MLP's parameters were never per-rank. `get_data_parallel_reduction_llm`,
+  `get_data_parallel_reduction_sizes` and `ep_dense_sync_bytes_dense` charged the FULL unsharded
+  MLP on every one of the `tp` ranks, while their attention terms divided. At `tp=8` that is
+  **5.667x** on the apply-grad price AND on the dp gradient payload. Direction: **down**.
+* **11** — nothing ordered the optimizer after its stage's gradient reducer; every dp collective
+  was a graph SINK, so the weight update ran in the collective's slack. New rule **R5b**.
+  Direction: **up**, on `dp > 1` only.
+* **12** — the embedding and the vocab projection got no apply-grad time at all. New
+  `durations["optimizer_embedding"]` / `["optimizer_softmax"]`, per-rank (`/tp`), charged once on
+  stage 0 / stage `pp-1`. Direction: **up**.
+
+## Delta table (golden `total_time`, `equiv.capture` at `ccc8f64` -> this tree)
+
+**37 of 44 specs moved. All 7 inference rows are bit-identical (only the `git_rev` stamp changed),
+and EVERY memory peak is bit-identical on every row.**
+
+The sign is diagnostic, and each group isolates one item:
+
+| group | what dominates | rows |
+|---|---|---|
+| `tp = 1, dp = 1` | **12 alone** (13 is a no-op at `tp=1`; 11 needs `dp>1`) | all four `dp1tp1cp1pp1` modes **+9.72 %**; the `cp2` rows **+9.00 %..+9.11 %** |
+| `tp = 1, dp = 2` | **11** stops hiding the optimizer, **12** adds to it | `analytical:dp2tp1cp1pp2` **+29.64 %**, `hybrid` **+29.17 %**, `hierarchical`/`flattened` **+18.51 %**, `ga2` **+15.52 %**/**+12.14 %**, `zero2` **+12.58 %**/**+5.26 %**, `zero3` **+2.88 %**/**+2.22 %** |
+| `tp > 1` | **13** outweighs the other two | `flattened:dp2tp2cp2pp2` **-17.54 %**, both `mesh2d` rows **-14.68 %**, `hierarchical:dp2tp2cp2pp2` **-6.43 %**, `gqa` **-2.39 %**, the `tp2` `pp2` family **-1.88 %..-1.97 %**, `recompute` **-1.64 %** |
+| MoE | mixed (`tp=2`, so 13 applies, but `dp=2` so 11 does too) | `hierarchical:…moe:ep2` **+17.29 %**, `hybrid` **+8.04 %**, `flattened:dp1…` **+5.61 %**, `flattened:dp2…` **+5.53 %** |
+
+Smallest mover: `hybrid:dp2tp2cp2pp2mb2sp1` **-0.17 %** (13 and 11 nearly cancel).
+
+## T5 — measured Megatron A100_korthi
+
+Direct `calc_time_llm()` A/B of item 13 alone (11 and 12 do not reach these rows: every one is
+`dp = 1`, so there is no dp collective for 11 to order against, and 12's endpoint term is small
+next to a 48-layer stage):
+
+| row | measured | unsharded MLP | per-rank MLP |
+|---|---|---|---|
+| GPT 22B bs4 pp1 full | 1.4 s | 1.774 s (**+26.73 %**) | 1.417 s (**+1.19 %**) |
+| GPT 22B bs4 pp1 selective | 1.1 s | 1.226 s (**+11.50 %**) | 0.869 s (**-21.01 %**) |
+| running avg abs error | | **19.11 %** | **11.10 %** |
+
+`GPT 22B selective` now UNDER-predicts by 21 %. That is not a regression introduced here: the same
+row was at **-27.27 %** before 10b as well, i.e. it is chronically under-predicted for a reason
+unrelated to the optimizer (selective recompute with `tp_sp`). These fixes uncovered it rather than
+caused it, and it is the best lead for whoever works the recompute model next.
+
+## Gates at this revision
+
+* golden gate **221 passed**;
+* full suite (minus webui and the golden gate) **1185 passed, 44 skipped, 7 xfailed, 2 xpassed** —
+  which is the previous 1399 minus the 221 excluded golden tests plus the 7 added here;
+* every T5 physical suite within its existing threshold (koyeb 5.98 % <= 6.50 %, IMEC A100 inference
+  all green; the H100 inference rows remain the pre-existing xfails).

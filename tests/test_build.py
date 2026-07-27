@@ -650,7 +650,16 @@ def test_r2_recompute_to_backward_layer_is_a_plain_same_device_dep():
 def test_r3_no_redundant_schedule_edges():
     """**D1**: for every added ``DepClass.SCHEDULE`` edge ``a -> b``, ``b`` was
     not reachable from ``a`` before the edge. Verified by removing the edge and
-    asserting reachability changes."""
+    asserting reachability changes.
+
+    R5/R5b edges are removed too. D1 is a property of R3's DECISION, and R3
+    eliminates against the graph it sees; the rule order is R2, R3, R4, R5, so
+    an R3 edge can be subsumed by a path that did not exist yet — R5b's
+    ``reducer -> optimizer`` edge makes exactly one such shortcut, since a
+    stage's last backward op reaches its optimizer both directly (R3) and now
+    through the gradient reducer. That is R5b adding an edge, not R3 having
+    been wrong, and both edges are semantically distinct claims.
+    """
     for cfg, granularity in (
         (Cfg(dp=1, pp=2, mb=3, num_layers=4), Granularity.COARSE),
         (Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FINE),
@@ -658,9 +667,11 @@ def test_r3_no_redundant_schedule_edges():
     ):
         program = _program(cfg, granularity, overlap=NoOverlap())
         edges = program.meta.misc["schedule_edges"]
+        later = set(program.meta.misc["r5_edges"])
         assert edges, f"{cfg.label()} must need at least one serialization edge"
         for source, target in edges:
-            assert not _reaches(program, source, target, skip={(source, target)}), (
+            skip = later | {(source, target)}
+            assert not _reaches(program, source, target, skip=skip), (
                 f"schedule edge {source}->{target} is redundant: "
                 f"{program.ops[target].name!r} was already reachable from "
                 f"{program.ops[source].name!r}"
@@ -981,7 +992,12 @@ def _requirement(
     )
 
 
-def test_r4_after_makes_the_requirement_a_sink_off_the_anchor():
+def test_r4_after_puts_the_requirement_off_the_anchor_and_before_the_optimizer():
+    """``AFTER`` hangs the collective off the anchor's exit, and **R5b** is the
+    only thing downstream of it: the weight update consumes the REDUCED
+    gradient. Before R5b existed every gradient reducer was a graph sink, so
+    AstraSim ran the optimizer concurrently with the all-reduce producing the
+    gradient it applies (BUG_LEDGER 11)."""
     cfg = Cfg(dp=2, pp=1, mb=1, num_layers=1)
     fw, work, bundle = _sync_fixture(cfg)
     layer_b = work.require(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
@@ -1003,8 +1019,9 @@ def test_r4_after_makes_the_requirement_a_sink_off_the_anchor():
     )
     reducer = _one(program, "transformer_dense_grad")
     anchor = _one(program, "layer_b_l0_mb0")
+    optimizer = _one(program, "optimizer_stage0")
     assert reducer.deps == (anchor.uid,)
-    assert _succs(program)[reducer.uid] == ()
+    assert _succs(program)[reducer.uid] == (optimizer.uid,)
 
 
 def test_r4_before_splices_the_requirement_in_front_of_the_anchor():

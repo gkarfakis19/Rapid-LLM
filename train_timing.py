@@ -1049,6 +1049,34 @@ class TimeCalculationLLM(TimeCalculation):
     def _ffn1_output_dim(self, intermediate_size: int) -> int:
         return 2 * intermediate_size if self._uses_gated_mlp() else intermediate_size
 
+    def _dense_ffn_param_components_per_rank(
+        self, hidden_dim: int, intermediate_size: int
+    ) -> Tuple[float, float]:
+        """Return ``(ffn1_params, ffn2_params)`` **owned by this rank**.
+
+        BUG_LEDGER 13. The dense MLP is tensor-parallel exactly like attention:
+        FFN1 (``h -> ffn``) is column-parallel and FFN2 (``ffn -> h``) is
+        row-parallel, so each of the ``tp`` ranks owns ``1/tp`` of both. The
+        authoritative per-rank parameter census agrees --- ``_param_stats_per_rank``
+        computes ``intermediate_size * ffn_proj_factor * hidden_dim / tp`` --- and
+        so does the MoE branch of the gradient helpers below (``expert_param_size /
+        tp`` under ``tp_ep``).
+
+        This exists because the three gradient/apply-grad call sites used to
+        write ``ffn1_dim * d`` inline, i.e. the FULL unsharded MLP, while their
+        attention terms went through :meth:`_attention_param_components_per_rank`
+        (which does divide). That asymmetry was the residue of a half-finished
+        per-rank conversion: before ``173a765`` NOTHING in those helpers was
+        per-rank (``d * 3 * d`` for QKV), the MoE overhaul converted attention
+        and the experts, and the dense MLP was left behind. At ``tp=8`` on a
+        standard ``4h`` MLP it made a layer's apply-grad and its dp gradient
+        payload **5.667x** too large.
+        """
+        tp = float(max(1, int(self.tp)))
+        ffn1_params = float(self._ffn1_output_dim(intermediate_size)) * float(hidden_dim) / tp
+        ffn2_params = float(intermediate_size) * float(hidden_dim) / tp
+        return ffn1_params, ffn2_params
+
     def _vit_sequence_shard_degree(self) -> int:
         if not self._is_vit_model():
             return 1
@@ -2912,9 +2940,9 @@ class TimeCalculationLLM(TimeCalculation):
         qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
         output_size = math.ceil(self.precision.grad_communication * output_params)
         if not moe:
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_dim * d)
-            ffn2_size = math.ceil(self.precision.grad_communication * intermediate_size * d)
+            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(d, intermediate_size)
+            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_params)
+            ffn2_size = math.ceil(self.precision.grad_communication * ffn2_params)
             total_size = qkv_size + output_size + ffn1_size + ffn2_size
             return total_size
 
@@ -2947,9 +2975,9 @@ class TimeCalculationLLM(TimeCalculation):
         apply_grad_time = self.apply_grad(int(qkv_params)) # QKV
         apply_grad_time += self.apply_grad(int(output_params)) # Output
         if not moe:
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            apply_grad_time += self.apply_grad(int(ffn1_dim * d)) # FFN1
-            apply_grad_time += self.apply_grad(int(intermediate_size * d)) # FFN2
+            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(d, intermediate_size)
+            apply_grad_time += self.apply_grad(int(ffn1_params)) # FFN1
+            apply_grad_time += self.apply_grad(int(ffn2_params)) # FFN2
         else:
             ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
             expert_param_size = ffn_proj_factor * intermediate_size * d
@@ -2976,7 +3004,78 @@ class TimeCalculationLLM(TimeCalculation):
             apply_grad_time /= grad_shard
 
         return apply_grad_time
-    
+
+    def get_embedding_apply_grad_llm(self, hidden_dim, vocab_size):
+        """apply-grad time for the parameters the FIRST pipeline stage owns
+        beyond its transformer layers, i.e. the input embedding table.
+
+        BUG_LEDGER 12. :meth:`get_data_parallel_reduction_llm` prices transformer
+        layers ONLY, so the embedding (stage 0) and the vocab projection (last
+        stage) received no weight-update time at all — while their gradients
+        WERE all-reduced (``embedding_size`` / ``softmax_size``). The model
+        reduced gradients it never applied.
+
+        Per-rank, ``/tp``: the embedding is vocab-parallel, which is what the
+        authoritative census says (``_param_stats_per_rank``:
+        ``embedding_params = vocab_size * hidden_dim / tp``). Ledger 10d's
+        "unsharded vocab projection" simplification is about where the softmax
+        GEMM is PLACED, not about how many parameters a rank owns; the two legs
+        are independent and this one has a single unambiguous answer already in
+        the file.
+        """
+        params, _ = self._embedding_softmax_params_per_rank(hidden_dim, vocab_size)
+        return self._apply_grad_sharded(params)
+
+    def get_softmax_apply_grad_llm(self, hidden_dim, vocab_size):
+        """apply-grad time for the output (vocab) projection — the LAST stage.
+
+        See :meth:`get_embedding_apply_grad_llm`. Zero when the embeddings are
+        tied, because then the last stage's projection IS stage 0's table and
+        charging both would double-count the same parameters.
+        """
+        _, params = self._embedding_softmax_params_per_rank(hidden_dim, vocab_size)
+        return self._apply_grad_sharded(params)
+
+    def _apply_grad_sharded(self, params: float) -> float:
+        if params <= 0:
+            return 0.0
+        t = self.apply_grad(int(params))
+        grad_shard = self.dp if (self.zero_stage >= 2 and self.dp > 1) else 1
+        return t / grad_shard if grad_shard > 1 else t
+
+    def _embedding_softmax_params_per_rank(
+        self, hidden_dim: int, vocab_size: int
+    ) -> Tuple[float, float]:
+        """``(embedding, output_projection)`` per-rank parameter counts.
+
+        Deliberately the SAME expressions as ``_param_stats_per_rank``'s
+        ``embedding_params`` / ``output_params`` (``train_timing.py:798-812``),
+        including the ViT branch and the ``tied_embeddings`` / ``disable_*``
+        cases, so the apply-grad term and the memory census can never disagree
+        about how many parameters a rank owns.
+        """
+        if getattr(self, "disable_embedding_unembedding", False):
+            return 0.0, 0.0
+        if self._is_vit_model():
+            embedding = float(
+                llm_util.vit_patch_embed_param_count(
+                    hidden_dim=hidden_dim,
+                    patch_size=self.patch_size,
+                    in_chans=self.in_chans,
+                )
+            )
+            output = float(
+                llm_util.vit_head_param_count(
+                    hidden_dim=hidden_dim,
+                    num_classes=getattr(self, "num_classes", 0),
+                )
+            )
+            return embedding, output
+        embedding = float(vocab_size) * float(hidden_dim) / float(max(1, int(self.tp)))
+        output = 0.0 if self.tied_embeddings else embedding
+        return embedding, output
+
+
     def _combine_mem(self, *args):
             combined = {}
             for d in args:
@@ -4594,9 +4693,11 @@ class TimeCalculationLLM(TimeCalculation):
             qkv_params, output_params = self._attention_param_components_per_rank(hidden_dim)
             qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
             output_size = math.ceil(self.precision.grad_communication * output_params)
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_dim * hidden_dim)
-            ffn2_size = math.ceil(self.precision.grad_communication * intermediate_size * hidden_dim)
+            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(
+                hidden_dim, intermediate_size
+            )
+            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_params)
+            ffn2_size = math.ceil(self.precision.grad_communication * ffn2_params)
             ep_dense_sync_bytes_dense = int(qkv_size + output_size + ffn1_size + ffn2_size)
             router_size = math.ceil(self.precision.grad_communication * hidden_dim * self.moe_num_experts)
             shared_size = 0
@@ -5021,6 +5122,19 @@ class TimeCalculationLLM(TimeCalculation):
                 self.moe_intermediate_size,
                 moe=True,
             )
+        # BUG_LEDGER 12 — the NON-layer parameters. Charged only on the stage
+        # that owns them (`optimizer_duration`), which is why they are separate
+        # keys rather than folded into the per-layer price.
+        optimizer_embedding = (
+            self.get_embedding_apply_grad_llm(hidden_dim, vocab_size)
+            if include_pipeline_backward
+            else 0.0
+        )
+        optimizer_softmax = (
+            self.get_softmax_apply_grad_llm(hidden_dim, vocab_size)
+            if include_pipeline_backward
+            else 0.0
+        )
 
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),
@@ -5041,6 +5155,10 @@ class TimeCalculationLLM(TimeCalculation):
             # so no single global scalar is correct.
             "optimizer": optimizer_per_layer_dense,
             "optimizer_moe": optimizer_per_layer_moe,
+            # NOT per-layer: `optimizer_duration` adds these once, on the stage
+            # that owns the embedding (0) and the vocab projection (pp-1).
+            "optimizer_embedding": optimizer_embedding,
+            "optimizer_softmax": optimizer_softmax,
         }
         comp_times_no_dp = None
         if need_no_dp_variant:

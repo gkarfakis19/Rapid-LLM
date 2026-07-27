@@ -379,17 +379,30 @@ def optimizer_duration(
     ``durations['optimizer']`` for the dense ones and
     ``durations['optimizer_moe']`` for the MoE ones.
 
-    NOT covered, and deliberately so: the embedding (stage 0) and the
-    softmax/vocab projection (last stage) contribute no apply-grad time at all
-    — ``get_data_parallel_reduction_llm`` never sums their parameters. That is
-    a separate omission, filed separately; scaling it here would be inventing a
-    term rather than fixing one.
+    The stage's NON-layer parameters are added on top (BUG_LEDGER 12): the
+    input embedding on stage 0 and the vocab projection on stage ``pp-1``.
+    Those are ``durations['optimizer_embedding']`` / ``['optimizer_softmax']``,
+    already per-rank and already ZeRO-sharded by the producer, and they are
+    NOT per-layer — each is added exactly once, on the one stage that owns it.
+    A producer that does not register them (inference, or any pre-item-12
+    ``comp_times``) contributes 0.0 and this reduces to the 10b behavior.
+
+    Why stage 0 / ``pp-1`` rather than a placement query: the embedding and the
+    softmax are pipeline ENDPOINTS by construction — ``Placement.stage_of``
+    returns exactly these for ``WorkKind.EMBEDDING`` / ``SOFTMAX`` — and this
+    function is called from inside placement, so asking it back would close a
+    cycle. The single-stage case (``pp == 1``) correctly gets both.
     """
     per_layer_dense = _duration_by_key("optimizer", fw)
     per_layer_moe = _duration_by_key("optimizer_moe", fw)
     total = 0.0
     for layer in stage_layers(item, fw, layers):
         total += per_layer_moe if fw.is_moe_layer(layer) else per_layer_dense
+    stage = int(item.stage)
+    if stage == 0:
+        total += _duration_by_key("optimizer_embedding", fw)
+    if stage == max(0, int(fw.degrees.pp) - 1):
+        total += _duration_by_key("optimizer_softmax", fw)
     return total
 
 
