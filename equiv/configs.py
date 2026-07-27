@@ -198,20 +198,35 @@ def build_matrix() -> List[EquivSpec]:
         )
     )
 
-    # MoE on the modes that support it (hybrid/hierarchical; flattened rejects MoE).
-    for backend in ("hybrid", "hierarchical"):
-        row = dict(dp=2, tp=2, cp=1, pp=2, mb=2, tp_sp=True)
-        specs.append(
-            EquivSpec(
-                spec_id=f"train:{backend}:{_row_tag(row)}:moe:ep2",
-                run_type="training",
-                backend=backend,
-                ep=2,
-                use_moe=True,
-                model_type="glm4_moe",
-                **row,
+    # MoE on all three AstraSim modes. The dp2 row is the cross-backend
+    # comparison point: hybrid / hierarchical / flattened model the same MoE
+    # work at three fidelities, so their totals are directly comparable.
+    # The flattened (FINE) build additionally materializes the ep cluster, so
+    # it is the only mode where the per-cluster-rank EP grad sync (S12) and the
+    # per-device MoE hot/cold routing joins have any content; dp1 pins the
+    # flattened build with that sync absent (GradAccumPolicy.emits is False at
+    # dp==1), dp2 with it present.
+    moe_rows = {
+        "hybrid": (dict(dp=2, tp=2, cp=1, pp=2, mb=2, tp_sp=True),),
+        "hierarchical": (dict(dp=2, tp=2, cp=1, pp=2, mb=2, tp_sp=True),),
+        "flattened": (
+            dict(dp=1, tp=2, cp=1, pp=2, mb=2, tp_sp=True),
+            dict(dp=2, tp=2, cp=1, pp=2, mb=2, tp_sp=True),
+        ),
+    }
+    for backend, rows in moe_rows.items():
+        for row in rows:
+            specs.append(
+                EquivSpec(
+                    spec_id=f"train:{backend}:{_row_tag(row)}:moe:ep2",
+                    run_type="training",
+                    backend=backend,
+                    ep=2,
+                    use_moe=True,
+                    model_type="glm4_moe",
+                    **row,
+                )
             )
-        )
 
     # Inference (prefill + decode) on a couple of rows.
     for backend in ("analytical", "flattened", "hierarchical"):

@@ -579,17 +579,43 @@ def test_zero2_chains_after_its_reducer() -> None:
         assert gather.origin in {"S3", "S5", "S10"}
 
 
-def test_zero3_spread_is_tp_shard_driven() -> None:
-    """A2 / B 10d: ``SyncSpread`` is DATA (``CommSpec.tp_shard``), so flipping
-    the legacy ``rank_tails[0]``-only attach is a policy change."""
-    cfg = Cfg(dp=2, zero_stage=3, pp=2, num_layers=4, mb=2)
-    for req in policy_requirements(cfg):
-        expected = (
-            SyncSpread.PER_CLUSTER_RANK
-            if req.comm_key == "zero3_transformer_gather"
-            else SyncSpread.CLUSTER_RANK_0
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        Cfg(dp=2, zero_stage=0, pp=2, tp=2, num_layers=4, mb=2),
+        Cfg(dp=2, zero_stage=2, pp=2, tp=2, num_layers=4, mb=2),
+        Cfg(dp=2, zero_stage=3, pp=2, tp=2, cp=2, num_layers=4, mb=2),
+        Cfg(dp=2, zero_stage=3, pp=2, num_layers=4, mb=2),
+        Cfg(dp=2, zero_stage=0, pp=2, tp=2, ep=2, num_layers=4, mb=2, moe=True),
+    ],
+    ids=["ddp", "zero2", "zero3", "zero3_tp1", "moe"],
+)
+def test_a2_every_dp_collective_is_per_cluster_rank(cfg: Cfg) -> None:
+    """**A2**: every DP collective exists on every cluster rank of its stage.
+
+    Before the fix ``_spread_for`` returned ``PER_CLUSTER_RANK`` only for
+    ``CommSpec.tp_shard`` (which ``train_timing.py:4495`` sets on
+    ``zero3_transformer_gather`` alone); everything else was ``CLUSTER_RANK_0``,
+    i.e. the legacy ``rank_tails[0]``-only attach. The spread is a property of
+    the COMMUNICATOR, not of how the byte count was computed, so it no longer
+    reads ``tp_shard`` at all.
+
+    The EP grad sync (row S12) is deliberately excluded: it is an ``ep``-axis
+    collective whose group is a real device communicator, not a dp replica
+    group, and it is not what A2 is about.
+    """
+    comm = make_workload(cfg).comm
+    reqs = [req for req in policy_requirements(cfg) if req.is_dp]
+    assert reqs, "fixture emits no dp collectives"
+    for req in reqs:
+        assert req.spread is SyncSpread.PER_CLUSTER_RANK, req
+    if cfg.zero_stage >= 3:
+        # the discriminator the old rule used is still DATA on the table, and
+        # both of its values now resolve to the same spread.
+        flags = {bool(comm.require(req.comm_key).tp_shard) for req in reqs}
+        assert flags == {True, False}, sorted(
+            {req.comm_key for req in reqs}
         )
-        assert req.spread is expected, req
 
 
 def test_prefetch_depth_is_a_constructor_argument() -> None:

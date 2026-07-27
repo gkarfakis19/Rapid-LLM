@@ -2561,14 +2561,6 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
                     f"(tokens_local = tokens_dispatched // moe_ranks = {tokens_dispatched} // {moe_ranks})\n"
                     f"(tokens_local={tokens_local} % experts_per_rank={experts_per_rank} != 0)\n"
                 )
-        backend = getattr(hw_config, "execution_backend", None)
-        if backend and str(getattr(backend, "model", "")).lower() == "astra":
-            astra_cfg = getattr(backend, "astra", None)
-            astra_mode = str(getattr(astra_cfg, "mode", "")).lower() if astra_cfg else ""
-            if astra_mode == "full_astrasim_flattened":
-                raise NotImplementedError(
-                    "MoE is not supported with full AstraSim flattened execution."
-                )
         if run_type != "inference" and getattr(hw_config.sw_config, "dp_zero_stage", 0) >= 2:
             raise NotImplementedError("MoE with ZeRO-2/3 (dp_zero_stage >= 2) is not supported yet.")
         network_layout = getattr(hw_config, "network_layout", None)

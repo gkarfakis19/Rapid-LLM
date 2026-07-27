@@ -140,9 +140,38 @@ Split `equiv/runner.py::compare_observation` (87 LOC) into
 
 ---
 
-## Phases
+## Phase status
 
 Each lands independently with T1/T3/T5 green. Only P5 and P7 may move T2 numbers.
+
+| phase | status | landed in | note |
+|---|---|---|---|
+| **P0** Gate rebuild | ✅ **COMPLETE** | `11fe448` | T1 extras + memory peaks in `RunObservation`; T3 always-on; `compare_observation` split into `compare_structural`/`compare_timing`/`compare_contract`/`compare_determinism`; `NO_CACHE` forced in the harness. Recaptured as a proven strict superset. |
+| **P1** Measure & inventory | ✅ **COMPLETE** | `d4f92ed` | Audit findings + the signed-off bug ledger + the approved interface spec (`INTERFACES.md`). |
+| **P2** L1 policies extracted | ✅ **COMPLETE** | `11fe448`, `38ac682` | `program/work.py` + `program/policies/{sharding,recompute,routing,overlap,gradaccum}.py`; the typed attach-mode vocabulary replaced the `skip_*_children` booleans; the duplicated `should_emit_dp_comm` and the three-way-split EP-sync policy are unified. |
+| **P3** L2 placement + granularity | ✅ **COMPLETE** | `11fe448`, `38ac682` | One `placement.py` + `block.py`; `Granularity` is a parameter; communicator members **constructed** from `(axis, coords)` via `groups.py::CommunicatorFactory`, killing participant-count inference. |
+| **P4** L3 schedule policy | ✅ **COMPLETE** | `f06ef6f` | `program/schedule/{policy,gpipe}.py`; cross-microbatch edges are `Schedule.implied_deps`; `layers_per_stage` counts generalized to an explicit `LayerAssignment` map. |
+| **P5** L4 direct IR — **the rebaseline** | ✅ **COMPLETE, rebaseline APPROVED** | `f06ef6f`, `5191c9f`, `70938f8` | `build()` is the only Program constructor. `legacy_lowering.py`, `schedule.py`, `pipeline_fine.py`, `pipeline_coarse.py`, `block_program.py`, `transforms.py`, the proto graphs, the clone cache and all ordering metadata are **deleted**. Delta table: `REBASELINE.md`. Owner accepted the residual T2 movement (max \|Δ\| 0.215% on `total_time`, −12.554% on one rank sample); goldens recaptured; **T4 ledger 449 → 0 entries**. |
+| **P6** L5 consumers onto the IR | ✅ **COMPLETE** | `f06ef6f` | `analytic_sim`, `memory_sim`, `retime`, `viz` all read the `Program`. The IR-level tie discipline is normative and was **measured to be free**: program order (ascending uid) gives bit-identical totals to the deleted proto-graph evaluator on all 10 analytical + all hybrid specs, and it is the order AstraSim already consumes as node-id priority. |
+| **P7** Bug fixes, one commit each | 🔶 **PARTIAL** | `11fe448` (A1), `f06ef6f` (A3) | **A1** (AstraSim cache key omitted all DAG structure) fixed first, as planned — it masked exactly the changes the restructure makes. **A3** (`is_moe_layer` dropped on the tp-overlap head split → memory double-count) fixed with the cutover. **A4** and **A5** are recorded as **dormant / unreachable today** (no reachable config found) and are not fixed. **A2** and **A6** are the ones with real modelling content and large predicted movement, and each needs its own delta table + owner approval — `BUG_LEDGER.md` is the authority on their current state. |
+| **P8** Capabilities | 🔶 **IN PROGRESS** | — | Flattened MoE: the audit's blocker was that the memory path does **not** validate MoE comm topology (`memory_sim` reads no comm attributes; template edges are created at `duration=0`), so it is real work at ~6 sites. The FINE MoE program builds for the memory replay but its group-order postcondition did not hold at the cutover (`REBASELINE.md` §6). A second sharding policy (FSDP prefetch) is deferred to a student project (#5 below). Check `equiv/configs.py` for the current matrix. |
+| **P9** Cleanup + docs + student scaffolding | 🔶 **IN PROGRESS** | — | **Docs done:** `CONTEXT.md` rewritten to the current architecture (the M8 description with proto graphs and `legacy_lowering` is gone, and the historical part is marked as such); `TESTING.md` updated for the T1–T5 tier split, the ledger↔`equiv.capture` workflow, and the fact that the four `RAPID_*_DIFF` sweeps are replaced by one `RAPID_BUILD_DIFF` sweep; `REBASELINE.md` corrected (mesh2d attribution, cause (2) everywhere, the per-rank column, four arithmetic nits); `STUDENT_PROJECTS.md` written. **Code cleanup done:** `RunPolicy` owns `interleave_scale` (Class B item 8) and the `include_backward`/`include_optimizer` derivations; `WorkloadSpec.from_timing` is the single producer seam, and the five construction flows (`train_timing`, `inference_timing`, `llm_util.estimate_inference_memory`, `simulate_inference_graph`, the validation drivers) now all go through `_prepare_execution_graphs` → `LLMExecutionDispatcher(tc, workload)` with no per-caller re-derivation. **Still open:** `tests/test_program_ir.py`'s literal-id assertions were removed with the lowering pass they tested rather than rewritten against `canonicalize_bundle`. |
+
+**Net effect on the extension exercises** — the reason the restructure was done, re-run as
+executable experiments rather than paper plans (`f06ef6f`):
+
+| exercise | before | after |
+|---|---:|---:|
+| flattened MoE | 1.0 | **0.03** |
+| ZeRO-3 prefetch depth | 0.9 | **0.3** |
+| native 1F1B | 1.0 | **0.25** (151 LOC in one new file, validated end-to-end) |
+| a new parallelism axis | — | **0.43** (weakest; no `AxisSpec` registry was built) |
+
+Briefs built on these numbers: `STUDENT_PROJECTS.md`.
+
+---
+
+## Phases (as planned)
 
 **P0 — Gate rebuild (no behavior change).** Add the T1 extras (compute-µs, byte histograms,
 per-group collectives, critical path, manifest, **memory peaks**) to `RunObservation`; T3
@@ -209,6 +238,10 @@ Rewrite `tests/test_program_ir.py:304,411` against `canonicalize_bundle` instead
 Each is scoped so the abstraction boundary is the deliverable's edge: the student implements one
 policy or consumer behind a stable interface, and the existing gates prove they broke nothing.
 
+> **Expanded into startable briefs — with the exact interface, the acceptance gates, a difficulty
+> estimate and a concrete first step for each — in
+> [`STUDENT_PROJECTS.md`](STUDENT_PROJECTS.md).** The table below is the index.
+
 | # | Project | Size | Interface exercised |
 |---|---|---|---|
 | 1 | **Native interleaved-1F1B / virtual stages** — replace the closed-form bubble multiplier with a real schedule | L | `SchedulePolicy` (L3) |
@@ -227,8 +260,13 @@ policy or consumer behind a stable interface, and the existing gates prove they 
 
 - Golden gate every phase: `env RAPID_ASTRA_CACHE_MODE=NO_CACHE LD_LIBRARY_PATH=/u1/ee/karfakis/gcc-10.2.0/lib64:/app/nanocad/projects/personal/gkarfakis/anaconda3/lib ./.venv/bin/python -m pytest tests/test_equiv_golden.py -q` → 42/42.
 - Full suite (webui browser/remote/service/worker excluded) matches baseline + intentional additions.
-- `RAPID_FINE_DIFF/BLOCK_DIFF/COARSE_DIFF/HIER_DIFF=1` sweeps until the builders they compare are
-  deleted, then replaced by the T3 canonical determinism check.
+- ~~`RAPID_FINE_DIFF/BLOCK_DIFF/COARSE_DIFF/HIER_DIFF=1` sweeps until the builders they compare are
+  deleted, then replaced by the T3 canonical determinism check.~~ **Done as planned**: the four
+  sweeps were deleted with their builders in `f06ef6f`. Their determinism property is now held by
+  the always-on `test_reemission_deterministic` (two separate processes, compared canonically) and
+  by one env-gated whole-matrix sweep, `RAPID_BUILD_DIFF=1` on `tests/test_build.py`
+  (every spec × {COARSE, FINE}: **O1** field-for-field on the Program, then canonically on the
+  bundle, then dlsim). See `docs/rewrite/TESTING.md` §Tier 3.
 - **T5 physical suites within existing error thresholds at every phase** — the real evidence that
   predictions did not move.
 - P1 sensitivity report and P5 delta table archived under `docs/rewrite/`; `docs/rewrite/DESIGN.md`

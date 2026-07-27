@@ -1,0 +1,626 @@
+{
+ "astra_times": {
+  "flat": {
+   "max_sec": 0.021744835,
+   "per_rank_sec": [
+    0.017882671000000003,
+    0.017887183,
+    0.017926843,
+    0.017936843,
+    0.021290211,
+    0.021306838,
+    0.021317835,
+    0.021744835
+   ]
+  }
+ },
+ "bundles": {
+  "flat": {
+   "bundle_hash": "a86783590c4e70bdf58af59d61889464423091b67a9915fa90ce2bccda7f1e00",
+   "byte_hist_by_kind": {
+    "COLL": {
+     "1048576": 128,
+     "2097152": 256,
+     "67141632": 32
+    },
+    "RECV": {
+     "1": 24,
+     "524288": 16
+    },
+    "SEND": {
+     "1": 24,
+     "524288": 16
+    }
+   },
+   "bytes_by_axis": {
+    "ep": 2416967680,
+    "p2p": 16777264,
+    "tp": 402653184
+   },
+   "bytes_by_kind": {
+    "COLL": 2819620864,
+    "RECV": 8388632,
+    "SEND": 8388632
+   },
+   "collectives_by_group": {
+    "0,1": {
+     "by_kind": {
+      "2": {
+       "bytes": 33554432,
+       "n": 32
+      },
+      "7": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 100663296,
+     "n_ops": 64
+    },
+    "0,2": {
+     "by_kind": {
+      "0": {
+       "bytes": 537133056,
+       "n": 8
+      },
+      "6": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 604241920,
+     "n_ops": 40
+    },
+    "1,3": {
+     "by_kind": {
+      "0": {
+       "bytes": 537133056,
+       "n": 8
+      },
+      "6": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 604241920,
+     "n_ops": 40
+    },
+    "2,3": {
+     "by_kind": {
+      "2": {
+       "bytes": 33554432,
+       "n": 32
+      },
+      "7": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 100663296,
+     "n_ops": 64
+    },
+    "4,5": {
+     "by_kind": {
+      "2": {
+       "bytes": 33554432,
+       "n": 32
+      },
+      "7": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 100663296,
+     "n_ops": 64
+    },
+    "4,6": {
+     "by_kind": {
+      "0": {
+       "bytes": 537133056,
+       "n": 8
+      },
+      "6": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 604241920,
+     "n_ops": 40
+    },
+    "5,7": {
+     "by_kind": {
+      "0": {
+       "bytes": 537133056,
+       "n": 8
+      },
+      "6": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 604241920,
+     "n_ops": 40
+    },
+    "6,7": {
+     "by_kind": {
+      "2": {
+       "bytes": 33554432,
+       "n": 32
+      },
+      "7": {
+       "bytes": 67108864,
+       "n": 32
+      }
+     },
+     "bytes": 100663296,
+     "n_ops": 64
+    }
+   },
+   "comm_groups": {
+    "1000": [
+     4,
+     5
+    ],
+    "1001": [
+     6,
+     7
+    ],
+    "1002": [
+     0,
+     1
+    ],
+    "1003": [
+     2,
+     3
+    ],
+    "1004": [
+     4,
+     6
+    ],
+    "1005": [
+     5,
+     7
+    ],
+    "1006": [
+     0,
+     2
+    ],
+    "1007": [
+     1,
+     3
+    ]
+   },
+   "compute_micros_total": 102976,
+   "manifest": {
+    "npus": 8,
+    "ranks": {
+     "0": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:422": 4,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 6,
+      "RECV:524288": 2,
+      "SEND:1": 6,
+      "SEND:524288": 2
+     },
+     "1": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     },
+     "2": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     },
+     "3": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     },
+     "4": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:1062": 2,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:414": 2,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 6,
+      "RECV:524288": 2,
+      "SEND:1": 6,
+      "SEND:524288": 2
+     },
+     "5": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     },
+     "6": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     },
+     "7": {
+      "COMM:-1:67141632:null": 4,
+      "COMM:2:1048576:null": 16,
+      "COMM:6:2097152:null": 16,
+      "COMM:7:2097152:null": 16,
+      "COMP:0": 32,
+      "COMP:103": 4,
+      "COMP:134": 4,
+      "COMP:15": 4,
+      "COMP:16": 8,
+      "COMP:161": 4,
+      "COMP:175": 4,
+      "COMP:21": 8,
+      "COMP:22": 4,
+      "COMP:26": 4,
+      "COMP:273": 4,
+      "COMP:28": 8,
+      "COMP:304": 4,
+      "COMP:33": 4,
+      "COMP:36": 8,
+      "COMP:3700": 1,
+      "COMP:466": 4,
+      "COMP:72": 4,
+      "COMP:78": 4,
+      "COMP:84": 4,
+      "RECV:1": 2,
+      "RECV:524288": 2,
+      "SEND:1": 2,
+      "SEND:524288": 2
+     }
+    },
+    "version": "df-astra-manifest/1"
+   },
+   "manifest_sha256": "77a546f9e7c38176a5447e2a19c35e04ae91dac3cac9aa516a5c85ae3a57b393",
+   "n_ranks": 8,
+   "n_recv": 40,
+   "n_transfers": 40,
+   "ranks": {
+    "0": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048582,
+      "SEND": 1048582
+     },
+     "compute_micros": 13980,
+     "critical_path_nodes": 76,
+     "critical_path_weight": 534824,
+     "dag_hash": "2cc28bc9c8bb754c17a23f127865f14fde90ffcf0bb2ba8c6f3e10feeaefe795",
+     "n_nodes": 193,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 125,
+      "RECV": 8,
+      "SEND": 8
+     },
+     "ops_hash": "e5d29a81223bcd00926dafd2310e3f0fdde60d8f7dc36044de1a7f3693f8e926"
+    },
+    "1": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 533980,
+     "dag_hash": "88b7b7120d28ef67474c870815b7ed2e3e2678c70ae633d0302625c10fcd3d2d",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "ec8d520b75085ce010e34e10dec0a12f44bd3e4167eec3de03024242a1f8d242"
+    },
+    "2": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 533980,
+     "dag_hash": "819c2449dcfb182b3d5faae465d0cb88a4fb7570a9934aaa1b4545f7030a1c4e",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "b0a676a3a527b5c225e6c6ddbb84376b482350df5955544f74a5b18f321ea090"
+    },
+    "3": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 533980,
+     "dag_hash": "7bcb48fec3741802909a0d1c22976134eee0e64d216b08b47b407864bc4ceeb1",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "4b41331538b8dc7d6d5842e269c29440184c85783d83b328a485a603ae280c3c"
+    },
+    "4": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048582,
+      "SEND": 1048582
+     },
+     "compute_micros": 15244,
+     "critical_path_nodes": 146,
+     "critical_path_weight": 1060216,
+     "dag_hash": "384d81110a21c988f9c83362ebc29ff541c7f0ab186e1ab1527efff8b1bf4e52",
+     "n_nodes": 193,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 125,
+      "RECV": 8,
+      "SEND": 8
+     },
+     "ops_hash": "96c9cdbf41f5cb07c5ea010ecfa2ead0755fe8716f71f9749403820b8d2c58ab"
+    },
+    "5": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 530281,
+     "dag_hash": "5bf362308982da8340a3ef610d83df387db02205d46d97646ff4a510519a6d9b",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "b26cce4fb28279e2fbb23fa521d30d57987d97f993aa1752c333126f1f01f6bb"
+    },
+    "6": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 530281,
+     "dag_hash": "4b450449ec83e5dbf1097e003f7c7e8b4ec0586571b7c7a47634b3eeb2ec2a47",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "5af70bde1cd8d26e6017e4ee8469f05de497738049990238b4b3b60b301e1e5b"
+    },
+    "7": {
+     "bytes_by_kind": {
+      "COLL": 352452608,
+      "RECV": 1048578,
+      "SEND": 1048578
+     },
+     "compute_micros": 12292,
+     "critical_path_nodes": 74,
+     "critical_path_weight": 530281,
+     "dag_hash": "7eb27c056b5858efaedc742816d395bd37f5a34adec9f27e2ebf6e95d56d5b64",
+     "n_nodes": 181,
+     "op_counts": {
+      "COLL": 52,
+      "COMP": 121,
+      "RECV": 4,
+      "SEND": 4
+     },
+     "ops_hash": "7f5af4382ccf26ed0b4f2002a30fbba4d1441b5b9b0eaeaa82d1f8dcc0e3fe5c"
+    }
+   }
+  }
+ },
+ "dlsim_ok": {
+  "flat": true
+ },
+ "error_tail": "",
+ "git_rev": "70938f8",
+ "memory": {
+  "LLM": {
+   "fields": {
+    "hardware_memory_capacity_per_gpu": 80.0,
+    "remaining_memory_headroom": 76.13,
+    "simulated_peak_memory_usage_per_gpu": 3.87,
+    "simulation_mode": "training"
+   },
+   "warnings": []
+  }
+ },
+ "p2p_ok": {
+  "flat": true
+ },
+ "phase_times": {},
+ "spec_id": "train:flattened:dp1tp2cp1pp2mb2sp1:moe:ep2",
+ "status": "ok",
+ "total_time": 0.02174484
+}

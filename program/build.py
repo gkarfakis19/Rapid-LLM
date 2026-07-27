@@ -405,16 +405,22 @@ def build(
     emission-side concern (P5 wires it), and silently doing nothing with a path
     would be worse than saying so.
 
-    ``check_group_membership`` enables invariant **V7** and DEFAULTS TO OFF, for
-    a reason that is a finding, not an oversight: V7 says every member device of
-    a communicator issues the group's collectives, while BUG_LEDGER **A2**
-    (``SyncSpread.CLUSTER_RANK_0``, the preserved default of INTERFACES §7) puts
-    exactly ONE instance of a stage-spanning collective on cluster rank 0. The
-    two are contradictory whenever a non-dp requirement's group spans more than
-    one device — e.g. the ``ep`` grad sync at ``tp*cp*ep > 1``. A2 is Class A and
-    is NOT fixed in this wave, so V7 cannot be fatal by default without making
-    today's modeling content unbuildable. Flipping ``SyncSpread`` to
-    ``PER_CLUSTER_RANK`` in P7 is exactly what lets this default flip to True.
+    ``check_group_membership`` enables invariant **V7** and DEFAULTS TO OFF.
+    V7 says every member device of a communicator issues the group's
+    collectives, which used to contradict BUG_LEDGER **A2**
+    (``SyncSpread.CLUSTER_RANK_0``: exactly ONE instance of a stage-spanning
+    collective, on cluster rank 0) whenever a non-dp requirement's group spanned
+    more than one device — e.g. the ``ep`` grad sync at ``tp*cp*ep > 1``.
+
+    **A2 is fixed** (final wave): ``policies.sharding._spread_for`` returns
+    ``PER_CLUSTER_RANK`` for every dp requirement and row S12 declares it too,
+    so no production requirement puts a grouped collective on one member of its
+    group any more, and ``build(..., check_group_membership=True)`` was measured
+    clean over 192 COARSE+FINE configurations (``dp/tp/cp/ep/pp`` in ``{1,2}`` x
+    ``zero_stage`` in ``{0,2,3}`` x dense/MoE). The default stays OFF only
+    because legacy-lowered / hand-built Programs are per-device clone programs
+    for which V7 is false BY CONSTRUCTION (``program/ir.py`` module docstring);
+    flipping it is a separate, now-unblocked decision.
     """
     builder = _Builder(
         fw=fw,

@@ -18,7 +18,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Tuple, Optional, List, Sequence, Set
+from typing import Any, Dict, Tuple, Optional, List, Sequence
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from llm_execution import ExecutionMode, LLMExecutionDispatcher
 from program import _env_flag
@@ -910,10 +910,6 @@ class TimeCalculationLLM(TimeCalculation):
     def _attention_param_total_per_rank(self, hidden_dim: int) -> float:
         qkv_params, output_params = self._attention_param_components_per_rank(hidden_dim)
         return float(qkv_params + output_params)
-
-    def _attention_param_total(self, hidden_dim: int) -> int:
-        qkv_params, output_params = self._attention_param_components(hidden_dim)
-        return int(qkv_params + output_params)
 
     @staticmethod
     def _derive_execution_mode(hw_config) -> ExecutionMode:
@@ -4944,11 +4940,11 @@ class TimeCalculationLLM(TimeCalculation):
 
                 transformer_operation_entries.append(entry)
 
-            # BLOCK template (M4): the per-GEMM entries + CommSpec metadata
-            # ARE the complete block description; the legacy transformer
-            # Graph/root construction (construct_transformer_graph + the
-            # overlap rewrite) moved into program.block_program, where the
-            # dispatcher builds the per-direction BLOCK Programs.
+            # BLOCK template: the per-GEMM entries + CommSpec metadata ARE the
+            # complete block description. The legacy transformer Graph/root
+            # construction (construct_transformer_graph + the overlap rewrite)
+            # is gone; the dispatcher now asks program.build.build() for a
+            # per-direction Program at Granularity.BLOCK.
             return BlockTemplate.from_gemm_entries(
                 transformer_operation_entries,
                 transformer_comm_metadata,

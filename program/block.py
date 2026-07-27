@@ -28,11 +28,11 @@ A :class:`BlockTemplate` is the typed port of the two inputs
 The flattener never read the transformer graph's *node structure* (verified
 in docs/rewrite/panel — it only consumed the template + metadata), so these
 two mappings are the complete block description. Dense and MoE variants are
-two templates; the flattened expansion treats both as serial per-rank
-chains, exactly like the legacy flattener, while the BLOCK builder
-(:mod:`program.block_program`, M4) additionally realizes the MoE hot/cold
-joins + residual transfers the deleted ``construct_transformer_graph``
-used to build (the flattened path still rejects MoE upstream).
+two templates, and ONE expander (:class:`program.placement.BlockExpander`)
+realizes both at every granularity: the MoE hot/cold joins + residual
+transfers the deleted ``construct_transformer_graph`` used to build are now
+produced by the FINE (flattened) build as well as the BLOCK one, which is
+what let the flattened path stop rejecting MoE (``ext_moe_flat.md`` P8).
 
 ``CommMeta`` is shared with :mod:`program.schedule` for the pipeline graph's
 comm metadata (``cross_layer`` / dp reducers / ZeRO gathers / EP sync).

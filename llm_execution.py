@@ -585,10 +585,14 @@ class LLMExecutionDispatcher:
         return ExecutionResult(total_time=max_sec)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
-        """Flattened execution: the FINE Program straight into AstraSim."""
-        if self.workload.blocks.moe is not None:
-            raise NotImplementedError("MoE is not supported with full AstraSim flattened execution.")
+        """Flattened execution: the FINE Program straight into AstraSim.
 
+        MoE included: ``build()`` expands the MoE block template through the
+        same :class:`~program.placement.BlockExpander` at every granularity, so
+        the hot/cold routing joins, the per-device all-to-all and the
+        ``residual_p2p`` cold->hot transfers are realized here exactly as they
+        are in the BLOCK builder (INTERFACES §3.4; ``ext_moe_flat.md`` P8).
+        """
         artifact_dir = self.time_calc.output_dir
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")

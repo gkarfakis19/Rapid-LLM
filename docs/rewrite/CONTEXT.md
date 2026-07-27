@@ -1,42 +1,110 @@
 # Rewrite context pack: RAPID-LLM graph construction → AstraSim execution
 
 Authoritative shared context for the `rewrite_astra` effort. Read this before
-designing or implementing. Everything here was verified against the code and
-by experiment on 2026-07-26.
+designing or implementing.
 
-## Post-migration state (M8, current)
+- **§"Current architecture"** describes the tree as it is now (post-restructure,
+  P5/P6 landed, rebaseline approved in `70938f8`). Verified against the code.
+- **§"What is being replaced" is HISTORICAL** — the legacy architecture as it
+  existed when the rewrite began. Keep it: every delta table in
+  `docs/rewrite/restructure/` cites it, and `program/` docstrings still name its
+  files and line numbers as provenance. Do **not** use it to reason about how
+  the code works today; none of the modules it names still exist.
+- **The three sections after it are STILL BINDING**: the AstraSim workload
+  contract (reverse-engineered and confirmed by experiment — it is what
+  `equiv/dlsim.py` replays), the equivalence safety net, and the constraints on
+  the design. Each is marked in its own heading.
 
-The migration described below is COMPLETE through M8: all four execution
-modes, inference prefill + sampled decode, and memory estimation run on the
-typed Program core, and the legacy graph machinery
-(`simulate_train_graph.py` with `Node`/`Edge`/`Data_batch`/`Graph`,
-`construct_fwd_bwd_graph`, the converter, the flattener) is deleted.
-`train_timing._prepare_execution_graphs` assembles a
-`program.schedule.ScheduleInputs` carrier (parallelism degrees +
-comp_times/comm_metadata/misc_metadata); `LLMExecutionDispatcher` distills
-it into a `ScheduleSpec`, enumerates ONE GPipe schedule
-(`build_pipeline_events`), and builds per-mode Programs from it: COARSE
-(`pipeline_coarse` + `analytic_sim`/`retime` for analytical/hybrid,
-`lower_coarse_for_emission` for hierarchical emission), FINE
-(`pipeline_fine` for flattened execution and the `memory_sim` replay), and
-BLOCK (`block_program` for the transformer AstraSim runs) — all emitted
-through `et_emit`. Two deliberate non-goals of the retirement: the proto
-event graphs stay alive alongside the op lists (the analytical evaluator's
-tie discipline, the memory replay's FIFO order, and the pinned emission
-order are defined over children-list adjacency order), and
-`program.legacy_lowering.lower_to_program` stays as the permanent
-emission-ordering pass over those events (its name records its converter
-lineage). Module inventory: `program/__init__.py`. Test-tier map (golden
-gate, always-on suites, env-gated determinism sweeps, run environment):
-`docs/rewrite/TESTING.md`.
+## Current architecture (post-restructure)
 
-Everything below this section is HISTORICAL: it documents the legacy
-architecture as it existed when the rewrite began (the golden-gate
-contract, AstraSim workload rules, and design constraints remain valid).
+Five levels, **one representation**, **one construction path**. The normative
+interface spec is `docs/rewrite/restructure/INTERFACES.md`; the module
+inventory is the docstring of `program/__init__.py`.
+
+```
+L0  program/workload.py   WorkloadSpec / RunPolicy / DurationTable / CommSpecTable
+L1  program/work.py       WorkItem, WorkSet, SyncRequirement (what work exists, no order)
+    program/policies/     sharding · gradaccum · recompute · routing · overlap
+L2  program/placement.py  Placement, Granularity (COARSE | FINE | BLOCK), BlockExpander
+    program/block.py      BlockTemplate / CommMeta
+    program/groups.py     CommunicatorFactory — members CONSTRUCTED from (axis, coords)
+    program/layout.py     RankLayout
+L3  program/schedule/     SchedulePolicy, Schedule, GPipeSchedule
+L4  program/ir.py         Program: ops with explicit deps/groups/transfers
+    program/build.py      build() — the ONLY Program constructor
+    program/validate.py   invariants V1–V10
+L5  program/et_emit.py    Program -> Chakra ET bundle (id policy = program order)
+    program/analytic_sim.py · memory_sim.py · retime.py · mapping.py · viz.py · shadow.py
+```
+
+**The flow.** `train_timing` / `inference_timing` compute the timing and byte
+*math* and hand it to `WorkloadSpec.from_timing` — the single producer seam
+(INTERFACES §1.7), which reads every `misc_metadata` key as REQUIRED and raises
+naming the key rather than defaulting. `LLMExecutionDispatcher`
+(`llm_execution.py`) then calls `program.build.build()` once per artifact. The
+four execution modes, the BLOCK measurements and the memory replay differ
+**only** in the `Granularity` they request and in which L5 consumer reads the
+result:
+
+| mode | granularity | consumer |
+|---|---|---|
+| analytical | COARSE | `analytic_sim.evaluate` |
+| hybrid | COARSE | BLOCK retime, then `analytic_sim.evaluate` |
+| full_astrasim_hierarchical | COARSE | BLOCK retime, then AstraSim over (pp, dp) |
+| full_astrasim_flattened | FINE | AstraSim over the full layout |
+| transformer blocks | BLOCK | AstraSim, one bundle per direction |
+| memory estimation | FINE | `memory_sim.simulate_memory` |
+
+**Dependencies are computed, not walked.** `build()` is mechanical and makes no
+policy decision of its own; it composes L1+L2+L3 in a fixed phase order and
+derives every edge from a numbered rule (INTERFACES §4.3): **R1** data flow
+inside a block chain from the `BlockTemplate`; **R2** cross-layer and the
+stated intra-microbatch edges (`SOFTMAX/F(b) → SOFTMAX/B(b)`,
+`LAYER/F(b,l) → RECOMPUTE(b,l)`), with a cross-device pair becoming a
+`TransferOp`; **R3** device serialization implied by the `SchedulePolicy`,
+added only when not already transitively implied, and **per DEVICE** — this is
+the rule the rebaseline turned on (`REBASELINE.md` §2.1, §5.1); **R4** sync
+deps from each `SyncRequirement`'s declared attach mode, materialized as
+1-byte control pairs when they cross ranks (emission is *total*: an uncarriable
+cross-rank dep is an `EmissionError`, never a dropped edge); **R5** the
+optimizer after every backward item of its stage.
+
+**Program order** = a deterministic function of (schedule step, device,
+intra-step index), and it is simultaneously the ET node-id priority AstraSim
+consumes and the tie discipline the analytical evaluator and the memory replay
+use. There is no `legacy_op_id` / `send_seq` / `recv_seq` / `post_deps`.
+
+**What is gone.** `simulate_train_graph.py`, `legacy_lowering.py`,
+`schedule.py`'s `build_pipeline_events`, `pipeline_fine.py`,
+`pipeline_coarse.py`, `block_program.py`, `transforms.py`, the proto event
+graphs (`ComputeEvent`/`CommEvent`/`FineNode`/`FineEdge`), the clone cache, the
+`"bwd" in name` dispatch, the `ScheduleInputs` dict-carrier,
+`ScheduleSpec.from_pipeline_graph`, `TransformerBlockSpec`, `Op.succs`,
+`et_emit`'s `legacy` id policy and `CrossRankDepWarning`. Docstrings across
+`program/` still *cite* those files by name and line — that is deliberate
+provenance for the delta tables, not a live reference; nothing imports them.
+
+**Where the remaining seams are.** `restructure/BUG_LEDGER.md` is the authority
+on which defects are fixed and which are filed-but-open; check it rather than
+this file. The two that shape the code you will read are **A2** — whether a
+stage-spanning collective is placed on cluster rank 0 only or on every cluster
+rank (`SyncSpread` in `policies/sharding.py`), which is what
+`build(check_group_membership=...)` and invariant **V7** hinge on — and **A6** —
+the ZeRO-3 prefetch anchor chosen by layer arithmetic, which can land on
+another device. Both move predictions, so each needs its own delta table and
+owner approval before landing.
+
+Test-tier map (golden gate, always-on suites, the one surviving env-gated
+sweep, the ledger, run environment): `docs/rewrite/TESTING.md`.
+
+---
+
+The next section is HISTORICAL; the three after it are still binding.
 
 ## What is being replaced (historical)
 
-The path from "model + hardware config" to "simulated time" currently flows:
+The path from "model + hardware config" to "simulated time" USED TO flow (all
+of this is deleted; kept for provenance):
 
 1. `train_timing.py` / `inference_timing.py` compute per-op timings and build
    TWO untyped mutable DAGs via `simulate_train_graph.Graph`:
@@ -82,7 +150,7 @@ The path from "model + hardware config" to "simulated time" currently flows:
 Interleaved pipelining is NOT in any graph: it is a closed-form correction
 (`_pipeline_interleave_scale`) applied to the simulated total.
 
-## The AstraSim workload contract (verified by experiment)
+## The AstraSim workload contract (STILL BINDING — verified by experiment)
 
 These rules were reverse-engineered from `astra-sim/workload/Workload.cc` +
 `HardwareResource.cc` and confirmed with minimal hand-built bundles
@@ -110,23 +178,28 @@ member ranks; and cross-stage deps with no pipeline Edge object drew p2p
 tags independently on send/recv side. Both are *design* consequences: the
 converter re-infers a global schedule it was never given.
 
-## The equivalence safety net (must stay green at every step)
+## The equivalence safety net (STILL CURRENT — must stay green at every step)
 
-`equiv/` + `tests/test_equiv_golden.py`: 42 golden specs (35 at rewrite
-start; fault, gmap/mesh2d, GQA, ViT and ga2 rows were added since — 4
-backends × parallelism rows × ZeRO-2/3 × grad-accum × recompute ×
-MoE(hybrid/hier) × inference). Gates per spec: (1) per-rank op multisets,
+`equiv/` + `tests/test_equiv_golden.py`: the golden matrix (35 specs at
+rewrite start, 42 after the fault, gmap/mesh2d, GQA, ViT and ga2 rows —
+`equiv.configs.build_matrix()` is the authority on the current count and
+`--list` prints it). 4 backends × parallelism rows × ZeRO-2/3 × grad-accum ×
+recompute × MoE × inference. Gates per spec: (1) per-rank op multisets,
 (2) dependency-DAG Merkle hashes, (3) exact AstraSim per-rank wall
 seconds, (4) end-to-end reported times, (5) dlsim completability.
-Regenerating goldens is allowed only for deliberate, justified behavior
-changes, committed with the diff. See `docs/rewrite/TESTING.md` for the
-full test-tier map and run commands.
+The tiers are now split into named tests (T1 structural / T2 timing /
+T3 contract + determinism / T4 ledger); regenerating goldens is allowed only
+for deliberate, justified behavior changes, committed with the diff **and**
+with a reviewed delta table. See `docs/rewrite/TESTING.md` for the full
+test-tier map and run commands, and
+`docs/rewrite/restructure/REBASELINE.md` for the one rebaseline that has been
+approved so far.
 
 Environment: run via `./.venv/bin/python`, with
 `LD_LIBRARY_PATH=/u1/ee/karfakis/gcc-10.2.0/lib64:...anaconda3/lib` for the
 AstraSim binary (see astra-sim/build/astra_analytical/build/bin).
 
-## Constraints on the new design
+## Constraints on the new design (STILL BINDING)
 
 1. All four execution modes + inference (prefill & sampled decode) + memory
    estimation keep working; goldens stay green through every landing stage.

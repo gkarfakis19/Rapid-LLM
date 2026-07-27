@@ -44,6 +44,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import re
 import warnings
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -1330,6 +1331,113 @@ def test_v7_is_exactly_the_a2_shape():
     validate_program(program, check_races=False, check_group_membership=True)
 
 
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        Cfg(dp=2, tp=2, cp=2, pp=2, mb=2, num_layers=4),
+        Cfg(dp=2, tp=2, cp=1, pp=2, mb=2, num_layers=4, zero_stage=2),
+        Cfg(dp=2, tp=2, cp=1, pp=2, mb=2, num_layers=4, zero_stage=3),
+        Cfg(dp=2, tp=2, ep=2, pp=2, mb=2, num_layers=4, moe=True),
+    ],
+    ids=["ddp_tp2cp2", "zero2_tp2", "zero3_tp2", "moe_tp2ep2"],
+)
+def test_a2_dp_collectives_exist_on_every_cluster_rank(cfg):
+    """**BUG_LEDGER A2, fixed.** One dp collective per (stage, cluster rank).
+
+    Legacy attached a stage's gradient all-reduce / reduce-scatter to
+    ``rank_tails[0]`` (``pipeline_fine.py:616-629``), so ONE of the
+    ``tp*cp*ep`` cluster ranks bore the whole dp traffic and the other
+    ``par_degree - 1`` ranks emitted nothing. That is not a placement detail: a
+    rank can only reduce the gradient shard IT owns, and the ``par_degree``
+    dp-axis communicators of a stage are DISJOINT, so no peer's collective
+    stands in for a missing one.
+
+    Pinned here at three levels:
+
+    1. every dp collective carries ``group=None`` (dp membership is stamped at
+       emission over pre-dp device ids — INTERFACES §3.3 / the B2 fix);
+    2. the per-``SyncKey`` instance devices are exactly
+       ``Placement.cluster_devices(stage)``, and every cluster rank of a stage
+       carries the SAME dp multiset and the SAME dp byte total;
+    3. the emitted bundle really contains ``par_degree`` distinct dp
+       communicators per stage, each of them a ``dp``-sized member set, and
+       they partition the ranks (no rank is in two of them).
+    """
+    program = _program(cfg, Granularity.FINE)
+    fw = make_workload(cfg).freeze()
+    placement = Placement(
+        fw, Granularity.FINE, LayerAssignment.contiguous(cfg.num_layers, cfg.pp)
+    )
+    par_degree = placement.cluster_size()
+    assert par_degree == cfg.tp * cfg.cp * cfg.ep > 1, "fixture is not a tp>1 shape"
+
+    dp_ops = [op for op in program.ops if isinstance(op, CollectiveOp) and op.is_dp]
+    assert dp_ops, "fixture emits no dp collectives"
+
+    # (1) a dp collective is unlabeled and carries no communicator.
+    for op in dp_ops:
+        assert op.group is None and op.label is None, op.name
+
+    # (2) instance devices are exactly the stage's cluster, per SyncKey.
+    #     ``_sync_name`` is ``<SyncKey>`` for instance 0 and ``<SyncKey>_rank<i>``
+    #     after it, so stripping the suffix recovers the requirement identity.
+    by_key: Dict[str, List[int]] = {}
+    for op in dp_ops:
+        by_key.setdefault(re.sub(r"_rank\d+$", "", op.name), []).append(int(op.device))
+    stage_of_device = {
+        int(device): int(placement.coords_of(device).of("pp"))
+        for device in placement.devices()
+    }
+    for name, devices in by_key.items():
+        stages = {stage_of_device[device] for device in devices}
+        assert len(stages) == 1, f"{name} spans stages {sorted(stages)}"
+        expected = placement.cluster_devices(StageId(stages.pop()))
+        assert sorted(devices) == sorted(int(d) for d in expected), name
+        assert len(devices) == par_degree, name
+
+    # ... so every cluster rank of a stage carries the same dp load.
+    load: Dict[int, Counter] = {}
+    dp_bytes: Dict[int, float] = {}
+    for op in dp_ops:
+        load.setdefault(int(op.device), Counter())[op.comm_key] += 1
+        dp_bytes[int(op.device)] = dp_bytes.get(int(op.device), 0.0) + float(op.size_bytes)
+    for stage in range(cfg.pp):
+        cluster = [int(d) for d in placement.cluster_devices(StageId(stage))]
+        hosts = [device for device in cluster if device in load]
+        if not hosts:
+            continue
+        assert len(hosts) == par_degree, f"stage {stage}: dp load on {hosts}"
+        assert len({tuple(sorted(load[d].items())) for d in hosts}) == 1, stage
+        assert len({round(dp_bytes[d], 6) for d in hosts}) == 1, stage
+
+    # (3) the emitted bundle carries par_degree DISJOINT dp communicators per
+    #     stage that hosts dp traffic.
+    import tempfile
+
+    from equiv.canonical import canonicalize_bundle
+    from program.et_emit import emit_chakra
+
+    with tempfile.TemporaryDirectory() as out:
+        emit_chakra(program, out)
+        groups = canonicalize_bundle(out).summary()["collectives_by_group"]
+    n_devices = len(program.devices)
+    dp_members = {
+        tuple(int(d) + idx * n_devices for idx in range(program.dp_count))
+        for d in sorted(load)
+    }
+    seen = {
+        tuple(int(part) for part in key.split(","))
+        for key in groups
+        if len(key.split(",")) == program.dp_count
+    }
+    assert dp_members <= seen, f"missing dp communicators: {sorted(dp_members - seen)}"
+    assert len(dp_members) == len(load) == par_degree * len(
+        {stage_of_device[d] for d in load}
+    )
+    flat = [rank for members in dp_members for rank in members]
+    assert len(flat) == len(set(flat)), "dp communicators are not disjoint"
+
+
 def test_labels_are_one_to_one_with_member_sets():
     """``et_emit`` interns wire gids BY LABEL (``et_emit.py:221-263``) and raises
     when one label maps to two member sets. The interner keys on the member set,
@@ -1741,13 +1849,11 @@ def test_build_is_deterministic_and_emits_a_completable_bundle(spec, tmp_path):
     cases = _dispatchers(spec, hw_config, model_config, mode, tmp_path / "out")
     checked = 0
     for label, _tc, dispatcher in cases:
-        # FINE + MoE is built (the memory replay consumes it) but not EMITTED:
-        # flattened MoE execution is rejected in production and lands in P8
-        # (``ext_moe_flat.md``), so its bundle is not expected to satisfy the
-        # group-order postcondition yet.
-        emittable = {Granularity.COARSE}
-        if dispatcher.workload.blocks.moe is None:
-            emittable.add(Granularity.FINE)
+        # Every granularity is emittable, MoE included: flattened MoE execution
+        # is production (``ext_moe_flat.md`` P8, 2026-07-26), so the FINE MoE
+        # bundle must satisfy the group-order postcondition and the AstraSim
+        # scheduling contract like any other.
+        emittable = {Granularity.COARSE, Granularity.FINE}
         for granularity in _GRANULARITIES:
             first = dispatcher._build_program(granularity, label="a")
             second = dispatcher._build_program(granularity, label="b")

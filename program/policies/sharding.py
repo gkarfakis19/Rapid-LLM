@@ -274,15 +274,44 @@ class ShardingContext:
 
 
 def _spread_for(spec: CommSpec) -> SyncSpread:
-    """``CommSpec.tp_shard`` IS the "instantiate per cluster rank" declaration
-    (train_timing.py:4496 sets it on ``zero3_transformer_gather`` only).
+    """Every data-parallel collective exists on EVERY cluster rank of its stage.
 
-    BUG_LEDGER **A2** / **B 10d**: every other collective defaults to
-    ``CLUSTER_RANK_0``, reproducing the legacy ``rank_tails[0]``-only attach
-    (pipeline_fine.py:616-629). A2's fix is this function returning
-    ``PER_CLUSTER_RANK`` unconditionally — one line, no lattice edit.
+    **BUG_LEDGER A2, FIXED (final wave).** This function used to return
+    ``PER_CLUSTER_RANK`` only when ``CommSpec.tp_shard`` was set — which
+    ``train_timing.py:4495`` sets on ``zero3_transformer_gather`` alone — so
+    every other dp collective fell back to ``CLUSTER_RANK_0`` and reproduced the
+    legacy ``rank_tails[0]``-only attach (``pipeline_fine.py:616-629``): ONE of
+    the ``tp*cp*ep`` cluster ranks bore the whole gradient all-reduce /
+    reduce-scatter and the other ``par_degree - 1`` ranks emitted nothing at all.
+
+    A dp collective reduces the gradient shard THAT RANK OWNS over that rank's
+    dp replicas. A rank cannot reduce a peer's shard, and the ``par_degree``
+    dp-axis communicators are DISJOINT (``et_emit`` interns one wire group per
+    owning device: ``gid = device_index + 1``, members
+    ``{dp_idx * ns_initial + device}``), so no other rank's collective can stand
+    in for the missing one. One instance per (stage, cluster rank) is the only
+    consistent reading, and it is what :class:`~program.work.SyncSpread`
+    already spells:
+    :meth:`program.placement.Placement.devices_for_sync` resolves
+    ``PER_CLUSTER_RANK`` against ``cluster_devices(stage_of(place_on))`` (the
+    B4 fix, so a requirement hanging off a cluster-rank-0 kind still spans the
+    stage) and
+    :meth:`program.groups.CommunicatorFactory.groups_for` returns ``None`` per
+    instance device for a dp requirement (the B2 fix, so the builder stamps
+    ``group=None, is_dp=True`` and dp membership stays an emission-time stamp
+    over pre-dp device ids).
+
+    Nothing moves where ``cluster_size == 1``: COARSE placement reports a
+    cluster of one (the stage IS the device) and ``tp*cp*ep == 1`` workloads
+    have one cluster rank, so ``PER_CLUSTER_RANK`` and ``CLUSTER_RANK_0``
+    resolve to the same single device.
+
+    ``CommSpec.tp_shard`` survives as train_timing's declaration that a key's
+    BYTES are a per-rank quantity; it is no longer a placement input, because
+    the spread of a collective is a property of the collective's communicator,
+    not of how its byte count was computed (BUG_LEDGER Class B item 1).
     """
-    return SyncSpread.PER_CLUSTER_RANK if spec.tp_shard else SyncSpread.CLUSTER_RANK_0
+    return SyncSpread.PER_CLUSTER_RANK
 
 
 # ---------------------------------------------------------------------------

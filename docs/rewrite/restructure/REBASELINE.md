@@ -1,11 +1,35 @@
 # REBASELINE.md — the P5/P6 hard-cutover delta table
 
-> **Status: the reviewed delta table PLAN.md §P5 requires — SECOND revision, 2026-07-29.**
+> **Status: the reviewed delta table PLAN.md §P5 requires — THIRD revision, corrected after the
+> confirmer's pass in the final wave; the rebaseline is APPROVED and LANDED (commit `70938f8`).**
 > `build()` is the only Program constructor for all four execution modes, the BLOCK measurements
-> and the memory replay; the legacy spine is deleted. **The goldens are NOT recaptured here.**
+> and the memory replay; the legacy spine is deleted.
 >
 > Run: `env RAPID_ASTRA_CACHE_MODE=NO_CACHE LD_LIBRARY_PATH=... ./.venv/bin/python -m pytest
 > tests/test_equiv_golden.py -q`
+>
+> **What the third revision changes.** No number below moved because the code moved; they moved
+> because three of them were *wrong* and one was *missing*:
+>
+> 1. **The `mesh2d` / `mesh2d_gmap` attribution was wrong** (§2.1, §3). Those rows were filed under
+>    cause (1), "duplicate-identity control wires, ordering-neutral". The three wires actually
+>    removed are `pipeline_send_control` messages — the **R3 per-device fan-out, cause (2)** — and
+>    they carry **21 real ordering pairs**. Nothing about them is ordering-neutral. The spec has
+>    `pp=1, mb=1` and therefore has **no cross-stage transfer at all**, so cause (1) cannot apply to
+>    it: it is the one spec where cause (2) is *isolated by construction*.
+> 2. **Cause (1) explains none of the T2 movement anywhere** (§2.1, §3). It removes wires on the
+>    specs that do have cross-stage p2p, but since the 2026-07-29 `ctrl_deps` amendment the merged
+>    SEND carries **both** producers, so the merge is genuinely ordering-neutral. **All nine
+>    down-movers are the R3 per-device over-constraint removal**, cause (2), and nothing else.
+>    That makes §5.1 the *only* modeling claim under the whole table, not one of two.
+> 3. **The per-rank movement was not reported** (§3.1). T2 gates **per-rank** AstraSim seconds, not
+>    just `total_time`, and the per-rank movement is an order of magnitude larger than the
+>    end-to-end movement: **−12.554% on two of the sixteen rank samples** of
+>    `dp2tp2cp2pp2mb2sp1`, whose `total_time` moves only −0.213%. This is now a column, and the
+>    owner has **ACCEPTED it as intended** (`70938f8`) — it is not a pending question.
+> 4. **Four arithmetic nits** (§3.1, §8): median absolute is **0.131%**, not 0.141%; the pre-revision
+>    collection count was **1402**, not 1403; this revision added **15** tests, not 14; the
+>    `RAPID_BUILD_DIFF` sweep is **95 passed**, not 43.
 
 > ## What changed since the first revision
 >
@@ -21,8 +45,9 @@
 >
 > | | first revision | **now** |
 > |---|---:|---:|
-> | largest down-mover | **−5.945%** | **−0.215%** |
-> | median absolute | 1.152% | **0.141%** |
+> | largest down-mover (`total_time`) | **−5.945%** | **−0.215%** |
+> | largest down-mover (**per rank**) | not reported | **−12.554%** |
+> | median absolute (`total_time`, 10 moved specs) | 1.152% | **0.131%** |
 > | the one up-mover (`zero3`) | +1.366% | **+0.002%** |
 > | specs whose `total_time` matches the golden exactly | 32 / 42 | **33 / 42** |
 > | T4 ledger entries | 475 over 21 specs | **449 over 12 specs** |
@@ -34,6 +59,12 @@
 ---
 
 ## 1. Gate status
+
+> **Read this section as the state AT REVIEW TIME** — i.e. with the pre-cutover goldens still in
+> place and the T4 ledger absorbing the T1 residual. §5.1 was approved and `python -m equiv.capture`
+> ran in `70938f8`; **after** the recapture the ledger's expiry mechanism fired and
+> `tests/golden_equiv/bug_ledger.json` went **449 entries → 0**, which is its enforced steady state.
+> The gate is **green with an empty ledger** today.
 
 | Tier | Result |
 |---|---|
@@ -80,19 +111,35 @@ same-stage source parent)* and Step 11 created one `TransferOp` per key, so one 
 producer chain ended in a collective became **two** ops with **two** tags. `build()` emits one
 object with both producers as deps — and, since 2026-07-29, its SEND carries **both** as
 `ctrl_deps`. That is what makes the merge ordering-neutral; before the fix it was not (see §4.1).
-This cause alone explains `mesh2d` / `mesh2d_gmap` (`pp=1, mb=1`, 15 → 12 wires).
 
-**(2) R3 is per DEVICE** (INTERFACES §4.3). Legacy attached the COARSE cross-microbatch GPipe
-boundary to *every cluster rank of a stage* and lowered each cross-device pair to a zero-byte
-control message; `build()` records the boundary as a device-local dep, which needs no wire.
+> **Correction (third revision).** The second revision added *"This cause alone explains `mesh2d` /
+> `mesh2d_gmap` (`pp=1, mb=1`, 15 → 12 wires)."* **That is wrong on both halves.** `mesh2d` is
+> `dp1 tp4 cp1 **pp1** mb1` (`equiv/configs.py:284`): with one pipeline stage there is **no
+> cross-stage transfer**, so there is no p2p identity to merge and cause (1) *cannot* apply to it.
+> The three wires it loses are `pipeline_send_control` messages — the cause (2) R3 per-device
+> fan-out — and they carry **21 real ordering pairs**, so they are not ordering-neutral either.
+> `mesh2d` / `mesh2d_gmap` are in fact the *cleanest* isolation of cause (2) in the matrix: a
+> `pp=1` spec has no other candidate.
+>
+> **And cause (1) explains no T2 movement anywhere.** With the `ctrl_deps` amendment the merged
+> SEND carries every producer the two split ops carried, so the closure is unchanged and the
+> AstraSim wall clock cannot move with it. Cause (1) is a wire-count change only; it shows up in
+> `bytes_by_kind[SEND|RECV]`, `byte_hist_by_kind` and `manifest_sha256`, and nowhere in T2.
+> **Every one of the nine down-movers is cause (2), the R3 per-device over-constraint removal.**
+
+**(2) R3 is per DEVICE** (INTERFACES §4.3) — **the whole of the T2 movement.** Legacy attached the
+COARSE cross-microbatch GPipe boundary to *every cluster rank of a stage* and lowered each
+cross-device pair to a zero-byte `pipeline_send_control` message; `build()` records the boundary as
+a device-local dep, which needs no wire.
 
 > **Correction.** The first revision justified (2) with *"the ordering is already enforced: a
 > collective cannot complete until all members issue it, so the next microbatch's first op on any
 > device is already behind that barrier."* **That is wrong.** The collective barrier is
 > `S(coll_j,k) ≤ E(coll_i,k)`; it orders nothing that sits *after* the last collective of a
-> microbatch on the peer rank. Isolated on the one moved spec with no other cause
-> (`train:flattened:dp1tp1cp2pp2mb2sp0`, `tp=1, cp=2`), **73 ordering pairs are lost and 0 added**,
-> all 73 attributable to the removed wires. Two witnesses from the ETs:
+> microbatch on the peer rank. Isolated on the two specs where cause (1) cannot apply —
+> `train:flattened:dp1tp1cp2pp2mb2sp0` (`tp=1, cp=2`) with **73 ordering pairs lost and 0 added**,
+> and `mesh2d` / `mesh2d_gmap` (`pp=1`) with **21 ordering pairs lost and 0 added** — every lost
+> pair is attributable to the removed `pipeline_send_control` wires. Two witnesses from the ETs:
 >
 > * legacy r0 `SEND tag=262 deps=[embedding_b_188]` → r1 `RECV` is the **sole** dep of r1's
 >   `optimizer_stage0_rank1_190` (3447 µs). Lost: `r0:embedding_b ⇒ r1:optimizer`,
@@ -106,7 +153,8 @@ control message; `build()` records the boundary as a device-local dep, which nee
 > enforced".** INTERFACES §4.3 states R3 per DEVICE and legacy's cross-product over the cluster
 > ranks of a stage is an artifact of its per-stage wiring — but that is a **modeling** claim to
 > approve, not an encoding claim to wave through. It is the whole of the residual T2 movement on
-> these 9 specs (−0.116% to −0.215%), and §5.1 is the owner decision it needs.
+> **all nine** down-moving specs (−0.116% to −0.215% on `total_time`, to **−12.554%** on a single
+> rank), and §5.1 is the owner decision it needed. **That decision was made: ACCEPTED** (`70938f8`).
 
 Everything else in this class is **derived** from those counts: `ops_hash`, `n_nodes`,
 `critical_path_nodes` / `critical_path_weight`, `bytes_by_kind[SEND|RECV]`, `byte_hist_by_kind`,
@@ -184,38 +232,68 @@ Two preserved quirks are named in `program/analytic_sim.py`:
 
 ## 3. T2 — the delta table
 
-Every moved row, with its **verified** cause. Rows marked **T2** are the ones left failing.
-Everything not listed is bit-exact on `total_time` and on every bundle's per-rank wall seconds.
+Every moved row, with its **verified** cause. Rows marked **T2** are the ones that were failing
+before the recapture. Everything not listed is bit-exact on `total_time`, on `max_sec` **and on
+every rank's wall seconds**.
 
-| spec | golden `total_time` | new | Δ% | bundle | golden `max_sec` | new | Δ% | **verified cause** |
-|---|---:|---:|---:|---|---:|---:|---:|---|
-| `train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d` **T2** | 0.01296883 | 0.01295383 | **−0.116** | flat | 0.012968834 | 0.012953834 | −0.116 | §2.1 cause (1) — 3 duplicate-identity control wires |
-| `train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d_gmap` **T2** | 0.01296883 | 0.01295383 | **−0.116** | flat | 0.012968834 | 0.012953834 | −0.116 | as above |
-| `train:flattened:dp1tp1cp2pp2mb2sp0` **T2** | 0.02814551 | 0.02811051 | **−0.124** | flat | 0.028145506 | 0.028110506 | −0.124 | §2.1 cause (2) ONLY — 5 cross-cluster-rank R3 wires, 73 lost pairs |
-| `train:flattened:dp1tp2cp1pp2mb2sp0:fault_tp` **T2** | 0.02530694 | 0.02527194 | **−0.138** | flat | 0.025306937 | 0.025271937 | −0.138 | §2.1 causes (1)+(2) — 6 wires |
-| `train:flattened:dp1tp2cp1pp2mb2sp1` **T2** | 0.02481312 | 0.02477812 | **−0.141** | flat | 0.024813124 | 0.024778124 | −0.141 | §2.1 causes (1)+(2) — 7 wires |
-| `train:flattened:dp1tp2cp1pp2mb2sp1:gqa` **T2** | 0.02017512 | 0.02014012 | **−0.173** | flat | 0.020175124 | 0.020140124 | −0.173 | §2.1 causes (1)+(2) — 7 wires |
-| `train:flattened:dp2tp2cp2pp2mb2sp1` **T2** | 0.04498711 | 0.04489122 | **−0.213** | flat | 0.044987106 | 0.044891222 | −0.213 | §2.1 causes (1)+(2) — 42 wires, 16 ranks |
-| `train:flattened:dp1tp2cp1pp2mb2sp1:recompute` **T2** | 0.03023712 | 0.03017212 | **−0.215** | flat | 0.030237124 | 0.030172124 | −0.215 | §2.1 causes (1)+(2) — 39 wires |
-| `train:flattened:dp2tp1cp1pp2mb2sp0:zero3` **T2** | 0.22019728 | 0.22020228 | **+0.002** | flat | 0.220197279 | 0.220202279 | +0.002 | §4.2 — the 8 cross-stage ZeRO-3 sync pairs are now all PAIRED (5 µs) |
-| `inf:flattened:dp2tp2cp1pp2mb2sp1` **T2** | 0.23 | 0.23 | **0** | flat (prefill) | 0.009449092 | 0.009434092 | −0.159 | §2.1 causes (1)+(2) — 3 wires |
-| | | | | flat (decode 1) | 0.003508733 | 0.003475733 | −0.940 | as above |
-| | | | | flat (decode 2) | 0.003490733 | 0.003493733 | +0.086 | as above |
+**The per-rank column is not decoration.** `compare_timing` gates `astra_times[bundle].per_rank_sec`
+element-by-element, so the per-rank Δ is the *gated* quantity and `total_time` is a downstream
+summary of it. It is consistently the larger number, by up to **59×** (`dp2tp2cp2pp2mb2sp1`:
+−12.554% on a rank, −0.213% end-to-end), because the removed `pipeline_send_control` wires sat on
+non-critical ranks: dropping them lets those ranks finish early without shortening the critical
+path. Every figure below is reproducible with
+`git show HEAD~1:tests/golden_equiv/<f>.json` against `HEAD`.
 
-**Every other spec is 0.000%**, including all 10 analytical, all 11 hierarchical (34 bundles), all 6
-hybrid (14 BLOCK bundles), and the flattened `dp1tp1cp1pp1mb1sp0`, `dp2tp1cp1pp2mb2sp0`, `:ga2`,
-`:zero2` and `inf:dp1tp1cp1pp1mb1sp0`.
+| spec | golden `total_time` | new | Δ% | bundle | golden `max_sec` | new | Δ% | **per-rank Δ% (worst … mildest, ranks moved)** | **verified cause** |
+|---|---:|---:|---:|---|---:|---:|---:|---|---|
+| `train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d` **T2** | 0.01296883 | 0.01295383 | **−0.116** | flat | 0.012968834 | 0.012953834 | −0.116 | **−3.491** … −0.116 (4/4) | §2.1 cause **(2) ONLY** — 3 `pipeline_send_control` R3 per-device wires, **21 lost pairs**. `pp=1`: cause (1) is impossible here |
+| `train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d_gmap` **T2** | 0.01296883 | 0.01295383 | **−0.116** | flat | 0.012968834 | 0.012953834 | −0.116 | **−3.491** … −0.116 (4/4) | as above (same program, SCOTCH remap only) |
+| `train:flattened:dp1tp1cp2pp2mb2sp0` **T2** | 0.02814551 | 0.02811051 | **−0.124** | flat | 0.028145506 | 0.028110506 | −0.124 | **−1.635** … −0.108 (4/4) | §2.1 cause **(2) ONLY** — 5 cross-cluster-rank R3 wires, **73 lost pairs**. `tp=1`: cause (1) is impossible here |
+| `train:flattened:dp1tp2cp1pp2mb2sp0:fault_tp` **T2** | 0.02530694 | 0.02527194 | **−0.138** | flat | 0.025306937 | 0.025271937 | −0.138 | **−1.818** … −0.119 (4/4) | §2.1 cause **(2)** — 6 wires removed in total, of which the cause-(1) merges are ordering-neutral |
+| `train:flattened:dp1tp2cp1pp2mb2sp1` **T2** | 0.02481312 | 0.02477812 | **−0.141** | flat | 0.024813124 | 0.024778124 | −0.141 | **−1.854** … −0.121 (4/4) | §2.1 cause **(2)** — 7 wires total, same split |
+| `train:flattened:dp1tp2cp1pp2mb2sp1:gqa` **T2** | 0.02017512 | 0.02014012 | **−0.173** | flat | 0.020175124 | 0.020140124 | −0.173 | **−2.281** … −0.147 (4/4) | §2.1 cause **(2)** — 7 wires total, same split |
+| `train:flattened:dp2tp2cp2pp2mb2sp1` **T2** | 0.04498711 | 0.04489122 | **−0.213** | flat | 0.044987106 | 0.044891222 | −0.213 | **−12.554** … −0.213 (16/16) | §2.1 cause **(2)** — 42 wires total, 16 ranks. **The largest per-rank movement in the matrix** |
+| `train:flattened:dp1tp2cp1pp2mb2sp1:recompute` **T2** | 0.03023712 | 0.03017212 | **−0.215** | flat | 0.030237124 | 0.030172124 | −0.215 | **−1.621** … −0.185 (4/4) | §2.1 cause **(2)** — 39 wires total |
+| `train:flattened:dp2tp1cp1pp2mb2sp0:zero3` **T2** | 0.22019728 | 0.22020228 | **+0.002** | flat | 0.220197279 | 0.220202279 | +0.002 | +0.003 … +0.002 (4/4) | §4.2 — the 8 cross-stage ZeRO-3 sync pairs are now all PAIRED (5 µs). **The only up-mover** |
+| `inf:flattened:dp2tp2cp1pp2mb2sp1` **T2** | 0.23 | 0.23 | **0** (2 dp — see §3.2) | flat (prefill) | 0.009449092 | 0.009434092 | −0.159 | **−0.444** … −0.159 (4/4) | §2.1 cause **(2)** — 3 wires total |
+| | | | | flat (decode 1) | 0.003508733 | 0.003475733 | −0.941 | **−1.600** … −0.941 (4/4) | as above |
+| | | | | flat (decode 2) | 0.003490733 | 0.003493733 | +0.086 | −0.294 … **+0.406** (4/4) | as above — the one bundle whose ranks move in both directions |
+
+**Every other spec is 0.000% on every rank**, including all 10 analytical, all 11 hierarchical (34
+bundles), all 6 hybrid (14 BLOCK bundles), and the flattened `dp1tp1cp1pp1mb1sp0`,
+`dp2tp1cp1pp2mb2sp0`, `:ga2`, `:zero2` and `inf:dp1tp1cp1pp1mb1sp0`.
 
 ### 3.1 Summary of the movement
 
-| | `total_time` | `max_sec` (flattened bundles) |
-|---|---:|---:|
-| min | **−0.215%** | −0.940% (an inference decode sample) |
-| median | **−0.141%** | −0.141% |
-| max | **+0.002%** | +0.086% |
-| median absolute | **0.141%** | 0.141% |
+Over the **10 moved specs**, counting the inference row's `total_time` at its recorded 0.000%
+(§3.2 explains why that row's `total_time` is not informative):
 
-Compare the first revision: min −5.945%, median −0.974%, max +1.366%, median absolute 1.152%.
+| | `total_time` (10 specs) | `max_sec` (12 flattened bundles) | **per rank** (60 rank-samples over the same 12 bundles) |
+|---|---:|---:|---:|
+| min | **−0.215%** | −0.941% (an inference decode sample) | **−12.554%** (r8/r9 of `dp2tp2cp2pp2mb2sp1`) |
+| median | −0.131% | −0.140% | −0.299% |
+| max | **+0.002%** | +0.086% | **+0.406%** (an inference decode sample) |
+| median absolute | **0.131%** | 0.140% | **0.304%** |
+
+Compare the first revision: min −5.945%, median −0.974%, max +1.366%, median absolute 1.152%
+(`total_time`; per-rank was not reported).
+
+> **The per-rank spread is the honest headline, and the owner has ACCEPTED it.** On
+> `dp2tp2cp2pp2mb2sp1` the 16 rank samples split into four bands: six at **−0.336%**, two at
+> **−0.304%**, six at **−12.508% … −12.554%**, and the two slowest — the ones that *are*
+> `max_sec` — at **−0.213%**. That is the whole reason `total_time` barely twitches: the
+> `pipeline_send_control` wires legacy removed here pinned six mid-pack ranks behind work on
+> another device, and freeing them shortens those ranks without shortening the critical path.
+> Freeing them is the intended consequence of "R3 is per DEVICE" (INTERFACES §4.3).
+>
+> *Reading note:* `per_rank_sec` is the sequence of `sys[i], Wall time:` lines as AstraSim prints
+> them (`astrasim_lib/integration.py:420-431`) — **finish order, not rank id**. Treat an index as
+> "the i-th fastest rank sample", not as device *i*; the vector is gated element-wise either way.
+>
+> This was put to the owner as §5.1 and **approved** in `70938f8` ("per-rank up to −12.55% on two
+> ranks of the largest spec … as intended"). It is **not** an open question and it is **not**
+> tolerance slack: the goldens now pin the new per-rank values exactly, and any future drift
+> fails T2.
 
 ### 3.2 Two rows need reading carefully
 
@@ -227,6 +305,9 @@ Compare the first revision: min −5.945%, median −0.974%, max +1.366%, median
   `manifest.json`, which contains the 1-byte SEND/RECV rows. Changing those rows re-sorts the run
   list, so `astra[flat] run 0: signature differs` even where the wall seconds agree. That is a
   harness artifact of a multi-run bundle (prefill + 2 decode samples); it is reported, not hidden.
+  It also means the §3 per-bundle and per-rank figures for this spec are computed by pairing runs
+  **by role** (prefill / decode 1 / decode 2), not by list position: the recapture moved prefill
+  from index 2 to index 0. Comparing index-to-index here produces nonsense deltas of ±170%.
 * **`train:flattened:dp2tp1cp1pp2mb2sp0:zero3`.** +0.002% is **5 microseconds on 220 ms**, and it is
   the price of making the emitted DAG equal the IR that the analytical evaluator honors (§4.2). The
   previous revision's +1.366% was four dropped edges.
@@ -349,30 +430,36 @@ which is why §2.5's 16 entries existed.
 
 ---
 
-## 5. What the owner is being asked to approve
+## 5. What the owner was asked to approve — and what was decided
 
-### 5.1 The T2 movement of §3 — and the one modeling claim under it
+### 5.1 The T2 movement of §3 — the one modeling claim under it — **APPROVED**
 
-Nine flattened specs move by **−0.116% to −0.215%** and one by **+0.002%**. Median absolute
-**0.141%**, down from 1.152%.
+Nine flattened specs move down by **−0.116% to −0.215%** on `total_time` (to **−12.554%** on a
+single rank sample) and one moves up by **+0.002%**. Median absolute **0.131%** on `total_time`,
+**0.304%** per rank, down from 1.152%.
 
-**The single claim that needs an owner decision** is §2.1 cause (2): *legacy's cross-cluster-rank
+**The single claim that needed an owner decision** is §2.1 cause (2): *legacy's cross-cluster-rank
 GPipe control wires expressed a synchronization the model does not require, and INTERFACES §4.3 is
 right to state R3 per DEVICE.* This is a **removed over-constraint**, proven not to be implied by
-any surviving path (§2.1). If you accept it, the nine `−0.1x%` rows are correct and the goldens
-should be recaptured. If you do not, R3 must fan the boundary across the cluster ranks of a stage
-again, and those rows will return to 0.000%.
+any surviving path (§2.1). It is the **only** modeling claim under the table — cause (1) is
+ordering-neutral and moves nothing (§2.1), and the `zero3` up-mover is a fix, not a preference.
 
-Everything else in §3 is now accounted for by a fix, not by a preference.
+> **Decision: ACCEPTED**, commit `70938f8`, including the per-rank magnitude explicitly. The
+> goldens were recaptured with `./.venv/bin/python -m equiv.capture` and the T4 ledger emptied.
+> The alternative — fanning the R3 boundary back across the cluster ranks of a stage — was
+> rejected; it would restore 0.000% on those rows by restoring the over-constraint.
+
+Everything else in §3 is accounted for by a fix, not by a preference.
 
 ### 5.2 The T4 ledger as the record of the T1 residual
 
 449 entries over 12 specs: 414 `P5-CONTROL-TRANSFER` + 27 `P5-ZERO3-CROSS-STAGE-SYNC` + 4 `A3` +
 4 `P5-GID-NUMBERING`. `A3` is a Class-A bug the interface declares unreproducible, so approving it is
 approving the fix; the other three are encodings and wire-level accounting, not modeling content.
-Once §5.1 lands, `python -m equiv.capture` recaptures and
-`tests/golden_equiv/bug_ledger.json` goes back to `"entries": []` — its steady state, enforced by
-`test_bug_ledger_entries_are_live`.
+
+**This happened.** §5.1 landed, `equiv.capture` recaptured, every entry's `old` stopped matching,
+and `tests/golden_equiv/bug_ledger.json` is back to `"entries": []` — its steady state, enforced by
+`test_bug_ledger_entries_are_live`. **449 → 0.**
 
 ### 5.3 Two follow-ups filed, not fixed
 
@@ -460,9 +547,11 @@ sweep.
 
 ## 8. Test inventory delta
 
-`pytest --collect-only` over the gated suite is **1417** (1403 before this revision, 1598 at the
-cutover; every removal was a comparison against a deleted target). This revision **adds** 14 tests
-and removes none — plus one rewritten in place:
+`pytest --collect-only` over the gated suite is **1417** (**1402** before this revision, 1598 at the
+cutover; every removal was a comparison against a deleted target). This revision **adds 15**
+collected tests and removes none — plus one rewritten in place. The three rows below sum to
+15, and 1402 + 15 = 1417; the second revision's "1403 / 14" was arithmetically inconsistent with
+its own table:
 
 | Added | n | What |
 |---|---:|---|
@@ -472,4 +561,17 @@ and removes none — plus one rewritten in place:
 
 `tests/test_build.py::test_succs_mirror_deps` is rewritten as
 `test_deps_carry_every_edge_exactly_once` (the mirror it asserted no longer exists; the property —
-one edge structure, no duplicate edges — is kept and strengthened).
+one edge structure, no duplicate edges — is kept and strengthened). That rewrite is net **0**.
+
+**The env-gated build sweep.** `RAPID_BUILD_DIFF=1` on `tests/test_build.py` is
+**95 passed** at this revision — not 43, which was the count before the §4.3 probes were
+parametrized over `_AscBackward`:
+
+```sh
+env RAPID_BUILD_DIFF=1 RAPID_ASTRA_CACHE_MODE=NO_CACHE LD_LIBRARY_PATH=... \
+    ./.venv/bin/python -m pytest tests/test_build.py -q -p no:randomly
+```
+
+This is the **only** surviving builder sweep. The four `RAPID_{FINE,BLOCK,COARSE,HIER}_DIFF`
+sweeps were deleted with the builders they differentially compared (`f06ef6f`); see
+`docs/rewrite/TESTING.md` §Tier 3 for what replaced them.

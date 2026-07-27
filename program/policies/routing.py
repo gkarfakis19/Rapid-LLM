@@ -228,6 +228,18 @@ def ep_sync_requirements(work: Any, ctx: Any) -> Tuple[Any, ...]:
     (``apply_ep_all_mbs = dp_microbatch_mode != "last_mb" or zero_stage >= 3``)
     is a re-derivation of ``Graph._should_emit_dp_comm`` (schedule.py:255-268) —
     is here exactly ONE call to :meth:`GradAccumPolicy.emits` (audit A6).
+
+    SPREAD (amendment 2026-07-26, flattened MoE / ``ext_moe_flat.md`` blocker 5):
+    ``PER_CLUSTER_RANK``, not the ``CLUSTER_RANK_0`` default. The dp reducers
+    can get away with one instance on cluster rank 0 (BUG_LEDGER A2) because a
+    dp group's members are the SAME device at different dp indices and emission
+    stamps the op per-dp. An ``ep`` group's members are DIFFERENT devices of the
+    same stage, so a single instance means one member issues the all-reduce and
+    the others issue nothing — the silent AstraSim deadlock, which the emitter's
+    group-order postcondition now rejects outright. At COARSE/BLOCK-with-
+    ``cluster_size==1`` this resolves to the same single stage device as before,
+    so it is a no-op for every hierarchical/hybrid golden; it only has content
+    where the cluster is materialized, i.e. the FINE (flattened) build.
     """
     from program.work import (
         AttachMode,
@@ -257,7 +269,7 @@ def ep_sync_requirements(work: Any, ctx: Any) -> Tuple[Any, ...]:
             place_on=work,
             mode=AttachMode.AFTER,
             anchors=(work,),
-            spread=SyncSpread.CLUSTER_RANK_0,
+            spread=SyncSpread.PER_CLUSTER_RANK,
             origin="S12",
         ),
     )

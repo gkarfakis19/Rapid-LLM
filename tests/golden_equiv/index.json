@@ -99,6 +99,11 @@
   "git_rev": "5191c9f",
   "status": "ok"
  },
+ "train:flattened:dp1tp2cp1pp2mb2sp1:moe:ep2": {
+  "file": "train_flattened_dp1tp2cp1pp2mb2sp1_moe_ep2.json",
+  "git_rev": "70938f8",
+  "status": "ok"
+ },
  "train:flattened:dp1tp2cp1pp2mb2sp1:recompute": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1_recompute.json",
   "git_rev": "5191c9f",
@@ -134,9 +139,14 @@
   "git_rev": "5191c9f",
   "status": "ok"
  },
+ "train:flattened:dp2tp2cp1pp2mb2sp1:moe:ep2": {
+  "file": "train_flattened_dp2tp2cp1pp2mb2sp1_moe_ep2.json",
+  "git_rev": "70938f8",
+  "status": "ok"
+ },
  "train:flattened:dp2tp2cp2pp2mb2sp1": {
   "file": "train_flattened_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "5191c9f",
+  "git_rev": "70938f8",
   "status": "ok"
  },
  "train:hierarchical:dp1tp1cp1pp1mb1sp0": {

@@ -468,13 +468,18 @@ class SyncSpread(Enum):
 
     NAMED POLICY for BUG_LEDGER **A2** (DP collective attached to
     ``rank_tails[0]`` only, pipeline_fine.py:616-629) and **B/10d**.
-    ``CLUSTER_RANK_0`` is today's (wrong, preserved) default; flipping a
-    requirement to ``PER_CLUSTER_RANK`` is A2's fix and needs no lattice edit.
+
+    **A2 is FIXED**: every requirement the ``ShardingPolicy`` emits now declares
+    ``PER_CLUSTER_RANK`` (``policies.sharding._spread_for``). ``CLUSTER_RANK_0``
+    remains in the vocabulary because it is still the honest declaration for a
+    collective whose *work* the model pins to one cluster rank — the EP grad
+    sync (row S12, ``policies/routing.py``) and any future collective whose byte
+    count is a whole-cluster quantity rather than a per-rank one.
     """
 
     STAGE = auto()  #: one instance; the stage IS the device (COARSE/BLOCK)
     CLUSTER_RANK_0 = auto()  #: one instance, on cluster rank 0 of the stage [legacy default]
-    PER_CLUSTER_RANK = auto()  #: one instance per cluster rank [A2's fix; ZeRO-3 tp_shard]
+    PER_CLUSTER_RANK = auto()  #: one instance per cluster rank [A2's fix; every dp collective]
 
 
 class ByteSplit(Enum):
