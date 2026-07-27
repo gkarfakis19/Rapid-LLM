@@ -39,7 +39,16 @@ lowering that motivated them.
   SEND ids into src-side consumers (legacy ``ensure_pipeline`` /
   ``ensure_local_pipeline_sends`` dep appends, membership-checked).
   Same-device transfers are elided (the consumer already deps on the
-  producer — DESIGN §2.2).
+  producer — DESIGN §2.2). A SEND carries the union of ``transfer.producer``
+  and every other dep of the transfer that resolves on the SEND's own rank —
+  in particular the COMPUTE ANCHOR ``build()`` records beside the producer.
+* **Phase B2** — cross-rank sync materialization: a dep whose two ends live on
+  different ranks with no transfer carrying it cannot be a ``ctrl_dep`` (that
+  is a node id in the SAME trace), so it goes ON THE WIRE as a 1-byte control
+  SEND/RECV pair, tagged from ``_SYNC_TAG_BASE``. This is what the legacy
+  lowering did (a zero-byte ``cross_layer_rank0`` ``TransferOp``), and it is
+  what makes the analytical evaluator and AstraSim honor the SAME DAG. Nothing
+  is dropped: an edge that cannot be carried raises :class:`EmissionError`.
 * **Phase C** — stable control-first renumber, a verbatim port of
   ``_RankTrace._renumber_control_priority`` (node ids are AstraSim
   scheduling priorities; tiny control sends must not starve). The partition
@@ -65,7 +74,6 @@ from __future__ import annotations
 import itertools
 import json
 import os
-import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -86,18 +94,16 @@ from program.validate import validate_program
 
 _WIRE_GROUP_BASE_ID = 1000  # legacy _TP_GROUP_BASE_ID
 
+#: p2p tag base for the SYNTHESIZED cross-rank sync pairs (§4.3 R4 amendment
+#: 2026-07-29). A normal transfer's tag IS its ``TransferOp.uid``, so the base
+#: has to sit above any uid a Program can reach; 10**6 is four orders of
+#: magnitude above the largest program in the matrix and keeps the tags
+#: readable in an AstraSim log.
+_SYNC_TAG_BASE = 1_000_000
+
 
 class EmissionError(RuntimeError):
     """Emission hit an inconsistency (or the group-order postcondition)."""
-
-
-class CrossRankDepWarning(UserWarning):
-    """A dependency edge crossed ranks with no transfer carrying it.
-
-    A Chakra ``ctrl_dep`` is a node id in the same trace, so such an edge cannot
-    be emitted. It is dropped and reported — never silently — see
-    ``emit_chakra``'s ``_resolved_deps``.
-    """
 
 
 @dataclass
@@ -269,19 +275,24 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
     # gid -> rank -> [(node, comm_type_enum, comm_size)] for the postcondition
     group_records: Dict[str, Dict[int, List[Tuple[Any, int, int]]]] = defaultdict(lambda: defaultdict(list))
 
-    #: (consumer uid, dep uid) pairs dropped because they cross ranks — see
-    #: ``_resolved_deps``. Reported once per bundle, never silently.
-    cross_rank_drops: List[Tuple[int, int]] = []
+    #: ``(consumer uid, dep uid)`` pairs whose ordering crosses ranks. A Chakra
+    #: ``ctrl_dep`` cannot express them, so **Phase B2** materializes each one as
+    #: a 1-byte control SEND/RECV pair — exactly what the legacy lowering did
+    #: (``pipeline_fine`` created a zero-byte ``cross_layer_rank0`` TransferOp).
+    #: Nothing is ever dropped: what cannot be carried raises.
+    cross_rank_syncs: List[Tuple[int, int]] = []
 
-    def _resolved_deps(op: Any, dp_idx: int) -> List[int]:
-        """Phase-A ctrl_deps of a main op.
+    def _resolve_deps(
+        dep_uids: Any, own_rank: int, dp_idx: int, *, owner: str, owner_uid: int
+    ) -> List[int]:
+        """``dep_uids`` -> ctrl_deps on ``own_rank``, per the ET's own rules.
 
         **A Chakra ``ctrl_dep`` is a node id in the SAME trace.** That is an ET
         fact, not an IR fact, so this is the one place that knows it, and it
         forces three cases:
 
-        * a **cross-device TransferOp** dep is skipped: the transfer has no ET
-          node of its own, it materializes as a SEND/RECV pair in Phase B, and
+        * a **cross-device TransferOp** dep is skipped HERE: the transfer has no
+          ET node of its own, it materializes as a SEND/RECV pair in Phase B, and
           the pair's ids are wired into the consumers there;
         * a **same-device TransferOp** dep is ELIDED (never emitted, DESIGN §2.2)
           and must be REPLACED by a plain dep on what it depends on — its
@@ -291,16 +302,16 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
           unreleased nodes``: a silent deadlock (measured; this is why the
           recursion exists);
         * a dep on an op on **another rank** with no transfer carrying it is not
-          expressible. Legacy materialized such an edge as a zero-byte control
-          transfer inside the lowering; ``build()`` keeps it as a plain SYNC dep
-          (a ZeRO-3 gather inheriting a cross-stage anchor's deps — rows S6/S14),
-          which the analytical evaluator honors and the wire cannot. It is
-          dropped HERE and counted, because writing a foreign rank's node id
-          would mis-order the trace or close a cycle (measured on
-          ``train:*:dp2tp1cp1pp2mb2sp0:zero3``).
+          expressible as a ctrl_dep — writing a foreign rank's node id would
+          mis-order the trace or close a cycle. It is recorded in
+          ``cross_rank_syncs`` and Phase B puts it ON THE WIRE as a 1-byte
+          control pair. Legacy did exactly that (a zero-byte ``cross_layer_rank0``
+          ``TransferOp`` per cross-stage ZeRO-3 gather anchor — rows S8/S15), so
+          the analytical evaluator and AstraSim see the SAME DAG.
+
+        ``owner``/``owner_uid`` name the op whose deps these are, for errors.
         """
         deps: List[int] = []
-        own_rank = rank_for(op.device, dp_idx)
 
         def _resolve(uid: int) -> None:
             dep_op = ops[uid]
@@ -308,31 +319,41 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
                 if dep_op.src_device != dep_op.dst_device:
                     return  # Phase B wires the SEND/RECV ids
                 if rank_for(dep_op.src_device, dp_idx) != own_rank:
-                    cross_rank_drops.append((op.uid, uid))
+                    cross_rank_syncs.append((owner_uid, uid))
                     return
                 for inner in dep_op.deps:
                     _resolve(int(inner))
                 return
             dep_rank = rank_for(dep_op.device, dp_idx)
             if dep_rank != own_rank:
-                cross_rank_drops.append((op.uid, uid))
+                cross_rank_syncs.append((owner_uid, uid))
                 return
             key = (uid, dep_rank)
             if key not in et_ids:
                 raise EmissionError(
-                    f"op {op.uid} ('{op.name}') depends on op {uid} "
+                    f"op {owner_uid} ('{owner}') depends on op {uid} "
                     f"('{dep_op.name}') which has no ET node on rank {dep_rank} "
                     "(skipped or not yet emitted)"
                 )
             deps.append(et_ids[key])
 
-        for dep in op.deps:
+        for dep in dep_uids:
             _resolve(int(dep))
         unique: List[int] = []
         for dep in deps:
             if dep not in unique:
                 unique.append(dep)
         return unique
+
+    def _resolved_deps(op: Any, dp_idx: int) -> List[int]:
+        """Phase-A ctrl_deps of a main op."""
+        return _resolve_deps(
+            op.deps,
+            rank_for(op.device, dp_idx),
+            dp_idx,
+            owner=op.name,
+            owner_uid=op.uid,
+        )
 
     for op in ops:
         if isinstance(op, TransferOp):
@@ -428,6 +449,28 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
                         f"{transfer.producer} has no ET node on rank {src_rank}"
                     )
                 node.ctrl_deps.append(et_ids[producer_key])
+                # A TransferOp's NON-producer deps are ordering constraints too,
+                # and they land on the SEND's OWN rank — so this is a plain
+                # omission if they are skipped, not an inexpressibility.
+                # ``_emit_cross_layer`` (build.py) deliberately records a second
+                # DATA_FLOW dep, the COMPUTE ANCHOR: "the SEND must fire off the
+                # last COMPUTE, not off a trailing collective"
+                # (``pipeline_fine.py:672-687``). At ``tp>1`` with a hoisted
+                # tp/sp collective the producer IS that trailing collective and
+                # the anchor is its SIBLING, so emitting only ``producer`` left
+                # the inter-stage SEND with NO dependency on the compute that
+                # produced the activation it carries — the layer's last COMPUTE
+                # became a dependency SINK. Measured: 62-95% of the P5 T2
+                # movement on every ``tp>1`` flattened spec.
+                for extra in _resolve_deps(
+                    transfer.deps,
+                    src_rank,
+                    dp_idx,
+                    owner=transfer.name,
+                    owner_uid=transfer.uid,
+                ):
+                    if extra not in node.ctrl_deps:
+                        node.ctrl_deps.append(extra)
                 trace.append_node(node, control=is_control)
                 send_ids[(transfer.uid, dp_idx)] = node_id
             else:
@@ -470,22 +513,104 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
                 if wire_id not in node.ctrl_deps:
                     node.ctrl_deps.append(wire_id)
 
-    if cross_rank_drops:
-        pairs = sorted(set(cross_rank_drops))
-        sample = ", ".join(
-            f"{ops[c].name!r}(uid {c}, dev {ops[c].device}) <- {ops[d].name!r}(uid {d})"
-            for c, d in pairs[:4]
+    # --- Phase B2: cross-rank sync deps go ON THE WIRE ----------------------
+    #
+    # A dep that crosses ranks with no transfer carrying it is NOT droppable:
+    # measured on ``train:flattened:dp2tp1cp1pp2mb2sp0:zero3``, the 4 dropped
+    # edges were the only thing ordering the ZeRO-3 parameter gathers, dropping
+    # them made all 4 gathers graph ROOTS that issue at t=0, and the bundle's
+    # wall time moved +1.366%. No collective spans the two pipeline stages, so
+    # the "carried by the shared per-stage collectives" story cannot hold: the
+    # gather's communicator is stage 1's dp pair and its dep is on stage 0.
+    #
+    # Legacy put them on the wire, so we put them on the wire: one 1-byte
+    # control SEND on the dep's rank + RECV on the consumer's rank, per dp
+    # replica. Deterministic in sorted (consumer, dep) order; the tags come from
+    # ``_SYNC_TAG_BASE`` so they cannot collide with a TransferOp uid.
+    for index, (consumer_uid, dep_uid) in enumerate(sorted(set(cross_rank_syncs))):
+        consumer = ops[consumer_uid]
+        dep_op = ops[dep_uid]
+        src_device = (
+            dep_op.src_device if isinstance(dep_op, TransferOp) else dep_op.device
         )
-        warnings.warn(
-            CrossRankDepWarning(
-                f"{len(pairs)} dependency edge(s) cross ranks with no transfer "
-                "carrying them and are NOT expressible as Chakra ctrl_deps; they "
-                "are dropped from the emitted bundle. The ordering they encode is "
-                "carried by the shared per-stage collectives (a collective cannot "
-                f"complete until every member issues it). Examples: {sample}"
-            ),
-            stacklevel=2,
-        )
+        # The CONSUMER may itself be a TransferOp: a cross-stage ZeRO-3 gather is
+        # spliced in front of the anchor's DATA_FLOW successor, and at a stage
+        # boundary that successor IS the ``cross_layer`` p2p on the OTHER stage
+        # (rows S8/S15, ``ZeRO3._via`` -> ``VIA_DATA_FLOW``). A transfer starts
+        # at its SEND, so that is the node the wire delays.
+        consumer_is_transfer = isinstance(consumer, TransferOp)
+        if consumer_is_transfer:
+            if consumer.src_device == consumer.dst_device:
+                raise EmissionError(
+                    f"cross-rank sync into transfer {consumer_uid} "
+                    f"('{consumer.name}') is impossible: the transfer is "
+                    "same-device and therefore elided, so it has no ET node"
+                )
+            consumer_device = consumer.src_device
+        else:
+            consumer_device = consumer.device
+        tag = _SYNC_TAG_BASE + index
+        for dp_idx in range(dp_count):
+            src_rank = rank_for(src_device, dp_idx)
+            dst_rank = rank_for(consumer_device, dp_idx)
+            if src_rank == dst_rank:  # pragma: no cover - defensive
+                raise EmissionError(
+                    f"cross-rank sync {consumer_uid} <- {dep_uid} resolved to the "
+                    f"same rank {src_rank}; it should have been a ctrl_dep"
+                )
+            before = len(cross_rank_syncs)
+            anchors = _resolve_deps(
+                (dep_uid,), src_rank, dp_idx, owner=dep_op.name, owner_uid=dep_uid
+            )
+            if len(cross_rank_syncs) != before or not anchors:
+                # A nested cross-rank carrier (the dep's own deps also cross a
+                # rank) would need a chain of wires. No production Program has
+                # one; make it LOUD rather than half-emitted.
+                raise EmissionError(
+                    f"cross-rank sync {consumer_uid} ('{consumer.name}') <- "
+                    f"{dep_uid} ('{dep_op.name}') cannot be carried: resolving the "
+                    f"dep on its own rank {src_rank} yielded {anchors!r} and "
+                    f"{len(cross_rank_syncs) - before} further cross-rank dep(s). "
+                    "Anchor the requirement on the consumer's device instead "
+                    "(INTERFACES §4.4)."
+                )
+            send_trace = _trace_for(src_rank, f"cross-rank sync {consumer_uid} send")
+            send_id = send_trace.next_id
+            send_node = new_send_node(
+                send_id,
+                f"cross_rank_sync_{consumer_uid}_{dep_uid}_send_control",
+                1,
+                dst_rank,
+                tag,
+            )
+            send_node.ctrl_deps.extend(anchors)
+            send_trace.append_node(send_node, control=True)
+
+            recv_trace = _trace_for(dst_rank, f"cross-rank sync {consumer_uid} recv")
+            recv_id = recv_trace.next_id
+            recv_node = new_recv_node(
+                recv_id,
+                f"cross_rank_sync_{consumer_uid}_{dep_uid}_recv_control",
+                1,
+                src_rank,
+                tag,
+            )
+            recv_trace.append_node(recv_node, control=True)
+            if consumer_is_transfer:
+                target_id = send_ids.get((consumer_uid, dp_idx))
+            else:
+                target_id = et_ids.get((consumer_uid, dst_rank))
+            if target_id is None:
+                raise EmissionError(
+                    f"cross-rank sync {consumer_uid} ('{consumer.name}') has no ET "
+                    f"node on rank {dst_rank}"
+                )
+            consumer_node = recv_trace.nodes[target_id]
+            if recv_id not in consumer_node.ctrl_deps:
+                consumer_node.ctrl_deps.append(recv_id)
+
+    # --- ALWAYS-ON POSTCONDITION: no op silently loses its successors ------
+    _check_no_lost_successors(ops, et_ids, traces, dp_count)
 
     # --- Phase C: stable control-first renumber ----------------------------
     for trace in traces.values():
@@ -512,6 +637,80 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
         comm_groups=comm_groups,
         comm_groups_path=comm_groups_path,
     )
+
+
+def _check_no_lost_successors(
+    ops: Any,
+    et_ids: Dict[Tuple[int, int], int],
+    traces: Dict[int, "_Trace"],
+    dp_count: int,
+) -> None:
+    """ALWAYS-ON: an op with successors in the IR keeps them in the ET.
+
+    The P5 cutover shipped an emitter that wired a cross-device SEND to
+    ``transfer.producer`` alone, so the transfer's OTHER dep — the compute
+    anchor — vanished and the layer's last COMPUTE became a dependency SINK on
+    every ``tp > 1`` spec. Nothing caught it: the op multisets, the byte
+    histograms, ``dlsim`` and the group-order postcondition are all indifferent
+    to a lost edge, and only the AstraSim wall clock moved (by up to 5.9%).
+
+    This is the check that would have caught it, stated where the loss happens.
+    ``validate.py``'s **V6** asks the same question of the IR and only about
+    collectives; this asks it of the EMITTED trace and about every op.
+
+    A genuine sink (a gradient reducer, the optimizer, a SINK collective) has no
+    successors in the IR either, so it is not flagged: the invariant is
+    *preservation*, not "everything has a successor".
+    """
+    # Which ops MUST still have a successor in the trace? Everything some
+    # EMITTED op (or some wire) depends on. Deps of an op the emitter legally
+    # skips do not count — a dp collective at ``dp_count <= 1`` (legacy Step 10)
+    # is gone entirely, so its producer legitimately ends up a sink — and a
+    # same-device transfer is elided, so its deps propagate to whatever depends
+    # on the transfer.
+    has_ir_successor: Set[int] = set()
+    pending: List[int] = []
+
+    def _mark(dep_uids: Any) -> None:
+        for raw in dep_uids:
+            dep = int(raw)
+            if dep in has_ir_successor:
+                continue
+            has_ir_successor.add(dep)
+            dep_op = ops[dep]
+            if (
+                isinstance(dep_op, TransferOp)
+                and dep_op.src_device == dep_op.dst_device
+            ):
+                pending.append(dep)
+
+    for uid, _rank in et_ids:
+        _mark(ops[uid].deps)
+    for op in ops:
+        if isinstance(op, TransferOp) and op.src_device != op.dst_device:
+            _mark(op.deps)
+    while pending:
+        _mark(ops[pending.pop()].deps)
+
+    wired: Dict[int, Set[int]] = {
+        rank: {int(dep) for node in trace.nodes for dep in node.ctrl_deps}
+        for rank, trace in traces.items()
+    }
+    lost: List[str] = []
+    for (uid, rank), node_id in sorted(et_ids.items()):
+        if uid not in has_ir_successor:
+            continue
+        if node_id in wired.get(rank, ()):
+            continue
+        op = ops[uid]
+        lost.append(f"{op.name!r} (uid {uid}, rank {rank}, node {node_id})")
+    if lost:
+        raise EmissionError(
+            f"{len(lost)} op(s) have successors in the Program but NONE in the "
+            "emitted trace — an ordering constraint was dropped at emission, "
+            "which no other gate can see (it moves only the AstraSim wall "
+            f"clock). Examples: {', '.join(lost[:6])}"
+        )
 
 
 def _check_group_order_postcondition(

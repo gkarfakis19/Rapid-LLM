@@ -511,6 +511,140 @@ def test_same_device_transfer_edge_survives_elision(tmp_path):
     assert list(nodes[1].ctrl_deps) == [0]
 
 
+def test_cross_device_send_carries_every_same_rank_dep_of_the_transfer(tmp_path):
+    """A ``TransferOp``'s NON-producer deps land on the SEND, not on the floor.
+
+    ``build()._emit_cross_layer`` deliberately records a second DATA_FLOW dep on
+    a pipeline transfer — the COMPUTE ANCHOR: "the SEND must fire off the last
+    COMPUTE, not off a trailing collective" (``pipeline_fine.py:672-687``).
+    Phase B used to emit ``transfer.producer`` and nothing else, so with a
+    fully-hoisted tp/sp collective (the anchor is then the producer's SIBLING,
+    not its ancestor) the inter-stage SEND had NO dependency on the compute that
+    produced the activation it carries, and that compute became a dependency
+    SINK. This is the shape that costs 62-95% of the P5 T2 movement on every
+    ``tp > 1`` flattened spec.
+    """
+    b = ProgramBuilder(dp_count=1)
+    root = b.add_compute("root", 0, 1e-6)
+    # anchor and coll are SIBLINGS, exactly as a hoisted overlap leaves them
+    anchor = b.add_compute("MLP_forward", 0, 5e-6, deps=(root,))
+    gk = b.group("tp", [0, 1], "mlp_tp")
+    coll = b.add_collective(
+        "mlp_rs", 0, AR, 4096, deps=[root], label="mlp_tp", group=gk, participants=2
+    )
+    peer_root = b.add_compute("peer_root", 1, 1e-6)
+    b.add_collective(
+        "mlp_rs", 1, AR, 4096, deps=[peer_root], label="mlp_tp", group=gk, participants=2
+    )
+    consumer = b.add_compute("next_stage", 1, 2e-6)
+    t = b.add_transfer(
+        "cross_layer", 0, 1, 2097152, producer=coll, comm_type=PIPE, consumers=[consumer]
+    )
+    prog = b.finish(validate=False)
+    # what build() records: producer + compute anchor
+    prog.ops[t].deps = (coll, anchor)
+
+    bundle = emit_chakra(prog, str(tmp_path))
+    nodes = _load_nodes(f"{bundle.et_prefix}.0.et")
+    by_id = {int(n.id): n for n in nodes}
+    send = [n for n in nodes if int(n.type) == pb.COMM_SEND_NODE]
+    assert len(send) == 1
+    dep_names = {by_id[int(d)].name for d in send[0].ctrl_deps}
+    assert any("mlp_rs" in name or "mlp_tp" in name for name in dep_names), dep_names
+    assert any("MLP_forward" in name for name in dep_names), (
+        f"the compute anchor is missing from the SEND's ctrl_deps: {dep_names}"
+    )
+    # ... and therefore the compute is not a dependency sink
+    anchor_node = next(n for n in nodes if "MLP_forward" in n.name)
+    successors = [n for n in nodes if int(anchor_node.id) in set(n.ctrl_deps)]
+    assert successors, "the layer's last COMPUTE must not be a dependency sink"
+
+
+def test_cross_rank_dep_is_materialized_as_a_control_pair(tmp_path):
+    """A dep that crosses ranks with no transfer carrying it goes ON THE WIRE.
+
+    It used to be DROPPED with a ``CrossRankDepWarning`` justified by "the
+    ordering is carried by the shared per-stage collectives". On
+    ``train:flattened:dp2tp1cp1pp2mb2sp0:zero3`` that was false — no collective
+    spans the two pipeline stages — and the four dropped edges were the only
+    thing ordering the ZeRO-3 parameter gathers, which became graph ROOTS. The
+    emitter is TOTAL now: every IR edge is a ctrl_dep, a wire, or an
+    ``EmissionError``.
+    """
+    b = ProgramBuilder(dp_count=1)
+    a = b.add_compute("producer_on_0", 0, 4e-6)
+    consumer = b.add_compute("consumer_on_1", 1, 4e-6, deps=(a,))
+    prog = b.finish(validate=False)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no warning class may survive
+        bundle = emit_chakra(prog, str(tmp_path))
+
+    r0 = _load_nodes(f"{bundle.et_prefix}.0.et")
+    r1 = _load_nodes(f"{bundle.et_prefix}.1.et")
+    sends = [n for n in r0 if int(n.type) == pb.COMM_SEND_NODE]
+    recvs = [n for n in r1 if int(n.type) == pb.COMM_RECV_NODE]
+    assert len(sends) == len(recvs) == 1
+    assert _attrs(sends[0])["comm_size"] == 1
+    assert _attrs(sends[0])["comm_dst"] == 1
+    assert _attrs(recvs[0])["comm_src"] == 0
+    assert _attrs(sends[0])["comm_tag"] == _attrs(recvs[0])["comm_tag"]
+    assert _attrs(sends[0])["comm_tag"] >= 1_000_000, "sync tags may not collide with a uid"
+    # the SEND fires off the dep; the RECV gates the consumer
+    by_id0 = {int(n.id): n for n in r0}
+    assert "producer_on_0" in by_id0[int(sends[0].ctrl_deps[0])].name
+    consumer_node = next(n for n in r1 if "consumer_on_1" in n.name)
+    assert int(recvs[0].id) in set(consumer_node.ctrl_deps)
+    assert consumer_node.ctrl_deps, "the consumer must not become a graph root"
+    assert not hasattr(__import__("program.et_emit", fromlist=["x"]), "CrossRankDepWarning")
+
+
+def test_emission_postcondition_catches_a_lost_successor():
+    """The gate that would have caught the P5 anchor drop.
+
+    A trace in which the ``MLP_forward`` compute has a successor in the Program
+    but none in the emitted DAG is exactly the shape the anchor drop produced,
+    and it is invisible to every other gate: same op multiset, same bytes, same
+    collectives, ``dlsim`` still completes. Only the AstraSim wall clock moved.
+    """
+    from program.et_emit import _check_no_lost_successors
+
+    b = ProgramBuilder(dp_count=1)
+    anchor = b.add_compute("MLP_forward", 0, 5e-6)
+    consumer = b.add_compute("consumer", 0, 1e-6, deps=(anchor,))
+    prog = b.finish(validate=False)
+    et_ids = {(anchor, 0): 0, (consumer, 0): 1}
+
+    class _T:
+        def __init__(self, nodes):
+            self.nodes = nodes
+
+    healthy = _T([new_comp_node(0, "MLP_forward", 5), new_comp_node(1, "consumer", 1)])
+    healthy.nodes[1].ctrl_deps.append(0)
+    _check_no_lost_successors(prog.ops, et_ids, {0: healthy}, 1)
+
+    lost = _T([new_comp_node(0, "MLP_forward", 5), new_comp_node(1, "consumer", 1)])
+    with pytest.raises(EmissionError, match="successors in the Program but NONE"):
+        _check_no_lost_successors(prog.ops, et_ids, {0: lost}, 1)
+
+
+def test_uncarriable_cross_rank_dep_is_an_error_not_a_shrug(tmp_path):
+    """The class cannot silently return: an edge that cannot be put on the wire
+    raises instead of being dropped."""
+    b = ProgramBuilder(dp_count=1)
+    a = b.add_compute("a", 0, 1e-6)
+    host = b.add_compute("host", 1, 1e-6)
+    same_device = b.add_transfer("cross_layer", 1, 1, 0, producer=host, comm_type=PIPE)
+    b.add_compute("consumer", 2, 1e-6, deps=(same_device,))
+    prog = b.finish(validate=False)
+    # A NESTED cross-rank carrier: the consumer (rank 2) depends on an elided
+    # same-device transfer on rank 1 whose own deps reach rank 0. One wire
+    # cannot express that, so it is loud.
+    prog.ops[same_device].deps = (host, a)
+    with pytest.raises(EmissionError, match="cannot be carried"):
+        emit_chakra(prog, str(tmp_path))
+
+
 def test_rank_formula_uses_the_declared_stage_count():
     """``rank = dp_idx * num_stages_initial + stage_index`` (DESIGN §2.5).
 

@@ -873,6 +873,35 @@ class BlockTemplates:
         return tuple(out)
 
 
+#: The ``misc_metadata`` keys :meth:`WorkloadSpec.from_timing` reads. Every one
+#: is written unconditionally by the single producer
+#: (``train_timing._prepare_execution_graphs``, which the inference model
+#: inherits), so a missing key means the producer changed and the workload is
+#: malformed — not that a default applies (**W1**).
+REQUIRED_MISC_KEYS: Tuple[str, ...] = (
+    "dp_microbatch_mode",
+    "dp_zero_stage",
+    "full_recomputation",
+    "moe_layer_mask",
+    "model_type",
+    "num_batch",
+    "num_layer",
+    "pipeline_style_recompute",
+)
+
+
+def _require_misc(misc_metadata: Mapping[str, Any], key: str) -> Any:
+    """``misc_metadata[key]``, with a WorkloadError that names the producer."""
+    if key not in misc_metadata:
+        raise WorkloadError(
+            f"misc_metadata is missing required key {key!r} "
+            f"(required: {list(REQUIRED_MISC_KEYS)}; produced by "
+            "train_timing._prepare_execution_graphs — INTERFACES §1.7). W1 "
+            "forbids a silent default here."
+        )
+    return misc_metadata[key]
+
+
 @dataclass(frozen=True)
 class WorkloadSpec:
     """The complete, typed workload description (INTERFACES §1.6).
@@ -1034,18 +1063,27 @@ class WorkloadSpec:
 
         ``layout`` is normally left ``None`` here and filled in by the dispatcher
         (which owns the hardware network layout); use :meth:`with_`.
+
+        **AMENDMENT 2026-07-29 (W1).** Every ``misc_metadata`` key this seam
+        reads is REQUIRED. It used to read all eight through
+        ``dict.get(key, fallback)``, which is the same silent-default hazard W1
+        deletes on the ``getattr`` side and which W1's own text already forbids:
+        a producer that stops writing ``num_layer`` yielded a 0-layer model, and
+        one that stops writing ``model_type`` yielded ``""`` — which the ViT
+        naming path dispatches on. ``_require_misc`` names the missing key and
+        the producer instead.
         """
         run = RunPolicy(
             run_type=RunType.parse(run_type),
             grad_accum_cycle=GradAccumCycle.parse(grad_accum_cycle),
             dp_microbatch_mode=DpMicrobatchMode.parse(
-                misc_metadata.get("dp_microbatch_mode", "every_mb")
+                _require_misc(misc_metadata, "dp_microbatch_mode")
             ),
-            zero_stage=int(misc_metadata.get("dp_zero_stage", 0) or 0),
+            zero_stage=int(_require_misc(misc_metadata, "dp_zero_stage") or 0),
             pipeline_interleave=max(1, int(pipeline_interleave or 1)),
-            full_recomputation=bool(misc_metadata.get("full_recomputation", False)),
+            full_recomputation=bool(_require_misc(misc_metadata, "full_recomputation")),
             pipeline_style_recompute=bool(
-                misc_metadata.get("pipeline_style_recompute", False)
+                _require_misc(misc_metadata, "pipeline_style_recompute")
             ),
         )
         declared = max(1, int(dp or 1))
@@ -1057,11 +1095,12 @@ class WorkloadSpec:
             dp=1 if run.run_type is RunType.INFERENCE else declared,
         )
         shape = ModelShape(
-            num_layers=int(misc_metadata.get("num_layer", 0) or 0),
-            micro_batches=int(misc_metadata.get("num_batch", 0) or 0),
-            model_type=str(misc_metadata.get("model_type", "") or ""),
+            num_layers=int(_require_misc(misc_metadata, "num_layer") or 0),
+            micro_batches=int(_require_misc(misc_metadata, "num_batch") or 0),
+            model_type=str(_require_misc(misc_metadata, "model_type") or ""),
             moe_layer_mask=tuple(
-                bool(value) for value in (misc_metadata.get("moe_layer_mask") or [])
+                bool(value)
+                for value in (_require_misc(misc_metadata, "moe_layer_mask") or [])
             ),
         )
         return cls(

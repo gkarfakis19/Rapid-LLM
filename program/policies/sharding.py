@@ -204,6 +204,39 @@ class ShardingContext:
     work: WorkSet
     grad_accum: GradAccumPolicy
     stages: StagePartition
+    #: AMENDMENT 2026-07-29 — the SchedulePolicy's global work order.
+    #:
+    #: A PREFETCH requirement is "issue this gather early, before the work that
+    #: consumes it" and the consuming work is *the next one of its kind in the
+    #: execution order*. Rows S6/S14 used to leave that to ``via``, i.e. to
+    #: whichever R3 edge the schedule produced — so under a backward pass that
+    #: walks microbatches ascending one gather preceded nothing at all. The
+    #: order is a declared L3 artifact (``Schedule.order``), so the policy reads
+    #: it and NAMES the consumer instead. Empty means "no order supplied", and
+    #: :meth:`next_after` then declares nothing (the ``via`` behavior).
+    order: Tuple[WorkItem, ...] = ()
+
+    def next_after(
+        self, hosts: Sequence[WorkItem], kind: WorkKind, direction: Direction
+    ) -> Optional[WorkItem]:
+        """The first ``(kind, direction)`` item scheduled after every host.
+
+        This is what "prefetch for the next one" means, resolved against the
+        order that will actually run rather than against a microbatch-index
+        assumption: under GPipe's descending backward it answers ``b - 1`` and
+        under an ascending one ``b + 1``, with no branch here.
+        """
+        if not self.order or not hosts:
+            return None
+        index = {item: position for position, item in enumerate(self.order)}
+        try:
+            after = max(index[host] for host in hosts)
+        except KeyError:  # pragma: no cover - a host outside the schedule
+            return None
+        for item in self.order[after + 1 :]:
+            if item.kind is kind and item.direction is direction:
+                return item
+        return None
 
     def spec_for(self, key: CommKey) -> Optional[CommSpec]:
         """``None`` when the key is absent — an absent key means the upstream
@@ -577,6 +610,9 @@ class ZeRO3(ZeRO2):
             embedding = ctx.emits(ZERO3_EMBEDDING_KEY, b + 1)
             hosts = self._cross_device_forward_hosts(b, ctx)
             if embedding is not None and hosts:
+                next_embedding = ctx.next_after(
+                    hosts, WorkKind.EMBEDDING, Direction.FORWARD
+                )
                 out.append(
                     SyncRequirement.from_spec(
                         embedding,
@@ -585,6 +621,14 @@ class ZeRO3(ZeRO2):
                         mode=AttachMode.PARALLEL_TO,
                         anchors=hosts,
                         via=VIA_NON_DATA_FLOW,
+                        # WHO WAITS FOR IT, declared: the NEXT forward embedding
+                        # after the boundary this gather is issued at. Under
+                        # GPipe that is microbatch b+1's, i.e. exactly what
+                        # ``via`` finds (stage 0's next projected item), so
+                        # nothing moves; under any other schedule the dependency
+                        # is still enforced instead of being lost with the R3
+                        # edge it used to ride.
+                        consumers=() if next_embedding is None else (next_embedding,),
                         spread=_spread_for(embedding),
                         origin="S6",
                     )
@@ -659,6 +703,14 @@ class ZeRO3(ZeRO2):
         hosts = self._cross_device_backward_hosts(b, ctx)
         if not hosts:
             return ()
+        # WHO WAITS FOR IT, declared. The gather is issued at microbatch ``b``'s
+        # backward stage boundary and prefetches for the NEXT backward softmax in
+        # the schedule's own order — ``b - 1`` under GPipe's descending backward,
+        # which is exactly the op ``via`` finds today (stage ``pp-1``'s next
+        # projected item), so declaring it moves nothing while making it survive
+        # a different ``SchedulePolicy``. Resolving it by microbatch ARITHMETIC
+        # instead would close a cycle under an ascending backward (measured).
+        consumer = ctx.next_after(hosts, WorkKind.SOFTMAX, Direction.BACKWARD)
         return (
             SyncRequirement.from_spec(
                 spec,
@@ -669,6 +721,7 @@ class ZeRO3(ZeRO2):
                 mode=AttachMode.PARALLEL_TO,
                 anchors=hosts,
                 via=VIA_NON_DATA_FLOW,
+                consumers=() if consumer is None else (consumer,),
                 spread=_spread_for(spec),
                 origin="S14",
             ),

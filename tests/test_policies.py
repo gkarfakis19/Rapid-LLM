@@ -760,6 +760,70 @@ def test_no_getattr_in_workload() -> None:
         assert not offenders, f"{path.name}: {offenders}"
 
 
+def test_no_silent_defaults_in_the_producer_seam() -> None:
+    """W1, the other half (amendment 2026-07-29).
+
+    ``getattr(obj, name, default)`` and ``dict.get(key, fallback)`` are the same
+    hazard wearing two hats, and W1's text has always named both. The grep gate
+    only caught the first, so ``WorkloadSpec.from_timing`` — THE producer seam
+    (§1.7) — was still reading all eight of its ``misc_metadata`` fields with a
+    fallback: a producer that stopped writing ``num_layer`` silently yielded a
+    0-layer model, and one that stopped writing ``model_type`` yielded ``""``,
+    which the ViT naming path dispatches on.
+    """
+    import inspect
+    import re as _re
+
+    from program.workload import WorkloadSpec
+
+    source = inspect.getsource(WorkloadSpec.from_timing)
+    source = _re.sub(r'"""(?:.|\n)*?"""', '""', source)
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        if _re.search(r"\.get\([^()]*,", _re.sub(r"#.*$", "", line))
+        or "getattr(" in _re.sub(r"#.*$", "", line)
+    ]
+    assert not offenders, f"WorkloadSpec.from_timing: {offenders}"
+
+
+def test_missing_misc_metadata_key_raises_and_names_the_key() -> None:
+    """Every key in ``REQUIRED_MISC_KEYS`` is required, one at a time."""
+    from program.workload import REQUIRED_MISC_KEYS, WorkloadError, WorkloadSpec
+
+    complete = {
+        "num_batch": 2,
+        "num_layer": 4,
+        "dp_zero_stage": 0,
+        "full_recomputation": False,
+        "pipeline_style_recompute": False,
+        "dp_microbatch_mode": "every_mb",
+        "moe_layer_mask": [],
+        "model_type": "gpt",
+    }
+    assert set(complete) == set(REQUIRED_MISC_KEYS)
+    cfg = Cfg()
+    template = make_workload(cfg).blocks
+
+    def _build(misc):
+        return WorkloadSpec.from_timing(
+            tp=1, cp=1, ep=1, pp=1, dp=1,
+            run_type="training",
+            comp_times={},
+            comm_metadata=raw_comm_metadata(cfg),
+            misc_metadata=misc,
+            blocks=template,
+            overlap=OverlapSpec.from_legacy("tp"),
+            interconnect={},
+        )
+
+    _build(complete)  # the complete input builds
+    for key in REQUIRED_MISC_KEYS:
+        partial = {k: v for k, v in complete.items() if k != key}
+        with pytest.raises(WorkloadError, match=key):
+            _build(partial)
+
+
 def test_no_participant_count_inference() -> None:
     """P2 precondition: communicator membership is never derived from a
     participant count (legacy_lowering.py:243-248)."""

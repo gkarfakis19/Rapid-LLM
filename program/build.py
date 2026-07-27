@@ -275,6 +275,16 @@ _ProtoOp = Union[_ProtoCompute, _ProtoCollective, _ProtoTransfer]
 #: ``BlockTemplate`` and ONE direction and nothing else.
 _BLOCK_KINDS: Tuple[WorkKind, ...] = (WorkKind.LAYER, WorkKind.RECOMPUTE)
 
+#: The work kinds whose BACKWARD direction produces a weight gradient, i.e. what
+#: **R5** makes the optimizer wait for. Same set as
+#: ``schedule.policy._GRADIENT_KINDS`` (which uses it to answer "which microbatch
+#: finishes last"); named here so R5 does not reach into L3's private table.
+_R5_GRADIENT_KINDS: Tuple[WorkKind, ...] = (
+    WorkKind.LAYER,
+    WorkKind.EMBEDDING,
+    WorkKind.SOFTMAX,
+)
+
 
 def restrict_work_for(
     granularity: Granularity,
@@ -513,6 +523,8 @@ class _Builder:
         self._apply_r3()
         # 7 / 8 -----------------------------------------------------------
         self._apply_r4(self._collect_requirements())
+        # 8b ---------------------------------------------------------------
+        self._apply_r5()
         # 9 ---------------------------------------------------------------
         self._realize_overlap()
         # 10 --------------------------------------------------------------
@@ -565,6 +577,22 @@ class _Builder:
             self._nodes[dep].succs.append(node)
         else:
             classes.add(dep_class)
+
+    def _classes(self, dep: int, node: int) -> Set[DepClass]:
+        """The classes carried by ``dep -> node``; ``{DATA_FLOW}`` if absent."""
+        return set(self._edges.get((dep, node)) or {DepClass.DATA_FLOW})
+
+    def _reparent_dep(self, dep: int, node: int, *, like: Tuple[int, int]) -> None:
+        """Add ``dep -> node`` carrying the classes of the edge ``like``.
+
+        Overlap realization (§4.5) MOVES edges; it does not invent them. Adding
+        the moved edge as ``DATA_FLOW`` unconditionally erased the original
+        class, which matters because ``PARALLEL_TO``'s ``via`` filter dispatches
+        on it (§2.2) and because ``meta.misc["schedule_edges"]`` is derived from
+        it.
+        """
+        for dep_class in self._classes(*like):
+            self._add_dep(dep, node, dep_class)
 
     def _drop_dep(self, dep: int, node: int) -> None:
         """Remove ``dep -> node`` entirely. Used ONLY by overlap realization
@@ -837,6 +865,24 @@ class _Builder:
         same-device dep, because the rematerialized activation never leaves the
         device that recomputed it (legacy wires it as a direct
         ``recompute_node.add_child(transformer_node_b)``, ``schedule.py:750``).
+
+        **AMENDMENT 2026-07-29.** R2 also links the two ends of a microbatch:
+
+        * ``SOFTMAX/FORWARD(b) -> SOFTMAX/BACKWARD(b)`` — the loss gradient
+          needs the forward logits. Legacy never wired it and the new core did
+          not either: the ordering was carried ONLY by R3, i.e. by whatever
+          adjacency the ``SchedulePolicy`` happened to produce, and R3 is free
+          to drop an edge it finds transitively implied (``:995``). Under GPipe
+          it survives; under any schedule that interleaves forward and backward
+          it is one adjacency away from being lost silently. It is a DATA_FLOW
+          edge, so it is stated as one.
+        * ``LAYER/FORWARD(b,l) -> RECOMPUTE(b,l)`` — the rematerialization
+          replays the forward of the same layer and needs what that forward
+          stashed. Same argument, same fix.
+
+        Both are same-stage by construction (a microbatch's softmax lives on
+        stage ``pp-1`` in both directions; a layer's recompute lives with the
+        layer), so both are plain same-device deps and neither adds an op.
         """
         work = self._work
         shape = self._fw.spec.shape
@@ -856,6 +902,9 @@ class _Builder:
                 continue
 
             previous = work.get(WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=b)
+            softmax_f = work.get(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=b)
+            if softmax_f is not None and previous is not None:
+                self._link(softmax_f, previous, transfer=False)
             for layer in reversed(range(layers)):
                 backward = work.get(
                     WorkKind.LAYER, Direction.BACKWARD, microbatch=b, layer=layer
@@ -869,6 +918,11 @@ class _Builder:
                 if previous is not None:
                     self._link(previous, entry, transfer=True)
                 if remat is not None:
+                    layer_f = work.get(
+                        WorkKind.LAYER, Direction.FORWARD, microbatch=b, layer=layer
+                    )
+                    if layer_f is not None:
+                        self._link(layer_f, remat, transfer=False)
                     self._link(remat, backward, transfer=False)
                 previous = backward
             embedding_b = work.get(
@@ -980,7 +1034,6 @@ class _Builder:
         the MICROBATCH BOUNDARY. Blanket serialization would inflate the DAG
         with edges AstraSim then has to carry per rank.
         """
-        added: List[Tuple[int, int]] = []
         for dep in self._schedule.implied_deps(self._placement.devices_for):
             device = int(dep.device)
             before = self._chain_nodes.get((dep.before, device))
@@ -995,10 +1048,6 @@ class _Builder:
             if self._reaches(source, target):
                 continue
             self._add_dep(source, target, DepClass.SCHEDULE)
-            added.append((source, target))
-        #: the R3 edges, as node ids. Stamped onto the Program as uid pairs so
-        #: **D1** is a checkable property of the artifact and not of a log line.
-        self._schedule_pairs = added
 
     # ------------------------------------------------------------------
     # phase 7 — requirements
@@ -1009,6 +1058,11 @@ class _Builder:
             work=self._work,
             grad_accum=self._grad_accum,
             stages=self._schedule.layers,
+            # A prefetch requirement names the work it prefetches FOR
+            # (``ShardingContext.next_after``); that is a question about the
+            # execution order, which L3 declares, so the order is handed over
+            # rather than re-derived from a microbatch index.
+            order=self._schedule.order(),
         )
         out: List[SyncRequirement] = list(self._sharding.workload_requirements(ctx))
         for item in self._work:
@@ -1155,6 +1209,23 @@ class _Builder:
                 from typing import assert_never
 
                 assert_never(mode)
+
+        # DECLARED consumers (amendment 2026-07-29, §2.2). Applied after the
+        # mode so a requirement whose "who waits for me" answer is knowable at
+        # declaration time does not have to be discovered through ``via`` — the
+        # gap that makes rows S6/S14 ride an R3 edge. Idempotent: under GPipe
+        # the ``via`` scan above already added exactly these edges.
+        for consumer in req.consumers:
+            consumer_entries, _consumer_exits = self._resolve_anchor(consumer, device)
+            if not consumer_entries:
+                raise BuildError(
+                    f"SyncRequirement {req.key!r} ({req.origin}) declares consumer "
+                    f"{consumer!r}, which has no chain reachable from device {device}"
+                )
+            for entry in consumer_entries:
+                if entry == nid:  # pragma: no cover - defensive
+                    continue
+                self._add_dep(nid, entry, DepClass.SYNC)
         return nid
 
     def _sync_name(self, req: SyncRequirement, instance: int) -> str:
@@ -1206,6 +1277,64 @@ class _Builder:
             entries.append(nids[chain.entry])
             exits.append(nids[chain.exit])
         return (entries, exits)
+
+    # ------------------------------------------------------------------
+    # phase 8b — R5 (the optimizer's gradient dependency)
+    # ------------------------------------------------------------------
+    def _apply_r5(self) -> None:
+        """**R5** (new, 2026-07-29) — ``OPTIMIZER(stage s)`` runs after EVERY
+        gradient-producing backward item of stage ``s``, on each device it is
+        placed on.
+
+        Stated because nothing stated it. Legacy hand-picked ONE attach point
+        per stage (``simulate_train_graph.py:1300-1318``: ``embedding_node_b[0]``
+        on stage 0, ``_bwd_exit_node(0, min_layer(s))`` elsewhere) and the new
+        core did not port it — the ordering came out of R3's per-device
+        adjacency, which happens to end each stage's projection with exactly
+        that item **because GPipe walks microbatches in reverse**. A schedule
+        whose backward walks microbatches ASCENDING leaves 6 of 9 backward items
+        un-ordered before the optimizer (measured), i.e. the optimizer applies
+        two thirds of a gradient. That is a property of the model, not of the
+        schedule, so it belongs in a rule.
+
+        Redundancy-eliminated exactly like R3 (**D1**): the edge is materialized
+        only when the ordering is not already implied, so under GPipe this rule
+        adds NOTHING and the artifact is unchanged. It runs AFTER R4 so the
+        sync lattice's own edges count as implications and so no ``via`` scan
+        can see an R5 edge.
+
+        **Not** in scope: "the optimizer runs after its stage's GRADIENT
+        REDUCER" (audit item D11). That edge is absent in legacy and in the new
+        core alike; it is a modeling question for the owner, not a regression.
+        """
+        if not self._fw.spec.run.include_backward:
+            return
+        optimizers = [
+            item for item in self._work if item.kind is WorkKind.OPTIMIZER
+        ]
+        if not optimizers:
+            return
+        producers = [
+            item
+            for item in self._work
+            if item.direction is Direction.BACKWARD
+            and item.kind in _R5_GRADIENT_KINDS
+        ]
+        for optimizer in sorted(optimizers, key=WorkItem.sort_key):
+            stage = int(self._schedule.stage_of(optimizer))
+            for chain in self._chains.get(optimizer, ()):
+                device = int(chain.device)
+                target = self._chain_nodes[(optimizer, device)][chain.entry]
+                for item in sorted(producers, key=WorkItem.sort_key):
+                    if int(self._schedule.stage_of(item)) != stage:
+                        continue
+                    entry = self._chain_by_device.get((item, device))
+                    if entry is None:
+                        continue
+                    source = self._chain_nodes[(item, device)][entry.exit]
+                    if source == target or self._reaches(source, target):
+                        continue
+                    self._add_dep(source, target, DepClass.DATA_FLOW)
 
     # ------------------------------------------------------------------
     # phase 9 — overlap realization (INTERFACES §4.5)
@@ -1260,10 +1389,10 @@ class _Builder:
             # compute takes the collective's consumers (``transforms.py:177-188``).
             for coll in collectives:
                 for dep in list(self._nodes[compute].deps):
-                    self._add_dep(dep, coll, DepClass.DATA_FLOW)
+                    self._reparent_dep(dep, coll, like=(dep, compute))
                 self._drop_dep(compute, coll)
                 for succ in list(self._nodes[coll].succs):
-                    self._add_dep(compute, succ, DepClass.DATA_FLOW)
+                    self._reparent_dep(compute, succ, like=(coll, succ))
             return
 
         head_duration = duration * (1.0 - decl.fraction)
@@ -1310,10 +1439,10 @@ class _Builder:
             self._drop_dep(dep, compute)
         self._add_dep(head, compute, DepClass.DATA_FLOW)
         for coll in collectives:
+            self._reparent_dep(head, coll, like=(compute, coll))
             self._drop_dep(compute, coll)
-            self._add_dep(head, coll, DepClass.DATA_FLOW)
             for succ in list(self._nodes[coll].succs):
-                self._add_dep(compute, succ, DepClass.DATA_FLOW)
+                self._reparent_dep(compute, succ, like=(coll, succ))
 
     def _split_collective(self, coll: int, decl: OverlapDecl) -> None:
         """``OverlapAnchor.CONSUMER`` (verbatim ``_split_cp_edge_fine``)."""
@@ -1337,14 +1466,14 @@ class _Builder:
             # The blocking consumer is re-parented onto the collective's
             # predecessors (``transforms.py:233-244``).
             for consumer in blocking:
-                self._drop_dep(coll, consumer)
                 for pred in preds:
-                    self._add_dep(pred, consumer, DepClass.DATA_FLOW)
+                    self._reparent_dep(pred, consumer, like=(pred, coll))
+                self._drop_dep(coll, consumer)
             for succ in succs:
                 if succ in blocking:
                     continue
                 for consumer in blocking:
-                    self._add_dep(consumer, succ, DepClass.DATA_FLOW)
+                    self._reparent_dep(consumer, succ, like=(coll, succ))
             return
 
         node.size_bytes = float(block_bytes)
@@ -1372,10 +1501,13 @@ class _Builder:
         for succ in succs:
             if succ in blocking:
                 continue
+            carried = self._classes(coll, succ)
             self._drop_dep(coll, succ)
             for consumer in blocking:
-                self._add_dep(consumer, succ, DepClass.DATA_FLOW)
-            self._add_dep(coll if ovlp is None else ovlp, succ, DepClass.DATA_FLOW)
+                for dep_class in carried:
+                    self._add_dep(consumer, succ, dep_class)
+            for dep_class in carried:
+                self._add_dep(coll if ovlp is None else ovlp, succ, dep_class)
 
     def _is_blocking_consumer(self, nid: int, decl: OverlapDecl) -> bool:
         node = self._nodes[nid]
@@ -1401,7 +1533,6 @@ class _Builder:
         for node in sorted(self._nodes, key=lambda n: uid_of[n.nid]):
             uid = uid_of[node.nid]
             deps = tuple(uid_of[dep] for dep in node.deps)
-            succs = tuple(uid_of[succ] for succ in node.succs)
             if isinstance(node, _ProtoCompute):
                 ops[uid] = ComputeOp(
                     uid=uid,
@@ -1418,7 +1549,6 @@ class _Builder:
                     layer=node.layer,
                     is_moe_layer=node.is_moe_layer,
                     work=node.work,
-                    succs=succs,
                 )
             elif isinstance(node, _ProtoCollective):
                 label = None
@@ -1442,7 +1572,6 @@ class _Builder:
                     comm_key=node.comm_key,
                     axes=node.axes,
                     work=node.work,
-                    succs=succs,
                 )
             else:
                 ops[uid] = TransferOp(
@@ -1458,7 +1587,6 @@ class _Builder:
                     moe_component=node.moe_component,
                     participants=node.participants,
                     interconnect=node.interconnect,
-                    succs=succs,
                 )
 
         devices = tuple(int(device) for device in self._devices)
@@ -1489,9 +1617,21 @@ class _Builder:
                     if self._directions is None
                     else tuple(d.name for d in self._directions)
                 ),
+                # **D1's artifact.** DERIVED from the edge table rather than
+                # recorded at R3 time: overlap realization (§4.5) re-parents
+                # edges after R3 runs, so a recorded ``(source, target)`` nid
+                # pair could name an edge that no longer exists (measured: 6/13
+                # stale on ``dp1tp2cp1pp2mb2sp1``, 14/25 on
+                # ``dp2tp2cp2pp2mb2sp1``). Reading the CLASS off the surviving
+                # edge cannot go stale, and it is what makes D1 checkable on the
+                # artifact instead of on a log line. Re-parenting preserves the
+                # class (``_reparent_dep``), which is what makes this exact.
                 "schedule_edges": tuple(
-                    (uid_of[source], uid_of[target])
-                    for source, target in self._schedule_pairs
+                    sorted(
+                        (uid_of[source], uid_of[target])
+                        for (source, target), classes in self._edges.items()
+                        if DepClass.SCHEDULE in classes
+                    )
                 ),
                 "dropped_requirements": tuple(self._dropped_requirements),
                 "gmap_workdir": self._gmap_workdir,

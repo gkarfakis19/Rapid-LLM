@@ -130,10 +130,6 @@ class ComputeOp:
     #: that ``retime`` / ``memory_sim`` / fault projection look ops up by,
     #: replacing positional mirroring and name-prefix walks.
     work: Optional[Any] = None
-    #: ORDERED successors (INTERFACES §4.7), in construction order. Consumers
-    #: that need a TIE ORDER use ascending uid instead — see
-    #: :mod:`program.analytic_sim`.
-    succs: Tuple[OpUid, ...] = ()
 
 
 @dataclass
@@ -169,8 +165,6 @@ class CollectiveOp:
     axes: Tuple[str, ...] = ()
     #: INTERFACES §4.7 — stable semantic identity; see ``ComputeOp.work``.
     work: Optional[Any] = None
-    #: ORDERED successors (INTERFACES §4.7).
-    succs: Tuple[OpUid, ...] = ()
 
 
 @dataclass
@@ -212,8 +206,6 @@ class TransferOp:
     #: other IR field expresses; see :mod:`program.analytic_sim`.
     participants: int = 0
     interconnect: Optional[str] = None
-    #: ORDERED successors (INTERFACES §4.7).
-    succs: Tuple[OpUid, ...] = ()
 
     @property
     def is_control(self) -> bool:

@@ -603,6 +603,20 @@ class SyncRequirement:
     mode: AttachMode = AttachMode.AFTER
     anchors: Tuple[SyncAnchor, ...] = ()
     via: FrozenSet[DepClass] = VIA_ALL  #: PARALLEL_TO only
+    #: AMENDMENT 2026-07-29 — work whose ENTRY must depend on this requirement,
+    #: DECLARED rather than discovered through ``via``.
+    #:
+    #: ``PARALLEL_TO(a, via)`` answers "who waits for me?" with
+    #: ``succ(a, via)`` — the successors the anchor happens to have when R4
+    #: runs. For rows **S6/S14** ``via`` is ``VIA_NON_DATA_FLOW``, i.e. the
+    #: answer is literally *an R3 edge*, whose identity is chosen by the
+    #: ``SchedulePolicy``. Under GPipe it is the right op; under a schedule
+    #: whose backward walks microbatches ascending, one gather ends up
+    #: preceding NOTHING and another attaches to the wrong microbatch
+    #: (measured). The consumer is known at DECLARATION time, so it is
+    #: declared. Under GPipe it names exactly the op ``via`` already finds, so
+    #: the attach is idempotent and the artifact does not move.
+    consumers: Tuple[WorkItem, ...] = ()
 
     # -- how ---------------------------------------------------------------
     overlap: Optional[Any] = None  #: OverlapDecl (program.policies.overlap)
@@ -646,7 +660,13 @@ class SyncRequirement:
                 f"SyncRequirement {self.key!r} mode {self.mode.name} may only anchor on "
                 "WorkItems; only AFTER may chain onto another SyncKey"
             )
+        if any(not isinstance(item, WorkItem) for item in self.consumers):
+            raise SyncError(
+                f"SyncRequirement {self.key!r} declares a non-WorkItem consumer: "
+                f"{list(self.consumers)!r}"
+            )
         object.__setattr__(self, "anchors", tuple(self.anchors))
+        object.__setattr__(self, "consumers", tuple(self.consumers))
         object.__setattr__(self, "axes", tuple(self.axes))
         object.__setattr__(self, "participants", int(self.participants))
 
@@ -661,6 +681,7 @@ class SyncRequirement:
         anchors: Sequence[SyncAnchor],
         spread: SyncSpread = SyncSpread.CLUSTER_RANK_0,
         via: FrozenSet[DepClass] = VIA_ALL,
+        consumers: Sequence[WorkItem] = (),
         split: ByteSplit = ByteSplit.WHOLE,
         overlap: Optional[Any] = None,
         origin: str = "",
@@ -687,6 +708,7 @@ class SyncRequirement:
             mode=mode,
             anchors=tuple(anchors),
             via=via,
+            consumers=tuple(consumers),
             overlap=overlap,
             origin=origin,
         )

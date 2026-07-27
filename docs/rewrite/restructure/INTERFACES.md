@@ -30,8 +30,16 @@
 | 2026-07-28 | §4.6, §5 (T1 tie discipline) | **Program order (ascending uid) IS the consumer tie discipline.** The successors of a finished op are visited in ascending uid, the initially-ready set is seeded in ascending uid, the ready list stays FIFO | **P6's normative deliverable.** The legacy replays' outcome depended on children-list adjacency order — an artifact of the construction sequence, declared nowhere, so it could not survive the cutover. Measured before choosing: on all 10 fully-analytical specs plus every hybrid spec, uid order and `Op.succs` construction order give BIT-IDENTICAL totals, and both match the deleted proto-graph evaluator. Program order was therefore free, and it is the order AstraSim already consumes as node-id priority. Two legacy quirks are preserved and NAMED rather than rediscovered: `analytic_sim._ROOT_COMM_IS_UNTIMED` (the conversion pass only converted *children*, and the ZeRO-3 forward-entry gather IS the coarse root — timing it moves `train:analytical:*:zero3` by +5.76%), and "the memory replay times the pipeline-level collectives only" (the coarse conversion ran BEFORE flattening, so per-rank pipeline transfers and block-template comms were created at `duration=0`). |
 | 2026-07-28 | §4.9, new `program/mapping.py` | The first-dimension SCOTCH remap is a POST-BUILD pass over the ops (`apply_first_dim_mapping`), not a step inside a lowering | **P5.** Steps 3/8 of `legacy_lowering.lower_to_program` read a mutable proto graph. Over the IR the whole remap is: collect per-axis collective bytes and cross-stage pipeline bytes off the ops, ask SCOTCH for a permutation, and reorder `Program.devices` — because `devices.index(d)` IS the stage index the dp-major rank formula uses and communicator members are DEVICE ids, so permuting the order re-derives every rank and every wire group with nothing to re-run. Op uids are NOT recomputed (BUG_LEDGER C7's split, kept: mapping is not scheduling). |
 | 2026-07-28 | §4.8 (V6) | **V6 is narrowed to pairs whose EARLIER member has a successor** | **P5.** §4.8 predicted the false-positive class and asked P5 to consider exactly this. V6 is always-on in `build()` now, and a gradient reducer is a graph SINK by construction, so every pair of reducers of one group on one device tripped it. Two sinks cannot race: nothing observes which issued first for a program whose order is ONE global order projected onto every device (CONTEXT constraint 2). Production no longer has to silence `GroupRaceWarning` to get a clean log. |
-| 2026-07-28 | §4.3 R4 / L5 | A SYNC dep may cross devices in the IR; **the EMITTER is where "a `ctrl_dep` is rank-local" lives** | **P5, and it cost one wrong attempt.** A ZeRO-3 gather inheriting a cross-stage anchor's deps (rows S6/S14) produces a dep between ops on different devices with no transfer carrying it. Filtering those out in `build()` looked right and moved `train:analytical:dp2tp1cp1pp2mb2sp0:zero3` by **-12.1%** — the analytical evaluator honors that edge, which is why legacy's total depended on it. So the IR keeps the edge (as legacy's coarse graph did) and `et_emit` drops it with a counted `CrossRankDepWarning`, because writing a foreign rank's node id aliases another trace (measured: it closed a cycle on that spec). Rank-locality is an ET fact, not an IR fact. |
+| 2026-07-28 | §4.3 R4 / L5 | A SYNC dep may cross devices in the IR; **the EMITTER is where "a `ctrl_dep` is rank-local" lives** | **P5, and it cost one wrong attempt.** A ZeRO-3 gather inheriting a cross-stage anchor's deps (rows S6/S14 — **wrong: the producing rows are S8/S15**, corrected 2026-07-29 by instrumenting `SyncRequirement.from_spec` and reading `req.origin`; S6/S14 are `place_on`-and-anchor co-located and never cross a rank) produces a dep between ops on different devices with no transfer carrying it. Filtering those out in `build()` looked right and moved `train:analytical:dp2tp1cp1pp2mb2sp0:zero3` by **-12.1%** — the analytical evaluator honors that edge, which is why legacy's total depended on it. So the IR keeps the edge (as legacy's coarse graph did) and `et_emit` drops it with a counted `CrossRankDepWarning`, because writing a foreign rank's node id aliases another trace (measured: it closed a cycle on that spec). Rank-locality is an ET fact, not an IR fact. |
 | 2026-07-28 | §4.3 R2, L5 | **A same-device (elided) `TransferOp` must be replaced by a PLAIN dep on its own deps at emission** — eliding the op must not elide the edge | **P5.** `ir.py` claimed "the consumer already depends on the producer directly (legacy stage_deps behavior)", but in a `build()` program the ONLY path from producer to consumer is through the transfer. Dropping it let the ranks of one stage leave collective-issue lockstep: AstraSim reported `Hardware Resource sys.id=N has unreleased nodes` and returned zero time on `train:flattened:dp1tp2cp1pp2mb2sp1:recompute` — a silent deadlock that `equiv.dlsim` did NOT catch (it does not model dynamic issue order). Two sibling fixes landed with it: a tp-overlap split must move the transfer's `consumers` to the head along with the deps, and a chain step that depends on a block-template p2p must register as a consumer of it (the MoE cold-rank JOIN's ordering against its own residual send). |
+| 2026-07-29 | §4.3 R2, L5 | **A cross-device `TransferOp`'s SEND carries EVERY dep of the transfer that resolves on the SEND's own rank**, not `transfer.producer` alone | **P5 verification.** R2 already said `TransferOp.deps` includes both `p.exit` and the nearest preceding `ComputeStep` when `p.exit` is a collective (the *compute-anchor double-dep*, `pipeline_fine.py:672-687`), and `build()` records it. `et_emit` Phase B emitted `transfer.producer` only, so the anchor was DROPPED — silently: not a `cross_rank_drop`, no warning, no ledger row. At `tp>1` with a hoisted tp/sp collective the anchor is the producer's SIBLING, so the inter-stage SEND ended up with **no dependency at all on the compute that produced the activation it carries**, and that compute became a dependency SINK. Measured: this is 62–95% of the entire P5 T2 movement (`dp2tp2cp2pp2mb2sp1` −5.945% → −0.213%). The anchor is on the SEND's own rank, so this was a plain omission, not an inexpressibility. |
+| 2026-07-29 | §4.3 R4, L5 — **supersedes the 2026-07-28 R4/L5 row** | **A cross-rank SYNC dep is MATERIALIZED as a 1-byte control SEND/RECV pair, never dropped.** `CrossRankDepWarning` is deleted; an edge that cannot be carried raises `EmissionError` | **P5 verification.** The 2026-07-28 row was right that rank-locality is an ET fact and wrong about the remedy. The warning's justification ("the ordering is carried by the shared per-stage collectives") is FALSE on the only spec that produces the class: the ZeRO-3 gather's communicator is stage 1's dp pair, its dep is on stage 0, and no collective has members on both stages. The four dropped edges were the gathers' ONLY ordering, so all four became graph ROOTS issuing at t=0 (+1.366%). Legacy put them on the wire (zero-byte `cross_layer_rank0` TransferOps); so does `et_emit` now, in both directions, which brings the spec to **+0.002%** and makes the analytical evaluator and AstraSim honor the SAME DAG. A warning class cannot silently return: emission is total. |
+| 2026-07-29 | §4.3 R2 | R2 also links **`SOFTMAX/FORWARD(b) -> SOFTMAX/BACKWARD(b)`** and **`LAYER/FORWARD(b,l) -> RECOMPUTE(b,l)`**, both plain same-device deps | **P5 verification.** Both are data dependencies (the loss gradient needs the forward logits; the rematerialization needs what the forward stashed) and neither was stated anywhere: the ordering was carried ONLY by an R3 adjacency, which R3 is free to drop when it finds it implied (`build.py:995`). Under a schedule whose backward walks microbatches ascending the softmax link survives for one microbatch and nothing else. Adding it is ordering-redundant under GPipe — the AstraSim wall clock does not move — and it makes **16 ledger `dag_hash` rows over 10 specs disappear**: those bundles are bit-exact with the goldens again, which is what "the 10 entries filed under CONTROL-TRANSFER were really a missing fwd→bwd edge" meant. |
+| 2026-07-29 | §4.3 (new **R5**), §4.2 | New rule **R5 — `OPTIMIZER(stage s)` depends on every gradient-producing BACKWARD WorkItem of stage `s`**, redundancy-eliminated exactly like R3; runs after R4 | **P5 verification.** Nothing stated it. Legacy hand-picked ONE attach point per stage (`85894c6:simulate_train_graph.py:1300-1318`) and `build()` inherited the ordering from R3's per-device adjacency, which is only correct because GPipe's backward walks microbatches in REVERSE. Under an ascending backward, 6 of 9 backward items are un-ordered before the optimizer — it applies two thirds of a gradient. R5 adds **zero** edges under GPipe, so the artifact does not move. **Not** in scope: "the optimizer after its stage's gradient REDUCER", which is absent in legacy and in `build()` alike (audit D11) — a modeling question for the owner, not a regression. |
+| 2026-07-29 | §2.2, §2.4 | `SyncRequirement` gains **`consumers: Tuple[WorkItem, ...]`** — work whose ENTRY must depend on the requirement, DECLARED; `ShardingContext` gains `order` (the `Schedule`'s work order) and `next_after(hosts, kind, direction)` | **P5 verification.** `PARALLEL_TO(a, via)` answers "who waits for me?" with `succ(a, via)`, and for rows **S6/S14** `via` is `VIA_NON_DATA_FLOW` — i.e. the answer is literally an R3 edge whose identity the `SchedulePolicy` chooses. Under an ascending backward one gather precedes NOTHING and another attaches to the wrong microbatch (`ext_1f1b.md` item 6, reproduced in the new core). A prefetch's consumer is "the next one of its kind in the execution order", which is a question about L3's declared order, so the policy reads the order and NAMES the consumer. Resolving it by microbatch ARITHMETIC instead closes a cycle under an ascending backward (measured). Under GPipe it names exactly the op `via` already finds: **zero** structural change on all 42 specs. |
+| 2026-07-29 | §4.7, §4.8, §6 | **`Op.succs` is DELETED.** `meta.misc["schedule_edges"]` is DERIVED from the edge table at `_finish` instead of recorded at R3 time; overlap re-parenting PRESERVES `DepClass` | **P5 verification.** §4.7 and §6 said `analytic_sim` / `memory_sim` / `viz` read `Op.succs`; they do not — all three build their own successor map from `deps`, and no other production reader exists. It was a write-only mirror that every mutation had to keep in sync. `schedule_edges` was stale wherever overlap ran (6/13 pairs on `dp1tp2cp1pp2mb2sp1`, 14/25 on `dp2tp2cp2pp2mb2sp1`) because `_split_compute`/`_split_collective` re-parent AFTER R3; deriving it from the surviving edge cannot go stale. Those re-parents also re-added every moved edge as `DATA_FLOW`, erasing the class that `via` dispatches on. |
+| 2026-07-29 | §4.8 (new **V9**), L5 | **Always-on emission postcondition: an op with successors in the Program keeps at least one in the emitted trace** (`et_emit._check_no_lost_successors`) | **P5 verification.** A dropped ordering edge is invisible to every existing gate — same op multiset, same bytes, same collectives, `dlsim` still completes, the group-order postcondition still holds — and moves only the AstraSim wall clock. This is the check that catches the class at the place it happens. `validate.py`'s **V6** asks a similar question of the IR and only about collectives. |
+| 2026-07-29 | §1.7, §1.8 (W1) | `_prepare_execution_graphs` returns a **2-tuple** `(WorkloadSpec, Optional[WorkloadSpec])`, not the 3-tuple §1.7 binds; `WorkloadSpec.from_timing` reads every `misc_metadata` key as REQUIRED (`REQUIRED_MISC_KEYS`, `WorkloadError` on a miss) | **P5 verification.** `BlockTemplates` moved ONTO the spec (§1.6), so the third element the signature block declares does not exist and never did — the text was stale, the code is right. W1's own wording forbids `dict.get(k, fallback)` as well as `getattr(obj, name, default)`, but the grep gate only caught the second, so the producer seam still read all eight of its fields with a fallback: a producer that stopped writing `num_layer` yielded a 0-layer model and one that stopped writing `model_type` yielded `""`, which the ViT naming path dispatches on. The gate now covers `from_timing` explicitly. |
 
 ---
 
@@ -503,15 +511,21 @@ destination type does.
 New signature:
 
 ```python
-# train_timing.py
+# train_timing.py   (AMENDED 2026-07-29: a 2-tuple, not a 3-tuple)
 def _prepare_execution_graphs(self, ...) -> Tuple[
     WorkloadSpec,             # was ScheduleInputs (final cycle)
     Optional[WorkloadSpec],   # was ScheduleInputs (nonfinal grad-accum cycle)
-    BlockTemplates,           # was TransformerBlockSpec (degrees now live on the spec)
 ]:
 ```
 
-`interconnect_params` moves onto the spec, so the 4-tuple becomes a 3-tuple.
+`interconnect_params` moves onto the spec and **`BlockTemplates` moves onto it too** (§1.6
+`WorkloadSpec.blocks`), so the legacy 4-tuple becomes a **2-tuple**. The 3-tuple this block used to
+declare was stale from the moment `blocks` landed on the spec; every call site
+(`train_timing.py:5266`, `inference_timing.py:648`/`:790`, `llm_util.py:919`) unpacks two.
+
+**Every `misc_metadata` key below is REQUIRED** (`program.workload.REQUIRED_MISC_KEYS`,
+amendment 2026-07-29): `from_timing` raises `WorkloadError` naming the key rather than defaulting.
+W1 forbids `dict.get(k, fallback)` exactly as it forbids `getattr(obj, name, default)`.
 `TransformerBlockSpec` (`block_program.py:94-112`) is deleted: `tp/cp/ep/include_backward` are
 already on `WorkloadSpec.degrees` / `WorkloadSpec.run`.
 
@@ -519,7 +533,7 @@ already on `WorkloadSpec.degrees` / `WorkloadSpec.run`.
 
 | id | Invariant | Verified by |
 |---|---|---|
-| **W1** | No field of `WorkloadSpec` is read with `getattr(obj, name, default)` or `dict.get(k, fallback)` anywhere in `program/`. A malformed input raises `WorkloadError` at construction. | new `tests/test_workload_spec.py`: constructing from an object with no `micro_batches` raises (today: silently `mb=0`); grep gate in the same test asserting zero `getattr(` in `program/workload.py` |
+| **W1** | No field of `WorkloadSpec` is read with `getattr(obj, name, default)` or `dict.get(k, fallback)` anywhere in `program/`. A malformed input raises `WorkloadError` at construction. | `tests/test_workload_spec.py::test_wrong_object_can_no_longer_produce_mb_zero`; `tests/test_policies.py::test_no_getattr_in_workload` (grep gate over `workload.py` + `work.py`) **and** `::test_no_silent_defaults_in_the_producer_seam` (amendment 2026-07-29 — the same gate over `WorkloadSpec.from_timing`, for `dict.get(k, fallback)` as well as `getattr`), `::test_missing_misc_metadata_key_raises_and_names_the_key` |
 | **W2** | `durations` is the only mutable member; `revision` strictly increases; a `FrozenDurations` never changes after `snapshot()`. | `tests/test_workload_spec.py::test_writeback_revision_and_snapshot_isolation` |
 | **W3** | Every `CommKey` referenced by any policy exists in `CommSpecTable`, or `WorkloadError` names it. | `tests/test_workload_spec.py`; T1 byte histograms by kind/axis (a dropped key changes the histogram) |
 | **W4** | `Program.meta.misc["duration_revision"]` equals the revision the program was built from. | T3 (contract tier) |
@@ -717,6 +731,7 @@ class SyncRequirement:
     mode: AttachMode
     anchors: Tuple[SyncAnchor, ...]      # >=1; PARALLEL_TO may repeat at several anchors (§2.3 S6/S14)
     via: FrozenSet[DepClass] = VIA_ALL   # PARALLEL_TO only; ignored by BEFORE/AFTER/OVERLAP_WITH
+    consumers: Tuple[WorkItem, ...] = () # AMENDMENT 2026-07-29 — who waits for me, DECLARED
 
     # -- how ---------------------------------------------------------------
     overlap: Optional["OverlapDecl"] = None
@@ -751,6 +766,7 @@ import edge and without either dispatching on a bare string literal (rule §8.2)
 | `BEFORE(a)` | `deps(req) := deps(a)`; `deps(a) += req` — the requirement is spliced *in front of* `a`. Degenerate when `a` is a root (then `req` becomes the root). |
 | `AFTER(a)` | `deps(req) := {a}` — the requirement is a sink hanging off `a`. `a` may be a `WorkItem` **or** a `SyncKey` (a requirement chained after another requirement). |
 | `PARALLEL_TO(a, via)` | `deps(req) += deps(a)`; for each `s in succ(a, via)`: `deps(s) += req`. The requirement runs *concurrently with* `a`. Applied once per anchor in `anchors`; idempotent (matching `attach_parallel_edge`'s `not in` guards, `schedule.py:556,566`). |
+| `consumers` *(any mode, amendment 2026-07-29)* | for each `c in consumers`: `deps(entry(c, device)) += req`, `DepClass.SYNC`. Applied AFTER the mode; idempotent. **This is how a PREFETCH names the work it prefetches for.** `via` answers the same question with `succ(a, via)`, and for rows S6/S14 `via` is `VIA_NON_DATA_FLOW` — i.e. the answer is literally an R3 edge whose identity the `SchedulePolicy` chooses; under a backward pass that walks microbatches ascending, one gather ends up preceding nothing at all. The consumer is "the next one of its kind in the execution order", which is `ShardingContext.next_after(hosts, kind, direction)` over `Schedule.order()`. Resolving it by microbatch ARITHMETIC instead closes a cycle under an ascending backward (measured). |
 | `OVERLAP_WITH(a)` | Defined by `OverlapDecl` (§2.8); realized at L4 by splitting `a` and re-parenting, not by adding a dep. |
 
 ### 2.3 Completeness proof: every existing call site maps to exactly one mode
@@ -1599,6 +1615,21 @@ not off a trailing collective) becomes a rule of R2, stated once:
 `TransferOp.deps` includes both `p.exit` and the nearest preceding `ComputeStep` on `p`'s chain when
 `p.exit` is a collective.
 
+> **AMENDMENT 2026-07-29: the anchor must reach the WIRE.** `et_emit` Phase B emits a SEND's
+> `ctrl_deps` as the union of `transfer.producer` and every other member of `transfer.deps` that
+> resolves on the SEND's own rank. Emitting `producer` alone dropped the anchor silently, and at
+> `tp > 1` with a hoisted tp/sp collective the anchor is the producer's *sibling*, so the inter-stage
+> SEND had no dependency on the compute that produced the activation — 62–95% of the P5 T2 movement.
+
+> **AMENDMENT 2026-07-29: R2 also links the two ends of a microbatch.** Both are plain same-device
+> deps and neither adds an op:
+>
+> * `SOFTMAX/FORWARD(b) -> SOFTMAX/BACKWARD(b)` — the loss gradient needs the forward logits;
+> * `LAYER/FORWARD(b,l) -> RECOMPUTE(b,l)` — the rematerialization needs what the forward stashed.
+>
+> Neither was stated anywhere: the ordering was carried only by an R3 adjacency, which R3 drops the
+> moment it finds it implied, and which a different `SchedulePolicy` re-points at will.
+
 Same-device transfers remain legal and are elided at emission (`ir.py` §2.2 amendment,
 `et_emit.py:351`). **Note for P8:** `validate.py:31-38` was widened to bless nonzero-byte
 same-device transfers, which is what silently drops the MoE `residual_p2p`
@@ -1648,7 +1679,38 @@ for dep in schedule.implied_deps(placement.devices_for):        # slot-monotone
   *presence* is load-bearing for the analytical evaluator's ready-scan; they are therefore emitted
   as same-device `TransferOp`s exactly as today (`legacy_lowering.py:1062-1090`).
 
-**R4 — sync attach (`DepClass.SYNC`).** §4.4.
+**R4 — sync attach (`DepClass.SYNC`).** §4.4. A requirement's `consumers` (amendment 2026-07-29)
+are applied after the mode: each named `WorkItem`'s chain ENTRY on the instance device gains a
+`DepClass.SYNC` dep on the requirement. That is "who waits for me", DECLARED, instead of discovered
+through `via` — see §2.2.
+
+**R5 — the optimizer's gradient dependency (`DepClass.DATA_FLOW`), amendment 2026-07-29.**
+
+```python
+# runs AFTER R4, so the sync lattice counts as an implication and no `via`
+# scan can see an R5 edge.
+for optimizer in work where kind is OPTIMIZER:
+    for device in devices(optimizer):
+        target = entry_node(optimizer, device)
+        for item in work where direction is BACKWARD
+                     and kind in {LAYER, EMBEDDING, SOFTMAX}
+                     and stage_of(item) == stage_of(optimizer)
+                     and device in devices(item):
+            source = exit_node(item, device)
+            if not reaches(source, target):
+                deps(target) += source                          # DepClass.DATA_FLOW
+```
+
+* **Redundancy-eliminated exactly like R3** (**D1**): under GPipe every ordering it requires is
+  already implied, so it materializes NOTHING and the artifact does not move.
+* **Why it must be a rule.** Legacy hand-picked one attach point per stage
+  (`85894c6:simulate_train_graph.py:1300-1318`: `embedding_node_b[0]` on stage 0,
+  `_bwd_exit_node(0, min_layer(s))` elsewhere) and `build()` did not port it — the ordering fell out
+  of R3's per-device adjacency, which is only right because GPipe's backward walks microbatches in
+  REVERSE. Under an ascending backward, 6 of 9 backward items are un-ordered before the optimizer.
+* **Not in scope:** "the optimizer after its stage's gradient REDUCER". That edge is absent in legacy
+  and in `build()` alike; it is a modeling question for the owner (audit item D11), not a
+  regression.
 
 ### 4.4 Sync-attach resolution (deterministic, order-declared)
 
@@ -1752,7 +1814,6 @@ TransferOp.send_seq, TransferOp.recv_seq, TransferOp.legacy_tag
 CollectiveOp.axes: Tuple[AxisName, ...]      # declared communicator axes (diagnostics + validate)
 ComputeOp.work: WorkItem                     # stable semantic identity (the never-built "OpKey")
 CollectiveOp.work: Optional[WorkItem]
-Op.succs: Tuple[OpUid, ...]                  # ORDERED successors — see below
 TransferOp.moe_component: Optional[str]      # AMENDMENT 2026-07-27 — V8 needs it ON THE OP
 
 # program/ir.py — CHANGED
@@ -1785,14 +1846,17 @@ by, replacing positional `events[op.uid]` mirroring (`retime.py:126-127`) and th
 | **S1** | `Schedule.slots` indices are dense `0..N-1` and unique. | `tests/test_build.py::test_s1_*` |
 | **S2** | `Schedule.order_for(stage)` is a total order and every WorkItem appears exactly once across all stages. | `tests/test_build.py::test_s2_*` |
 | **S3** | `schedule()` output is a permutation of `work.items`. | `tests/test_build.py::test_s3_*`, `Schedule.check_permutation` |
-| **D1** | **No redundant schedule dep**: for every added `DepClass.SCHEDULE` edge `a → b`, `b` was not reachable from `a` before the edge. | `tests/test_build.py::test_r3_no_redundant_schedule_edges` (removes the edge and asserts reachability changes; the edges are stamped onto `Program.meta.misc["schedule_edges"]` as uid pairs so D1 is a property of the ARTIFACT) |
+| **D1** | **No redundant schedule dep**: for every added `DepClass.SCHEDULE` edge `a → b`, `b` was not reachable from `a` before the edge. Also holds of **R5**. | `tests/test_build.py::test_r3_no_redundant_schedule_edges`, `::test_r5_adds_nothing_under_gpipe` (remove the edge and assert reachability changes; the edges are DERIVED at `_finish` from the surviving edges that carry `DepClass.SCHEDULE` and stamped onto `Program.meta.misc["schedule_edges"]` as uid pairs, so D1 is a property of the ARTIFACT and cannot go stale under overlap re-parenting — amendment 2026-07-29) |
+| **D3** | *(new, 2026-07-29)* **Every real data dependency is stated by a RULE, not by a schedule adjacency**: `SOFTMAX/F(b) → SOFTMAX/B(b)` (R2), `LAYER/F(b,l) → RECOMPUTE(b,l)` (R2), `OPTIMIZER(s)` after every backward item of stage `s` (R5), and a prefetch requirement's consumer (`SyncRequirement.consumers`). | `tests/test_build.py::test_r2_softmax_forward_precedes_its_own_backward_under_any_schedule`, `::test_r2_layer_forward_precedes_its_own_recompute_under_any_schedule`, `::test_r5_optimizer_waits_for_every_backward_item_of_its_stage`, `::test_zero3_prefetch_gathers_precede_their_declared_consumer` — each parametrized over GPipe **and** a non-GPipe `_AscBackward` schedule |
 | **D2** | Every op is reachable from a root and every non-root has ≥1 dep (no orphans — the S6/S14 drop happens *before* materialization). | `tests/test_build.py::test_o2_*`; `validate.py` (extended V1) |
 | **O1** | Program order is deterministic: two builds from the same `FrozenWorkload` produce byte-identical Programs and canonically-identical ET bundles. | `tests/test_build.py::test_o1_*`; T3 deterministic re-emission compared **canonically** (`equiv/canonical.py`), not `filecmp` |
 | **O2** | `dep < uid` for every op (V1). | `program/validate.py`; `tests/test_build.py::test_o2_*` |
 | **V7** | *(new; **opt-in**, amended 2026-07-27)* every grouped `CollectiveOp` is instantiated on every member device of its group. | `program/validate.py` (`check_group_membership=True`); `tests/test_build.py::test_v7_is_exactly_the_a2_shape` |
 | **V8** | *(new)* a same-device `TransferOp` with `size_bytes > 0` and a set `moe_component` is an error. | `program/validate.py` (always on); `tests/test_build.py::test_v8_*` |
 | **V1–V6** | unchanged (`program/validate.py:67-256`); **V6 is promoted to always-on** in `build()` (today every production caller passes `check_races=False`, so CONTEXT constraint 2 is unenforced outside tests). | `tests/test_program_ir.py:144-258` |
-| **G1** | The always-on group-order postcondition still holds. | `et_emit.py:463-533`, T3 |
+| **G1** | The always-on group-order postcondition still holds. | `et_emit.py`, T3 |
+| **V9** | *(new, 2026-07-29)* **Emission loses no successor**: an op with successors in the Program has ≥1 successor in the emitted trace. A dropped ordering edge is invisible to the op multisets, the byte histograms, `dlsim` and G1 — it moves only the AstraSim wall clock. | `program/et_emit._check_no_lost_successors` (always on); `tests/test_program_ir.py::test_emission_postcondition_catches_a_lost_successor` |
+| **V10** | *(new, 2026-07-29)* **Emission is TOTAL for cross-rank deps**: a dep whose ends are on different ranks with no transfer carrying it is materialized as a 1-byte control SEND/RECV pair, or raises `EmissionError`. Never dropped, never warned. | `program/et_emit` Phase B2; `tests/test_program_ir.py::test_cross_rank_dep_is_materialized_as_a_control_pair`, `::test_uncarriable_cross_rank_dep_is_an_error_not_a_shrug` |
 
 > **AMENDMENT 2026-07-27 (L4): V7 is OPT-IN, and that is a finding, not an oversight.** V7 says every
 > member device of a communicator issues the group's collectives. BUG_LEDGER **A2**
@@ -1850,7 +1914,17 @@ L4 (**the rebaseline** — one atomic cutover, no partial step):
   the interface above makes it a policy, not a guard).
 
 L5 (P6, consumers): `analytic_sim` (`:162-192`), `memory_sim` (`:73`, `:458-460`) and `viz` read
-`Program.ops` + `Op.succs`; the `meta.misc` proto readers disappear with the fields above.
+`Program.ops` and derive their own successor map from `deps`; the `meta.misc` proto readers
+disappear with the fields above.
+
+> **AMENDMENT 2026-07-29: `Op.succs` is DELETED.** No consumer read it — `analytic_sim`,
+> `memory_sim` and `viz` all build a successor map from `deps` — so it was a write-only mirror that
+> every graph mutation had to keep in sync. `deps` is the ONE edge structure.
+> `meta.misc["schedule_edges"]` is likewise derived at `_finish` from the edges that carry
+> `DepClass.SCHEDULE`, because overlap realization re-parents edges AFTER R3 and a recorded nid pair
+> went stale (6/13 on `dp1tp2cp1pp2mb2sp1`, 14/25 on `dp2tp2cp2pp2mb2sp1`). Re-parenting preserves
+> the `DepClass` it moves, which is what makes the derivation exact — and matters anyway because
+> `PARALLEL_TO`'s `via` filter dispatches on the class.
 
 ---
 
@@ -1913,6 +1987,8 @@ default is today's (wrong) value, so P7 is a default change plus a delta table.
 | **A4** | collective-only stage rank collision | `Program.num_stages_initial()` | pre-extension count | post-extension count |
 | **A5** | ZeRO-3 dead store with side effects | deleted with `_ensure_zero3_per_rank_edges` | — | — |
 | **A1** | cache key omits DAG structure | `astrasim_lib/integration.py` | manifest-only | hash the `.et` bytes — **fix FIRST** |
+| **A6** *(new 2026-07-29)* | ZeRO-3 prefetch anchored by layer arithmetic, landing on another device (rows S8/S15) | `ZeRO3._via` already branches on `same_stage`; the DEP side needs the mirror rule (a `_dep_anchor` beside it), and `build._resolve_anchor`'s `local_chains if local_chains else list(chains)` fallback is the site | today's: inherit the FOREIGN stage's deps | anchor on the requirement's own device. **Moves the analytical zero3 golden (≈ -4.3%)**; needs `analytic_sim._ROOT_COMM_IS_UNTIMED` settled first, because a stage's first gather then legitimately becomes a program root |
+| **D 11** *(new 2026-07-29)* | nothing orders the optimizer after its stage's gradient reducer | **R5** (§4.3) — its source set | backward COMPUTE items only, reproducing legacy | add the reducer's `SyncKey` to R5's sources; totals **increase** |
 | C 3 | manifest records `ALL_REDUCE` as `-1` | `et_emit` manifest | unchanged | — |
 | C 7 | Step-11 pre-SCOTCH-remap iteration | deleted with `legacy_lowering` | — | — |
 | C 10e | non-unique op ids from overlap splits | deleted by §4.6 | — | — |

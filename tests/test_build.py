@@ -178,6 +178,21 @@ def _reaches(program: Program, source: int, target: int, *, skip=()) -> bool:
     return False
 
 
+def _succs(program: Program) -> Dict[int, Tuple[int, ...]]:
+    """``uid -> successor uids``, DERIVED from ``deps``.
+
+    ``Op.succs`` was deleted (INTERFACES §4.7 amendment 2026-07-29): it was a
+    mirror of ``deps`` that no consumer read and that every mutation had to keep
+    in sync. A test that wants successors builds them, exactly as
+    ``analytic_sim`` / ``memory_sim`` already do.
+    """
+    out: Dict[int, List[int]] = {int(op.uid): [] for op in program.ops}
+    for op in program.ops:
+        for dep in op.deps:
+            out[int(dep)].append(int(op.uid))
+    return {uid: tuple(succs) for uid, succs in out.items()}
+
+
 def _block_template(
     entries: Sequence[Tuple[str, Sequence[str], Sequence[str]]],
     comm_metadata: Dict[str, Dict[str, Any]],
@@ -566,14 +581,15 @@ def test_r2_recompute_to_backward_layer_is_a_plain_same_device_dep():
     program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
     remat = [op for op in program.ops if isinstance(op, ComputeOp) and op.recompute]
     assert remat, "full recomputation must materialize RECOMPUTE work"
+    succs = _succs(program)
     for op in remat:
-        for succ in op.succs:
+        for succ in succs[op.uid]:
             assert not isinstance(program.ops[succ], TransferOp) or (
                 program.ops[succ].size_bytes == 0
             )
         backward = [
             program.ops[succ]
-            for succ in op.succs
+            for succ in succs[op.uid]
             if isinstance(program.ops[succ], ComputeOp)
         ]
         assert backward, "the rematerialization feeds its backward layer directly"
@@ -660,6 +676,213 @@ def test_r3_puts_the_optimizer_where_legacy_attached_it():
 
 
 # ===========================================================================
+# A NON-GPipe schedule — the probe for "explicit, not incidental"
+# ===========================================================================
+#
+# Every dependency below was, before 2026-07-29, carried ONLY by an R3 edge,
+# i.e. by whatever adjacency the SchedulePolicy happened to produce. Under
+# GPipe they all hold; the point of these probes is that they must hold under a
+# DIFFERENT legal schedule too, because they are properties of the model.
+#
+# ``_AscBackward`` is the minimal legal deviation: GPipe with the backward pass
+# walking microbatches ASCENDING — the one property every 1F1B / interleaved
+# schedule has. Nothing else changes, so a failure here is about the dependency
+# rules and not about the alternative schedule being exotic.
+
+
+@dataclass(frozen=True)
+class _AscBackward:
+    """GPipe, but the backward walks microbatches ascending."""
+
+    name: str = "asc_backward"
+
+    def layer_assignment(self, fw):
+        return LayerAssignment.contiguous(
+            int(fw.spec.shape.num_layers), int(fw.spec.degrees.pp)
+        )
+
+    def schedule(self, fw, work):
+        layers = self.layer_assignment(fw)
+        shape = fw.spec.shape
+        order: List[WorkItem] = []
+
+        def take(item):
+            if item is not None:
+                order.append(item)
+
+        for b in range(int(shape.micro_batches)):
+            take(work.get(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=b))
+            for layer in range(int(shape.num_layers)):
+                take(work.get(WorkKind.LAYER, Direction.FORWARD, microbatch=b, layer=layer))
+            take(work.get(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=b))
+        for b in range(int(shape.micro_batches)):  # <-- ASCENDING
+            take(work.get(WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=b))
+            for layer in reversed(range(int(shape.num_layers))):
+                take(work.get(WorkKind.RECOMPUTE, Direction.FORWARD, microbatch=b, layer=layer))
+                take(work.get(WorkKind.LAYER, Direction.BACKWARD, microbatch=b, layer=layer))
+            take(work.get(WorkKind.EMBEDDING, Direction.BACKWARD, microbatch=b))
+        for stage in range(int(fw.spec.degrees.pp)):
+            take(work.get(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=StageId(stage)))
+
+        slots = tuple(
+            ScheduleSlot(index=index, stage=layers.stage_of_work(item), work=item)
+            for index, item in enumerate(order)
+        )
+        schedule = Schedule(policy=self.name, layers=layers, slots=slots)
+        schedule.check_permutation(work)
+        return schedule
+
+
+_SCHEDULES = (GPipeSchedule(), _AscBackward())
+
+
+def _chain_ends(program: Program, kind, direction, **fields):
+    """``work -> {device: (first uid, last uid)}`` for one WorkItem's chains."""
+    out: Dict[int, List[int]] = {}
+    for op in program.ops:
+        work = getattr(op, "work", None)
+        if work is None or work.kind is not kind or work.direction is not direction:
+            continue
+        if any(getattr(work, name) != value for name, value in fields.items()):
+            continue
+        out.setdefault(int(op.device), []).append(int(op.uid))
+    return {device: (min(uids), max(uids)) for device, uids in out.items()}
+
+
+@pytest.mark.parametrize("schedule_policy", _SCHEDULES, ids=lambda s: s.name)
+def test_r2_softmax_forward_precedes_its_own_backward_under_any_schedule(
+    schedule_policy,
+):
+    """**D4** — the loss gradient needs the forward logits. R2 states it now;
+    before, only R3's adjacency did, and R3 is free to drop what it finds
+    implied."""
+    cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
+    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    for b in range(cfg.mb):
+        fwd = _chain_ends(program, WorkKind.SOFTMAX, Direction.FORWARD, microbatch=b)
+        bwd = _chain_ends(program, WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=b)
+        assert fwd and bwd
+        for device, (_first, last) in fwd.items():
+            entry = bwd[device][0]
+            assert _reaches(program, last, entry), (
+                f"{schedule_policy.name}: softmax fwd(mb{b}) does not precede its "
+                f"own backward on device {device}"
+            )
+
+
+@pytest.mark.parametrize("schedule_policy", _SCHEDULES, ids=lambda s: s.name)
+def test_r2_layer_forward_precedes_its_own_recompute_under_any_schedule(
+    schedule_policy,
+):
+    """**D9** — the rematerialization consumes what the forward stashed."""
+    cfg = Cfg(
+        dp=1, pp=2, tp=2, mb=3, num_layers=4, full_recomputation=True, flattened=True
+    )
+    program = _program(
+        cfg, Granularity.FINE, schedule_policy=schedule_policy, overlap=NoOverlap()
+    )
+    checked = 0
+    for b in range(cfg.mb):
+        for layer in range(cfg.num_layers):
+            fwd = _chain_ends(
+                program, WorkKind.LAYER, Direction.FORWARD, microbatch=b, layer=layer
+            )
+            remat = _chain_ends(
+                program, WorkKind.RECOMPUTE, Direction.FORWARD, microbatch=b, layer=layer
+            )
+            if not fwd or not remat:
+                continue
+            for device, (_first, last) in fwd.items():
+                assert _reaches(program, last, remat[device][0]), (
+                    f"{schedule_policy.name}: layer {layer} fwd(mb{b}) does not "
+                    f"precede its own recompute on device {device}"
+                )
+                checked += 1
+    assert checked, "the config must materialize RECOMPUTE work"
+
+
+@pytest.mark.parametrize("schedule_policy", _SCHEDULES, ids=lambda s: s.name)
+def test_r5_optimizer_waits_for_every_backward_item_of_its_stage(schedule_policy):
+    """**D10** — legacy hand-picked ONE attach point per stage and the new core
+    inherited the ordering from R3's per-device adjacency, which is only right
+    because GPipe's backward descends microbatches. Under ``_AscBackward`` the
+    ordering used to be missing for every microbatch but the last."""
+    cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
+    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    optimizers = [
+        op for op in program.ops
+        if getattr(op, "work", None) is not None
+        and op.work.kind is WorkKind.OPTIMIZER
+    ]
+    assert optimizers
+    checked = 0
+    for optimizer in optimizers:
+        stage = int(optimizer.work.stage)
+        for op in program.ops:
+            work = getattr(op, "work", None)
+            if work is None or work.direction is not Direction.BACKWARD:
+                continue
+            if work.kind not in (WorkKind.LAYER, WorkKind.EMBEDDING, WorkKind.SOFTMAX):
+                continue
+            if int(op.device) != int(optimizer.device):
+                continue
+            assert _reaches(program, int(op.uid), int(optimizer.uid)), (
+                f"{schedule_policy.name}: optimizer of stage {stage} does not wait "
+                f"for {op.name!r} — it would apply an incomplete gradient"
+            )
+            checked += 1
+    assert checked
+
+
+def test_r5_adds_nothing_under_gpipe():
+    """R5 is redundancy-eliminated exactly like R3 (**D1**): under GPipe every
+    ordering it requires is already implied, so the artifact does not move."""
+    cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
+    program = _program(cfg, Granularity.COARSE)
+    for op in program.ops:
+        work = getattr(op, "work", None)
+        if work is None or work.kind is not WorkKind.OPTIMIZER:
+            continue
+        for dep in op.deps:
+            source = program.ops[int(dep)]
+            assert not _reaches(
+                program, int(dep), int(op.uid), skip={(int(dep), int(op.uid))}
+            ), (
+                f"optimizer dep {source.name!r} -> {op.name!r} is redundant; R5 "
+                "must only materialize what is not already implied"
+            )
+
+
+@pytest.mark.parametrize("schedule_policy", _SCHEDULES, ids=lambda s: s.name)
+def test_zero3_prefetch_gathers_precede_their_declared_consumer(schedule_policy):
+    """**D18/D19** — rows S6/S14 used to answer "who waits for me?" with
+    ``succ(anchor, VIA_NON_DATA_FLOW)``, i.e. with an R3 edge whose identity the
+    SchedulePolicy chooses. Under ``_AscBackward`` one gather preceded NOTHING
+    and another attached to the wrong microbatch. The consumer is declared now,
+    so both hold under either schedule."""
+    cfg = Cfg(dp=2, pp=2, mb=3, num_layers=4, zero_stage=3)
+    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    gathers = [
+        op for op in program.ops
+        if isinstance(op, CollectiveOp) and "zero3_embedding_gather_fwd_b" in op.name
+    ]
+    assert gathers, "the config must materialize S6 gathers"
+    for gather in gathers:
+        microbatch = int(gather.name.rsplit("_b", 1)[1])
+        target = _chain_ends(
+            program, WorkKind.EMBEDDING, Direction.FORWARD, microbatch=microbatch
+        )
+        assert target, f"no embedding chain for mb{microbatch}"
+        for device, (entry, _last) in target.items():
+            if device != int(gather.device):
+                continue
+            assert _reaches(program, int(gather.uid), entry), (
+                f"{schedule_policy.name}: {gather.name} does not precede the "
+                f"embedding of microbatch {microbatch} it prefetches for"
+            )
+
+
+# ===========================================================================
 # R4 — sync attach
 # ===========================================================================
 
@@ -736,7 +959,7 @@ def test_r4_after_makes_the_requirement_a_sink_off_the_anchor():
     reducer = _one(program, "transformer_dense_grad")
     anchor = _one(program, "layer_b_l0_mb0")
     assert reducer.deps == (anchor.uid,)
-    assert reducer.succs == ()
+    assert _succs(program)[reducer.uid] == ()
 
 
 def test_r4_before_splices_the_requirement_in_front_of_the_anchor():
@@ -802,7 +1025,7 @@ def test_r4_parallel_to_inherits_deps_and_successors_filtered_by_via():
         return program, gather, host_op
 
     program, gather, host_op = _built(VIA_DATA_FLOW, 2)
-    successors = [program.ops[uid] for uid in gather.succs]
+    successors = [program.ops[uid] for uid in _succs(program)[gather.uid]]
     assert successors, "VIA_DATA_FLOW must keep the cross-layer transfer"
     assert all(isinstance(op, TransferOp) for op in successors)
     assert set(program.ops[gather.uid].deps) == set(host_op.deps)
@@ -811,9 +1034,11 @@ def test_r4_parallel_to_inherits_deps_and_successors_filtered_by_via():
     # (stage 1) and still inherits the stage-0 anchor's deps. The analytical
     # evaluator honors that edge (it is why
     # ``train:analytical:dp2tp1cp1pp2mb2sp0:zero3`` is bit-exact); the EMITTER is
-    # where a rank-local ctrl_dep is a fact, and it drops what no wire carries
-    # (``et_emit.CrossRankDepWarning``). Keeping the two concerns apart is the
-    # point: L4 states the ordering, L5 states what a trace can express.
+    # where a rank-local ctrl_dep is a fact, and it puts what no ctrl_dep can
+    # carry ON THE WIRE as a 1-byte control pair (``et_emit`` Phase B2, amendment
+    # 2026-07-29) so the two evaluators honor the SAME DAG. Keeping the two
+    # concerns apart is the point: L4 states the ordering, L5 states how a trace
+    # expresses it. That the ordering is device-blind AT ALL is BUG_LEDGER A6.
     def _dep_devices(program, uid):
         out = []
         for d in program.ops[uid].deps:
@@ -829,7 +1054,7 @@ def test_r4_parallel_to_inherits_deps_and_successors_filtered_by_via():
     assert all(dev == gather.device for dev in _dep_devices(program, gather.uid))
 
     program, gather, host_op = _built(VIA_NON_DATA_FLOW, 3)
-    successors = [program.ops[uid] for uid in gather.succs]
+    successors = [program.ops[uid] for uid in _succs(program)[gather.uid]]
     assert successors, "VIA_NON_DATA_FLOW must keep the cross-microbatch dep"
     assert not any(isinstance(op, TransferOp) for op in successors)
 
@@ -1001,30 +1226,30 @@ def test_o2_every_dep_precedes_its_op_and_no_op_is_orphaned():
         reachable = set()
         roots = [op.uid for op in program.ops if not op.deps]
         assert roots
+        succs = _succs(program)
         stack = list(roots)
         while stack:
             current = stack.pop()
             if current in reachable:
                 continue
             reachable.add(current)
-            stack.extend(int(succ) for succ in program.ops[current].succs)
+            stack.extend(succs[int(current)])
         assert len(reachable) == len(program.ops), (
             f"{len(program.ops) - len(reachable)} ops are unreachable from a root"
         )
 
 
-def test_succs_mirror_deps():
+def test_deps_carry_every_edge_exactly_once():
+    """``deps`` is the ONE edge structure (``Op.succs``, its write-only mirror,
+    is deleted): every edge appears exactly once and nothing is duplicated."""
     program = _program(Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FINE)
     forward = Counter()
     for op in program.ops:
         for dep in op.deps:
             forward[(int(dep), op.uid)] += 1
-    backward = Counter()
-    for op in program.ops:
-        for succ in op.succs:
-            backward[(op.uid, int(succ))] += 1
-    assert forward == backward
     assert all(count == 1 for count in forward.values()), "no duplicate edges"
+    assert not hasattr(program.ops[0], "succs"), "Op.succs must stay deleted"
+
 
 
 def test_v8_rejects_a_same_device_moe_p2p_carrying_bytes():
@@ -1248,7 +1473,7 @@ def test_overlap_producer_hoist():
     out = _one(program, "output_proj_forward")
     assert qkv.uid in coll.deps, "the hoisted collective takes the compute's deps"
     assert mlp.uid not in coll.deps
-    assert out.uid in [uid for uid in mlp.succs]
+    assert out.uid in _succs(program)[mlp.uid]
 
 
 def test_overlap_consumer_splits_the_collective_by_bytes():
@@ -1285,7 +1510,7 @@ def test_overlap_consumer_splits_the_collective_by_bytes():
     # what ``_split_cp_edge_fine``'s "for succ in succs: if succ in
     # attention_children: continue" loop leaves behind (transforms.py:289-298).
     assert ovlp.deps == (block.uid,)
-    assert ovlp.succs == ()
+    assert _succs(program)[ovlp.uid] == ()
     assert mlp.deps == (attention.uid,)
 
 
@@ -1482,16 +1707,16 @@ def _describe_program(program: Program) -> List[Any]:
         if isinstance(op, ComputeOp):
             out.append((op.uid, op.device, op.duration, op.deps, op.role.name,
                         op.direction.name, str(op.mem_kind), op.layer, op.micro_batch,
-                        op.is_moe_layer, op.recompute, op.param_gather, op.succs))
+                        op.is_moe_layer, op.recompute, op.param_gather))
         elif isinstance(op, CollectiveOp):
             out.append((op.uid, op.device, op.coll.name, op.size_bytes, op.participants,
                         op.axes, op.is_dp, op.label,
                         None if op.group is None else op.group.members,
-                        op.comm_key, op.deps, op.succs))
+                        op.comm_key, op.deps))
         else:
             out.append((op.uid, op.src_device, op.dst_device, op.size_bytes,
                         None if op.comm_type is None else op.comm_type.name,
-                        op.producer, op.consumers, op.moe_component, op.deps, op.succs))
+                        op.producer, op.consumers, op.moe_component, op.deps))
     return out
 
 
