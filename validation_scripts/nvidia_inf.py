@@ -3367,7 +3367,7 @@ def _plot_combined_a100_error_bars(
         )
         for rect, hatch in zip(bars, bottom_hatches):
             rect.set_hatch(hatch)
-        axes[1].set_title("NVIDIA NIM Llama3-70B")
+        axes[1].set_title("NVIDIA NIM Llama 3.3-70B")
         axes[1].set_ylabel("")
         axes[1].set_xticks(bottom_positions)
         axes[1].set_xticklabels(bottom_labels, fontstyle="italic")
@@ -3726,7 +3726,7 @@ def _plot_combined_ratio_grids(
         bbox_to_anchor=(0.5, 0.03),
         ncol=len(tool_names),
     )
-    fig.text(0.5, 0.48, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
+    fig.text(0.5, 0.48, "Llama 3.3-70B", ha="center", va="bottom", fontsize=12)
     fig.subplots_adjust(bottom=0.2, top=0.85)
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -3950,7 +3950,7 @@ def _plot_combined_ratio_grids_h100(
         bbox_to_anchor=(0.5, 0.03),
         ncol=len(tool_names),
     )
-    fig.text(0.5, 0.48, "Llama 3-70B", ha="center", va="bottom", fontsize=12)
+    fig.text(0.5, 0.48, "Llama 3.3-70B", ha="center", va="bottom", fontsize=12)
     fig.subplots_adjust(bottom=0.2, top=0.85)
 
     outdir.mkdir(parents=True, exist_ok=True)
