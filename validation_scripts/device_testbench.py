@@ -23,8 +23,9 @@ A structured largest-scale-holdout probe is reported but never golden.
 
 Point sources per device
   H100_SXM5  train: Megatron-Core MoE points (vpp=max) + HF/Nanotron rows
-             (via h100_testbench adapters, incl. the measured-MFU >= 8%
-             envelope and the pp>1 cut rule)
+             (via h100_testbench adapters: the FULL pp==1 nanotron
+             population with no tp/dp window, the measured-MFU envelope
+             h100_testbench.MEASURED_MFU_FLOOR = 20%, and the pp>1 cut rule)
              inference: NVIDIA NIM 4xH100 Llama3.3-70B (16 rows, total
              latency = TTFT + ITL*(out-1)) + IMEC Llama2 rows (10 rows,
              total latency; simulated with the repo's established
@@ -40,7 +41,10 @@ Point sources per device
   Excluded: koyeb.py points (different metric — decode-only throughput —
   single GPU, and one point is PCIe-contaminated per its own comments).
 
-Training rows with measured MFU < 8% are report-only (degenerate runs).
+Training rows below the measured-MFU floor are report-only (outside the
+applicability envelope of a roofline-based model). The A100 sources use the
+local MEASURED_MFU_FLOOR below (8%); the H100 nanotron rows use the
+separately disclosed h100_testbench.MEASURED_MFU_FLOOR (20%).
 
 Outputs per device (validation_scripts/device_testbench/<device>/):
   results CSV, split report; golden factors + split canonized to

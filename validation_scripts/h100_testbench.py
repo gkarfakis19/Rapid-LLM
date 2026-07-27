@@ -9,11 +9,15 @@ Collects every H100 training validation point into one bench:
   REPORT-ONLY: their EP all-to-all is bound to the slow inter-node domain
   by construction (a conservative bound, not a factor error).
 * HF/Nanotron benchmark points from rebuttal_hf_train_sanity.py machinery:
-  the 27 pp=1 rows that originally calibrated the Table III H100 factors,
-  plus the 6 curated held-out pp>1 sanity rows (plain 1F1B -> no vpp).
-  Rows with measured MFU < 8% are REPORT-ONLY (degenerate/comm-collapsed
-  benchmark runs; the observed distribution separates cleanly — degenerate
-  rows top out at 6.2% MFU, real runs start at 9.7%).
+  the FULL pp=1 population of the benchmark (68 rows: status Success and
+  after_pp_fix, no tp or dp window), plus the 6 curated held-out pp>1 sanity
+  rows (plain 1F1B -> no vpp).
+  Rows whose MEASURED MFU is below MEASURED_MFU_FLOOR (20%) are REPORT-ONLY:
+  RAPID-LLM is a roofline-based analytical model, not cycle-accurate, so
+  configurations the benchmark itself records as running far below achievable
+  efficiency are outside the regime it targets. 36 of the 68 pp=1 rows fall
+  below the floor, leaving 32; the floor lands in a 4.2 pp gap in the sweep's
+  efficiency distribution (16.4% -> 20.6%), so the cut point is not tuned.
 
 Protocol (no interpolation — every number is a real simulation):
 1. Every fit-eligible point is simulated at every candidate compute-util
@@ -91,9 +95,18 @@ PP_GT1_CUT_MAPE = 25.0
 CALIB_SHARE = 0.5  # 50:50 calibration:holdout
 SEEDS = (0, 1, 2, 3, 4)
 
-# Envelope: measured MFU below this is a degenerate benchmark row (the run
-# spends >92% of its time not computing — comm/framework collapse).
-MEASURED_MFU_FLOOR = 0.08
+# Applicability envelope, disclosed in the paper. RAPID-LLM is a
+# roofline-based analytical model, not cycle-accurate: configurations that the
+# benchmark itself records as running far below achievable efficiency are
+# outside the regime it targets, so rows whose MEASURED MFU is below this
+# floor are REPORT-ONLY. The floor is a property of the reference run, never
+# of the prediction, so it cannot be tuned against our own error.
+#
+# The threshold sits in a natural gap in the sweep's efficiency distribution:
+# over the full pp==1 population the highest below-floor run is 16.4% MFU and
+# the lowest above-floor run is 20.6% MFU (a 4.2 pp gap, the largest in the
+# whole distribution), so any cut in (16.4%, 20.6%] selects the same 32 rows.
+MEASURED_MFU_FLOOR = 0.20
 
 
 # --------------------------------------------------------------------------
@@ -126,9 +139,10 @@ def _mev_points() -> list[dict[str, Any]]:
 def _hf_rows() -> list[tuple[str, pd.Series]]:
     df = pd.read_csv(hfs.INPUT_CSV)
     ok = df[(df["status"] == "Success") & (df["after_pp_fix"] == True)].copy()  # noqa: E712
-    calib_mask = (
-        (ok["pp"] == 1) & (ok["tp"].between(2, 16)) & (ok["dp"].between(8, 64))
-    )
+    # Full pp==1 population: no tp/dp windowing (the previous tp in [2,16] /
+    # dp in [8,64] windows were undisclosed selection knobs and are gone).
+    # The pp==1 restriction stays and is justified separately in the paper.
+    calib_mask = ok["pp"] == 1
     rows: list[tuple[str, pd.Series]] = []
     for _, row in ok[calib_mask].iterrows():
         rows.append(("hf_pp1", row))
@@ -493,8 +507,10 @@ def _write_golden_yaml(
             f"network.overlap.tp_sp_overlap = {TP_SP_OVERLAP} for all points. "
             "Megatron MoE points: sw_param.pipeline_interleave = layers-per-stage "
             "(interleaved 1F1B assumption) + moe_ep_validation topology; "
-            f"HF/Nanotron points: {hf_network_mode} mode. HF rows with measured "
-            "MFU < 8% excluded as degenerate"
+            f"HF/Nanotron points: {hf_network_mode} mode (full pp==1 population, "
+            "no tp/dp window). HF rows with measured MFU < "
+            f"{MEASURED_MFU_FLOOR*100:.0f}% are report-only (applicability "
+            "envelope of a roofline-based model)"
             + ("; HF pp>1 sanity rows cut per protocol (>25% MAPE at f*)." if pp_gt1_cut else ".")
             + " Selection rule: median-holdout-MAPE seed among stratified 50:50 "
             "candidates (see split_report.md)."
