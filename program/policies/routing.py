@@ -270,6 +270,19 @@ def ep_sync_requirements(work: Any, ctx: Any) -> Tuple[Any, ...]:
             mode=AttachMode.AFTER,
             anchors=(work,),
             spread=SyncSpread.PER_CLUSTER_RANK,
+            # A GRADIENT REDUCER on the ep axis: `train_timing` sizes it as
+            # `grad_communication x params`, and it reduces the replicated
+            # (attention / router / shared-expert) gradients across the EP
+            # group. R5b must order the optimizer after it, exactly as for the
+            # dp reducer.
+            #
+            # This flag was MISSED when R5b switched from selecting by
+            # `SyncPhase.GRAD` to selecting by role: the phase filter had been
+            # picking S12 up for free, and dropping it turned 16 ep_sync
+            # collectives back into graph SINKS on a `dp2 ep2 moe pp2` probe —
+            # reintroducing item 11's bug on the ep axis at a measured cost of
+            # 0.00 s, so no golden caught it. Found by adversarial audit.
+            is_reducer=True,
             origin="S12",
         ),
     )

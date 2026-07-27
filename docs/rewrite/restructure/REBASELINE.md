@@ -711,3 +711,50 @@ with `tp_sp`. Best available lead for whoever works the recompute model.
 
 golden **221 passed** · full suite **1189 passed, 44 skipped, 7 xfailed, 2 xpassed** ·
 `RAPID_BUILD_DIFF=1` sweep green · every T5 physical suite within its existing threshold.
+
+---
+
+# Rebaseline 5 (2026-07-27) — the audit's blocking finding: R5b dropped the EP reducer
+
+The adversarial audit's ADJUDICATION found a regression in rebaseline 4 itself. Switching R5b from
+`key.phase is SyncPhase.GRAD` to `SyncRequirement.is_reducer` narrowed the source set correctly for
+ZeRO-2 and **silently dropped the EP gradient sync** (row S12, `policies/routing.py`), which never
+set the new flag — the phase filter had been picking it up for free. Item 11's own bug, reintroduced
+on the ep axis, one commit after fixing it.
+
+Measured on `dp2 ep2 moe pp2` FINE: **16 `ep_sync` collectives became graph sinks, 0 edges to the
+optimizer**, against 16 edges before.
+
+**And it is not free — a `total_time` diff says it is.** On
+`train:flattened:dp2tp2cp1pp2mb2sp1:moe:ep2` the aggregate does not move (the max-rank was already
+the bottleneck), but per-rank seconds do:
+
+| rank | golden | now |
+|---|---|---|
+| 0, 1 | 0.08491143 | 0.09295319 (**+9.5 %**) |
+| 2, 3 | 0.09285714 | 0.09298721 (+0.1 %) |
+| 4, 5 | 0.09364335 | 0.09456688 (+1.0 %) |
+| 6, 7 | 0.09442956 | 0.09458026 (+0.2 %) |
+
+The T2 per-rank tier is the only thing that catches it. My own delta script compares `total_time`
+and reported "0 of 44 moved"; the audit's probe likewise read 0.00 s. **That is a lesson about the
+diff, not about the bug** — and a reason the delta tooling should report per-rank spread, not just
+the aggregate.
+
+**Fix:** `is_reducer=True` on the S12 requirement. R5b's source set is every gradient REDUCER, and
+they live in **two** policy modules — S2/S4/S9 in `sharding.py`, S12 in `routing.py`. Because a
+hand-maintained whitelist is exactly the shape of bug this whole entry exists to remove, the
+PROPERTY is now asserted directly: `test_every_gradient_reducer_reaches_its_optimizer` walks dp /
+ZeRO-2 / EP configurations at both granularities and requires every gradient collective to reach its
+stage's optimizer. Verified to fail with the S12 flag removed, naming
+`transformer_dense_ep_sync_grad_b1_l3`.
+
+Delta: 5 golden assertions moved (structural + per-rank timing on the two `dp2 … moe:ep2` rows);
+`total_time` unchanged on all 44.
+
+Also in this rebaseline: ledger **20** filed (5 shipped H100 configs invert the memory hierarchy —
+DRAM at 1.83e13 B/s against SRAM-L2 at 8.74e12, so `num_levels-1` is the last level but not the
+slowest); item **16**'s clip share qualified as config-specific (0.136 %–3.715 % across 33 configs,
+a 27x spread); item **12**'s `train_timing.py:2915` citation withdrawn (it evaluates to 0.0 in every
+measured row and the dominant term four lines earlier reads the table unsharded); item **15**
+extended to cover tied-awareness as well as per-rank-ness.

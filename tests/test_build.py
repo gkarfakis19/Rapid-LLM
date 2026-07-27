@@ -1084,6 +1084,69 @@ def test_r5b_selects_reducers_by_role_not_by_schedule_phase():
             )
 
 
+def test_every_gradient_reducer_reaches_its_optimizer():
+    """**BUG_LEDGER 11**, completeness — the regression the FIRST role-based fix
+    shipped.
+
+    Switching R5b from ``key.phase is SyncPhase.GRAD`` to
+    ``SyncRequirement.is_reducer`` narrowed the source set correctly for ZeRO-2,
+    and silently DROPPED the EP gradient sync (row S12, ``policies/routing.py``),
+    which never set the new flag. The phase filter had been picking it up for
+    free. 16 ``ep_sync`` collectives became graph sinks at a measured cost of
+    0.00 s, so no golden caught it.
+
+    A whitelist that must be maintained by hand is exactly the shape of bug that
+    produced this whole ledger entry, so the property is asserted directly: any
+    collective whose bytes are a GRADIENT payload must reach the optimizer of
+    its stage. Checked over the configurations that exercise each reducer
+    family — dp, ZeRO-2, and EP.
+    """
+    cases = (
+        Cfg(dp=2, pp=2, mb=2, num_layers=4),                             # dp
+        Cfg(dp=2, pp=2, mb=2, num_layers=4, zero_stage=2),               # + zero2 gather
+        Cfg(dp=2, pp=2, mb=2, num_layers=4, ep=2, moe=True),             # + S12 ep sync
+    )
+    for cfg in cases:
+        for granularity in (Granularity.COARSE, Granularity.FINE):
+            program = _program(cfg, granularity, overlap=NoOverlap())
+            optimizers = {
+                op.uid for op in program.ops
+                if isinstance(op, ComputeOp) and op.role is OpRole.OPTIMIZER
+            }
+            assert optimizers, f"{cfg.label()}/{granularity.name}: no optimizer"
+            succs = _succs(program)
+
+            def reaches_optimizer(uid, _s=succs, _o=optimizers):
+                seen, stack = {uid}, [uid]
+                while stack:
+                    for nxt in _s.get(stack.pop(), ()):
+                        if nxt in _o:
+                            return True
+                        if nxt not in seen:
+                            seen.add(nxt)
+                            stack.append(nxt)
+                return False
+
+            for op in program.ops:
+                if not isinstance(op, CollectiveOp):
+                    continue
+                # A reducer is identified by its ROLE at the source: it is the
+                # requirement the sharding/routing policy declared is_reducer.
+                # Here we can only see the emitted op, so use the two families
+                # the policies produce as gradient reducers.
+                is_grad_reducer = op.is_dp or "ep_sync" in (op.comm_key or "")
+                if not is_grad_reducer:
+                    continue
+                if op.coll is CollectiveType.ALL_GATHER:
+                    continue  # post-update broadcast; R5c orders it the OTHER way
+                assert reaches_optimizer(op.uid), (
+                    f"{cfg.label()}/{granularity.name}: gradient reducer "
+                    f"{op.name!r} ({op.comm_key}) never reaches an optimizer — "
+                    "the weight update is modeled as concurrent with the "
+                    "collective that produces the gradient it applies"
+                )
+
+
 def test_r4_before_splices_the_requirement_in_front_of_the_anchor():
     cfg = Cfg(dp=2, pp=1, mb=1, num_layers=1, zero_stage=3)
     fw, work, bundle = _sync_fixture(cfg)
