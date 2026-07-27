@@ -2,4 +2,7 @@ llm-analysis commit: d841e40aec8c84b9e76ba9cfbce67418adb172bd 2024-11-13 14:41:5
 run: train(model_name=<json>, gpu_name=a100-sxm-80gb, dtype_name=w16a16e16, batch_size_per_gpu=1, gradient_accumulation_steps=<mb>, dp/tp/pp per case, seq_len=2048, activation_recomputation={4:full,1:selective}, flops_efficiency=0.5 [README-documented large-scale training value], all other efficiencies and settings at tool defaults).
 Post-emission correction (paper Appendix "Training Data Comparison Difficulty"): stock llm-analysis floors each layer's forward latency at a data-parallel weight all-gather (analysis.py get_latency_fwd_per_layer, unconditional max()) irrespective of ds_zero — a ZeRO-3-style unsharding term that does not occur in the unsharded reference runs. Reported numbers apply, purely on tool-emitted summary components:
   t_corr = t_iter - 3 * n_acc * max(0, latency_fwd_sharded_dp_comm - (latency_fwd_attn + latency_fwd_mlp + latency_fwd_layernorm + latency_fwd_tp_comm))
-(factor 3: the tool models backward as 2x forward). dp=1 rows unchanged. Corrected MAPE 22.8% (worst 33.6%); uncorrected stock emissions reach 78.5% (worst +158%). Verified exact on all 7 rows.
+(factor 3: the tool models backward as 2x forward). dp=1 rows unchanged. Corrected MAPE 15.8% (worst 24.9%); uncorrected stock emissions reach 68.2% (worst +136.6%). Verified exact on all 7 rows.
+Reference times are Kundu et al. (IISWC 2024, arXiv:2407.14645) Table 1 `tref` (published MEASURED runtimes,
+cross-checked against Korthikanti et al. arXiv:2205.05198 Table 5 and Narayanan et al. SC'21 Table 1) --
+NOT that table's `tpred` column, which holds Kundu's own model predictions.

@@ -33,14 +33,16 @@ logging.disable(logging.CRITICAL)
 from llm_analysis.analysis import train  # noqa: E402
 
 # label, model json, actual_s, dp, tp, pp, gas(=mb), recompute (4=full, 1=selective)
+# actual_s = Kundu et al. (IISWC 2024, arXiv:2407.14645) Table 1 `tref` (published
+# MEASURED runtimes, Korthikanti/Megatron), NOT that table's `tpred` column.
 CASES = [
-    ("GPT 1T korthi full",       "megatron-gpt-1t.json",   87.9,  1, 8, 64, 512, 4),
-    ("GPT 1T korthi selective",  "megatron-gpt-1t.json",   69.1,  1, 8, 64, 512, 1),
-    ("GPT 1T selene full",       "megatron-gpt-1t.json",  100.7,  6, 8, 64, 512, 4),
-    ("GPT 310B selene full",     "megatron-gpt-310b.json", 34.1, 15, 8, 16, 144, 4),
-    ("GPT 530B selene full",     "megatron-gpt-530b.json", 51.2,  9, 8, 35, 280, 4),
-    ("GPT 175B korthi full",     "megatron-gpt-175b.json", 16.9,  1, 8,  8,  64, 4),
-    ("GPT 175B korthi selective","megatron-gpt-175b.json", 12.9,  1, 8,  8,  64, 1),
+    ("GPT 1T korthi full",       "megatron-gpt-1t.json",   94.4,  1, 8, 64, 512, 4),
+    ("GPT 1T korthi selective",  "megatron-gpt-1t.json",   71.5,  1, 8, 64, 512, 1),
+    ("GPT 1T selene full",       "megatron-gpt-1t.json",  102.4,  6, 8, 64, 512, 4),
+    ("GPT 310B selene full",     "megatron-gpt-310b.json", 37.6, 15, 8, 16, 144, 4),
+    ("GPT 530B selene full",     "megatron-gpt-530b.json", 54.2,  9, 8, 35, 280, 4),
+    ("GPT 175B korthi full",     "megatron-gpt-175b.json", 18.1,  1, 8,  8,  64, 4),
+    ("GPT 175B korthi selective","megatron-gpt-175b.json", 13.8,  1, 8,  8,  64, 1),
 ]
 
 
