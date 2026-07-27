@@ -635,3 +635,79 @@ caused it, and it is the best lead for whoever works the recompute model next.
   which is the previous 1399 minus the 221 excluded golden tests plus the 7 added here;
 * every T5 physical suite within its existing threshold (koyeb 5.98 % <= 6.50 %, IMEC A100 inference
   all green; the H100 inference rows remain the pre-existing xfails).
+
+---
+
+# Rebaseline 4 (2026-07-27) — audit corrections + items 16, 18, and 11's second half
+
+Rebaseline 3 was put through an **adversarial audit**: six claims about WHY items 11/12/13 existed,
+each attacked by two independent agents instructed to REFUTE rather than confirm. Five of six came
+back `PARTLY_REFUTED` or `REFUTED`. **Every code fix survived. Three stated reasons did not, and one
+fix was half-wrong.** This rebaseline lands the corrections.
+
+## What the audit found
+
+| claim | verdict | outcome |
+|---|---|---|
+| 13 is an accident, no compensating divisor | **SURVIVES** (both auditors, high) | code unchanged |
+| 13's provenance (`173a765` converted attention) | **PARTLY_REFUTED** | prose corrected in 3 places |
+| 11's R5b is correct | **PARTLY_REFUTED → code fixed** | see below |
+| 12's `/tp` | **SURVIVES** | argument replaced with a stronger one |
+| 16's "compute-bound at peak FLOPs" | **PARTLY_REFUTED** | physics corrected; number was right |
+| fixes are complete | **REFUTED** | R5b defect; 14 promoted into this commit |
+
+**The one that mattered.** R5b selected its sources with `key.phase is SyncPhase.GRAD`. ZeRO-2's
+post-reduce parameter all-gather is declared in that same phase, so it became a source and the
+optimizer was ordered `reduce-scatter -> all-gather -> update` — the physical inverse. Then the
+second auditor caught that the obvious fix is ALSO wrong: on a one-COMM-slot model
+`RS -> gather -> update` and `RS -> update -> gather` cost the SAME, so excluding the gather without
+adding `optimizer -> gather` leaves it a SINK and it overlaps the update for free.
+
+| `flattened:dp2tp1cp1pp2mb2sp0:zero2` | total |
+|---|---|
+| inverted (rebaseline 3 as shipped) | 0.09766584 s |
+| gather excluded only — a SINK | 0.09293931 s |
+| **correct: `RS -> update -> gather`** | **0.09455452 s** |
+
+Fixed as a PAIR — **R5b** (optimizer after the reducer) and **R5c** (post-update collectives after
+the optimizer) — with roles DECLARED by the policy (`SyncRequirement.is_reducer` / `.after_update`)
+instead of read off a schedule phase. Ledger **14** is therefore fixed here rather than later.
+
+## Also in this rebaseline
+
+* **16** — `grad_clipping` moved from `mem_layer[0]` (the register file) to DRAM. `roofline` now
+  REQUIRES `mem_level` for a scalar `mem_access`, which surfaced **five** callers reaching level 0
+  by omission — three inside the analytical collective model. Only `grad_clipping` moved; the rest
+  are pinned explicitly with citations (**16b**, **16c**).
+* **18** — ONE parameter census. `layer_params_per_rank` is now the single answer to "how many
+  parameters does this rank own"; all four readers route through it. Behavior-preserving.
+* **19** — filed, not fixed: there is no `cp`-axis gradient reduction anywhere.
+
+## Delta table (golden `total_time`, rebaseline 3 -> this tree)
+
+**37 of 44 moved; all 7 inference rows and every memory peak bit-identical.** The dominant term is
+16 (+33.3 % on the apply-grad price, hence +3 % .. +9.6 % nearly everywhere); the two zero2 rows
+additionally carry the R5b/R5c correction (`analytical` **+3.17 %**, `flattened` **-3.19 %**).
+
+## T5 — measured Megatron A100_korthi
+
+Item 13 alone, all four rows (A/B on the MLP divisor, everything else held):
+
+| row | measured | unsharded MLP | per-rank MLP |
+|---|---|---|---|
+| GPT 22B pp1 full | 1.4 s | 1.774 s (+26.71 %) | 1.417 s (**+1.21 %**) |
+| GPT 22B pp1 selective | 1.1 s | 1.226 s (+11.45 %) | 0.869 s (-21.00 %) |
+| GPT 175B pp8 full | 16.9 s | 18.562 s (+9.83 %) | 18.205 s (**+7.72 %**) |
+| GPT 175B pp8 selective | 12.9 s | 12.503 s (-3.08 %) | 12.145 s (-5.85 %) |
+| **avg abs error** | | **12.77 %** | **8.95 %** |
+
+At HEAD (13 + 16 together): GPT 22B pp1 full **+3.05 %**, selective **-18.64 %**.
+
+`GPT 22B selective` under-predicts by ~19-21 % in every variant including the pre-10b baseline
+(-27.27 %), so it is chronically low for a reason unrelated to the optimizer — selective recompute
+with `tp_sp`. Best available lead for whoever works the recompute model.
+
+## Gates
+
+golden **221 passed** · full suite **1189 passed, 44 skipped, 7 xfailed, 2 xpassed** ·
+`RAPID_BUILD_DIFF=1` sweep green · every T5 physical suite within its existing threshold.

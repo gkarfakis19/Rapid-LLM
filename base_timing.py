@@ -310,6 +310,14 @@ class NetworkModel:
             0,
             int(math.ceil(2 * size_bytes / participants)),
             name=f"{label}-mem",
+            # BUG_LEDGER 16c — PINNED at level 0, not endorsed. This reached
+            # level 0 by omission before `roofline` required the level; stating
+            # it keeps behavior identical and makes the question visible. A ring
+            # hop's chunk is `size/participants`, which for a gradient buffer is
+            # HBM-resident, so DRAM is the likely right answer — but this term
+            # is inside EVERY analytical collective, so moving it needs its own
+            # review and delta table.
+            mem_level=0,
         )
         data_transfer = ((per_rank / ib) + mem_access + ll) * 2 * (participants - 1)
         prep_comp = per_rank
@@ -317,7 +325,7 @@ class NetworkModel:
 
         # NOTE: removed overhead because it made it impossible to eliminate network effects even with inf bandwidth and zero latency
         data_prep = (
-            self._roofline(prep_comp, prep_mem, name=f"{label}-prep") # + self.O
+            self._roofline(prep_comp, prep_mem, name=f"{label}-prep", mem_level=0)  # + self.O  (16c)
         ) * (participants - 1)
         return data_transfer + data_prep
 
@@ -329,12 +337,20 @@ class NetworkModel:
             0,
             int(math.ceil(2 * size_bytes / participants)),
             name=f"{label}-mem",
+            # BUG_LEDGER 16c — PINNED at level 0, not endorsed. This reached
+            # level 0 by omission before `roofline` required the level; stating
+            # it keeps behavior identical and makes the question visible. A ring
+            # hop's chunk is `size/participants`, which for a gradient buffer is
+            # HBM-resident, so DRAM is the likely right answer — but this term
+            # is inside EVERY analytical collective, so moving it needs its own
+            # review and delta table.
+            mem_level=0,
         )
         data_transfer = ((per_rank / ib) + mem_access + ll) * (participants - 1)
         prep_comp = per_rank
         prep_mem = int(math.ceil(3 * size_bytes / participants))
         data_prep = (
-            self._roofline(prep_comp, prep_mem, name=f"{label}-prep") + self.O
+            self._roofline(prep_comp, prep_mem, name=f"{label}-prep", mem_level=0) + self.O  # 16c
         ) * (participants - 1)
         return data_transfer + data_prep
 
@@ -345,6 +361,14 @@ class NetworkModel:
             0,
             int(math.ceil(2 * size_bytes / participants)),
             name=f"{label}-mem",
+            # BUG_LEDGER 16c — PINNED at level 0, not endorsed. This reached
+            # level 0 by omission before `roofline` required the level; stating
+            # it keeps behavior identical and makes the question visible. A ring
+            # hop's chunk is `size/participants`, which for a gradient buffer is
+            # HBM-resident, so DRAM is the likely right answer — but this term
+            # is inside EVERY analytical collective, so moving it needs its own
+            # review and delta table.
+            mem_level=0,
         )
         data_transfer = ((size_bytes / ib) + mem_access + ll) * (participants - 1)
         return data_transfer
@@ -573,13 +597,37 @@ class TimeCalculation:
         return model_classes[key]
 
     def roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
-        # print("Roofline: entered {}".format(name))
+        """Roofline time for one operation.
 
+        ``mem_access_`` is either a LIST of per-level byte counts, ordered
+        ``(L0, L1, L2, DRAM)`` — in which case every level is evaluated and the
+        slowest wins — or a SCALAR, meaning "this many bytes at ONE level".
+
+        **A scalar requires ``mem_level``** (BUG_LEDGER 16). It used to default
+        to level 0, silently pricing the operation against the REGISTER FILE:
+        a one-element list has length 1, so the multi-level branch evaluated
+        ``mem_layer[0]`` alone. That is why ``grad_clipping`` — a full sweep of
+        every gradient in the model — measured 0.21 % of the ``apply_grad`` term
+        it sits beside: not because it went compute-bound, but because it went
+        MEMORY-bound against ~134 TB/s instead of ~0.8 TB/s.
+
+        Requiring the level surfaced FIVE callers that had been reaching level 0
+        by omission, three of them inside the analytical collective model
+        (``_analytical_all_reduce`` / ``_reduce_scatter`` / ``_all_gather``).
+        Only ``grad_clipping`` was moved; the rest are pinned at their existing
+        level with a citation, because changing them moves every collective or
+        every GEMM in the model and each deserves its own review.
+        """
         # Parse mem_access_ into consistent format
-        if isinstance(mem_access_, int):
-            mem_access = [mem_access_]
-        elif isinstance(mem_access_, float):
+        if isinstance(mem_access_, (int, float)):
             mem_access = [int(mem_access_)]
+            if mem_level is None:
+                raise ValueError(
+                    f"roofline({name!r}): a scalar mem_access needs an explicit "
+                    f"mem_level (0 = fastest .. {self.num_levels - 1} = DRAM). "
+                    "Pass mem_level=self.num_levels-1 for anything that streams "
+                    "a full tensor from memory."
+                )
         elif isinstance(mem_access_, list):
             mem_access = mem_access_
         else:
@@ -980,8 +1028,17 @@ class TimeCalculation:
         # 2: 2 memory accesses for operands with one input and one output
         # 1: 5/4 non-linearities per gate
 
+        # BUG_LEDGER 16b — level 0 is PINNED here, not endorsed. This call used
+        # to reach level 0 by omission (see `roofline`); the level is now stated
+        # so the behavior is unchanged and the question is visible. A GEMM
+        # epilogue plausibly does run out of fast memory while the output tile
+        # is hot, which is why this one is not moved to DRAM along with
+        # `grad_clipping` — but `point_mem` scales with the FULL m*n output, so
+        # for a large GEMM it cannot all be register-resident. Settling it moves
+        # every GEMM in the model, so it needs its own review and delta table.
         point_time = (
-            self.roofline(point_flop, point_mem, name=f"pointwise_{name}") + 5 * self.O
+            self.roofline(point_flop, point_mem, name=f"pointwise_{name}", mem_level=0)
+            + 5 * self.O
         )
 
         if self.debug:
@@ -998,7 +1055,26 @@ class TimeCalculation:
     # Reduction and all-gather time estimation
 
     def grad_clipping(self, num_params: int) -> float:
-        """Gradient clipping (L2 norm + scale) cost."""
+        """Gradient clipping (L2 norm + scale) cost.
+
+        BUG_LEDGER 16. This priced a sweep of EVERY gradient in the model
+        against ``mem_layer[0]`` — the register file — because it omitted
+        ``mem_level`` and ``roofline`` defaulted a scalar to level 0.
+
+        It came out MEMORY-bound there, not compute-bound: ``comp_int`` is
+        ``4n / (2*precision.gradients*n)`` = 0.5, against an L0 inflection of
+        ``th/bw0`` = 2.32 on ``a100_80GB_korthikanti``, so ``roofline`` took the
+        memory branch and charged 8 B/param at ~134 TB/s register bandwidth.
+        The measured share was **0.8442 us of a 399.2401 us apply-grad call =
+        0.2115 %** — which is the memory-bound answer; a genuinely compute-bound
+        term would have been 4.65x smaller still. The share is config-specific.
+
+        The gradient buffer is DRAM-resident by construction, so the traffic is
+        charged at the last level like every other full-tensor sweep. Both terms
+        are then memory-bound at the same bandwidth, so this adds exactly
+        ``2*precision.gradients / (read+write bytes per param)`` = **+33.3 %**
+        to ``apply_grad`` at this config.
+        """
         norm_comp = num_params * 2  # square + sum
         clip_comp = num_params * 2  # scale + divide
         clip_mem = num_params * 2 * self.precision.gradients  # read + write
@@ -1006,7 +1082,12 @@ class TimeCalculation:
         gradclip_mem = clip_mem
         gradclip_comp = norm_comp + clip_comp
 
-        return self.roofline(gradclip_comp, gradclip_mem, name="pointwise-grad-clipping")
+        return self.roofline(
+            gradclip_comp,
+            gradclip_mem,
+            name="pointwise-grad-clipping",
+            mem_level=self.num_levels - 1,
+        )
 
     def apply_grad(self, num_params: int) -> float:
         """Approximate optimizer update cost (Adam/AdamW-style) per parameter tensor."""

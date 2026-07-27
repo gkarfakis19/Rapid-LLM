@@ -68,6 +68,7 @@ from program.ir import (
     CommGroup,
     ComputeOp,
     GroupKey,
+    OpRole,
     Program,
     ProgramMeta,
     TransferOp,
@@ -978,6 +979,7 @@ def _requirement(
     microbatch=None,
     layer=None,
     spread=SyncSpread.CLUSTER_RANK_0,
+    is_reducer: bool = False,
 ) -> SyncRequirement:
     spec = fw.spec.comm.require(key)
     return SyncRequirement.from_spec(
@@ -988,6 +990,7 @@ def _requirement(
         anchors=anchors,
         via=via,
         spread=spread,
+        is_reducer=is_reducer,
         origin="test",
     )
 
@@ -1010,6 +1013,10 @@ def test_r4_after_puts_the_requirement_off_the_anchor_and_before_the_optimizer()
         anchors=(layer_b,),
         microbatch=0,
         layer=0,
+        # R5b selects by ROLE, so the fixture must declare it — which is the
+        # property under test: a GRAD-phase collective that is NOT a reducer
+        # (ZeRO-2's post-reduce gather) must stay off the optimizer.
+        is_reducer=True,
     )
     program = _program(
         cfg,
@@ -1022,6 +1029,59 @@ def test_r4_after_puts_the_requirement_off_the_anchor_and_before_the_optimizer()
     optimizer = _one(program, "optimizer_stage0")
     assert reducer.deps == (anchor.uid,)
     assert _succs(program)[reducer.uid] == (optimizer.uid,)
+
+
+def test_r5b_selects_reducers_by_role_not_by_schedule_phase():
+    """**BUG_LEDGER 11**, the defect an adversarial audit found in the FIRST fix.
+
+    R5b originally filtered its source set with ``key.phase is SyncPhase.GRAD``.
+    ZeRO-2's post-reduce parameter all-gather is declared in that same phase
+    (``sharding.ZeRO2.after_reducer``), so it became a source and the optimizer
+    was ordered ``reduce-scatter -> all-gather -> update`` — the physical
+    inverse of ``reduce-scatter -> update -> all-gather``.
+
+    A ``SyncPhase`` says WHERE in the schedule a requirement sits. It can never
+    answer WHAT it is. The role is declared by the policy that knows
+    (``SyncRequirement.is_reducer``), and this pins it end to end on a real
+    ZeRO-2 workload.
+    """
+    cfg = Cfg(dp=2, pp=2, mb=2, num_layers=4, zero_stage=2)
+    for granularity in (Granularity.COARSE, Granularity.FINE):
+        program = _program(cfg, granularity, overlap=NoOverlap())
+        succs = _succs(program)
+        optimizers = {
+            op.uid for op in program.ops
+            if isinstance(op, ComputeOp) and op.role is OpRole.OPTIMIZER
+        }
+        assert optimizers, f"{granularity.name}: no optimizer op"
+
+        reducers = [op for op in program.ops
+                    if isinstance(op, CollectiveOp) and op.is_dp
+                    and op.coll is CollectiveType.REDUCE_SCATTER]
+        gathers = [op for op in program.ops
+                   if isinstance(op, CollectiveOp) and op.is_dp
+                   and op.coll is CollectiveType.ALL_GATHER]
+        assert reducers and gathers, f"{granularity.name}: zero2 must emit both"
+
+        # the REDUCER feeds the optimizer ...
+        assert any(optimizers & set(succs.get(r.uid, ())) for r in reducers), (
+            f"{granularity.name}: no reduce-scatter -> optimizer edge"
+        )
+        # ... and the post-reduce GATHER never does.
+        for g in gathers:
+            assert not (optimizers & set(succs.get(g.uid, ()))), (
+                f"{granularity.name}: the ZeRO-2 parameter all-gather {g.uid} feeds "
+                "the optimizer — the update cannot wait on a gather that "
+                "broadcasts its own output"
+            )
+            # R5c: it runs AFTER the update instead. Excluding the gather from
+            # R5b's SOURCES without adding this makes it a graph sink, which
+            # overlaps the update for free — cheaper than the inverted edge it
+            # replaced. The pair is the fix; either half alone is wrong.
+            assert optimizers & set(g.deps), (
+                f"{granularity.name}: the ZeRO-2 parameter all-gather {g.uid} is a "
+                "SINK — it must depend on the optimizer whose output it broadcasts"
+            )
 
 
 def test_r4_before_splices_the_requirement_in_front_of_the_anchor():

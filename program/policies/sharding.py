@@ -397,6 +397,9 @@ class DDP(ShardingPolicy):
             mode=AttachMode.AFTER,
             anchors=(work,),
             spread=_spread_for(spec),
+            # THE reducer — see SyncRequirement.is_reducer. Everything
+            # `after_reducer` adds shares this phase and is NOT one.
+            is_reducer=True,
             origin=_REDUCER_ORIGIN[work.kind],
         )
         return (reducer,) + tuple(self.after_reducer(reducer, work, ctx))
@@ -474,6 +477,9 @@ class ZeRO2(DDP):
                 mode=AttachMode.AFTER,
                 anchors=(reducer.key,),
                 spread=_spread_for(spec),
+                # This gather broadcasts the parameters the optimizer just
+                # wrote, so it cannot precede or overlap the update.
+                after_update=True,
                 origin=_ZERO2_ORIGIN[work.kind],
             ),
         )

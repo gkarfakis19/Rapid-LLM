@@ -778,12 +778,14 @@ class TimeCalculationLLM(TimeCalculation):
         tp = max(1, self.tp)
         pp = max(1, self.pp)
 
-        ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
-        attention_params = self._attention_param_total_per_rank(hidden_dim)
-        transformer_param_layer = attention_params + (
-            intermediate_size * ffn_proj_factor * hidden_dim / tp
+        # BUG_LEDGER 18 — the memory/ZeRO census and the gradient census are the
+        # SAME question, so they read the same function. This used to spell the
+        # MLP out inline as `intermediate_size * ffn_proj_factor * hidden_dim / tp`,
+        # which is exactly what `layer_params_per_rank` returns for a dense layer
+        # (`_ffn1_output_dim` is `2*inter` gated / `inter` otherwise, plus `inter`).
+        params_per_layer_per_rank = sum(
+            self.layer_params_per_rank(hidden_dim, intermediate_size, moe=False).values()
         )
-        params_per_layer_per_rank = transformer_param_layer
 
         total_transformer_params = params_per_layer_per_rank * self.num_layers
         if pp == 1:
@@ -1065,17 +1067,80 @@ class TimeCalculationLLM(TimeCalculation):
         This exists because the three gradient/apply-grad call sites used to
         write ``ffn1_dim * d`` inline, i.e. the FULL unsharded MLP, while their
         attention terms went through :meth:`_attention_param_components_per_rank`
-        (which does divide). That asymmetry was the residue of a half-finished
-        per-rank conversion: before ``173a765`` NOTHING in those helpers was
-        per-rank (``d * 3 * d`` for QKV), the MoE overhaul converted attention
-        and the experts, and the dense MLP was left behind. At ``tp=8`` on a
-        standard ``4h`` MLP it made a layer's apply-grad and its dp gradient
-        payload **5.667x** too large.
+        (which does divide). That asymmetry is the residue of a HALF-FINISHED
+        per-rank conversion in ``c5823bb`` ("MLA PT#1 (Megatron-equal)",
+        2026-04-03): that commit introduced
+        :meth:`_attention_param_components_per_rank` and swapped it into the
+        gradient helpers, converting the ATTENTION terms to per-rank and leaving
+        the dense MLP at ``ffn1_dim * d``. The census had been per-rank all
+        along --- before ``c5823bb`` it divided the whole layer once at the end
+        (``params_per_layer_per_rank = transformer_param_layer / tp``) --- and
+        ``173a765`` ("MoE overhaul", 2026-01-06) had already made the EXPERTS
+        per-rank. So the commit that left the MLP behind is the one explicitly
+        aiming at "Megatron-equal" accounting: about as clear an oversight
+        signature as provenance gets. At ``tp=8`` on a standard ``4h`` MLP it
+        made a layer's apply-grad and its dp gradient payload **5.667x** too
+        large.
         """
         tp = float(max(1, int(self.tp)))
         ffn1_params = float(self._ffn1_output_dim(intermediate_size)) * float(hidden_dim) / tp
         ffn2_params = float(intermediate_size) * float(hidden_dim) / tp
         return ffn1_params, ffn2_params
+
+    def _moe_ffn_param_components_per_rank(
+        self, hidden_dim: int, moe_intermediate_size: int
+    ) -> Tuple[float, float]:
+        """Return ``(expert_params, router_params)`` **owned by this rank**.
+
+        The MoE counterpart of :meth:`_dense_ffn_param_components_per_rank`, and
+        the third leg of the census (**BUG_LEDGER 18**). This body used to exist
+        VERBATIM in two places — ``get_data_parallel_reduction_sizes`` and
+        ``get_data_parallel_reduction_llm`` — with a partial third copy in the
+        ``ep_dense_sync_bytes`` block. Duplicated arithmetic is exactly how the
+        dense MLP came to disagree with the census in the first place (item 13),
+        so it lives once.
+
+        ``tp_ep`` decides whether experts are ALSO tensor-sharded on top of the
+        expert-parallel split; the router is a ``hidden x num_experts`` matrix
+        replicated on every rank.
+        """
+        tp = max(1, int(self.tp))
+        ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
+        expert_param_size = ffn_proj_factor * moe_intermediate_size * hidden_dim
+        moe_group = max(1, int(self._moe_routing_group()))
+        per_expert = (expert_param_size / tp) if bool(getattr(self, "tp_ep", True)) else expert_param_size
+        experts_per_rank = (self.moe_num_experts / moe_group) + self.n_shared_experts
+        expert_params = float(per_expert) * float(experts_per_rank)
+        router_params = float(hidden_dim) * float(self.moe_num_experts)
+        return expert_params, router_params
+
+    def layer_params_per_rank(
+        self, hidden_dim: int, intermediate_size: int, *, moe: bool = False
+    ) -> Dict[str, float]:
+        """**THE** per-rank parameter census for ONE transformer layer.
+
+        BUG_LEDGER 18. Four call sites used to answer "how many parameters does
+        this rank own" independently — ``_param_stats_per_rank`` (memory/ZeRO),
+        the apply-grad price, the dp gradient payload and the EP-sync payload —
+        and three of them disagreed until 2026-07-27 (items 12 and 13). They now
+        all route through here, so a future divisor can only be wrong in ONE
+        place, and `tests/test_grad_param_census.py` asserts the four agree.
+
+        Keys are component names so a caller that needs a SUBSET (the EP dense
+        sync wants attention + MLP but not the experts) can take it by name
+        instead of re-deriving the arithmetic.
+        """
+        qkv, output = self._attention_param_components_per_rank(hidden_dim)
+        params: Dict[str, float] = {"qkv": float(qkv), "output": float(output)}
+        if moe:
+            experts, router = self._moe_ffn_param_components_per_rank(hidden_dim, intermediate_size)
+            params["experts"] = experts
+            params["router"] = router
+        else:
+            ffn1, ffn2 = self._dense_ffn_param_components_per_rank(hidden_dim, intermediate_size)
+            params["ffn1"] = ffn1
+            params["ffn2"] = ffn2
+        return params
 
     def _vit_sequence_shard_degree(self) -> int:
         if not self._is_vit_model():
@@ -2930,74 +2995,41 @@ class TimeCalculationLLM(TimeCalculation):
         return w, w_size
 
     def get_data_parallel_reduction_sizes(self, d, intermediate_size, *, moe: bool = False):
-        """Calculate communication sizes for data parallel reductions (no timing)."""
+        """dp gradient payload for ONE layer, in bytes (no timing).
+
+        Reads :meth:`layer_params_per_rank` — the ONE census (BUG_LEDGER 18).
+        The dense and MoE branches differ only in which components exist, and
+        the per-component ``ceil`` is preserved verbatim from the original so
+        the rounding is unchanged.
+        """
         if not getattr(self, "dp", 1) or self.dp <= 1:
             # No communication needed for dp=1
             return 0
-
-        # Calculate sizes only
-        qkv_params, output_params = self._attention_param_components_per_rank(d)
-        qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
-        output_size = math.ceil(self.precision.grad_communication * output_params)
+        params = self.layer_params_per_rank(d, intermediate_size, moe=moe)
+        grad_comm = self.precision.grad_communication
         if not moe:
-            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(d, intermediate_size)
-            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_params)
-            ffn2_size = math.ceil(self.precision.grad_communication * ffn2_params)
-            total_size = qkv_size + output_size + ffn1_size + ffn2_size
-            return total_size
-
-        ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
-        expert_param_size = ffn_proj_factor * intermediate_size * d
-        tp = max(1, int(self.tp))
-        moe_group = max(1, int(self._moe_routing_group()))
-        routed_experts_per_rank = self.moe_num_experts / moe_group
-        shared_experts_per_rank = self.n_shared_experts
-        use_tp_sharded = bool(getattr(self, "tp_ep", True))
-        if use_tp_sharded:
-            routed_params_per_rank = (expert_param_size / tp) * routed_experts_per_rank
-        else:
-            routed_params_per_rank = expert_param_size * routed_experts_per_rank
-        if use_tp_sharded:
-            shared_params_per_rank = (expert_param_size / tp) * shared_experts_per_rank
-        else:
-            shared_params_per_rank = expert_param_size * shared_experts_per_rank
-        expert_params_per_rank = routed_params_per_rank + shared_params_per_rank
-        router_params_per_rank = d * self.moe_num_experts
-        moe_param_size = math.ceil(
-            self.precision.grad_communication * (expert_params_per_rank + router_params_per_rank)
+            return sum(
+                math.ceil(grad_comm * params[k]) for k in ("qkv", "output", "ffn1", "ffn2")
+            )
+        # The MoE branch rounds the expert+router pair TOGETHER, as it always has.
+        return (
+            math.ceil(grad_comm * params["qkv"])
+            + math.ceil(grad_comm * params["output"])
+            + math.ceil(grad_comm * (params["experts"] + params["router"]))
         )
-        total_size = qkv_size + output_size + moe_param_size
-        return total_size
 
     def get_data_parallel_reduction_llm(self, d, intermediate_size, *, moe: bool = False):
-        """Return apply_grad compute time per rank (no communication), honoring ZeRO sharding."""
-        qkv_params, output_params = self._attention_param_components_per_rank(d)
-        apply_grad_time = self.apply_grad(int(qkv_params)) # QKV
-        apply_grad_time += self.apply_grad(int(output_params)) # Output
-        if not moe:
-            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(d, intermediate_size)
-            apply_grad_time += self.apply_grad(int(ffn1_params)) # FFN1
-            apply_grad_time += self.apply_grad(int(ffn2_params)) # FFN2
-        else:
-            ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
-            expert_param_size = ffn_proj_factor * intermediate_size * d
-            tp = max(1, int(self.tp))
-            moe_group = max(1, int(self._moe_routing_group()))
-            routed_experts_per_rank = self.moe_num_experts / moe_group
-            shared_experts_per_rank = self.n_shared_experts
-            use_tp_sharded = bool(getattr(self, "tp_ep", True))
-            if use_tp_sharded:
-                routed_params_per_rank = (expert_param_size / tp) * routed_experts_per_rank
-            else:
-                routed_params_per_rank = expert_param_size * routed_experts_per_rank
-            if use_tp_sharded:
-                shared_params_per_rank = (expert_param_size / tp) * shared_experts_per_rank
-            else:
-                shared_params_per_rank = expert_param_size * shared_experts_per_rank
-            expert_params_per_rank = routed_params_per_rank + shared_params_per_rank
-            apply_grad_time += self.apply_grad(int(expert_params_per_rank))
-            router_params_per_rank = d * self.moe_num_experts
-            apply_grad_time += self.apply_grad(int(router_params_per_rank)) # Router
+        """apply-grad compute time per rank for ONE layer, honoring ZeRO sharding.
+
+        Reads :meth:`layer_params_per_rank` — the ONE census (BUG_LEDGER 18).
+        ``apply_grad`` is priced per COMPONENT rather than on the summed total
+        because ``roofline`` is not linear in general (it takes the max of a
+        compute-bound and a memory-bound term per call), and the component split
+        is what the original charged.
+        """
+        params = self.layer_params_per_rank(d, intermediate_size, moe=moe)
+        order = ("qkv", "output", "ffn1", "ffn2") if not moe else ("qkv", "output", "experts", "router")
+        apply_grad_time = sum(self.apply_grad(int(params[k])) for k in order)
 
         grad_shard = self.dp if (self.zero_stage >= 2 and self.dp > 1) else 1
         if grad_shard > 1:
@@ -4690,26 +4722,32 @@ class TimeCalculationLLM(TimeCalculation):
         ep_dense_sync_bytes_dense = 0
         ep_dense_sync_bytes_moe = 0
         if include_transformer_backward and self.use_moe and self.ep > 1:
-            qkv_params, output_params = self._attention_param_components_per_rank(hidden_dim)
-            qkv_size = math.ceil(self.precision.grad_communication * qkv_params)
-            output_size = math.ceil(self.precision.grad_communication * output_params)
-            ffn1_params, ffn2_params = self._dense_ffn_param_components_per_rank(
-                hidden_dim, intermediate_size
+            # BUG_LEDGER 18 — the fourth census reader. It wants SUBSETS: a dense
+            # layer syncs everything it owns across the EP group, while an MoE
+            # layer syncs only its REPLICATED parameters (attention + router +
+            # shared experts); the routed experts are private to their EP rank
+            # and are reduced by the dp collective instead.
+            grad_comm = self.precision.grad_communication
+            dense = self.layer_params_per_rank(hidden_dim, intermediate_size, moe=False)
+            moe_params = self.layer_params_per_rank(hidden_dim, self.moe_intermediate_size, moe=True)
+            qkv_size = math.ceil(grad_comm * dense["qkv"])
+            output_size = math.ceil(grad_comm * dense["output"])
+            ep_dense_sync_bytes_dense = int(
+                qkv_size
+                + output_size
+                + math.ceil(grad_comm * dense["ffn1"])
+                + math.ceil(grad_comm * dense["ffn2"])
             )
-            ffn1_size = math.ceil(self.precision.grad_communication * ffn1_params)
-            ffn2_size = math.ceil(self.precision.grad_communication * ffn2_params)
-            ep_dense_sync_bytes_dense = int(qkv_size + output_size + ffn1_size + ffn2_size)
-            router_size = math.ceil(self.precision.grad_communication * hidden_dim * self.moe_num_experts)
+            router_size = math.ceil(grad_comm * moe_params["router"])
             shared_size = 0
             if self.n_shared_experts > 0:
-                ffn_proj_factor = 3 if self._uses_gated_mlp() else 2
-                expert_param_size = ffn_proj_factor * self.moe_intermediate_size * hidden_dim
-                use_tp_sharded = bool(getattr(self, "tp_ep", True))
-                if use_tp_sharded:
-                    shared_params_per_rank = (expert_param_size / max(1, self.tp)) * self.n_shared_experts
-                else:
-                    shared_params_per_rank = expert_param_size * self.n_shared_experts
-                shared_size = math.ceil(self.precision.grad_communication * shared_params_per_rank)
+                # ``experts`` is (routed + shared) per rank; the shared slice is
+                # the per-expert price times the shared count. Derived from the
+                # census rather than re-spelled, so tp_ep cannot drift here.
+                moe_group = max(1, int(self._moe_routing_group()))
+                experts_per_rank = (self.moe_num_experts / moe_group) + self.n_shared_experts
+                shared_fraction = float(self.n_shared_experts) / float(experts_per_rank)
+                shared_size = math.ceil(grad_comm * moe_params["experts"] * shared_fraction)
             ep_dense_sync_bytes_moe = int(qkv_size + output_size + router_size + shared_size)
 
         comm_metadata = self._build_comm_metadata(

@@ -1,10 +1,10 @@
 {
  "astra_times": {
   "hier": {
-   "max_sec": 0.032431,
+   "max_sec": 0.035205,
    "per_rank_sec": [
-    0.032431,
-    0.032431
+    0.035205,
+    0.035205
    ]
   },
   "hier/bwd": {
@@ -24,54 +24,54 @@
  },
  "bundles": {
   "hier": {
-   "bundle_hash": "0578f2029684485951e4e202cb31bdeec2ba75f68097eed7d9711b095c175bfb",
+   "bundle_hash": "b5149d82137a9aeab2cb0ff710dacdbe632940161621930754ffc4385fc71935",
    "byte_hist_by_kind": {},
    "bytes_by_kind": {},
    "collectives_by_group": {},
    "comm_groups": {},
-   "compute_micros_total": 64862,
+   "compute_micros_total": 70410,
    "manifest": {
     "npus": 1,
     "ranks": {
      "0": {
+      "COMP:12541": 1,
       "COMP:1664": 1,
       "COMP:2897": 2,
       "COMP:2928": 1,
       "COMP:432": 2,
-      "COMP:5707": 2,
-      "COMP:9767": 1
+      "COMP:5707": 2
      }
     },
     "version": "df-astra-manifest/1"
    },
-   "manifest_sha256": "2777ba90fa6fa4f38483298e14f568d4c51ee20650d17001a0d530a6ecf3f482",
+   "manifest_sha256": "c0b281becfc8ddb483c2d61c1d31ae25b8dce5da4103aa6b9fc481fd7c50bf57",
    "n_ranks": 2,
    "n_recv": 0,
    "n_transfers": 0,
    "ranks": {
     "0": {
      "bytes_by_kind": {},
-     "compute_micros": 32431,
+     "compute_micros": 35205,
      "critical_path_nodes": 9,
-     "critical_path_weight": 32431,
-     "dag_hash": "213525550fcfa77509e5830adbd1b04490fa65f57c4d7aac91bd8261f61bd8c7",
+     "critical_path_weight": 35205,
+     "dag_hash": "285b3ab883c4979b353c4b90daf1692a020a6e23c77c970defb815e1bf77f1f0",
      "n_nodes": 9,
      "op_counts": {
       "COMP": 9
      },
-     "ops_hash": "d168baa6c1be02175998f409ff52b08f1a759ddda7a9c40aee4a0cb0d0c204e3"
+     "ops_hash": "a957194d14b76518d9e2f16fc08365a2a60f5b924c0e1cb6022b968bf9055c93"
     },
     "1": {
      "bytes_by_kind": {},
-     "compute_micros": 32431,
+     "compute_micros": 35205,
      "critical_path_nodes": 9,
-     "critical_path_weight": 32431,
-     "dag_hash": "213525550fcfa77509e5830adbd1b04490fa65f57c4d7aac91bd8261f61bd8c7",
+     "critical_path_weight": 35205,
+     "dag_hash": "285b3ab883c4979b353c4b90daf1692a020a6e23c77c970defb815e1bf77f1f0",
      "n_nodes": 9,
      "op_counts": {
       "COMP": 9
      },
-     "ops_hash": "d168baa6c1be02175998f409ff52b08f1a759ddda7a9c40aee4a0cb0d0c204e3"
+     "ops_hash": "a957194d14b76518d9e2f16fc08365a2a60f5b924c0e1cb6022b968bf9055c93"
     }
    }
   },
@@ -184,7 +184,7 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "ccc8f64",
+ "git_rev": "4e9ec1e",
  "memory": {
   "LLM": {
    "fields": {
@@ -204,5 +204,5 @@
  "phase_times": {},
  "spec_id": "train:hierarchical:dp1tp1cp1pp1mb1sp0",
  "status": "ok",
- "total_time": 0.032431
+ "total_time": 0.035205
 }

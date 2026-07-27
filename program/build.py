@@ -489,6 +489,12 @@ class _Builder:
         self._chain_by_device: Dict[Tuple[WorkItem, int], ExpandedChain] = {}
         #: ``SyncKey -> the node ids the requirement materialized on``.
         self._sync_nodes: Dict[SyncKey, List[int]] = {}
+        #: The subset of ``_sync_nodes`` whose requirement declared
+        #: ``is_reducer`` — R5b's source set. Recorded here because R5 runs
+        #: after R4 and no longer has the requirements.
+        self._reducer_keys: Set[SyncKey] = set()
+        #: Requirements declaring ``after_update`` — R5b's SUCCESSOR set.
+        self._after_update_keys: Set[SyncKey] = set()
         #: R5/R5b edges, recorded so **D1** stays checkable on the artifact:
         #: R3 eliminates an edge only against the graph R3 SAW, and R5 runs
         #: after R4, so an R3 edge can be subsumed later without R3 having
@@ -1129,6 +1135,10 @@ class _Builder:
                     instances.append(attached)
             if instances:
                 self._sync_nodes[req.key] = instances
+                if req.is_reducer:
+                    self._reducer_keys.add(req.key)
+                if req.after_update:
+                    self._after_update_keys.add(req.key)
                 resolved.add(req.key)
             else:
                 # INTERFACES §2.3 note 1: a requirement whose resolved anchor
@@ -1360,20 +1370,35 @@ class _Builder:
             if item.direction is Direction.BACKWARD
             and item.kind in _R5_GRADIENT_KINDS
         ]
-        # R5b sources: every GRAD-phase collective, indexed by (stage, device).
+        # R5b sources: the GRADIENT REDUCERS, indexed by (stage, device).
+        #
+        # Selected by ROLE (``SyncRequirement.is_reducer``), NOT by
+        # ``key.phase is SyncPhase.GRAD``. The phase test was wrong and shipped
+        # briefly: ZeRO-2's post-reduce parameter all-gather is declared in the
+        # same phase (``sharding.ZeRO2.after_reducer``), so it became an R5b
+        # source and the optimizer was ordered AFTER the gather —
+        # ``reduce-scatter -> all-gather -> update`` instead of the physical
+        # ``reduce-scatter -> update -> all-gather``. A phase says WHERE in the
+        # schedule a requirement sits; it can never answer WHAT it is.
+        #
         # ``_ProtoCollective.work`` is the requirement's ``place_on``, so the
         # stage is read from the schedule exactly as it is for a work item —
         # nothing is inferred from the node's name or comm key.
         reducers: Dict[Tuple[int, int], List[int]] = {}
+        after_update: Dict[Tuple[int, int], List[int]] = {}
         for key, nids in self._sync_nodes.items():
-            if key.phase is not SyncPhase.GRAD:
+            if key in self._reducer_keys:
+                bucket = reducers
+            elif key in self._after_update_keys:
+                bucket = after_update
+            else:
                 continue
             for nid in nids:
                 node = self._nodes[nid]
                 work = getattr(node, "work", None)
                 if work is None:
                     continue
-                reducers.setdefault(
+                bucket.setdefault(
                     (int(self._schedule.stage_of(work)), int(node.device)), []
                 ).append(nid)
 
@@ -1405,6 +1430,26 @@ class _Builder:
                         )
                     self._add_dep(source, target, DepClass.DATA_FLOW)
                     self._r5_edges.append((source, target))
+                # R5c — and anything that broadcasts the UPDATED parameters runs
+                # after it. Must land WITH R5b, never alone: excluding ZeRO-2's
+                # gather from R5b's sources without this makes the gather a
+                # graph SINK, and a sink collective overlaps the update for free
+                # — cheaper than the mis-ordered edge it replaced. Measured on
+                # `flattened:dp2tp1cp1pp2mb2sp0:zero2`: sink 0.09293931 s vs
+                # correct 0.09309056 s, against 0.09766584 s for the inverted
+                # ordering. Only the pair is right.
+                exit_nid = self._chain_nodes[(optimizer, device)][chain.exit]
+                for sink in sorted(after_update.get((stage, device), ())):
+                    if sink == exit_nid or self._reaches(exit_nid, sink):
+                        continue
+                    if self._reaches(sink, exit_nid):
+                        raise BuildError(
+                            f"R5c would close a cycle: post-update collective "
+                            f"{sink} already reaches OPTIMIZER node {exit_nid} "
+                            f"(stage {stage}, device {device})"
+                        )
+                    self._add_dep(exit_nid, sink, DepClass.DATA_FLOW)
+                    self._r5_edges.append((exit_nid, sink))
 
     # ------------------------------------------------------------------
     # phase 9 — overlap realization (INTERFACES §4.5)

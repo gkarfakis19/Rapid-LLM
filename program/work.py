@@ -750,6 +750,31 @@ class SyncRequirement:
     # -- how ---------------------------------------------------------------
     overlap: Optional[Any] = None  #: OverlapDecl (program.policies.overlap)
 
+    #: True for the GRADIENT REDUCER itself — the collective that produces the
+    #: reduced gradient the optimizer applies. Declared by the policy, because
+    #: only the policy knows: :meth:`ShardingPolicy.after_reducer` hangs further
+    #: collectives on the reducer and they land in the SAME ``SyncPhase.GRAD``,
+    #: so the phase cannot distinguish them.
+    #:
+    #: **R5b depends on this.** It first filtered by ``key.phase is GRAD``, which
+    #: swept up ZeRO-2's post-reduce PARAMETER ALL-GATHER and ordered
+    #: ``reduce-scatter -> all-gather -> update`` — the physical inverse of
+    #: ``reduce-scatter -> update -> all-gather``. A phase is a position in the
+    #: schedule (``work.SyncPhase``), never a role; asking it a role question is
+    #: how the wrong edge got in.
+    is_reducer: bool = False
+
+    #: True for a collective that broadcasts the UPDATED parameters, i.e. one
+    #: that must run AFTER the optimizer. ZeRO-2/3's post-reduce parameter
+    #: all-gather is the only such row today (row S3/S5/S10).
+    #:
+    #: The real ZeRO-2 sequence is ``reduce-scatter -> update my 1/dp shard ->
+    #: all-gather``. Declaring the gather ``AFTER(reducer)`` alone leaves it a
+    #: SIBLING of the optimizer, and AstraSim's one-COMP/one-COMM-slot model
+    #: then overlaps them — cheaper than physics allows. R5b wires
+    #: ``optimizer -> gather`` from this flag.
+    after_update: bool = False
+
     #: Diagnostics only: the INTERFACES §2.3 row this requirement reproduces.
     origin: str = ""
 
@@ -813,6 +838,8 @@ class SyncRequirement:
         consumers: Sequence[WorkItem] = (),
         split: ByteSplit = ByteSplit.WHOLE,
         overlap: Optional[Any] = None,
+        is_reducer: bool = False,
+        after_update: bool = False,
         origin: str = "",
     ) -> "SyncRequirement":
         """Build a requirement from its :class:`CommSpec`.
@@ -839,6 +866,8 @@ class SyncRequirement:
             via=via,
             consumers=tuple(consumers),
             overlap=overlap,
+            is_reducer=is_reducer,
+            after_update=after_update,
             origin=origin,
         )
 
