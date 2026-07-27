@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 import pandas as pd
 
 matplotlib.use("Agg")
@@ -66,11 +67,8 @@ OUT = SCRIPT_DIR.parent / "output" / "validation" / "paper" / "h100_train_compar
 
 # Same marker vocabulary and ordering as the MPT parity figure.
 MARKERS = ["o", "s", "^", "D", "v", "P", "X", "<", ">"]
-# GPU count is an ordinal magnitude, so its colors are a single-hue ramp
-# (light -> dark) rather than a categorical cycle: monotone in lightness,
-# adjacent dL >= 0.06, light end clears the surface, and unlike tab10 it
-# stays separable under protanopia.
-GPU_RAMP = ["#6aa9d6", "#3585bf", "#19629f", "#0a3a66"]
+# GPU-count colors are sampled from tab10 exactly as the MPT parity figure
+# samples its SeqLen colors, so the two figures read as a matched pair.
 PARITY_LINE = "#b04a4a"  # muted red dashed y=x, as in the MPT figure
 # Log-axis padding, in decades, applied to both ends of the shared range.
 # 0.16 dec (a factor of 1.45) is the smallest pad that keeps the 0.3 s tick
@@ -152,10 +150,11 @@ def main() -> None:
     sizes = sorted(keep["size"].unique())
     gpu_counts = sorted(keep["gpus"].unique())
     size_to_marker = {s: MARKERS[i % len(MARKERS)] for i, s in enumerate(sizes)}
-    gpu_to_color = {g: GPU_RAMP[i % len(GPU_RAMP)] for i, g in enumerate(gpu_counts)}
+    _gpu_colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(1, len(gpu_counts))))
+    gpu_to_color = {g: _gpu_colors[i] for i, g in enumerate(gpu_counts)}
 
     with plt.rc_context(ieee_rc_params()):
-        fig, ax = plt.subplots(figsize=(IEEE_HALF_COLUMN_WIDTH_IN * 1.45, 3.2))
+        fig, ax = plt.subplots(figsize=(IEEE_HALF_COLUMN_WIDTH_IN * 1.2, 3.0))
         for size in sizes:
             for gpus in gpu_counts:
                 sub = keep[(keep["size"] == size) & (keep["gpus"] == gpus)]
@@ -188,7 +187,7 @@ def main() -> None:
             # No minor ticks: keeps the gridline density identical to the
             # linear version instead of drawing 8 faint lines per decade.
             axis.set_minor_locator(NullLocator())
-        ax.set_title("Dense Training Runtime Comparison (H100 Nanotron Sweep)",
+        ax.set_title("Dense Training Runtime (H100 Nanotron Sweep)",
                      fontsize=IEEE_TITLE_SIZE_PT)
         ax.set_xlabel("Actual (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
         ax.set_ylabel("Predicted (s)", fontsize=IEEE_AXIS_TITLE_SIZE_PT)
