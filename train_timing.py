@@ -23,8 +23,7 @@ from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from llm_execution import ExecutionMode, LLMExecutionDispatcher
 from program import _env_flag
 from program.block import BlockTemplate
-from program.block_program import TransformerBlockSpec
-from program.schedule import ScheduleInputs
+from program.workload import BlockTemplates, OverlapSpec, WorkloadSpec
 import llm_util
 from memory_estimation import MemoryEstimator
 from base_timing import TimeCalculation
@@ -312,14 +311,15 @@ class TimeCalculationLLM(TimeCalculation):
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0
-        #: Pipeline schedule inputs (M7: ``program.schedule.ScheduleInputs``,
-        #: the typed carrier that replaced the legacy pipeline ``Graph``).
-        self.pipeline_graph: Optional[ScheduleInputs] = None
+        #: The typed workload the dispatcher consumes (P5: L0's
+        #: ``program.workload.WorkloadSpec``, which replaced the
+        #: ``ScheduleInputs`` carrier) and its non-final grad-accum twin.
+        self.workload: Optional[WorkloadSpec] = None
+        self.workload_no_dp: Optional[WorkloadSpec] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
-        #: BLOCK template bundles (M4): dense/MoE BlockTemplates + cluster
-        #: degrees, replacing the legacy transformer Graph/root twelve-tuple.
-        self.transformer_blocks: Optional[TransformerBlockSpec] = None
-        self.transformer_blocks_no_dp: Optional[TransformerBlockSpec] = None
+        #: BLOCK template bundle: the dense/MoE ``BlockTemplate``s plus their
+        #: per-template comm tables.
+        self.transformer_blocks: Optional[BlockTemplates] = None
         self.transformer_analytical_time_forward: Optional[float] = None
         self.transformer_analytical_time_backward: Optional[float] = None
         self.transformer_analytical_time_backward_combined: Optional[float] = None
@@ -331,7 +331,6 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_astrasim_per_rank_backward: Optional[List[float]] = None
         self.transformer_astrasim_per_rank_forward_moe: Optional[List[float]] = None
         self.transformer_astrasim_per_rank_backward_moe: Optional[List[float]] = None
-        self.pipeline_graph_no_dp: Optional[ScheduleInputs] = None
 
     def _sequence_parallel_degree(self) -> int:
         """Return tensor-parallel degree used for sequence-parallel collectives.
@@ -4538,21 +4537,18 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_embedding_gather_bytes: float = 0.0,
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
-    ) -> Tuple[
-        ScheduleInputs,
-        Optional[ScheduleInputs],
-        "TransformerBlockSpec",
-        Dict[str, Tuple[float, float]],
-    ]:
-        """Build the pipeline schedule inputs + transformer BLOCK templates
-        shared across training and inference. The no-DP transformer twin
-        (grad accumulation with MoE EP sync) is stored on
-        ``self.transformer_blocks_no_dp``.
+    ) -> Tuple[WorkloadSpec, Optional[WorkloadSpec]]:
+        """Assemble the typed :class:`~program.workload.WorkloadSpec` pair the
+        dispatcher consumes: the final grad-accum cycle and (when grad
+        accumulation is active) its non-final twin, which carries the no-DP
+        transformer templates.
 
-        M7 note: this used to construct legacy pipeline ``Graph`` objects
-        and their ``construct_fwd_bwd_graph`` roots; the dispatcher builds
-        every Program (coarse/fine) from the :class:`ScheduleInputs`
-        carrier now, so only the inputs are assembled here."""
+        P5 note: this is THE producer seam. It hands over one typed object per
+        cycle — degrees, shape, run policy, comm table, block templates, overlap
+        spec, interconnect params and the mutable duration table — instead of a
+        ``ScheduleInputs`` carrier plus a ``TransformerBlockSpec`` plus a loose
+        interconnect dict that every one of the five call sites re-derived
+        ``include_backward`` / ``include_optimizer`` / the effective dp from."""
         need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
 
         if not include_pipeline_backward and not include_transformer_backward:
@@ -4975,16 +4971,12 @@ class TimeCalculationLLM(TimeCalculation):
                 ep_dense_sync_bytes=ep_dense_sync_bytes_moe,
             )
 
-        transformer_blocks = TransformerBlockSpec(
+        transformer_blocks = BlockTemplates(
             dense=transformer_template,
             moe=moe_transformer_template,
-            tp=self.tp,
-            cp=self.cp,
-            ep=graph_ep,
-            include_backward=include_transformer_backward,
         )
 
-        transformer_blocks_no_dp: Optional[TransformerBlockSpec] = None
+        transformer_blocks_no_dp: Optional[BlockTemplates] = None
         if need_no_dp_variant and include_transformer_backward and self.use_moe and self.ep > 1:
             dense_template_no_dp = _build_transformer_template(
                 transformer_timings,
@@ -5000,13 +4992,9 @@ class TimeCalculationLLM(TimeCalculation):
                     use_moe_layer=True,
                     ep_dense_sync_bytes=0,
                 )
-            transformer_blocks_no_dp = TransformerBlockSpec(
+            transformer_blocks_no_dp = BlockTemplates(
                 dense=dense_template_no_dp,
                 moe=moe_template_no_dp,
-                tp=self.tp,
-                cp=self.cp,
-                ep=graph_ep,
-                include_backward=include_transformer_backward,
             )
 
         dense_transformer_f = node_breakdown.get('transformer_time_f', 0.0)
@@ -5078,43 +5066,58 @@ class TimeCalculationLLM(TimeCalculation):
         misc_metadata_nonfinal = dict(misc_metadata)
         misc_metadata_nonfinal["grad_accum_cycle"] = "nonfinal"
 
-        pipeline_inputs = ScheduleInputs(
-            dp=self.dp,
-            pp=self.pp,
-            tp=self.tp,
-            cp=self.cp,
-            ep=graph_ep,
-            comp_times=comp_times,
-            comm_metadata=comm_metadata,
-            misc_metadata=misc_metadata_final,
+        interconnect_params = self._build_interconnect_params()
+        overlap_spec = OverlapSpec.from_legacy(
+            self.get_parallelism_mode(),
+            tp_overlap=getattr(self, "tp_overlap", 0.0),
+            tp_sp_overlap=getattr(self, "tp_sp_overlap", 0.0),
+            cp_overlap=getattr(self, "cp_overlap", 0.0),
         )
 
-        pipeline_inputs_no_dp = None
-        if need_no_dp_variant:
-            # For grad accumulation we run non-final cycles with the optimizer
-            # disabled while skipping skippable DP comms (the "nonfinal"
-            # grad_accum_cycle marker drives both in the schedule builders).
-            pipeline_inputs_no_dp = ScheduleInputs(
-                dp=self.dp,
-                pp=self.pp,
+        def _workload(
+            *,
+            comp: Dict[str, Any],
+            misc: Dict[str, Any],
+            blocks: BlockTemplates,
+            grad_accum_cycle: str,
+        ) -> WorkloadSpec:
+            """One typed WorkloadSpec (INTERFACES §1.7 producer map, in L0)."""
+            return WorkloadSpec.from_timing(
                 tp=self.tp,
                 cp=self.cp,
                 ep=graph_ep,
-                comp_times=comp_times_no_dp or comp_times,
+                pp=self.pp,
+                dp=self.dp,
+                run_type=getattr(self, "run_type", "training"),
+                grad_accum_cycle=grad_accum_cycle,
+                pipeline_interleave=int(getattr(self, "pipeline_interleave", 1) or 1),
+                comp_times=comp,
                 comm_metadata=comm_metadata,
-                misc_metadata=misc_metadata_nonfinal,
+                misc_metadata=misc,
+                blocks=blocks,
+                overlap=overlap_spec,
+                interconnect=interconnect_params,
             )
 
-        interconnect_params = self._build_interconnect_params()
-
-        self.transformer_blocks_no_dp = transformer_blocks_no_dp
-
-        return (
-            pipeline_inputs,
-            pipeline_inputs_no_dp,
-            transformer_blocks,
-            interconnect_params,
+        workload = _workload(
+            comp=comp_times,
+            misc=misc_metadata_final,
+            blocks=transformer_blocks,
+            grad_accum_cycle="final",
         )
+        workload_no_dp = None
+        if need_no_dp_variant:
+            # For grad accumulation we run non-final cycles with the optimizer
+            # disabled while skipping skippable DP comms (the "nonfinal"
+            # grad_accum_cycle marker drives both, on RunPolicy now).
+            workload_no_dp = _workload(
+                comp=comp_times_no_dp or comp_times,
+                misc=misc_metadata_nonfinal,
+                blocks=transformer_blocks_no_dp or transformer_blocks,
+                grad_accum_cycle="nonfinal",
+            )
+
+        return workload, workload_no_dp
 
     def _build_training_graphs_and_memory_data(self):
         batch_size = self._effective_transformer_batch()
@@ -5260,12 +5263,7 @@ class TimeCalculationLLM(TimeCalculation):
                     max(extra_static.values())
                 )
 
-        (
-            pipeline_inputs,
-            pipeline_inputs_no_dp,
-            transformer_blocks,
-            interconnect_params,
-        ) = self._prepare_execution_graphs(
+        workload, workload_no_dp = self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
             transformer_timings=transformer_timings,
             moe_node_breakdown=moe_node_breakdown,
@@ -5286,7 +5284,7 @@ class TimeCalculationLLM(TimeCalculation):
             zero3_softmax_gather_bytes=zero3_softmax_gather_bytes,
         )
 
-        self.transformer_blocks = transformer_blocks
+        self.transformer_blocks = workload.blocks
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         # Report backward including recompute overhead when enabled.
         self.transformer_analytical_time_backward_combined = node_breakdown['transformer_time_b_combined']
@@ -5302,9 +5300,13 @@ class TimeCalculationLLM(TimeCalculation):
             )
             self.transformer_analytical_time_backward = self.transformer_analytical_time_backward_combined
 
-        self.pipeline_graph = pipeline_inputs
-        self.pipeline_interconnect = interconnect_params
-        self.pipeline_graph_no_dp = pipeline_inputs_no_dp
+        #: the typed workload the dispatcher consumes (final grad-accum cycle)
+        #: and its non-final twin. There is no ``ScheduleInputs`` carrier any
+        #: more, and no per-caller re-derivation of include_backward /
+        #: include_optimizer / effective dp.
+        self.workload = workload
+        self.workload_no_dp = workload_no_dp
+        self.pipeline_interconnect = dict(workload.interconnect)
 
         return mem_estimator, memory_data
 
@@ -5315,29 +5317,16 @@ class TimeCalculationLLM(TimeCalculation):
         mode = self.execution_mode
         time_fw_bw_no_dp: Optional[float] = None
         if self.gradient_accumulation_steps > 1:
-            if not self.pipeline_graph_no_dp:
-                raise RuntimeError("Gradient accumulation steps > 1 requires non-final accumulation schedule inputs")
-            transformer_blocks_no_dp = self.transformer_blocks_no_dp or self.transformer_blocks
-            dispatcher_no_dp = LLMExecutionDispatcher(
-                time_calc=self,
-                pipeline_graph=self.pipeline_graph_no_dp,
-                interconnect_params=self.pipeline_interconnect,
-                transformer_blocks=transformer_blocks_no_dp,
-                no_data_parallel=True,
-            )
+            if not self.workload_no_dp:
+                raise RuntimeError("Gradient accumulation steps > 1 requires a non-final accumulation workload")
+            dispatcher_no_dp = LLMExecutionDispatcher(self, self.workload_no_dp)
             try:
                 result_no_dp = dispatcher_no_dp.run(mode)
             except NotImplementedError as exc:
                 raise NotImplementedError(f"{exc}. Selected execution mode '{mode.value}'.") from exc
             time_fw_bw_no_dp = result_no_dp.total_time
 
-        dispatcher = LLMExecutionDispatcher(
-            time_calc=self,
-            pipeline_graph=self.pipeline_graph,
-            interconnect_params=self.pipeline_interconnect,
-            transformer_blocks=self.transformer_blocks,
-            no_data_parallel=False,
-        )
+        dispatcher = LLMExecutionDispatcher(self, self.workload)
         try:
             result = dispatcher.run(mode)
         except NotImplementedError as exc:
@@ -5370,13 +5359,7 @@ class TimeCalculationLLM(TimeCalculation):
     def estimate_memory_only(self) -> Dict[str, Any]:
         mem_estimator, memory_data = self._build_training_graphs_and_memory_data()
 
-        dispatcher = LLMExecutionDispatcher(
-            time_calc=self,
-            pipeline_graph=self.pipeline_graph,
-            interconnect_params=self.pipeline_interconnect,
-            transformer_blocks=self.transformer_blocks,
-            no_data_parallel=False,
-        )
+        dispatcher = LLMExecutionDispatcher(self, self.workload)
         memory_program = dispatcher.build_fine_program_for_memory()
         _, training_peak_gb = mem_estimator.simulate_peak(
             memory_program,

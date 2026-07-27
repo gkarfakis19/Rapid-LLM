@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence, Tuple, List
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 def _normalize_axis_name(name: str) -> str:
@@ -167,3 +167,39 @@ def derive_axes_filter(
         axes = [axis for axis in axes if axis != "dp"]
         axes.append("dp")
     return axes
+
+
+def extract_axis_layout(
+    rank_layout: Optional[Mapping[str, Any]],
+) -> Tuple[List[str], Dict[str, int], Dict[str, int]]:
+    """Parse a rank-layout descriptor into ``(axis_order, sizes, strides)``.
+
+    Relocated here in P5 from ``program.legacy_lowering`` (the emission-ordering
+    pass it lived in is deleted); the body and its defensive coercions are
+    unchanged. Strides are recomputed row-major when the descriptor omits them.
+    """
+    if not isinstance(rank_layout, dict):
+        return [], {}, {}
+    axis_order = list(rank_layout.get("axis_order", []))
+    raw_sizes = rank_layout.get("axis_sizes", {})
+    axis_sizes: Dict[str, int] = {}
+    if isinstance(raw_sizes, dict):
+        for key, value in raw_sizes.items():
+            try:
+                axis_sizes[str(key)] = max(1, int(value))
+            except Exception:
+                axis_sizes[str(key)] = 1
+    raw_strides = rank_layout.get("axis_strides", {})
+    axis_strides: Dict[str, int] = {}
+    if isinstance(raw_strides, dict):
+        for key, value in raw_strides.items():
+            try:
+                axis_strides[str(key)] = int(value)
+            except Exception:
+                axis_strides[str(key)] = 0
+    else:
+        span = 1
+        for axis in axis_order:
+            axis_strides[axis] = span
+            span *= axis_sizes.get(axis, 1)
+    return axis_order, axis_sizes, axis_strides

@@ -157,6 +157,11 @@ def policies_for(
     ``block_expanded`` select the recompute policy (INTERFACES §2.7); the
     coupling is one documented argument, not a ``misc["flattened_mode"]`` read
     inside a builder.
+
+    No granularity-specific SHARDING override is needed: a BLOCK workload is a
+    single-replica block measurement (``degrees.dp == 1``, which ``build()``
+    enforces — INTERFACES §3.1 and the legacy ``dp_override=1``), and
+    ``sharding_policy_for`` already answers :class:`NullSharding` at ``dp <= 1``.
     """
     from program.workload import WorkloadSpec
 

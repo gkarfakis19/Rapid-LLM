@@ -19,16 +19,15 @@
 simulation over a ``program.ir.Program``: emit (``program.et_emit``) ->
 config generation -> cached AstraSim run -> per-rank seconds.
 
-History: the legacy converter (``convert_rapid_llm_graph_to_chakra_et``)
-died in two steps. At M2 (docs/rewrite/DESIGN.md §5) its body moved into the
-``program`` core — ``program.legacy_lowering.lower_to_program`` reproduces
-the graph analysis (Steps 1-7) and ``program.et_emit.emit_chakra`` owns
-every AstraSim contract rule, byte-equivalence proven in shadow mode on all
-42 golden specs at M1. At M6 the remaining shell (the legacy-graph entry of
-this runner) was deleted with the last legacy-graph caller: the
-hierarchical pipeline phase now lowers its coarse Program through the same
-shared pass (``program.pipeline_coarse.lower_coarse_for_emission``), so
-only Programs reach this runner.
+History: the legacy converter (``convert_rapid_llm_graph_to_chakra_et``) died
+in three steps. At M2 (docs/rewrite/DESIGN.md §5) its body moved into the
+``program`` core, with ``program.et_emit.emit_chakra`` owning every AstraSim
+contract rule (byte-equivalence proven in shadow mode on all 42 golden specs at
+M1) and an emission-ordering pass reproducing the graph analysis. At M6 the
+legacy-graph entry of this runner was deleted. At P5 the ordering pass went too:
+``program.build.build()`` produces the emitted Program directly, in program order
+(``kahn(slot, device, intra)``), so ``emit_chakra`` has ONE id policy and this
+runner sees only Programs.
 """
 
 import os
@@ -38,11 +37,11 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# Raised for deep event graphs. Originally installed for the deleted
-# recursive converter (convert_rapid_llm_graph_to_chakra_et); the surviving
-# recursive consumers that depend on this import-time side effect are
-# program/analytic_sim.py (convert_comm_sizes_to_times) and program/viz.py
-# (_visit) — deep coarse event graphs can exceed the default limit.
+# Raised for deep graphs. Originally installed for the deleted recursive
+# converter (convert_rapid_llm_graph_to_chakra_et). P5/P6 removed the last
+# recursive graph walkers (the analytical evaluator and the renderer read the op
+# list now); the limit is kept because Chakra's protobuf helpers and graphviz
+# both recurse over large workloads.
 sys.setrecursionlimit(100000)
 
 from graphviz import Digraph
@@ -51,7 +50,7 @@ import util
 from .config_generation import generate_astrasim_configs_from_hw
 # Imported for its import-time dependency probe: gmap requires scotchpy, and a
 # missing scotchpy must surface here (astrasim_lib import) so ASTRASIM_AVAILABLE
-# flips to False, not later inside a conversion (lower_to_program uses gmap).
+# flips to False, not later inside a run (program.mapping uses gmap).
 from . import gmap  # noqa: F401
 from .et_utils import (
     chakra_decode,
@@ -59,7 +58,7 @@ from .et_utils import (
     pb,
 )
 from .integration import run_cache_astrasim
-from .layout_utils import derive_axes_filter
+from .layout_utils import derive_axes_filter, extract_axis_layout
 from util import relpath_display
 
 
@@ -386,7 +385,7 @@ def run_astra_simulation_only_onepath(
         # The Program carries its own emission dp (the builder already
         # applied any inference dp override when constructing it).
         dp_count = max(1, int(fwdbwd_root.dp_count))
-        bundle = emit_chakra(fwdbwd_root, work_dir, id_policy="legacy")
+        bundle = emit_chakra(fwdbwd_root, work_dir)
         fwd_et_prefix, rank_ids, fwd_manifest = (
             bundle.et_prefix,
             bundle.rank_ids,
@@ -433,13 +432,9 @@ def run_astra_simulation_only_onepath(
             print("[AstraSim] RAPID_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
             exit()
 
-        # Lazy import for the same astrasim_lib <-> program cycle reason as
-        # above.
-        from program.legacy_lowering import _extract_axis_layout
-
         if rank_layout is None and fwdbwd_root.layout.axis_order:
             rank_layout = fwdbwd_root.layout.descriptor()
-        axis_order, axis_sizes, _ = _extract_axis_layout(rank_layout)
+        axis_order, axis_sizes, _ = extract_axis_layout(rank_layout)
         preferred_axes_for_synthetic = tuple(axis_order) if axis_order else tuple()
         axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)
         if not axes_filter:

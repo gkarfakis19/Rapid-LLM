@@ -13,41 +13,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Graphviz rendering of schedule/fine proto event graphs (M8).
+"""Graphviz rendering of a :class:`~program.ir.Program` (P6).
 
-Port of the legacy ``simulate_train_graph.visualize_graph`` /
-``Graph.save_graph`` pair over the Program builders' proto events — the
-coarse schedule events (:class:`program.schedule.ComputeEvent` /
-``CommEvent``) and the fine builder's :class:`program.pipeline_fine.
-FineNode`/``FineEdge``. The classification is duck-typed exactly like the
-legacy renderer's event branches:
+Reads the **Program**; the proto event graphs are gone. The classification is
+the legacy renderer's, restated over typed fields instead of ``hasattr``
+probes:
 
-* ``comm_size_bytes`` present -> comm event: green when ``is_dp``, white
-  for EVERY ``PIPELINE`` comm event — including byte-carrying cross-stage
-  ``cross_layer`` transfers; the legacy renderer never checked bytes —
-  yellow for the remaining (non-dp, non-PIPELINE) collectives; the label
-  shows ``local_hw_id`` when placed;
-* ``hw_id`` present -> compute event: lightblue forward / lightcoral
-  backward; the label shows the scalar duration or the per-DP
-  ``duration_profile`` written by :func:`program.retime.apply_block_timings`
-  (grouped by equal values, the legacy format).
+* :class:`~program.ir.CollectiveOp` / :class:`~program.ir.TransferOp` -> comm:
+  green when ``is_dp``, white for EVERY ``PIPELINE`` comm op (including
+  byte-carrying cross-stage ``cross_layer`` transfers — the legacy renderer
+  never checked bytes), yellow for the remaining collectives. A collective's
+  label shows its owning device (the legacy ``local_hw_id``);
+* :class:`~program.ir.ComputeOp` -> compute: lightblue forward / lightcoral
+  backward, labelled with the scalar duration or the per-DP profile written by
+  :func:`program.retime.apply_block_timings` (grouped by equal values, the
+  legacy format).
 
-``save_events_graph`` preserves the legacy output contract byte-for-byte:
-``<output_folder><filename>.svg`` via :func:`util.graphviz_submit` (async
-when ``RAPID_VISUALIZE_GRAPHS`` is set, else inline), with the same
-"Graph saved to" completion message.
+Comm durations come from ``meta.misc[analytic_sim.COMM_DURATIONS_KEY]`` when the
+analytical conversion ran (it is what the evaluator used), else 0 — the legacy
+renderer read the durations the conversion pass had written onto the events.
+
+Edges are drawn in program order (ascending uid on both endpoints), the tie
+discipline :mod:`program.analytic_sim` documents.
+
+:func:`save_program_graph` preserves the legacy output contract byte-for-byte:
+``<output_folder><filename>.svg`` via :func:`util.graphviz_submit` (async when
+``RAPID_VISUALIZE_GRAPHS`` is set, else inline), with the same "Graph saved to"
+completion message.
 """
 
 from __future__ import annotations
 
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from graphviz import Digraph
 
 import util
 from timing_model import CollectiveType
+
+from program.analytic_sim import COMM_DURATIONS_KEY
+from program.ir import CollectiveOp, ComputeOp, Direction, Program, TransferOp
+
+__all__ = ["save_program_graph", "visualize_program"]
 
 
 def _format_duration(value: float, profile: Optional[Tuple[float, ...]] = None) -> str:
@@ -81,62 +90,60 @@ def _format_duration(value: float, profile: Optional[Tuple[float, ...]] = None) 
     return ", ".join(parts)
 
 
-def _node_color(node: Any) -> str:
-    if hasattr(node, "comm_size_bytes"):
-        if getattr(node, "is_dp", False):
+def _op_color(op: Any) -> str:
+    if isinstance(op, ComputeOp):
+        return "lightblue" if op.direction is Direction.FORWARD else "lightcoral"
+    if isinstance(op, CollectiveOp):
+        if op.is_dp:
             return "green"
-        if getattr(node, "comm_type", None) == CollectiveType.PIPELINE:
+        if op.coll is CollectiveType.PIPELINE:
             return "white"
         return "yellow"
-    if hasattr(node, "hw_id"):
-        return "lightblue" if getattr(node, "fwd", True) else "lightcoral"
+    if isinstance(op, TransferOp):
+        return "white" if op.comm_type is CollectiveType.PIPELINE else "yellow"
     return "mediumorchid"
 
 
-def _node_label(node: Any) -> str:
-    if hasattr(node, "comm_size_bytes"):
-        duration_display = _format_duration(node.duration)
-        if getattr(node, "local_hw_id", None) is not None:
-            return f"{node.name}\n(local_hw_id={node.local_hw_id}, dur={duration_display})"
-        return f"{node.name}\n(dur={duration_display})"
-    if hasattr(node, "hw_id"):
-        # ComputeEvent ports the legacy Node duration property pair
-        # (scalar ``duration`` + optional per-DP ``duration_profile``).
-        profile = getattr(node, "duration_profile", None)
-        duration = node.duration
-        if profile is None and isinstance(duration, (tuple, list)):
-            profile = tuple(duration)
-        value = profile[0] if profile else duration
-        return f"{node.name}\n(hw_id={node.hw_id}, dur={_format_duration(value, profile)})"
-    return str(node)
+def _op_label(op: Any, duration: float) -> str:
+    if isinstance(op, ComputeOp):
+        profile = tuple(op.duration) if len(op.duration) > 1 else None
+        value = op.duration[0] if op.duration else 0.0
+        return f"{op.name}\n(hw_id={op.device}, dur={_format_duration(value, profile)})"
+    display = _format_duration(duration)
+    if isinstance(op, CollectiveOp):
+        return f"{op.name}\n(local_hw_id={op.device}, dur={display})"
+    return f"{op.name}\n(dur={display})"
 
 
-def visualize_events(roots: Any) -> Digraph:
-    """Render an event DAG (coarse schedule or fine proto) to a Digraph."""
+def visualize_program(program: Program) -> Digraph:
+    """Render a Program's dependency DAG to a Digraph."""
+    if not isinstance(program, Program):
+        raise TypeError(
+            f"visualize_program expects a Program (got {type(program).__name__})"
+        )
+    stored: Optional[Sequence[float]] = program.meta.misc.get(COMM_DURATIONS_KEY)
 
     dot = Digraph(comment="Computation Graph", format="svg")
-    visited = set()
-
-    def _visit(node: Any) -> None:
-        if node in visited:
-            return
-        visited.add(node)
-        node_id = str(id(node))
-        dot.node(node_id, label=_node_label(node), style="filled", fillcolor=_node_color(node), shape="box")
-        for child in getattr(node, "children", []):
-            child_id = str(id(child))
-            dot.edge(node_id, child_id)
-            _visit(child)
-
-    iterable = roots if isinstance(roots, (list, tuple, set)) else [roots]
-    for root in iterable:
-        _visit(root)
+    for op in program.ops:
+        duration = 0.0 if stored is None else float(stored[op.uid])
+        dot.node(
+            str(op.uid),
+            label=_op_label(op, duration),
+            style="filled",
+            fillcolor=_op_color(op),
+            shape="box",
+        )
+    for op in program.ops:
+        for dep in sorted(op.deps):
+            dot.edge(str(dep), str(op.uid))
     return dot
 
 
-def save_events_graph(roots: Any, output_folder: str = "output/LLM/", filename: str = "graph") -> None:
+def save_program_graph(
+    program: Program, output_folder: str = "output/LLM/", filename: str = "graph"
+) -> None:
     """Render + write ``<output_folder><filename>.svg`` (legacy
-    ``Graph.save_graph`` contract, async via ``util.graphviz_submit``)."""
+    ``Graph.save_graph`` contract, async via :func:`util.graphviz_submit`)."""
     os.makedirs(output_folder, exist_ok=True)
 
     base_path = os.path.normpath(f"{output_folder}{filename}")
@@ -145,7 +152,7 @@ def save_events_graph(roots: Any, output_folder: str = "output/LLM/", filename: 
     printstr = f" | Graph saved to    {display_path}"
 
     def _render_graph() -> None:
-        dot = visualize_events(roots)
+        dot = visualize_program(program)
         dot.render(base_path, format="svg", cleanup=True)
 
     util.graphviz_submit(f"{filename}.svg", _render_graph, print_message=printstr)

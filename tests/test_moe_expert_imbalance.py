@@ -7,8 +7,6 @@ from astrasim_lib import is_astrasim_available
 import config
 from inference_timing import TimeCalculationLLMInference
 from program.block import BlockTemplate
-from program.block_program import build_block_program, build_block_root
-from program.pipeline_fine import FineEdge, FineNode
 from train_timing import MoECommDecomposition
 from timing_model import CollectiveType
 from train_timing import TimeCalculationLLM
@@ -91,6 +89,91 @@ def _walk_graph(root):
         objects.append(obj)
         stack.extend(getattr(obj, "children", []))
     return objects
+
+
+# ---------------------------------------------------------------------------
+# P5: the BLOCK builder these tests used (``block_program.build_block_root`` /
+# ``build_block_program``) is deleted; ``build()`` at ``Granularity.BLOCK`` is
+# the one construction path. The helpers below are the SAME observations over
+# the Program: a routing JOIN is ``OpRole.JOIN`` and a residual p2p is a
+# ``TransferOp`` whose ``CommSpec.moe_component`` says so — typed fields, not
+# name substrings.
+# ---------------------------------------------------------------------------
+
+
+def _block_program(template, *, tp: int, cp: int, ep: int, direction: str = "forward"):
+    from program.build import build
+    from program.ir import Program
+    from program.placement import Granularity
+    from program.policies import policies_for
+    from program.schedule.gpipe import GPipeSchedule
+    from program.work import Direction
+    from program.workload import (
+        BlockTemplates,
+        DpMicrobatchMode,
+        DurationTable,
+        GradAccumCycle,
+        ModelShape,
+        OverlapSpec,
+        ParallelDegrees,
+        RunPolicy,
+        RunType,
+        WorkloadSpec,
+    )
+    from program.workload import CommSpecTable
+
+    spec = WorkloadSpec(
+        degrees=ParallelDegrees(tp=tp, cp=cp, ep=ep, pp=1, dp=1),
+        shape=ModelShape(num_layers=1, micro_batches=1, model_type="gpt"),
+        run=RunPolicy(
+            run_type=RunType.TRAINING,
+            grad_accum_cycle=GradAccumCycle.FINAL,
+            dp_microbatch_mode=DpMicrobatchMode.EVERY_MB,
+            zero_stage=0,
+        ),
+        comm=CommSpecTable([]),
+        blocks=BlockTemplates(dense=template),
+        overlap=OverlapSpec(parallelism_mode="none"),
+        layout=None,
+        interconnect={},
+        granularity_hint=Granularity.BLOCK,
+        durations=DurationTable({}),
+    )
+    fw = spec.freeze()
+    bundle = policies_for(fw, granularity=Granularity.BLOCK)
+    only = (Direction.FORWARD,) if direction == "forward" else (Direction.BACKWARD,)
+    return build(
+        fw,
+        granularity=Granularity.BLOCK,
+        sharding=bundle.sharding,
+        schedule_policy=GPipeSchedule(),
+        recompute=bundle.recompute,
+        routing=bundle.routing,
+        overlap=bundle.overlap,
+        grad_accum=bundle.grad_accum,
+        label="moe_block",
+        directions=only,
+    )
+
+
+def _joins(program, token: str):
+    from program.ir import ComputeOp, OpRole
+
+    return [
+        op
+        for op in program.ops
+        if isinstance(op, ComputeOp) and op.role is OpRole.JOIN and token in op.name
+    ]
+
+
+def _residuals(program):
+    from program.ir import TransferOp
+
+    return [
+        op
+        for op in program.ops
+        if isinstance(op, TransferOp) and op.moe_component == "residual_p2p"
+    ]
 
 
 def _et_name_to_id_map(text: str):
@@ -350,17 +433,15 @@ def test_training_moe_comm_graph_uses_local_joins_and_hot_join_fan_in_per_tp_sli
             },
         },
     )
-    root = build_block_root(template, "forward", tp=2, cp=1, ep=3)
-    objects = _walk_graph(root)
-
-    joins = [obj for obj in objects if isinstance(obj, FineNode) and "dispatch_fwd_group_join" in obj.name]
-    residuals = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p_rank" in obj.name]
+    program = _block_program(template, tp=2, cp=1, ep=3)
+    joins = _joins(program, "dispatch_fwd_group_join")
+    residuals = _residuals(program)
 
     assert len(joins) == 6
-    assert sorted(node.hw_id for node in joins) == [0, 1, 2, 3, 4, 5]
+    assert sorted(op.device for op in joins) == [0, 1, 2, 3, 4, 5]
     assert len(residuals) == 4
-    parent_counts = {join.hw_id: len(join.parents) for join in joins}
-    assert parent_counts == {0: 3, 1: 3, 2: 2, 3: 2, 4: 2, 5: 2}
+    dep_counts = {op.device: len(op.deps) for op in joins}
+    assert dep_counts == {0: 3, 1: 3, 2: 2, 3: 2, 4: 2, 5: 2}
 
 
 def test_inference_moe_comm_graph_uses_local_joins_with_single_pooled_hot_rank():
@@ -401,17 +482,15 @@ def test_inference_moe_comm_graph_uses_local_joins_with_single_pooled_hot_rank()
             },
         },
     )
-    root = build_block_root(template, "forward", tp=2, cp=1, ep=2)
-    objects = _walk_graph(root)
-
-    joins = [obj for obj in objects if isinstance(obj, FineNode) and "combine_fwd_group_join" in obj.name]
-    residuals = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p_rank" in obj.name]
+    program = _block_program(template, tp=2, cp=1, ep=2)
+    joins = _joins(program, "combine_fwd_group_join")
+    residuals = _residuals(program)
 
     assert len(joins) == 4
-    assert sorted(node.hw_id for node in joins) == [0, 1, 2, 3]
+    assert sorted(op.device for op in joins) == [0, 1, 2, 3]
     assert len(residuals) == 3
-    parent_counts = {join.hw_id: len(join.parents) for join in joins}
-    assert parent_counts == {0: 4, 1: 2, 2: 2, 3: 2}
+    dep_counts = {op.device: len(op.deps) for op in joins}
+    assert dep_counts == {0: 4, 1: 2, 2: 2, 3: 2}
 
 
 def test_training_graph_build_path_registers_moe_parallel_comm_specs():
@@ -433,12 +512,18 @@ def test_training_graph_build_path_registers_moe_parallel_comm_specs():
     tc._build_training_graphs_and_memory_data()
     blocks = tc.transformer_blocks
     assert blocks is not None and blocks.moe is not None
-    root = build_block_root(blocks.moe, "forward", tp=blocks.tp, cp=blocks.cp, ep=blocks.ep)
-    objects = _walk_graph(root)
+    degrees = tc.workload.degrees
+    program = _block_program(blocks.moe, tp=degrees.tp, cp=degrees.cp, ep=degrees.ep)
 
-    base_edges = [obj for obj in objects if isinstance(obj, FineEdge) and "base_all_to_all" in obj.name]
-    residual_edges = [obj for obj in objects if isinstance(obj, FineEdge) and "residual_p2p" in obj.name]
-    joins = [obj for obj in objects if isinstance(obj, FineNode) and "_join_rank" in obj.name]
+    from program.ir import CollectiveOp
+
+    base_edges = [
+        op
+        for op in program.ops
+        if isinstance(op, CollectiveOp) and "base_all_to_all" in op.name
+    ]
+    residual_edges = _residuals(program)
+    joins = _joins(program, "_join")
 
     assert len(base_edges) == 12
     assert len(residual_edges) == 8
@@ -535,8 +620,8 @@ def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
     )
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
-        program = build_block_program(template, "forward", None, tp=2, cp=1, ep=3)
-        bundle = emit_chakra(program, tmpdir, id_policy="legacy")
+        program = _block_program(template, tp=2, cp=1, ep=3)
+        bundle = emit_chakra(program, tmpdir)
         rank_ids = bundle.rank_ids
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
@@ -549,15 +634,15 @@ def test_training_hierarchical_et_blocks_cold_local_join_on_residual_send():
         hot_ids = _et_name_to_id_map(hot_text)
         hot_deps = _et_ctrl_deps_map(hot_text)
 
-        cold_join = cold_ids["dispatch_fwd_group_join_rank2_8"]
-        cold_send = cold_ids["moe_dispatch_forward_residual_p2p_rank2_to_hot0_send_dp0"]
+        cold_join = _find_et_node_id(cold_ids, "dispatch_fwd_group_join_device2_")
+        cold_send = cold_ids["moe_dispatch_forward_residual_p2p_rank2_to_rank0_send_dp0"]
         cold_base = _find_et_node_id(cold_ids, "moe_dispatch_forward_base_all_to_all")
         assert cold_send in cold_deps[cold_join]
         assert cold_base in cold_deps[cold_join]
 
-        hot_join = hot_ids["dispatch_fwd_group_join_rank0_2"]
-        hot_recv_rank2 = hot_ids["moe_dispatch_forward_residual_p2p_rank2_to_hot0_recv_dp0"]
-        hot_recv_rank4 = hot_ids["moe_dispatch_forward_residual_p2p_rank4_to_hot0_recv_dp0"]
+        hot_join = _find_et_node_id(hot_ids, "dispatch_fwd_group_join_device0_")
+        hot_recv_rank2 = hot_ids["moe_dispatch_forward_residual_p2p_rank2_to_rank0_recv_dp0"]
+        hot_recv_rank4 = hot_ids["moe_dispatch_forward_residual_p2p_rank4_to_rank0_recv_dp0"]
         hot_base = _find_et_node_id(hot_ids, "moe_dispatch_forward_base_all_to_all")
         assert hot_base in hot_deps[hot_join]
         assert hot_recv_rank2 in hot_deps[hot_join]
@@ -608,8 +693,8 @@ def test_inference_hierarchical_et_blocks_cold_local_join_on_residual_send():
     )
 
     with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tmp") as tmpdir:
-        program = build_block_program(template, "forward", None, tp=2, cp=1, ep=2)
-        bundle = emit_chakra(program, tmpdir, id_policy="legacy")
+        program = _block_program(template, tp=2, cp=1, ep=2)
+        bundle = emit_chakra(program, tmpdir)
         rank_ids = bundle.rank_ids
         et_paths = [str(Path(tmpdir) / f"llm_graph.{rank}.et") for rank in rank_ids]
         _dump_et_text(et_paths)
@@ -622,17 +707,17 @@ def test_inference_hierarchical_et_blocks_cold_local_join_on_residual_send():
         hot_ids = _et_name_to_id_map(hot_text)
         hot_deps = _et_ctrl_deps_map(hot_text)
 
-        cold_join = cold_ids["combine_fwd_group_join_rank1_5"]
-        cold_send = cold_ids["moe_combine_forward_residual_p2p_rank1_to_hot0_send_dp0"]
+        cold_join = _find_et_node_id(cold_ids, "combine_fwd_group_join_device1_")
+        cold_send = cold_ids["moe_combine_forward_residual_p2p_rank1_to_rank0_send_dp0"]
         cold_base = _find_et_node_id(cold_ids, "moe_combine_forward_base_all_to_all")
         assert cold_send in cold_deps[cold_join]
         assert cold_base in cold_deps[cold_join]
 
-        hot_join = hot_ids["combine_fwd_group_join_rank0_2"]
+        hot_join = _find_et_node_id(hot_ids, "combine_fwd_group_join_device0_")
         hot_base = _find_et_node_id(hot_ids, "moe_combine_forward_base_all_to_all")
-        hot_recv_rank1 = hot_ids["moe_combine_forward_residual_p2p_rank1_to_hot0_recv_dp0"]
-        hot_recv_rank2 = hot_ids["moe_combine_forward_residual_p2p_rank2_to_hot0_recv_dp0"]
-        hot_recv_rank3 = hot_ids["moe_combine_forward_residual_p2p_rank3_to_hot0_recv_dp0"]
+        hot_recv_rank1 = hot_ids["moe_combine_forward_residual_p2p_rank1_to_rank0_recv_dp0"]
+        hot_recv_rank2 = hot_ids["moe_combine_forward_residual_p2p_rank2_to_rank0_recv_dp0"]
+        hot_recv_rank3 = hot_ids["moe_combine_forward_residual_p2p_rank3_to_rank0_recv_dp0"]
         assert hot_base in hot_deps[hot_join]
         assert hot_recv_rank1 in hot_deps[hot_join]
         assert hot_recv_rank2 in hot_deps[hot_join]

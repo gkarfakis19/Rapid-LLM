@@ -733,7 +733,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         if prefill_len <= 0:
             print("Skipping prefill")
-            self.pipeline_graph = None
+            self.workload = None
             self.pipeline_interconnect = None
             self.transformer_blocks = None
             self.transformer_analytical_time_forward = None
@@ -787,12 +787,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             if getattr(self, "disable_kv_cache", False):
                 token_bytes = 0.0
 
-            (
-                pipeline_graph,
-                _,
-                transformer_blocks,
-                interconnect_params,
-            ) = self._prepare_execution_graphs(
+            workload, _ = self._prepare_execution_graphs(
                 node_breakdown=node_breakdown,
                 transformer_timings=transformer_timings,
                 moe_node_breakdown=moe_node_breakdown,
@@ -806,18 +801,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 include_transformer_backward=False,
             )
 
-            self.pipeline_graph = pipeline_graph
-            self.pipeline_interconnect = interconnect_params
-            self.transformer_blocks = transformer_blocks
+            self.workload = workload
+            self.pipeline_interconnect = dict(workload.interconnect)
+            self.transformer_blocks = workload.blocks
             self.transformer_analytical_time_forward = node_breakdown.get("transformer_time_f")
             self.transformer_analytical_time_backward = None
 
-            dispatcher = LLMExecutionDispatcher(
-                time_calc=self,
-                pipeline_graph=self.pipeline_graph,
-                interconnect_params=self.pipeline_interconnect,
-                transformer_blocks=self.transformer_blocks,
-            )
+            dispatcher = LLMExecutionDispatcher(self, workload)
             mode = self.execution_mode
             try:
                 result = dispatcher.run(mode)
@@ -855,22 +845,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 vocab_size=vocab_size,
                 model_type=self.model_type,
             )
-            (
-                decode_pipeline_graph,
-                _,
-                decode_transformer_blocks,
-                decode_interconnect_params,
-            ), _ = self.prepare_decode_graphs(
+            (decode_workload, _), _ = self.prepare_decode_graphs(
                 batch_size=batch_size,
                 total_seq_len=self.seq_len,
                 gemm_shapes=decode_gemm_shapes,
             )
-            decode_dispatcher = LLMExecutionDispatcher(
-                time_calc=self,
-                pipeline_graph=decode_pipeline_graph,
-                interconnect_params=decode_interconnect_params,
-                transformer_blocks=decode_transformer_blocks,
-            )
+            decode_dispatcher = LLMExecutionDispatcher(self, decode_workload)
             decode_memory_program = decode_dispatcher.build_fine_program_for_memory()
             decode_memory_data = mem_estimator.build_memory_data(
                 mode="inference",

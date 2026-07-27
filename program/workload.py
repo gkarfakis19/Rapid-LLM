@@ -989,6 +989,141 @@ class WorkloadSpec:
         final/nonfinal grad-accum cycle pair)."""
         return replace(self, **changes)
 
+    # -- THE producer seam (INTERFACES §1.7) ------------------------------
+    @classmethod
+    def from_timing(
+        cls,
+        *,
+        tp: int,
+        cp: int,
+        ep: int,
+        pp: int,
+        dp: int,
+        run_type: Any,
+        comp_times: Mapping[str, Any],
+        comm_metadata: Mapping[str, Mapping[str, Any]],
+        misc_metadata: Mapping[str, Any],
+        blocks: BlockTemplates,
+        overlap: OverlapSpec,
+        interconnect: Mapping[str, Tuple[float, float]],
+        grad_accum_cycle: Any = GradAccumCycle.FINAL,
+        pipeline_interleave: int = 1,
+        layout: Optional[RankLayout] = None,
+        granularity_hint: Any = None,
+        durations: Optional[DurationTable] = None,
+    ) -> "WorkloadSpec":
+        """THE §1.7 producer map, in ONE place.
+
+        This is the seam ``train_timing`` / ``inference_timing`` hand across:
+        every field is read from the raw timing-model outputs exactly once, with
+        no ``getattr(..., fallback)`` against a ``program/`` type (**W1**). It
+        replaces the five duplicated dispatcher-construction flows
+        (``train_timing.calc_time_llm`` / ``estimate_memory_only``,
+        ``inference_timing``, ``llm_util.estimate_inference_memory``,
+        ``simulate_inference_graph``, ``huggingface_bench_validation``), each of
+        which re-derived ``include_backward``, ``include_optimizer`` and the
+        effective dp for itself.
+
+        ``dp`` is the DECLARED data-parallel degree; the stored
+        :attr:`degrees` carries the EFFECTIVE one, because inference is a
+        single-replica measurement (legacy ``dp_override=1``, three copies at
+        ``llm_execution.py:412``/``:607``/``:743``). Making it the degree — not a
+        per-call override — is what lets ``sharding_policy_for`` answer
+        ``NullSharding`` and ``GradAccumPolicy.emits`` answer False with no
+        run-type special case anywhere downstream.
+
+        ``layout`` is normally left ``None`` here and filled in by the dispatcher
+        (which owns the hardware network layout); use :meth:`with_`.
+        """
+        run = RunPolicy(
+            run_type=RunType.parse(run_type),
+            grad_accum_cycle=GradAccumCycle.parse(grad_accum_cycle),
+            dp_microbatch_mode=DpMicrobatchMode.parse(
+                misc_metadata.get("dp_microbatch_mode", "every_mb")
+            ),
+            zero_stage=int(misc_metadata.get("dp_zero_stage", 0) or 0),
+            pipeline_interleave=max(1, int(pipeline_interleave or 1)),
+            full_recomputation=bool(misc_metadata.get("full_recomputation", False)),
+            pipeline_style_recompute=bool(
+                misc_metadata.get("pipeline_style_recompute", False)
+            ),
+        )
+        declared = max(1, int(dp or 1))
+        degrees = ParallelDegrees(
+            tp=max(1, int(tp or 1)),
+            cp=max(1, int(cp or 1)),
+            ep=max(1, int(ep or 1)),
+            pp=max(1, int(pp or 1)),
+            dp=1 if run.run_type is RunType.INFERENCE else declared,
+        )
+        shape = ModelShape(
+            num_layers=int(misc_metadata.get("num_layer", 0) or 0),
+            micro_batches=int(misc_metadata.get("num_batch", 0) or 0),
+            model_type=str(misc_metadata.get("model_type", "") or ""),
+            moe_layer_mask=tuple(
+                bool(value) for value in (misc_metadata.get("moe_layer_mask") or [])
+            ),
+        )
+        return cls(
+            degrees=degrees,
+            shape=shape,
+            run=run,
+            comm=CommSpecTable.from_legacy(comm_metadata or {}),
+            blocks=blocks,
+            overlap=overlap,
+            layout=layout,
+            interconnect=dict(interconnect or {}),
+            granularity_hint=granularity_hint,
+            durations=(
+                durations if durations is not None else DurationTable(comp_times or {})
+            ),
+        )
+
+    def for_block(self, *, layout: Optional[RankLayout], moe: bool) -> "WorkloadSpec":
+        """The BLOCK workload: ONE layer of ONE template over the (tp,cp,ep)
+        sublayout (INTERFACES §3.1).
+
+        BLOCK's device space carries neither ``pp`` nor ``dp``, so a block run is
+        a single-stage, single-replica, single-microbatch measurement of one
+        transformer block — which is exactly what the legacy
+        ``build_block_program(template, direction, ...)`` measured with
+        ``dp_override=1``. Recompute is off because a block measurement times one
+        template chain; the rematerialization chain IS that chain.
+
+        ``moe`` selects which template the single layer uses, by declaring the
+        one-entry ``moe_layer_mask``. The comm table is the *template's* own
+        (INTERFACES §1.6 amendment B1), which is why the dense and MoE block
+        runs cannot share a workload.
+        """
+        if moe and self.blocks.moe is None:
+            raise WorkloadError(
+                "for_block(moe=True) needs BlockTemplates.moe, which is None"
+            )
+        blocks = (
+            BlockTemplates(dense=self.blocks.moe, dense_comm=self.blocks.moe_comm)
+            if moe
+            else BlockTemplates(dense=self.blocks.dense, dense_comm=self.blocks.dense_comm)
+        )
+        return replace(
+            self,
+            degrees=ParallelDegrees(
+                tp=self.degrees.tp,
+                cp=self.degrees.cp,
+                ep=self.degrees.ep,
+                pp=1,
+                dp=1,
+            ),
+            shape=ModelShape(
+                num_layers=1,
+                micro_batches=1,
+                model_type=self.shape.model_type,
+                moe_layer_mask=(),
+            ),
+            run=replace(self.run, full_recomputation=False),
+            blocks=blocks,
+            layout=layout,
+        )
+
 
 @dataclass(frozen=True)
 class FrozenWorkload:

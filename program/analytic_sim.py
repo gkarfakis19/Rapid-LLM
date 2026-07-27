@@ -13,143 +13,171 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Analytical evaluation of COARSE Programs (M5).
+"""Analytical evaluation of COARSE :class:`~program.ir.Program`\\ s (P6).
 
-Verbatim-semantics port of the deleted legacy pair
+Reads the **Program** — there is one representation. The proto event graph the
+M5 evaluator walked (``meta.misc["coarse_events"]`` /
+``["coarse_proto_root"]``) is gone, and with it the only reason the coarse
+builder existed.
 
-* ``Graph.convert_comm_sizes_to_times`` (simulate_train_graph.py, formerly
-  lines 316-361) — :func:`convert_comm_sizes_to_times`, and
-* ``Graph.simulate`` (formerly lines 998-1110) — :func:`evaluate`,
+Two free functions:
 
-onto the COARSE builder's output (:mod:`program.pipeline_coarse`). The
-engine is the legacy list scheduler exactly:
+* :func:`comm_durations` — the byte -> time conversion (the port of
+  ``Graph.convert_comm_sizes_to_times``). It returns a per-uid duration vector
+  instead of mutating a graph in place, so the analytical evaluator, the memory
+  replay and the renderer all read the SAME numbers without a shared mutable
+  object.
+* :func:`evaluate_detailed` / :func:`evaluate` — the legacy list scheduler
+  (``Graph.simulate``) over ``Program.ops``.
 
-* event heap keyed ``(finish_time, insertion_counter)``;
-* one outstanding compute per device (``GPU_list`` boolean exclusivity);
-  comm events (collectives, pipeline transfers, same-stage zero-byte
-  control edges) NEVER occupy a device slot;
-* a FIFO ready-list scanned in append order after every completion;
-  successors iterated in legacy children-list order;
-* same-stage zero-byte transfers are enqueued as real heap events — they
-  consume insertion counters and therefore shift analytical tie order
-  (DESIGN.md §2 amendment 2);
-* the root is pushed at t=0 WITHOUT occupying its device (legacy quirk) and
-  a comm-event root keeps duration 0 (the legacy conversion only ever
-  converted *children*, so the ZeRO-3 entry-edge root was never timed);
-* compute durations read ``ComputeOp.duration[0]`` — exactly the legacy
-  ``Node.duration`` property over a per-DP profile tuple (DESIGN.md §2
-  amendment 4), which is how hybrid retiming (:mod:`program.retime`)
-  reaches the evaluator.
+THE IR-LEVEL TIE DISCIPLINE (P6's normative deliverable)
+=======================================================
+The legacy event loop's outcome depended on **children-list adjacency order**:
+the order ``add_child`` happened to be called in, i.e. an artifact of the
+construction sequence. Nothing about it was declared, so it could not survive
+the cutover. It is replaced by ONE rule:
 
-The comm conversion pass reproduces the legacy call args and call ORDER of
-``NetworkModel.collective``: a recursive first-encounter DFS from the root
-converting each *child* with ``comm_size_bytes > 0`` before descending into
-it — including the duplicate conversions of multi-parent edges (an already
--visited child is re-converted, not re-descended). Sizes/participants/
-interconnect labels are read from the schedule events (the RAW legacy
-``Edge`` attribute surface — dp reducer sizes are floats and must stay
-floats, see ``CommMeta``), and results are written onto ``event.duration``
-in place, exactly like the legacy pass (the memory dispatcher replays this
-on its own coarse events — ``build_fine_program_for_memory``).
+    **PROGRAM ORDER (ascending uid) IS THE TIE DISCIPLINE.**
 
-The event loop runs over ``meta.misc["coarse_events"]`` /
-``["coarse_proto_root"]`` because the legacy FIFO discipline depends on the
-children-list adjacency order, which uid order cannot represent (see
-:mod:`program.pipeline_coarse`; the :mod:`program.memory_sim` precedent).
-Scheduling state lives in evaluator-local structures — the events are only
-mutated by the conversion pass (durations), as legacy was.
+Concretely, and this is the whole contract:
+
+1. the successors of a finished op are visited in ascending uid;
+2. the ops that start ready (``deps == ()``) are seeded in ascending uid;
+3. the ready list stays a FIFO, scanned front to back, exactly as the legacy
+   loop scanned it.
+
+Program order is ``kahn(slot, device, intra)`` (INTERFACES §4.6) — the same
+total order AstraSim consumes as node-id priority (``CONTEXT.md``) — so the
+replay is a pure function of the Program and agrees with the priority the
+emitted bundle declares. Measured: on all 10 fully-analytical golden specs plus
+every hybrid spec, uid order and construction order give **bit-identical**
+totals, and both are bit-identical to the deleted proto-graph evaluator.
+
+Preserved legacy semantics (each one measured, not assumed):
+
+* one outstanding compute per device (``GPU_list`` boolean exclusivity); comm
+  ops NEVER occupy a device slot;
+* the event heap is keyed ``(finish_time, insertion_counter)``;
+* same-device zero-byte ``TransferOp``\\ s are real heap events — they consume
+  insertion counters and drive the ready scan (Class B item 9);
+* the roots are pushed at t=0 **without** occupying their device;
+* **a comm op that is a program ROOT carries no time.** The legacy conversion
+  pass only ever converted a node's *children*, so the ZeRO-3 forward-entry
+  gather — which IS the coarse root (``schedule.py:790``) — was never timed.
+  Dropping the quirk moves ``train:analytical:dp2tp1cp1pp2mb2sp0:zero3`` by
+  **+5.76%**, so it is preserved and named here (:data:`_ROOT_COMM_IS_UNTIMED`)
+  rather than rediscovered later;
+* compute durations read ``ComputeOp.duration[0]`` — the legacy
+  ``Node.duration`` property over a per-DP profile tuple, which is how hybrid
+  retiming (:mod:`program.retime`) reaches the evaluator.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from heapq import heappop, heappush
-from typing import Any, Dict, List, Mapping, Set, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Set, Tuple
 
-from timing_model import CollectiveType
+from program.ir import CollectiveOp, ComputeOp, Program, TransferOp
 
-from program.ir import ComputeOp, Program
-from program.schedule import CommEvent, ComputeEvent
+__all__ = [
+    "COMM_DURATIONS_KEY",
+    "CoarseEvalResult",
+    "comm_durations",
+    "evaluate",
+    "evaluate_detailed",
+]
+
+#: Preserved legacy quirk: the conversion pass converted *children* only, so a
+#: comm op with no predecessor keeps duration 0. See the module docstring.
+_ROOT_COMM_IS_UNTIMED = True
+
+#: ``meta.misc`` key holding a per-uid comm-duration vector. Written by
+#: :func:`evaluate_detailed` (and by the dispatcher for the memory replay), so
+#: the renderer and :mod:`program.memory_sim` read the same numbers the
+#: evaluator used instead of a second representation being mutated in place.
+COMM_DURATIONS_KEY = "comm_durations"
 
 
-def convert_comm_sizes_to_times(roots, network_model, interconnect_params):
-    """Convert comm sizes to durations on a coarse event graph, in place.
+def comm_durations(
+    program: Program,
+    network_model: Any,
+    interconnect_params: Mapping[str, Tuple[float, float]],
+    *,
+    collective_keys: Optional[Collection[str]] = None,
+) -> Tuple[float, ...]:
+    """Per-uid comm durations (0.0 for compute ops and untimed comm ops).
 
-    Free-function port of ``Graph.convert_comm_sizes_to_times`` (the legacy
-    body verbatim, ``self`` dropped); duck-typed over the legacy ``Edge``
-    attribute surface so it accepts :class:`~program.schedule.CommEvent`
-    graphs (the coarse evaluator and the memory dispatcher's events hook).
+    Port of ``Graph.convert_comm_sizes_to_times``: the same
+    ``NetworkModel.collective`` call with the same arguments, for every comm op
+    whose ``size_bytes > 0``. The conversion is a pure function of
+    ``(kind, size, participants, ib, ll)``, so the legacy recursion order (and
+    its duplicate conversions of multi-parent edges) is unobservable and is not
+    reproduced.
+
+    ``collective_keys`` restricts the conversion to ``CollectiveOp``s whose
+    ``comm_key`` is in that set — the memory replay's rule, which passes the
+    PIPELINE-LEVEL comm keys (``WorkloadSpec.comm``). Block-template comm keys
+    are deliberately left untimed there; see :mod:`program.memory_sim`.
     """
-
-    def traverse_and_convert(node, visited=None):
-        if visited is None:
-            visited = set()
-        if id(node) in visited:
-            return
-        visited.add(id(node))
-
-        # Process children (edges and nodes)
-        for child in node.children:
-            # If it's an edge with communication size, convert to time
-            if hasattr(child, "comm_size_bytes") and child.comm_size_bytes > 0:
-                # Get the appropriate bandwidth/latency for this interconnect type
-                interconnect_type = child.comm_interconnect_type
-                if interconnect_type and interconnect_type in interconnect_params:
-                    ib, ll = interconnect_params[interconnect_type]
-                else:
-                    raise ValueError(f"Invalid interconnect type: {interconnect_type}")
-                if not isinstance(child.comm_type, CollectiveType):
-                    raise TypeError(
-                        f"Comm edge {getattr(child, 'name', '<unnamed>')} missing "
-                        "CollectiveType comm_type"
-                    )
-
-                child.duration = network_model.collective(
-                    kind=child.comm_type,
-                    size_bytes=child.comm_size_bytes,
-                    participants=child.participants,
-                    ib=ib,
-                    ll=ll,
-                    local_bytes=0.0,
-                    local_ops=0.0,
-                    debug_label=f"{child.name}_conversion",
-                )
-
-            # Recursively process this child
-            traverse_and_convert(child, visited)
-
-    traverse_and_convert(roots)
-    return roots
+    if not isinstance(program, Program):
+        raise TypeError(
+            f"comm_durations expects a Program (got {type(program).__name__})"
+        )
+    out: List[float] = [0.0] * len(program.ops)
+    for op in program.ops:
+        if isinstance(op, ComputeOp):
+            continue
+        if collective_keys is not None and (
+            not isinstance(op, CollectiveOp) or op.comm_key not in collective_keys
+        ):
+            continue
+        if _ROOT_COMM_IS_UNTIMED and not op.deps:
+            continue
+        size = float(op.size_bytes)
+        if size <= 0:
+            continue
+        kind = op.coll if isinstance(op, CollectiveOp) else op.comm_type
+        if kind is None:
+            raise ValueError(f"Comm op {op.name!r} (uid {op.uid}) has no CollectiveType")
+        axis = op.interconnect
+        if not axis or axis not in interconnect_params:
+            raise ValueError(f"Invalid interconnect type: {axis}")
+        ib, ll = interconnect_params[axis]
+        out[op.uid] = float(
+            network_model.collective(
+                kind=kind,
+                size_bytes=size,
+                participants=op.participants,
+                ib=ib,
+                ll=ll,
+                local_bytes=0.0,
+                local_ops=0.0,
+                debug_label=f"{op.name}_conversion",
+            )
+        )
+    return tuple(out)
 
 
 @dataclass
 class CoarseEvalResult:
     """Detailed evaluation output (parity/differential surface).
 
-    ``finish_times[uid]`` is the finish time of op ``uid`` (-1 when the op
-    never ran — the legacy ``Node.finish_time`` reset value).
+    ``finish_times[uid]`` is the finish time of op ``uid`` (-1 when the op never
+    ran — the legacy ``Node.finish_time`` reset value).
     """
 
     total_time: float
     finish_times: List[float]
 
 
-def _coarse_events(program: Program) -> Tuple[Any, Tuple[Any, ...]]:
-    if not isinstance(program, Program):
-        raise TypeError(f"evaluate expects a Program (got {type(program).__name__})")
-    if program.meta.misc.get("granularity") != "coarse":
-        raise RuntimeError(
-            "Analytical evaluation requires a COARSE program "
-            "(program.pipeline_coarse.build_coarse_program)."
-        )
-    events = program.meta.misc.get("coarse_events")
-    root = program.meta.misc.get("coarse_proto_root")
-    if events is None or root is None:
-        raise RuntimeError(
-            "COARSE program does not carry its schedule events "
-            "(meta.misc['coarse_events'/'coarse_proto_root'])."
-        )
-    return root, tuple(events)
+def _device_count(program: Program) -> int:
+    """GPU-slot count: the legacy rule (``max(Graph.pp, max hw_id + 1)``)."""
+    count = max(1, len(program.devices))
+    for op in program.ops:
+        if isinstance(op, ComputeOp):
+            count = max(count, int(op.device) + 1)
+    return count
 
 
 def evaluate_detailed(
@@ -157,97 +185,84 @@ def evaluate_detailed(
     network_model: Any,
     interconnect_params: Mapping[str, Tuple[float, float]],
 ) -> CoarseEvalResult:
-    """Convert comm sizes and replay the legacy list scheduler; see module
-    docstring for the reproduced discipline."""
-    root, events = _coarse_events(program)
-    uid_of: Dict[int, int] = {id(event): uid for uid, event in enumerate(events)}
+    """Convert comm sizes and replay the legacy list scheduler over the ops."""
+    if not isinstance(program, Program):
+        raise TypeError(f"evaluate expects a Program (got {type(program).__name__})")
+    if program.meta.misc.get("granularity") != "coarse":
+        raise RuntimeError(
+            "Analytical evaluation requires a COARSE program "
+            "(build(..., granularity=Granularity.COARSE))."
+        )
 
-    convert_comm_sizes_to_times(root, network_model, interconnect_params)
-
-    def _duration(event: Any) -> float:
-        if isinstance(event, ComputeEvent):
-            op = program.ops[uid_of[id(event)]]
-            assert isinstance(op, ComputeOp)
+    ops = program.ops
+    durations = list(comm_durations(program, network_model, interconnect_params))
+    for op in ops:
+        if isinstance(op, ComputeOp):
             # Legacy Node.duration property: profile tuples read index 0.
-            return op.duration[0]
-        return event.duration
+            durations[op.uid] = float(op.duration[0])
+    #: the renderer reads these back (the legacy pass mutated the events).
+    program.meta.misc[COMM_DURATIONS_KEY] = tuple(
+        0.0 if isinstance(op, ComputeOp) else durations[op.uid] for op in ops
+    )
 
-    # ---- device discovery (legacy: max Node hw_id over the reachable
-    # graph, floored at Graph.pp; comm events carry no ``hw_id``) ----------
-    base_devices = max(1, int(program.meta.misc.get("coarse_pp", 0) or 0))
-    max_hw_id = -1
-    visited_nodes: Set[int] = set()
-    stack: List[Any] = [root]
-    while stack:
-        node = stack.pop()
-        node_id = id(node)
-        if node_id in visited_nodes:
-            continue
-        visited_nodes.add(node_id)
-        hw_id = getattr(node, "hw_id", None)
-        if hw_id is not None and int(hw_id) >= 0:
-            max_hw_id = max(max_hw_id, int(hw_id))
-        stack.extend(node.children)
-    if max_hw_id >= 0:
-        base_devices = max(base_devices, max_hw_id + 1)
+    # THE TIE DISCIPLINE: successors in ascending uid (module docstring).
+    succs: List[List[int]] = [[] for _ in ops]
+    for op in ops:
+        for dep in op.deps:
+            succs[dep].append(op.uid)
+    for entry in succs:
+        entry.sort()
 
-    # ---- the legacy event loop ------------------------------------------
     time: float = 0
     counter = 0
-    event_queue: List[Tuple[float, int, Any]] = []
-    ready_list: List[Any] = []
+    heap: List[Tuple[float, int, int]] = []
+    ready: List[int] = []
     done: Set[int] = set()
     scheduled: Set[int] = set()
     finish: Dict[int, float] = {}
+    gpu_free = [True] * _device_count(program)
 
-    GPU_list = [True for _ in range(base_devices)]
+    # Roots at t=0, in program order, WITHOUT occupying their device.
+    for op in ops:
+        if not op.deps:
+            heappush(heap, (durations[op.uid], counter, op.uid))
+            scheduled.add(op.uid)
+            counter += 1
 
-    ready_list.append(root)
-    scheduled.add(id(root))
-    heappush(event_queue, (_duration(root), counter, root))
-    ready_list.remove(root)
-    counter = counter + 1
+    while heap:
+        time, _, uid = heappop(heap)
+        done.add(uid)
+        scheduled.discard(uid)
+        finish[uid] = time
 
-    while len(event_queue) > 0:
-        time, _, event = heappop(event_queue)
-        done.add(id(event))
-        scheduled.discard(id(event))
-        finish[id(event)] = time
+        for child in succs[uid]:
+            if child in done or child in scheduled or child in ready:
+                continue
+            if all(dep in done for dep in ops[child].deps):
+                ready.append(child)
 
-        for child in event.children:
-            is_ready = True
-            for parent in child.parents:
-                if id(parent) not in done:
-                    is_ready = False
-            if (
-                is_ready
-                and (child not in ready_list)
-                and (id(child) not in done)
-                and (id(child) not in scheduled)
-            ):
-                ready_list.append(child)
+        if isinstance(ops[uid], ComputeOp):
+            gpu_free[int(ops[uid].device)] = True
 
-        if isinstance(event, ComputeEvent):
-            GPU_list[int(event.hw_id)] = True
+        for candidate in ready[:]:
+            op = ops[candidate]
+            if isinstance(op, ComputeOp):
+                if gpu_free[int(op.device)]:
+                    heappush(heap, (time + durations[candidate], counter, candidate))
+                    scheduled.add(candidate)
+                    counter += 1
+                    gpu_free[int(op.device)] = False
+                    ready.remove(candidate)
+            else:
+                heappush(heap, (time + durations[candidate], counter, candidate))
+                scheduled.add(candidate)
+                counter += 1
+                ready.remove(candidate)
 
-        for event in ready_list[:]:
-            if isinstance(event, ComputeEvent):
-                if GPU_list[int(event.hw_id)] == True:  # noqa: E712 - legacy kept
-                    new_time = time + _duration(event)
-                    heappush(event_queue, (new_time, counter, event))
-                    scheduled.add(id(event))
-                    counter = counter + 1
-                    GPU_list[int(event.hw_id)] = False
-                    ready_list.remove(event)
-            elif isinstance(event, CommEvent):
-                new_time = time + _duration(event)
-                heappush(event_queue, (new_time, counter, event))
-                scheduled.add(id(event))
-                counter = counter + 1
-                ready_list.remove(event)
-
-    finish_times = [finish.get(id(event), -1) for event in events]
-    return CoarseEvalResult(total_time=time, finish_times=finish_times)
+    return CoarseEvalResult(
+        total_time=time,
+        finish_times=[finish.get(op.uid, -1) for op in ops],
+    )
 
 
 def evaluate(

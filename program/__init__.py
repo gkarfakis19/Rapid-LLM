@@ -15,36 +15,32 @@
 
 """``program`` — the typed placed-operation IR core (docs/rewrite/DESIGN.md).
 
-Post-migration (M8) module inventory:
+Post-cutover (P5/P6) module inventory. **One representation** (the IR) and
+**one construction path** (``build()``); the proto graphs, the three granularity
+builders and the emission-ordering pass are gone.
 
-* :mod:`program.ir` — the Program IR (``ComputeOp``/``CollectiveOp``/
-  ``TransferOp``/``Program``);
-* :mod:`program.layout` — the unified ``RankLayout`` (M0);
-* :mod:`program.validate` — invariants V1-V6;
-* :mod:`program.schedule` — ``ScheduleInputs`` (the pipeline input carrier,
-  M7), ``ScheduleSpec`` and ``build_pipeline_events`` (the single GPipe
-  schedule enumeration every builder consumes);
-* :mod:`program.block` — ``BlockTemplate``/``CommMeta``;
-* :mod:`program.block_program` — ``build_block_program`` (BLOCK Programs
-  for the hybrid/hierarchical transformer AstraSim runs, M4);
-* :mod:`program.pipeline_fine` — ``build_fine_program`` (the direct
-  flattened builder, M3a; also feeds the memory replay);
-* :mod:`program.pipeline_coarse` — ``build_coarse_program`` (COARSE
-  pipeline Programs, M5) + ``lower_coarse_for_emission`` (the hierarchical
-  pipeline emission entry, M6);
-* :mod:`program.analytic_sim` — the analytical evaluator (M5);
-* :mod:`program.retime` — ``apply_block_timings`` (per-DP retime
-  write-back, M5/M6);
-* :mod:`program.transforms` — TP/TP-SP/CP overlap passes;
-* :mod:`program.memory_sim` — ``simulate_memory`` (peak-memory replay over
-  FINE proto graphs, M3b);
-* :mod:`program.legacy_lowering` — the emission-ordering pass (event DAG ->
-  validated emission-ordered Program; permanent, see its docstring);
-* :mod:`program.et_emit` — Program -> Chakra ET bundle;
-* :mod:`program.viz` — ``RAPID_VISUALIZE_GRAPHS`` event-graph rendering
-  (M8, port of the retired ``simulate_train_graph`` visualizer);
-* :mod:`program.shadow` — ``compare_et_bundles``, the standard bundle
-  comparator used by the differential/determinism tests.
+L0  * :mod:`program.workload` — ``WorkloadSpec``/``RunPolicy``/``DurationTable``/
+      ``CommSpecTable`` (the typed workload; ``WorkloadSpec.from_timing`` is THE
+      producer seam);
+L1  * :mod:`program.work` — ``WorkItem``/``WorkSet``/``SyncRequirement``;
+    * :mod:`program.policies` — sharding / grad-accum / recompute / routing /
+      overlap, one named swappable object each;
+L2  * :mod:`program.placement` — ``Placement``, ``Granularity``,
+      ``BlockExpander``; :mod:`program.block` — ``BlockTemplate``/``CommMeta``;
+    * :mod:`program.groups` — ``CommunicatorFactory`` (members CONSTRUCTED);
+    * :mod:`program.layout` — the unified ``RankLayout``;
+L3  * :mod:`program.schedule` — ``SchedulePolicy``/``Schedule``/``GPipeSchedule``;
+L4  * :mod:`program.ir` — the Program IR; :mod:`program.build` — ``build()``,
+      the ONLY Program constructor; :mod:`program.validate` — V1-V8;
+L5  * :mod:`program.et_emit` — Program -> Chakra ET bundle (id policy = program
+      order, the only policy);
+    * :mod:`program.mapping` — the first-dimension SCOTCH remap over a built
+      Program;
+    * :mod:`program.analytic_sim` — the analytical evaluator + the byte->time
+      conversion; :mod:`program.memory_sim` — the peak-memory replay;
+      :mod:`program.retime` — the per-DP block retime write-back;
+      :mod:`program.viz` — ``RAPID_VISUALIZE_GRAPHS`` rendering;
+    * :mod:`program.shadow` — ``compare_et_bundles``, the bundle comparator.
 
 Heavier submodules are imported lazily by their consumers; this package
 import stays light.

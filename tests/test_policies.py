@@ -15,21 +15,21 @@
 
 """L1 policy tests (INTERFACES.md §2.9 invariants K1-K6).
 
-The correctness oracle while nothing is wired: for the SAME configuration,
-build (a) the legacy event DAG via ``program.schedule.build_pipeline_events``
-and (b) the L1 policy requirement set, then compare the **multiset of comm
-keys**. Byte values, collective kinds, participants and axes are compared too;
-op NAMES are not (they are not part of canonical equivalence,
-``equiv/canonical.py:20-27``).
+Everything here is INTRINSIC since P5. The differential oracle this file used to
+run — a recording ``comm_metadata`` mapping fed to
+``schedule.build_pipeline_events``, whose attached comm-key multiset the policy
+set had to reproduce, plus an ``add_child`` log replayed to prove the typed
+``via`` sets reproduced ``skip_non_comm_children`` / ``skip_comm_children`` site
+by site — is DELETED with ``program/schedule.py``. Those differentials passed
+before the deletion; what they proved is now asserted directly:
 
-Oracle detail: the legacy builder identifies a comm event only by name, so the
-harness swaps in a recording ``comm_metadata`` mapping that stamps a unique
-sentinel ``size_bytes`` per ``__getitem__``; the sentinel is carried onto the
-created ``CommEvent`` and maps it back to its comm key. Comm events that were
-*created but never attached* (rows S6/S14 with no cross-device boundary —
-INTERFACES §2.3 note 1) are excluded by walking the event DAG undirected from
-the compute seeds, because the legacy lowering never collects them either: they
-consume a legacy op id and nothing else (Class **C**).
+* the requirement SET, its bytes/kinds/participants/axes (read from the comm
+  table, never re-derived), its uniqueness and its order-independence;
+* the attach-mode census against INTERFACES §2.3's table;
+* R4's actual resolution, in ``tests/test_build.py::test_r4_*``.
+
+Byte values, collective kinds, participants and axes are compared; op NAMES are
+not (they are not part of canonical equivalence, ``equiv/canonical.py:20-27``).
 """
 
 from __future__ import annotations
@@ -85,7 +85,6 @@ from program.policies.sharding import (
     ZeRO3,
     sharding_policy_for,
 )
-from program.schedule import ScheduleSpec, build_pipeline_events, legacy_layers_per_stage
 from program.work import (
     AttachMode,
     ByteSource,
@@ -133,7 +132,7 @@ PIPELINE = CollectiveType.PIPELINE
 
 
 # ---------------------------------------------------------------------------
-# Fixture: one config -> (legacy ScheduleSpec, L0 WorkloadSpec)
+# Fixture: one config -> the L0 WorkloadSpec
 # ---------------------------------------------------------------------------
 
 
@@ -295,54 +294,12 @@ def raw_comm_metadata(cfg: Cfg) -> Dict[str, Dict[str, Any]]:
     return md
 
 
-class RecordingCommMetadata(dict):
-    """A ``comm_metadata`` mapping that records every ``__getitem__`` and
-    stamps a unique sentinel ``size_bytes`` so the created ``CommEvent`` can be
-    mapped back to the comm key it came from.
+# P5: ``RecordingCommMetadata`` / ``make_schedule_spec`` / ``_walk_events`` /
+# ``legacy_comm_keys`` are DELETED with ``program/schedule.py``: they existed only
+# to replay the legacy event lattice this file was differentially compared
+# against. The policy layer's own invariants (K1-K9) are unchanged and still
+# gated below; what is gone is the comparison to a builder that no longer exists.
 
-    ``build_pipeline_events`` reads the table exactly once per keyed comm event
-    (``_comm_event``, schedule.py:507-527); presence tests use ``in`` and the
-    grad-accum flag uses ``.get``, neither of which is recorded.
-    """
-
-    def __init__(self, data: Dict[str, Any]) -> None:
-        super().__init__(data)
-        self.reads: List[str] = []
-        self.sentinel_to_key: Dict[float, str] = {}
-
-    def __getitem__(self, key: str) -> Any:
-        meta = super().__getitem__(key)
-        self.reads.append(key)
-        sentinel = float(len(self.reads))  # 1-based; 0 is the zero-byte control edges
-        self.sentinel_to_key[sentinel] = key
-        return dataclasses.replace(meta, size_bytes=sentinel)
-
-
-def make_schedule_spec(cfg: Cfg) -> Tuple[ScheduleSpec, RecordingCommMetadata]:
-    recorder = RecordingCommMetadata(comm_metadata_from_legacy(raw_comm_metadata(cfg)))
-    spec = ScheduleSpec(
-        mb=cfg.mb,
-        num_layers=cfg.num_layers,
-        pp=cfg.pp,
-        dp=cfg.dp,
-        tp=cfg.tp,
-        cp=cfg.cp,
-        ep=cfg.ep,
-        layers_per_stage=legacy_layers_per_stage(cfg.num_layers, cfg.pp),
-        moe_layer_mask=cfg.moe_layer_mask,
-        zero_stage=cfg.zero_stage,
-        dp_microbatch_mode=cfg.dp_microbatch,
-        grad_accum_cycle=cfg.grad_accum_cycle,
-        include_backward=cfg.include_backward,
-        include_optimizer=cfg.include_optimizer,
-        full_recomputation=cfg.full_recomputation,
-        pipeline_style_recompute=cfg.pipeline_style_recompute,
-        flattened_mode=cfg.flattened,
-        model_type="gpt",
-        comp_times=dict(COMP_TIMES),
-        comm_metadata=recorder,
-    )
-    return spec, recorder
 
 
 def _block_template(
@@ -431,53 +388,6 @@ def policy_requirements(cfg: Cfg) -> List[SyncRequirement]:
 # ---------------------------------------------------------------------------
 
 
-def _walk_events(events: Any) -> List[Any]:
-    """Every event ATTACHED to the schedule, reached undirected (children and
-    parents) from the compute seeds. Comm events created but never attached
-    (S6/S14 with no cross-device boundary) have neither, so they are excluded —
-    exactly like ``legacy_lowering._collect_objects``, which never sees them."""
-    seeds: List[Any] = [events.root]
-    seeds.extend(events.embedding)
-    seeds.extend(events.softmax)
-    for row in events.layers:
-        seeds.extend(row)
-
-    seen: Dict[int, Any] = {}
-    stack = [s for s in seeds if s is not None]
-    while stack:
-        obj = stack.pop()
-        if id(obj) in seen:
-            continue
-        seen[id(obj)] = obj
-        for neighbour in list(getattr(obj, "children", [])) + list(getattr(obj, "parents", [])):
-            if id(neighbour) not in seen:
-                stack.append(neighbour)
-    return list(seen.values())
-
-
-def legacy_comm_keys(cfg: Cfg) -> Tuple[Counter, Counter]:
-    """``(attached, created)`` comm-key multisets of the legacy lattice.
-
-    ``cross_layer`` is excluded from both: it is data flow (R2), never a
-    :class:`SyncRequirement` (``SyncRequirement`` rejects
-    ``CollectiveType.PIPELINE`` outright).
-    """
-    spec, recorder = make_schedule_spec(cfg)
-    events = build_pipeline_events(spec)
-
-    attached: Counter = Counter()
-    for obj in _walk_events(events):
-        sentinel = getattr(obj, "comm_size_bytes", None)
-        if not isinstance(sentinel, float):
-            continue
-        key = recorder.sentinel_to_key.get(sentinel)
-        if key is not None and key != "cross_layer":
-            attached[key] += 1
-
-    created = Counter(k for k in recorder.reads if k != "cross_layer")
-    return attached, created
-
-
 # ---------------------------------------------------------------------------
 # The config matrix
 # ---------------------------------------------------------------------------
@@ -532,19 +442,6 @@ MATRIX = _matrix()
 
 
 @pytest.mark.parametrize("cfg", MATRIX, ids=[c.label() for c in MATRIX])
-def test_policy_comm_keys_match_legacy_lattice(cfg: Cfg) -> None:
-    """The union of the policies' outputs is exactly the multiset of comm keys
-    ``build_pipeline_events`` attaches for the same config."""
-    attached, _created = legacy_comm_keys(cfg)
-    mine = Counter(req.comm_key for req in policy_requirements(cfg))
-    assert mine == attached, (
-        f"{cfg.label()}\n"
-        f"  policy-only : {sorted((mine - attached).items())}\n"
-        f"  legacy-only : {sorted((attached - mine).items())}"
-    )
-
-
-@pytest.mark.parametrize("cfg", MATRIX, ids=[c.label() for c in MATRIX])
 def test_requirement_specs_match_the_comm_table(cfg: Cfg) -> None:
     """K5 + the byte seam: kind/axes/participants/bytes on every requirement are
     the table's values, never re-derived."""
@@ -586,26 +483,21 @@ def test_anchors_resolve(cfg: Cfg) -> None:
                 assert anchor in work, f"{req!r} anchors on a non-existent WorkItem"
 
 
-def test_orphan_requirements_are_the_documented_class_c_divergence() -> None:
-    """INTERFACES §2.3 note 1: rows S6/S14 are CREATED once per microbatch but
-    attached only inside the cross-device branch. With no stage boundary the
-    legacy lattice builds an object it never attaches — it consumes a legacy op
-    id and is never lowered. The L1 model simply does not emit it (Class C:
-    op-id numbering only, op multiset unchanged)."""
-    cfg = Cfg(dp=2, zero_stage=3, pp=1, num_layers=4, mb=3)
-    attached, created = legacy_comm_keys(cfg)
-    orphans = created - attached
-    # pp == 1: no forward boundary (mb-1 S6 orphans) and no backward boundary
-    # (mb-1 S14 orphans).
-    assert orphans == Counter(
-        {"zero3_embedding_gather": cfg.mb - 1, "zero3_softmax_gather": cfg.mb - 1}
-    )
-    assert Counter(req.comm_key for req in policy_requirements(cfg)) == attached
+def test_no_orphan_requirements_at_pp1() -> None:
+    """INTERFACES §2.3 note 1, restated WITHOUT the deleted lattice.
 
-    # ... and with a stage boundary there are no orphans at all.
-    cfg2 = dataclasses.replace(cfg, pp=2)
-    attached2, created2 = legacy_comm_keys(cfg2)
-    assert created2 == attached2
+    Rows S6/S14 (the ZeRO-3 next-microbatch entry gathers) only have somewhere to
+    attach at a STAGE BOUNDARY. The legacy lattice CREATED one per microbatch
+    regardless and left the boundary-less ones unattached — an object that
+    consumed a legacy op id and was never lowered (Class C). The L1 model does not
+    create what it cannot attach: at ``pp == 1`` the requirement set contains no
+    such row at all, and at ``pp == 2`` it does.
+    """
+    reqs1 = Counter(req.comm_key for req in policy_requirements(Cfg(dp=2, zero_stage=3, pp=1, num_layers=4, mb=3)))
+    reqs2 = Counter(req.comm_key for req in policy_requirements(Cfg(dp=2, zero_stage=3, pp=2, num_layers=4, mb=3)))
+    # the boundary-only rows appear exactly (mb - 1) more times at pp == 2
+    assert reqs2["zero3_embedding_gather"] - reqs1["zero3_embedding_gather"] == 2
+    assert reqs2["zero3_softmax_gather"] - reqs1["zero3_softmax_gather"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1599,253 +1491,12 @@ def test_policy_bundle_names() -> None:
             policy.name = "mutated"  # type: ignore[misc]
 
 
-# ---------------------------------------------------------------------------
-# Structural oracle: the ATTACHMENT, not just the existence
-# ---------------------------------------------------------------------------
-#
-# The comm-key multiset above proves every collective EXISTS. This second
-# oracle proves each one attaches the way the legacy lattice attached it — i.e.
-# that the typed `via` reproduces `skip_non_comm_children` / `skip_comm_children`
-# site by site. It observes `attach_parallel_edge`'s effect by logging every
-# `add_child` call and replaying it, so nothing is re-derived from the code
-# under test.
-
-_ZERO3_NAME_PATTERNS = (
-    (re.compile(r"^(zero3_embedding_gather)_b(\d+)_fwd_entry$"), SyncPhase.FWD_ENTRY, False),
-    (re.compile(r"^(zero3_softmax_gather)_b(\d+)_bwd_entry$"), SyncPhase.BWD_ENTRY, False),
-    (re.compile(r"^(zero3_transformer_gather)_b(\d+)_layer(\d+)_fwd$"), SyncPhase.FWD, True),
-    (re.compile(r"^(zero3_transformer_gather)_b(\d+)_layer(\d+)_bwd$"), SyncPhase.BWD, True),
-    (re.compile(r"^(zero3_embedding_gather)_b(\d+)_fwd$"), SyncPhase.FWD, False),
-    (re.compile(r"^(zero3_embedding_gather)_b(\d+)_bwd$"), SyncPhase.BWD, False),
-    (re.compile(r"^(zero3_softmax_gather)_b(\d+)_fwd$"), SyncPhase.FWD, False),
-    (re.compile(r"^(zero3_softmax_gather)_b(\d+)_bwd$"), SyncPhase.BWD, False),
-)
-
-
-def _sync_key_from_legacy_name(name: str) -> Optional[SyncKey]:
-    for pattern, phase, has_layer in _ZERO3_NAME_PATTERNS:
-        match = pattern.match(name)
-        if match is None:
-            continue
-        key = match.group(1)
-        microbatch = int(match.group(2))
-        layer = int(match.group(3)) if has_layer else None
-        return SyncKey(key, phase, microbatch, layer)
-    return None
-
-
-def _legacy_events_with_log(cfg: Cfg, monkeypatch: Any) -> Tuple[Any, List[Tuple[Any, Any]]]:
-    """Build the legacy event DAG while logging every ``add_child`` call."""
-    import program.schedule as legacy_schedule
-
-    log: List[Tuple[Any, Any]] = []
-
-    def _wrap(cls: Any) -> None:
-        original = cls.add_child
-
-        def add_child(self: Any, obj: Any) -> None:
-            log.append((self, obj))
-            original(self, obj)
-
-        monkeypatch.setattr(cls, "add_child", add_child)
-
-    _wrap(legacy_schedule.ComputeEvent)
-    _wrap(legacy_schedule.CommEvent)
-
-    spec, _recorder = make_schedule_spec(cfg)
-    return build_pipeline_events(spec), log
-
-
-def _legacy_compute_index(events: Any, cfg: Cfg) -> Dict[WorkItem, Any]:
-    """WorkItem -> the legacy ``ComputeEvent`` that realizes it."""
-    import program.schedule as legacy_schedule
-
-    index: Dict[WorkItem, Any] = {}
-    for b, node in enumerate(events.embedding):
-        index[WorkItem(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=b)] = node
-    for b, node in enumerate(events.softmax):
-        index[WorkItem(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=b)] = node
-        for child in node.children:
-            if isinstance(child, legacy_schedule.ComputeEvent) and child.role == "softmax_b":
-                index[WorkItem(WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=b)] = child
-
-    for obj in _walk_events(events):
-        if not isinstance(obj, legacy_schedule.ComputeEvent):
-            continue
-        if obj.layer_index is None or obj.micro_batch_index is None:
-            continue
-        kind = WorkKind.RECOMPUTE if obj.recompute else WorkKind.LAYER
-        direction = Direction.FORWARD if obj.direction == "forward" else Direction.BACKWARD
-        index[
-            WorkItem(kind, direction, microbatch=obj.micro_batch_index, layer=obj.layer_index)
-        ] = obj
-    return index
-
-
-def _is_pipeline(obj: Any) -> bool:
-    return getattr(obj, "comm_type", None) is PIPELINE
-
-
-@dataclass(frozen=True)
-class _AttachCall:
-    """One ``add_child`` burst: the parents an object was hung under, followed
-    by the successors it inherited. ``attach_parallel_edge`` emits exactly this
-    shape (schedule.py:553-567), so segmenting the log recovers the calls."""
-
-    obj: Any
-    start: int
-    parents: Tuple[Any, ...]
-    children: Tuple[Any, ...]
-
-
-def _attach_calls(log: List[Tuple[Any, Any]], tracked: Any) -> List[_AttachCall]:
-    """Segment the ``add_child`` log into the ``attach_parallel_edge`` calls
-    that hung each TRACKED object.
-
-    ``attach_parallel_edge(target, e)`` emits ``(p, e)`` for every parent of
-    ``target`` and then ``(e, c)`` for every child that survives the filter,
-    contiguously (schedule.py:553-567). An entry therefore belongs to ``e``'s
-    call whenever ``e`` is its CHILD; a leading children-only run belongs to
-    ``e`` when ``target`` had no parents.
-    """
-    tracked_ids = {id(obj) for obj in tracked}
-    calls: List[_AttachCall] = []
-    idx = 0
-    total = len(log)
-    while idx < total:
-        parent, child = log[idx]
-        if id(child) in tracked_ids:
-            hung = child
-            parent_end = idx
-            while parent_end < total and log[parent_end][1] is hung:
-                parent_end += 1
-            child_end = parent_end
-            while child_end < total and log[child_end][0] is hung:
-                child_end += 1
-            calls.append(
-                _AttachCall(
-                    obj=hung,
-                    start=idx,
-                    parents=tuple(p for p, _ in log[idx:parent_end]),
-                    children=tuple(c for _, c in log[parent_end:child_end]),
-                )
-            )
-            idx = child_end
-            continue
-        if id(parent) in tracked_ids:
-            hung = parent
-            child_end = idx
-            while (
-                child_end < total
-                and log[child_end][0] is hung
-                and id(log[child_end][1]) not in tracked_ids
-            ):
-                child_end += 1
-            calls.append(
-                _AttachCall(
-                    obj=hung,
-                    start=idx,
-                    parents=(),
-                    children=tuple(c for _, c in log[idx:child_end]),
-                )
-            )
-            idx = child_end
-            continue
-        idx += 1
-    return calls
-
-
-@pytest.mark.parametrize(
-    "cfg",
-    [
-        Cfg(dp=2, zero_stage=3, pp=2, num_layers=4, mb=3),
-        Cfg(dp=2, zero_stage=3, pp=4, num_layers=4, mb=3),
-        Cfg(dp=2, zero_stage=3, pp=2, num_layers=5, mb=4, moe=True, ep=2),
-        Cfg(dp=2, zero_stage=3, pp=3, num_layers=2, mb=2),
-        Cfg(dp=2, zero_stage=3, pp=1, num_layers=4, mb=3),
-        Cfg(dp=2, zero_stage=3, pp=2, num_layers=4, mb=1),
-        Cfg(
-            dp=2,
-            zero_stage=3,
-            pp=2,
-            num_layers=4,
-            mb=3,
-            full_recomputation=True,
-            flattened=True,
-        ),
-    ],
-    ids=lambda c: c.label(),
-)
-def test_via_reproduces_the_legacy_skip_flags(cfg: Cfg, monkeypatch: Any) -> None:
-    """Row by row: the typed ``via`` selects exactly the successor edges the
-    legacy boolean flags selected.
-
-    ``skip_non_comm_children=True`` keeps only ``CollectiveType.PIPELINE``
-    successors -> ``VIA_DATA_FLOW``; ``skip_comm_children=True`` keeps only the
-    others -> ``VIA_NON_DATA_FLOW``; no flag -> ``VIA_ALL``, and the gather must
-    then inherit the host's successors UNFILTERED (compared against a replay of
-    the host's children as of that call).
-    """
-    events, log = _legacy_events_with_log(cfg, monkeypatch)
-    compute = _legacy_compute_index(events, cfg)
-
-    legacy_by_key: Dict[SyncKey, Any] = {}
-    for obj in _walk_events(events):
-        key = _sync_key_from_legacy_name(str(getattr(obj, "name", "")))
-        if key is not None:
-            legacy_by_key[key] = obj
-    calls = _attach_calls(log, tracked=tuple(legacy_by_key.values()))
-
-    reqs = {r.key: r for r in policy_requirements(cfg)}
-    parallel = [
-        r for r in reqs.values() if r.mode is AttachMode.PARALLEL_TO and r.key in legacy_by_key
-    ]
-    assert parallel, "no PARALLEL_TO requirement was exercised"
-
-    checked_all = checked_data = checked_non_data = 0
-    for req in parallel:
-        gather = legacy_by_key[req.key]
-        own = [call for call in calls if call.obj is gather]
-        assert own, f"{req.key!r}: legacy gather was never attached"
-        assert len(own) == len(req.anchors), (
-            f"{req.key!r}: legacy attached it {len(own)} time(s) but the policy "
-            f"declares {len(req.anchors)} anchor(s)"
-        )
-
-        for call in own:
-            if req.via == VIA_DATA_FLOW:
-                assert all(_is_pipeline(c) for c in call.children), (
-                    f"{req.key!r} declares VIA_DATA_FLOW but legacy kept non-pipeline "
-                    f"successors {[getattr(c, 'name', c) for c in call.children]}"
-                )
-                checked_data += 1
-            elif req.via == VIA_NON_DATA_FLOW:
-                assert not any(_is_pipeline(c) for c in call.children), (
-                    f"{req.key!r} declares VIA_NON_DATA_FLOW but legacy kept pipeline "
-                    f"successors {[getattr(c, 'name', c) for c in call.children]}"
-                )
-                checked_non_data += 1
-            else:
-                assert req.via == VIA_ALL
-                if len(req.anchors) != 1:
-                    continue
-                host = compute.get(req.anchors[0])
-                if host is None:
-                    continue
-                snapshot = tuple(
-                    child for (parent, child) in log[: call.start] if parent is host
-                )
-                assert call.children == snapshot, (
-                    f"{req.key!r} declares VIA_ALL but legacy filtered the host's "
-                    f"successors: took {[getattr(c, 'name', c) for c in call.children]} "
-                    f"of {[getattr(c, 'name', c) for c in snapshot]}"
-                )
-                checked_all += 1
-
-    assert checked_all > 0
-    if cfg.pp > 1 and cfg.num_layers >= cfg.pp:
-        # a multi-stage config always exercises at least one cross-device site
-        assert checked_data + checked_non_data > 0
+# P5: the legacy-attachment structural oracle (``_legacy_events_with_log`` /
+# ``_attach_calls`` / ``test_via_reproduces_the_legacy_skip_flags``) is DELETED
+# with ``program/schedule.py``'s ``attach_parallel_edge``. It proved the typed
+# ``via`` sets reproduced the ``skip_non_comm_children`` / ``skip_comm_children``
+# booleans site by site; those booleans no longer exist, and R4's resolution is
+# now pinned directly by ``tests/test_build.py::test_r4_parallel_to_*``.
 
 
 def test_ep_sync_requires_the_graph_ep_degree() -> None:

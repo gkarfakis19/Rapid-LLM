@@ -13,27 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""L2 tests: ``program/placement.py`` + ``program/groups.py`` (INTERFACES §3.5).
+"""L2 — placement, communicator construction and block expansion (INTERFACES §3).
 
-Three tiers:
+Three tiers, all intrinsic since P5 (the legacy oracles this file used to run
+differentially against — ``pipeline_fine._FineExpander``,
+``pipeline_fine.build_fine_program``, ``block_program.build_block_root`` and
+``legacy_lowering._build_axis_groups`` — are DELETED; the differentials they
+gated on passed before the deletion, and the properties they proved are asserted
+directly here now):
 
-1. **device sets per granularity** — COARSE/FINE/BLOCK over the parallelism
-   grids of the golden matrix, plus a direct differential against the legacy
-   rank formula ``_FineExpander._hw_id_for_rank`` (the thing L2 deletes);
-2. **group construction** — single-axis groups differentially against
-   ``legacy_lowering._build_axis_groups``, the composite ``("tp","ep")`` group
-   that ``legacy_lowering.py:243-248`` recovers from a participant count, and
-   the singleton (size-1 axis) case;
-3. **the FINE placement oracle** — for every golden parallelism grid, the
-   ``(device -> op multiset)`` mapping produced by ``Placement`` +
-   ``BlockExpander`` must equal the one ``program.pipeline_fine.
-   build_fine_program`` produces from the equivalent ``ScheduleSpec``.
-
-Tier 3 is the load-bearing one: ``build_fine_program`` is the oracle L2 must
-reproduce before ``pipeline_fine.py`` can be deleted in P3.
-
-Run:
-    ./.venv/bin/python -m pytest tests/test_placement.py -q
+1. **device space** — ``Placement.devices``/``devices_for``/``cluster_rank_of``
+   per granularity, the placement POLICY (Class B 10d) and the layout/degree
+   consistency check;
+2. **communicators** — members CONSTRUCTED from the ``RankLayout``, the declared
+   composite ``("tp","ep")`` routing group (never inferred from a participant
+   count), singleton and absent-axis groups, and ``devices_for_sync`` for every
+   ``SyncSpread``;
+3. **block expansion** — chain shape, ``CommSpec.placement`` (pre/post), the MoE
+   hot/cold routing join, and the B1/B2/B4/B5 amendments.
 """
 
 from __future__ import annotations
@@ -65,7 +62,6 @@ from program.placement import (
 )
 from program.policies.recompute import FullRecompute, NoRecompute
 from program.policies.routing import EP_ROUTING, TP_EP_ROUTING
-from program.schedule import ScheduleSpec, legacy_layers_per_stage
 from program.work import (
     Direction,
     WorkItem,
@@ -103,7 +99,7 @@ class _LayerAssignment:
 
     @classmethod
     def contiguous(cls, num_layers: int, pp: int) -> "_LayerAssignment":
-        counts = legacy_layers_per_stage(num_layers, pp)
+        counts = _contiguous_counts(num_layers, pp)
         mapping: List[int] = []
         for stage, count in enumerate(counts):
             mapping.extend([stage] * count)
@@ -209,6 +205,19 @@ GRIDS: Tuple[Grid, ...] = (
 )
 
 
+def _contiguous_counts(num_layers: int, pp: int) -> Tuple[int, ...]:
+    """The remainder-first contiguous split, as a COUNT tuple.
+
+    Replaces the deleted ``schedule.legacy_layers_per_stage``; the authority is
+    ``LayerAssignment.contiguous`` (L3) and this derives the counts from it, so
+    there is still exactly one implementation of the split.
+    """
+    from program.schedule.policy import LayerAssignment
+
+    assignment = LayerAssignment.contiguous(num_layers, pp)
+    return tuple(len(assignment.layers_of(stage)) for stage in range(pp))
+
+
 def _template(
     gemms: Tuple[Mapping[str, Any], ...] = DENSE_GEMMS,
     comm: Mapping[str, Mapping[str, Any]] = DENSE_COMM,
@@ -307,24 +316,10 @@ def test_device_sets_per_granularity(grid: Grid) -> None:
         assert block.cluster_devices(stage) == tuple(range(cluster))
 
 
-@pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
-def test_fine_device_ids_match_legacy_rank_formula(grid: Grid) -> None:
-    """Differential against ``_FineExpander._hw_id_for_rank`` — the hand-rolled
-    rank formula L2 deletes (pipeline_fine.py:268-286)."""
-    from program.pipeline_fine import _FineExpander
-
-    spec, template = _workload(grid)
-    fw = spec.freeze()
-    placement = Placement(
-        fw, Granularity.FINE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
-    )
-    expander = _FineExpander(
-        _schedule_spec(grid, template), {"dense": template}, fw.spec.layout
-    )
-
-    for stage in range(grid.pp):
-        for rank in range(placement.cluster_size()):
-            assert placement.device_for(stage, rank) == expander._hw_id_for_rank(stage, rank)
+# P5: ``test_fine_device_ids_match_legacy_rank_formula`` is DELETED with
+# ``pipeline_fine._FineExpander._hw_id_for_rank``. The rank formula it compared
+# against no longer exists; ``RankLayout`` is the one linearization and is
+# gated directly by ``tests/test_program_layout.py``.
 
 
 @pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
@@ -440,41 +435,11 @@ def test_device_coord_is_hashable_and_shiftable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _legacy_axis_groups(layout: RankLayout, num_devices: int):
-    """The legacy group table (``legacy_lowering._compute_stage_axis_coords`` +
-    ``_build_axis_groups``) at dp_count=1, where stage == device."""
-    from program.legacy_lowering import _build_axis_groups, _compute_stage_axis_coords
-
-    axis_order = list(layout.axis_order)
-    axis_sizes = dict(layout.axis_sizes)
-    stage_ids = list(range(num_devices))
-    coords = _compute_stage_axis_coords(stage_ids, axis_order, axis_sizes)
-    stage_to_ranks = {stage: [stage] for stage in stage_ids}
-    return _build_axis_groups(axis_order, axis_sizes, coords, stage_to_ranks), coords
-
-
-@pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
-def test_single_axis_groups_match_legacy(grid: Grid) -> None:
-    placement, _ = _placement(grid, Granularity.FINE)
-    factory = placement.communicators
-    devices = placement.devices()
-    groups, coords = _legacy_axis_groups(placement.layout, len(devices))
-
-    for axis in ("tp", "cp", "ep", "pp"):
-        size = placement.layout.axis_sizes[axis]
-        for device in devices:
-            members = factory.members((axis,), device)
-            if size <= 1:
-                assert members == (device,), f"{axis} size 1 must give a singleton"
-                continue
-            key_base = tuple(
-                (ax, coords[device].get(ax, 0))
-                for ax in placement.layout.axis_order
-                if ax != axis
-            )
-            expected = tuple(sorted(groups[axis][(0, key_base)]))
-            assert members == expected, f"axis {axis} device {device}"
-            assert len(members) == size
+# P5: ``_legacy_axis_groups`` / ``test_single_axis_groups_match_legacy`` are
+# DELETED with ``legacy_lowering._build_axis_groups`` /
+# ``_compute_stage_axis_coords``. Group membership is CONSTRUCTED from the
+# ``RankLayout`` now (invariants P2/P3) and is gated by the tests below, which
+# assert members directly instead of against a second implementation.
 
 
 def test_composite_tp_ep_group_is_declared_not_inferred() -> None:
@@ -546,98 +511,12 @@ def test_group_members_are_layout_derived_not_count_derived() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _schedule_spec(grid: Grid, template: BlockTemplate) -> ScheduleSpec:
-    """The legacy ``ScheduleSpec`` equivalent of :func:`_workload`'s grid."""
-    return ScheduleSpec(
-        mb=grid.mb,
-        num_layers=grid.num_layers,
-        pp=grid.pp,
-        dp=1,
-        tp=grid.tp,
-        cp=grid.cp,
-        ep=grid.ep,
-        layers_per_stage=legacy_layers_per_stage(grid.num_layers, grid.pp),
-        moe_layer_mask=(),
-        zero_stage=0,
-        dp_microbatch_mode="every_mb",
-        grad_accum_cycle="final",
-        include_backward=grid.include_backward,
-        include_optimizer=True,
-        full_recomputation=grid.recompute,
-        pipeline_style_recompute=grid.recompute,
-        flattened_mode=True,
-        model_type="gpt",
-        comp_times=dict(DURATIONS),
-        comm_metadata=dict(template.comm_metadata),
-    )
-
-
-def _oracle_profile(grid: Grid, template: BlockTemplate, layout: RankLayout):
-    """``device -> Counter(op descriptor)`` from the legacy FINE builder.
-
-    TransferOps are excluded: cross-layer p2p is dependency rule R2 of
-    ``build()`` (INTERFACES §4.3), not L2 placement. dp is 1 in every grid, so
-    every ``CollectiveOp`` present is a block-template collective.
-    """
-    from program.ir import CollectiveOp, ComputeOp
-    from program.pipeline_fine import build_fine_program
-
-    program = build_fine_program(
-        _schedule_spec(grid, template), {"dense": template}, layout, dp_count=1
-    )
-    profile: Dict[int, Counter] = defaultdict(Counter)
-    for op in program.ops:
-        if isinstance(op, ComputeOp):
-            profile[op.device][("COMP", round(float(op.duration[0]), 15))] += 1
-        elif isinstance(op, CollectiveOp):
-            profile[op.device][
-                ("COLL", op.coll.name, int(op.size_bytes))
-            ] += 1
-    return {device: dict(counter) for device, counter in profile.items()}
-
-
-def _l2_profile(fw, placement: Placement, recompute) -> Dict[int, Dict[Any, int]]:
-    """``device -> Counter(op descriptor)`` from Placement + BlockExpander."""
-    expander = BlockExpander(fw, placement)
-    work = enumerate_work(fw, recompute)
-    profile: Dict[int, Counter] = defaultdict(Counter)
-    for item in work:
-        for chain in expander.expand(item):
-            for step in chain.steps:
-                if isinstance(step, ComputeStep):
-                    profile[chain.device][("COMP", round(float(step.duration), 15))] += 1
-                else:
-                    profile[chain.device][
-                        ("COLL", step.spec.kind.name, int(step.spec.size_bytes))
-                    ] += 1
-    return {device: dict(counter) for device, counter in profile.items()}
-
-
-@pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
-def test_fine_placement_matches_build_fine_program(grid: Grid) -> None:
-    """THE ORACLE. ``Placement`` + ``BlockExpander`` must reproduce the legacy
-    FINE builder's ``device -> op multiset`` mapping exactly."""
-    spec, template = _workload(grid)
-    fw = spec.freeze()
-    placement = Placement(
-        fw, Granularity.FINE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
-    )
-    recompute = FullRecompute() if grid.recompute else NoRecompute()
-
-    expected = _oracle_profile(grid, template, fw.spec.layout)
-    actual = _l2_profile(fw, placement, recompute)
-
-    assert sorted(actual) == sorted(expected), (
-        f"{grid.label}: device sets differ\n"
-        f"  L2:     {sorted(actual)}\n"
-        f"  legacy: {sorted(expected)}"
-    )
-    for device in sorted(expected):
-        assert actual[device] == expected[device], (
-            f"{grid.label}: device {device} op multiset differs\n"
-            f"  L2:     {sorted(actual[device].items())}\n"
-            f"  legacy: {sorted(expected[device].items())}"
-        )
+# P5: the FINE placement ORACLE (``_schedule_spec`` / ``_oracle_profile`` /
+# ``_l2_profile`` / ``test_fine_placement_matches_build_fine_program``) is
+# DELETED with ``pipeline_fine.build_fine_program``. It was the differential
+# that had to pass before ``pipeline_fine.py`` could be deleted; it did, and it
+# was. What survives is the intrinsic shape check below plus the end-to-end
+# gate in ``tests/test_equiv_golden.py``.
 
 
 @pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
@@ -909,144 +788,10 @@ def test_moe_group_without_routing_policy_raises() -> None:
         )
 
 
-def _block_oracle_profile(template: BlockTemplate, direction: str, grid: Grid):
-    """``device -> Counter`` from the legacy BLOCK builder ``build_block_root``.
-
-    This is the ONLY existing implementation of the MoE hot/cold join and of
-    ``placement`` (pre/post) handling, so it is the oracle for both.
-    """
-    from program.block_program import build_block_root
-    from program.pipeline_fine import FineEdge, FineNode
-
-    root = build_block_root(template, direction, tp=grid.tp, cp=grid.cp, ep=grid.ep)
-    profile: Dict[int, Counter] = defaultdict(Counter)
-    seen = set()
-    stack = [root]
-    while stack:
-        obj = stack.pop()
-        if id(obj) in seen:
-            continue
-        seen.add(id(obj))
-        stack.extend(getattr(obj, "children", []))
-        if isinstance(obj, FineNode):
-            profile[int(obj.hw_id)][("COMP", round(float(obj.duration), 15))] += 1
-        elif isinstance(obj, FineEdge):
-            profile[int(obj.local_hw_id)][
-                ("COLL", obj.comm_type.name, int(obj.comm_size_bytes))
-            ] += 1
-    return {device: dict(counter) for device, counter in profile.items()}
-
-
-def _block_l2_profile(fw, placement: Placement, routing=None):
-    expander = BlockExpander(fw, placement, routing=routing)
-    profile: Dict[int, Counter] = defaultdict(Counter)
-    for chain in expander.expand(
-        WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
-    ):
-        for step in chain.steps:
-            if isinstance(step, ComputeStep):
-                profile[chain.device][("COMP", round(float(step.duration), 15))] += 1
-            else:
-                profile[chain.device][
-                    ("COLL", step.spec.kind.name, int(step.spec.size_bytes))
-                ] += 1
-    return {device: dict(counter) for device, counter in profile.items()}
-
-
-BLOCK_GRIDS: Tuple[Grid, ...] = (
-    Grid("block:tp1", tp=1, cp=1, ep=1, pp=1, mb=1, num_layers=1),
-    Grid("block:tp2", tp=2, cp=1, ep=1, pp=1, mb=1, num_layers=1),
-    Grid("block:tp2cp2", tp=2, cp=2, ep=1, pp=1, mb=1, num_layers=1),
-    Grid("block:tp2ep2", tp=2, cp=1, ep=2, pp=1, mb=1, num_layers=1),
-    Grid("block:tp2cp2ep2", tp=2, cp=2, ep=2, pp=1, mb=1, num_layers=1),
-)
-
-
-@pytest.mark.parametrize("grid", BLOCK_GRIDS, ids=[g.label for g in BLOCK_GRIDS])
-def test_block_placement_matches_build_block_root_dense(grid: Grid) -> None:
-    spec, template = _workload(grid)
-    fw = spec.freeze()
-    placement = Placement(fw, Granularity.BLOCK, _LayerAssignment.contiguous(1, 1))
-    assert _block_l2_profile(fw, placement) == _block_oracle_profile(
-        template, "forward", grid
-    )
-
-
-def test_block_pre_post_placement_matches_build_block_root() -> None:
-    """``split_comm_keys`` differentially against ``block_program._split_comm_keys``
-    — the only legacy implementation that honors ``placement``."""
-    comm = {
-        "pre_gather": {
-            "size": 512,
-            "type": CollectiveType.ALL_GATHER,
-            "participants": 2,
-            "interconnect_type": "tp",
-            "placement": "pre",
-        },
-        "post_reduce": {
-            "size": 1024,
-            "type": CollectiveType.ALL_REDUCE,
-            "participants": 2,
-            "interconnect_type": "tp",
-            "placement": "post",
-        },
-        "cross_layer": DENSE_COMM["cross_layer"],
-    }
-    gemms = (
-        {
-            "name": "qkv_proj",
-            "forward": {"duration": 1e-4, "comm_keys": ["pre_gather", "post_reduce"]},
-            "backward": {"duration": 2e-4, "comm_keys": []},
-        },
-        {
-            "name": "MLP",
-            "forward": {"duration": 3e-4, "comm_keys": ["pre_gather"]},
-            "backward": {"duration": 4e-4, "comm_keys": []},
-        },
-    )
-    grid = Grid("block:prepost", tp=2, cp=1, ep=1, pp=1, mb=1, num_layers=1)
-    spec, template = _workload(grid, comm=comm, gemms=gemms)
-    fw = spec.freeze()
-    placement = Placement(fw, Granularity.BLOCK, _LayerAssignment.contiguous(1, 1))
-
-    assert _block_l2_profile(fw, placement) == _block_oracle_profile(
-        template, "forward", grid
-    )
-    # ... and the ORDER matches too, not just the multiset.
-    chain = BlockExpander(fw, placement).expand(
-        WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
-    )[0]
-    assert [step.kind for step in chain.steps] == [
-        StepKind.COMM,
-        StepKind.COMPUTE,
-        StepKind.COMM,
-        StepKind.COMM,
-        StepKind.COMPUTE,
-    ]
-
-
-@pytest.mark.parametrize(
-    "grid",
-    [g for g in BLOCK_GRIDS if g.ep > 1],
-    ids=[g.label for g in BLOCK_GRIDS if g.ep > 1],
-)
-def test_block_moe_join_matches_build_block_root(grid: Grid) -> None:
-    """The MoE hot/cold join, differentially: same ops on the same devices as
-    ``block_program._attach_moe_parallel_post_group``, with ``_moe_hot_rank`` /
-    ``_moe_parallel_token`` replaced by ``min(members)`` over a constructed
-    communicator."""
-    spec, template = _workload(
-        grid,
-        comm=MOE_COMM,
-        gemms=MOE_GEMMS,
-        moe_gemms=MOE_GEMMS,
-        moe_layer_mask=(True,),
-    )
-    fw = spec.freeze()
-    placement = Placement(fw, Granularity.BLOCK, _LayerAssignment.contiguous(1, 1))
-    assert _block_l2_profile(fw, placement, routing=EP_ROUTING) == _block_oracle_profile(
-        template, "forward", grid
-    )
+# P5: the BLOCK placement ORACLE (``_block_oracle_profile`` /
+# ``_block_l2_profile`` and the three ``*_matches_build_block_root`` tests) is
+# DELETED with ``block_program.build_block_root``, for the same reason as the
+# FINE oracle above.
 
 
 # ---------------------------------------------------------------------------

@@ -36,15 +36,10 @@ dense/MoE baseline fallback, verbatim legacy semantics:
   tuple — the evaluator reads index 0 either way (legacy ``Node.duration``
   property, DESIGN.md §2 amendment 4).
 
-The write-back is mirrored onto the aligned schedule events
-(``meta.misc["coarse_events"]``, legacy scalar-vs-tuple convention). The
-mirror is load-bearing since M6: the hierarchical pipeline emission lowers
-the coarse proto root (``program.pipeline_coarse.lower_coarse_for_emission``),
-and the lowering reads the events' ``duration_profile``/``duration`` —
-exactly the legacy ``Node`` duration surface the deleted
-``_apply_transformer_time``/``_assign_transformer_durations`` walk wrote.
-``RAPID_VISUALIZE_GRAPHS`` renders the same retimed durations; the
-analytical evaluator itself reads only the ops.
+P6: the write-back has exactly ONE destination, ``ComputeOp.duration``. The
+mirror onto the aligned schedule events is gone with the events: the
+hierarchical emission, the analytical evaluator and the renderer all read the
+ops now.
 """
 
 from __future__ import annotations
@@ -89,7 +84,6 @@ def apply_block_timings(
         raise RuntimeError("apply_block_timings requires a COARSE program")
 
     dp_count = max(1, int(dp_count))
-    events = coarse_program.meta.misc.get("coarse_events")
     retimed = 0
 
     for op in coarse_program.ops:
@@ -122,9 +116,6 @@ def apply_block_timings(
                 values.append(float(default))
 
         op.duration = tuple(values)
-        if events is not None:
-            # Mirror for visualization (legacy tuple-vs-scalar convention).
-            events[op.uid].duration = tuple(values) if dp_count > 1 else values[0]
         retimed += 1
 
     return retimed

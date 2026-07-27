@@ -121,7 +121,7 @@ class ContiguousStages:
 
     The WorkItem-keyed rule is :meth:`stage_of_work` (renamed from ``stage_of``
     on 2026-07-26 to free ``stage_of`` for the ``LayerAssignment`` signature).
-    P4 replaces this class with ``program.sched.policy.LayerAssignment``, which
+    P4 replaces this class with ``program.schedule.policy.LayerAssignment``, which
     carries the same three ``LayerAssignment`` members.
     """
 

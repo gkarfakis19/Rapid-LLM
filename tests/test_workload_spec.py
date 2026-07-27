@@ -45,21 +45,17 @@ from tests.test_policies import Cfg, make_workload, raw_comm_metadata
 # ---------------------------------------------------------------------------
 
 
-class _WrongObject:
-    """The kind of object ``ScheduleSpec.from_pipeline_graph`` silently accepts
-    today: every read is a ``getattr(..., default)`` chain, so it yields
-    ``mb=0`` / ``num_layers=0`` instead of failing."""
-
-    misc_metadata = {}
-    comp_times = {}
-    comm_metadata = {}
-
-
 def test_wrong_object_can_no_longer_produce_mb_zero() -> None:
-    from program.schedule import ScheduleSpec
+    """The schedule.py:186 hazard, now unrepresentable.
 
-    legacy = ScheduleSpec.from_pipeline_graph(_WrongObject(), include_backward=True)
-    assert legacy.mb == 0 and legacy.num_layers == 0  # today's silent failure
+    ``ScheduleSpec.from_pipeline_graph`` read every field through a
+    ``getattr(obj, name, default)`` chain, so an object with empty
+    ``misc_metadata`` yielded ``mb == 0`` / ``num_layers == 0`` and built an
+    empty schedule in silence. That constructor is deleted; ``ModelShape``
+    raises instead, and ``WorkloadSpec.from_timing`` — the one producer seam —
+    goes through it.
+    """
+    from program.workload import WorkloadError as _WE
 
     with pytest.raises(WorkloadError, match="micro_batches"):
         ModelShape(num_layers=4, micro_batches=0, model_type="gpt")

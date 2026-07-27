@@ -916,12 +916,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
                 num_SMs,
                 use_moe_override=True,
             )
-        (
-            pipeline_graph,
-            _,
-            transformer_blocks,
-            interconnect_params,
-        ) = tc._prepare_execution_graphs(
+        workload, _ = tc._prepare_execution_graphs(
             node_breakdown=node_breakdown,
             transformer_timings=transformer_timings,
             moe_node_breakdown=moe_node_breakdown,
@@ -934,12 +929,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             include_pipeline_backward=False,
             include_transformer_backward=False,
         )
-        dispatcher = LLMExecutionDispatcher(
-            time_calc=tc,
-            pipeline_graph=pipeline_graph,
-            interconnect_params=interconnect_params,
-            transformer_blocks=transformer_blocks,
-        )
+        dispatcher = LLMExecutionDispatcher(tc, workload)
         prefill_program = dispatcher.build_fine_program_for_memory()
         prefill_memory_data = mem_estimator.build_memory_data(
             mode="inference",
@@ -947,7 +937,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             seq_len=prefill_len,
             kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else prefill_len,
         )
-        tc.pipeline_graph = pipeline_graph
+        tc.workload = workload
         _, prefill_peak_gb = mem_estimator.simulate_peak(
             prefill_program,
             prefill_memory_data,
@@ -968,22 +958,12 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             vocab_size=vocab_size,
             model_type=tc.model_type,
         )
-        (
-            decode_pipeline_graph,
-            _,
-            decode_transformer_blocks,
-            decode_interconnect_params,
-        ), _ = tc.prepare_decode_graphs(
+        (decode_workload, _), _ = tc.prepare_decode_graphs(
             batch_size=batch_size,
             total_seq_len=seq_len,
             gemm_shapes=decode_gemm_shapes,
         )
-        decode_dispatcher = LLMExecutionDispatcher(
-            time_calc=tc,
-            pipeline_graph=decode_pipeline_graph,
-            interconnect_params=decode_interconnect_params,
-            transformer_blocks=decode_transformer_blocks,
-        )
+        decode_dispatcher = LLMExecutionDispatcher(tc, decode_workload)
         decode_program = decode_dispatcher.build_fine_program_for_memory()
         decode_memory_data = mem_estimator.build_memory_data(
             mode="inference",
@@ -992,7 +972,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             gemm_shapes=decode_gemm_shapes,
             kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else seq_len,
         )
-        tc.pipeline_graph = decode_pipeline_graph
+        tc.workload = decode_workload
         _, decode_peak_gb = mem_estimator.simulate_peak(
             decode_program,
             decode_memory_data,

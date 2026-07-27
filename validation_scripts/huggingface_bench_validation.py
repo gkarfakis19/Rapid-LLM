@@ -1285,13 +1285,7 @@ def run_rapid_estimation(
                 from llm_execution import LLMExecutionDispatcher
                 mem_estimator, memory_data = tc._build_training_graphs_and_memory_data()
                 _apply_activation_window_scaling(memory_data, activation_factor)
-                dispatcher = LLMExecutionDispatcher(
-                    time_calc=tc,
-                    pipeline_graph=tc.pipeline_graph,
-                    interconnect_params=tc.pipeline_interconnect,
-                    transformer_blocks=tc.transformer_blocks,
-                    no_data_parallel=False,
-                )
+                dispatcher = LLMExecutionDispatcher(tc, tc.workload)
                 memory_program = dispatcher.build_fine_program_for_memory()
                 _, training_peak_gb = mem_estimator.simulate_peak(
                     memory_program,
@@ -1504,13 +1498,7 @@ def _worker_process_row(
                     from llm_execution import LLMExecutionDispatcher
                     mem_estimator, memory_data = tc._build_training_graphs_and_memory_data()
                     _apply_activation_window_scaling(memory_data, activation_factor)
-                    dispatcher = LLMExecutionDispatcher(
-                        time_calc=tc,
-                        pipeline_graph=tc.pipeline_graph,
-                        interconnect_params=tc.pipeline_interconnect,
-                        transformer_blocks=tc.transformer_blocks,
-                        no_data_parallel=False,
-                    )
+                    dispatcher = LLMExecutionDispatcher(tc, tc.workload)
                     memory_program = dispatcher.build_fine_program_for_memory()
                     _, training_peak_gb = mem_estimator.simulate_peak(
                         memory_program,

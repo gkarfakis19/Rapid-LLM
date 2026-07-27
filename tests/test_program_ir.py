@@ -232,11 +232,21 @@ def test_v5_label_group_isdp_consistency():
 
 
 def test_v6_group_race_warning_fires_and_is_silenced_by_a_path():
+    """V6 warns on an unordered same-group pair whose EARLIER member has a
+    successor — the narrowing P5 applied (INTERFACES §4.8).
+
+    V6 became always-on in ``build()``, and a gradient reducer is a graph SINK by
+    construction: nothing follows it. Two sinks cannot race, because nothing
+    observes which issued first for a program whose order is ONE global order
+    projected onto every device (CONTEXT constraint 2). A pair whose earlier
+    member feeds something IS the race, and is still reported.
+    """
     gk = GroupKey(axis="tp", members=(0,))
     groups = {gk: CommGroup(key=gk, label="g")}
     racy = [
         CollectiveOp(uid=0, name="c0", device=0, coll=AR, size_bytes=4, label="g", group=gk),
         CollectiveOp(uid=1, name="c1", device=0, coll=AR, size_bytes=4, label="g", group=gk),
+        ComputeOp(uid=2, name="consumer", device=0, duration=(1.0,), deps=(0,)),
     ]
     with pytest.warns(GroupRaceWarning):
         validate_program(_program(racy, [0], groups=groups), check_races=True)
@@ -249,6 +259,15 @@ def test_v6_group_race_warning_fires_and_is_silenced_by_a_path():
     with warnings.catch_warnings():
         warnings.simplefilter("error", GroupRaceWarning)
         validate_program(_program(ordered, [0], groups=groups), check_races=True)
+
+    # ... and the narrowed-away class: two SINK reducers of one group.
+    sinks = [
+        CollectiveOp(uid=0, name="c0", device=0, coll=AR, size_bytes=4, label="g", group=gk),
+        CollectiveOp(uid=1, name="c1", device=0, coll=AR, size_bytes=4, label="g", group=gk),
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GroupRaceWarning)
+        validate_program(_program(sinks, [0], groups=groups), check_races=True)
 
 
 # ---------------------------------------------------------------------------
@@ -460,76 +479,51 @@ def test_emitted_bundle_matches_hand_built_et(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Legacy lowering quirks (synthetic legacy graphs)
+# Same-device transfers and the dp-major rank formula
 # ---------------------------------------------------------------------------
+#
+# P5: the two tests that drove synthetic graphs through
+# ``legacy_lowering.lower_to_program`` are gone with that pass. What they were
+# really pinning survives here, stated against the IR the emitter consumes.
 
 
-def test_lowering_collective_only_stage_uses_pre_extension_rank_arithmetic():
-    from program.legacy_lowering import lower_to_program
-    from program.schedule import CommEvent, ComputeEvent
+def test_same_device_transfer_edge_survives_elision(tmp_path):
+    """A same-device ``TransferOp`` emits NO wire op, and its dependency must
+    reappear as a plain ctrl_dep on the consumer.
 
-    # M8: synthetic graphs use the schedule events (the legacy Node/Edge
-    # classes are retired; the events expose the same duck-typed surface).
-    a = ComputeEvent("A", 0, 1.0)
-    a.op_id = 0
-    edge = CommEvent(
-        "dp_sync",
-        comm_size_bytes=64, comm_type=AR, participants=2, comm_interconnect_type="dp",
-        local_hw_id=3,  # a stage no compute node lives on
-    )
-    edge.op_id = 2
-    b_node = ComputeEvent("B", 0, 2.0)
-    b_node.op_id = 1
-    a.add_child(edge)
-    edge.add_child(b_node)
+    Elide the OP, keep the EDGE. Dropping the edge instead lets the ranks of one
+    stage drift out of collective-issue lockstep, which AstraSim reports as
+    ``Hardware Resource ... has unreleased nodes`` — a silent deadlock.
+    """
+    b = ProgramBuilder(dp_count=1)
+    a_uid = b.add_compute("A", 0, 1.0)
+    t_uid = b.add_transfer("cross_layer", 0, 0, 0, a_uid, comm_type=PIPE)
+    b.add_compute("B", 0, 2.0, deps=(t_uid,))
+    prog = b.finish(validate=False)
 
-    prog = lower_to_program(a, dp_size=2, layout_descriptor=None)
-    # Collective-only stage discovered via the edge extends the device set...
-    assert prog.devices == (0, 3)
-    # ...but the rank formula keeps the PRE-extension stage count
-    # (executor.py:1251-1262): num_stages == 1, extension index == 1.
-    assert prog.num_stages_initial() == 1
-    assert prog.compute_devices() == (0,)
-    assert prog.rank_for(0, 0) == 0 and prog.rank_for(0, 1) == 1
-    assert prog.rank_for(3, 0) == 1 and prog.rank_for(3, 1) == 2  # collides — legacy quirk
-
-    kinds = [type(op).__name__ for op in prog.ops]
-    assert kinds[:3] == ["ComputeOp", "ComputeOp", "CollectiveOp"]
-    coll = prog.ops[2]
-    assert coll.is_dp and coll.label is None and coll.device == 3
-    # The edge's compute parent at another stage became a control transfer
-    # whose pseudo-edge is the parent object itself (walker quirk).
-    transfer = prog.ops[3]
-    assert isinstance(transfer, TransferOp)
-    assert (transfer.src_device, transfer.dst_device) == (0, 3)
-    assert transfer.size_bytes == 0 and transfer.is_control
-    assert transfer.name == "A"
-
-
-def test_lowering_same_stage_pipeline_edge_becomes_same_device_transfer(tmp_path):
-    from program.legacy_lowering import lower_to_program
-    from program.schedule import CommEvent, ComputeEvent
-
-    a = ComputeEvent("A", 0, 1.0)
-    a.op_id = 0
-    xl = CommEvent("cross_layer", comm_type=PIPE)
-    xl.op_id = 1
-    b_node = ComputeEvent("B", 0, 2.0)
-    b_node.op_id = 2
-    a.add_child(xl)
-    xl.add_child(b_node)
-
-    prog = lower_to_program(a, dp_size=1, layout_descriptor=None)
-    assert [type(op).__name__ for op in prog.ops] == ["ComputeOp", "ComputeOp", "TransferOp"]
-    b_op = prog.ops[1]
-    assert b_op.deps == (0,)  # plain dep, exactly like the legacy converter
-    transfer = prog.ops[2]
+    transfer = prog.ops[t_uid]
     assert transfer.src_device == transfer.dst_device == 0
     assert transfer.size_bytes == 0
-    assert transfer.consumers == (1,)
-    assert transfer.send_seq is None and transfer.recv_seq is None
 
     bundle = emit_chakra(prog, str(tmp_path))
     nodes = _load_nodes(f"{bundle.et_prefix}.0.et")
     assert [int(n.type) for n in nodes] == [pb.COMP_NODE, pb.COMP_NODE]
     assert list(nodes[1].ctrl_deps) == [0]
+
+
+def test_rank_formula_uses_the_declared_stage_count():
+    """``rank = dp_idx * num_stages_initial + stage_index`` (DESIGN §2.5).
+
+    ``num_stages_initial`` is DECLARED on the program, which is what keeps
+    BUG_LEDGER **A4** expressible: a device set larger than the declared stage
+    count makes two (device, dp) pairs share a rank, and P7 flips the declared
+    value rather than editing arithmetic.
+    """
+    b = ProgramBuilder(dp_count=2)
+    b.add_compute("A", 0, 1.0)
+    prog = b.finish(devices=(0, 3), num_stages_initial=1, compute_devices=(0,))
+    assert prog.num_stages_initial() == 1
+    assert prog.compute_devices() == (0,)
+    assert prog.rank_for(0, 0) == 0 and prog.rank_for(0, 1) == 1
+    # the collision A4 describes, asserted so a fix cannot land unnoticed
+    assert prog.rank_for(3, 0) == 1 and prog.rank_for(3, 1) == 2

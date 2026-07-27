@@ -221,19 +221,9 @@ class DecodeGraph:
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
         )
-        (
-            pipeline_graph,
-            _,
-            transformer_blocks,
-            interconnect_params,
-        ) = execution_graphs
+        workload, _ = execution_graphs
 
-        dispatcher = LLMExecutionDispatcher(
-            time_calc=temp_time_calc,
-            pipeline_graph=pipeline_graph,
-            interconnect_params=interconnect_params,
-            transformer_blocks=transformer_blocks,
-        )
+        dispatcher = LLMExecutionDispatcher(temp_time_calc, workload)
 
         result = dispatcher.run(temp_time_calc.execution_mode)
         if sample_dir:

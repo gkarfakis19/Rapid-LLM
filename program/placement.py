@@ -96,7 +96,7 @@ from program.workload import CommSpec, CommSpecTable, FrozenWorkload
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from program.policies.overlap import OverlapDecl, OverlapPolicy
     from program.policies.routing import MoERoutingPolicy
-    from program.sched.policy import LayerAssignment
+    from program.schedule.policy import LayerAssignment
     from program.work import SyncRequirement
 
 

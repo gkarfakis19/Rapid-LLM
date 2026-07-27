@@ -13,9 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""The execution dispatcher: ONE construction path for every mode (P5/P6).
+
+``program.build.build()`` is the only Program constructor. The four execution
+modes, the memory replay and the BLOCK measurements differ ONLY in the
+:class:`~program.placement.Granularity` they ask for and in what they do with
+the result:
+
+======================  ===========  ===========================================
+mode                    granularity  consumer
+======================  ===========  ===========================================
+ANALYTICAL              COARSE       ``program.analytic_sim.evaluate``
+HYBRID                  COARSE       BLOCK retime, then ``analytic_sim.evaluate``
+FULL_ASTRASIM_HIER..    COARSE       BLOCK retime, then AstraSim over (pp,dp)
+FULL_ASTRASIM_FLAT..    FINE         AstraSim over the full layout
+transformer blocks      BLOCK        AstraSim, one bundle per direction
+memory                  FINE         ``program.memory_sim.simulate_memory``
+======================  ===========  ===========================================
+
+The dispatcher takes a **typed** :class:`~program.workload.WorkloadSpec` (L0),
+built by ``WorkloadSpec.from_timing`` — the single home of INTERFACES §1.7's
+producer map. ``ScheduleInputs``, ``ScheduleSpec.from_pipeline_graph`` and
+``TransformerBlockSpec`` are gone, and so is every per-caller re-derivation of
+``include_backward`` / ``include_optimizer`` / the effective dp: those live on
+:class:`~program.workload.RunPolicy`, together with the interleave scale
+(Class B item 8).
+"""
+
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
@@ -24,15 +52,15 @@ from astrasim_lib import run_astra_simulation_only_onepath
 from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
 from astrasim_lib.layout_utils import axis_layout_from_descriptor
 from program import _env_flag
-from program.block_program import TransformerBlockSpec
+from program.ir import Program
 from program.layout import RankLayout
-from program.schedule import ScheduleInputs
+from program.placement import Granularity
+from program.work import Direction
+from program.workload import WorkloadSpec
 from util import log_message
 
 if TYPE_CHECKING:
     from train_timing import TimeCalculationLLM
-
-
 
 
 class ExecutionMode(Enum):
@@ -40,14 +68,10 @@ class ExecutionMode(Enum):
     HYBRID = "hybrid"
     FULL_ASTRASIM_HIERARCHICAL = "full_astrasim_hierarchical"
     FULL_ASTRASIM_FLATTENED = "full_astrasim_flattened"
-    
-    
+
+
 @dataclass
 class ExecutionResult:
-    # M7/M8 note: the legacy ``graph_root``/``mode`` compat fields were
-    # retired — no caller ever read them (callers consume ``total_time``
-    # only; the executed Programs live on the dispatcher as
-    # ``coarse_program``/``fine_program``).
     total_time: float
 
 
@@ -55,54 +79,62 @@ class ExecutionResult:
 class TransformerTimings:
     forward: float
     backward: float
-    
+
+
 class LLMExecutionDispatcher:
     def __init__(
         self,
-        time_calc: TimeCalculationLLM,  # somehow this works? TODO: fix this at some point so its not annotated by IDE.
-        pipeline_graph: ScheduleInputs,
-        interconnect_params: Dict[str, Tuple[float, float]],
-        transformer_blocks: Optional[TransformerBlockSpec] = None,
-        no_data_parallel: bool = False,
+        time_calc: "TimeCalculationLLM",
+        workload: WorkloadSpec,
     ) -> None:
+        if not isinstance(workload, WorkloadSpec):
+            raise TypeError(
+                "LLMExecutionDispatcher requires a typed program.workload.WorkloadSpec "
+                f"(got {type(workload).__name__}); build it with WorkloadSpec.from_timing"
+            )
         self.time_calc = time_calc
-        #: The pipeline schedule inputs (M7: ``program.schedule.
-        #: ScheduleInputs``, the typed carrier that replaced the legacy
-        #: ``simulate_train_graph.Graph`` object — same attribute surface:
-        #: parallelism degrees + comp_times/comm_metadata/misc_metadata).
-        self.pipeline_graph = pipeline_graph
-        self.interconnect_params = interconnect_params
-        #: BLOCK template bundle (M4): dense/MoE BlockTemplates + cluster
-        #: degrees, replacing the legacy transformer Graph + fwd/bwd roots.
-        self.transformer_blocks = transformer_blocks
-        #: FINE Program built by the flattened execution path (reused by the
-        #: memory path) and the memory path's own cached build (M3b).
-        self.fine_program: Optional[Any] = None
-        self._memory_fine_program: Optional[Any] = None
-        #: COARSE Program evaluated by the analytical/hybrid modes (M5).
-        self.coarse_program: Optional[Any] = None
-        #: True once _run_pipeline_with_analytical_comm converted the coarse
-        #: graph's comm sizes to times in place (analytical/hybrid modes) —
-        #: the legacy memory flatten inherited those durations, so the FINE
-        #: memory build replays the conversion on its coarse events.
-        self._comm_sizes_converted = False
-        self._transformer_rank_layout: Dict[str, Any] = {}
-        self._pipeline_rank_layout: Dict[str, Any] = {}
+        #: True for the grad-accumulation non-final cycle (the graph built
+        #: without the optimizer tail and with the skippable dp comms dropped).
+        #: DERIVED from the workload's own grad-accum cycle — it used to be a
+        #: separate constructor flag that every caller had to keep in sync.
+        self.no_data_parallel = bool(workload.run.is_nonfinal_grad_accum_cycle)
+
         self._network_dimensions: Tuple[Any, ...] = tuple()
+        self._transformer_rank_layout: Optional[Dict[str, Any]] = None
+        self._pipeline_rank_layout: Optional[Dict[str, Any]] = None
         self._axis_dimension_map: Dict[str, int] = {}
+        self._first_dim_optimize_cfg: Optional[Dict[str, Any]] = None
+        self._rank_layout = self._build_rank_layout_descriptor(workload)
+        #: the workload with the hardware layout attached (the dispatcher owns
+        #: the network layout; ``from_timing`` leaves ``layout=None``).
+        self.workload = workload.with_(layout=_layout_of(self._rank_layout))
+        self.interconnect_params: Dict[str, Tuple[float, float]] = dict(
+            self.workload.interconnect
+        )
+
+        #: FINE Program built by the flattened execution path (reused by the
+        #: memory path) and the memory path's own cached build.
+        self.fine_program: Optional[Program] = None
+        self._memory_fine_program: Optional[Program] = None
+        #: COARSE Program evaluated/emitted by the other three modes.
+        self.coarse_program: Optional[Program] = None
+        #: True once a mode ran the analytical comm-size conversion: the memory
+        #: replay then times the dp/ZeRO collectives too (memory_sim docstring).
+        self._comm_sizes_converted = False
+
         self._transformer_stage_dp_faults: Dict[Tuple[int, int], Tuple[Tuple[int, int, float], ...]] = {}
         self._transformer_stage_timings: Dict[Tuple[int, int], TransformerTimings] = {}
         self._transformer_stage_moe_timings: Dict[Tuple[int, int], TransformerTimings] = {}
         self._transformer_baseline_timings: Optional[TransformerTimings] = None
         self._transformer_moe_baseline_timings: Optional[TransformerTimings] = None
-        self.no_data_parallel = bool(no_data_parallel)
-        self._rank_layout = self._build_rank_layout_descriptor()
-        self._first_dim_optimize_cfg: Optional[Dict[str, Any]] = getattr(self, "_first_dim_optimize_cfg", None)
         self._fault_space: Optional[FaultSpace] = None
         self._fault_projections: Dict[str, FaultProjectionResult] = {}
         self._initialize_fault_mappings()
 
-    def _build_rank_layout_descriptor(self) -> Dict[str, Any]:
+    # ==================================================================
+    # layout / faults  (unchanged surface)
+    # ==================================================================
+    def _build_rank_layout_descriptor(self, workload: WorkloadSpec) -> Dict[str, Any]:
         hw_config = getattr(self.time_calc, "hw_config", None)
         layout = getattr(hw_config, "network_layout", None)
         dimensions = getattr(layout, "dimensions", None) if layout is not None else None
@@ -110,26 +142,24 @@ class LLMExecutionDispatcher:
             return {}
         self._network_dimensions = tuple(dimensions)
 
-        def _safe_int(value: Any, default: int = 1) -> int:
-            try:
-                candidate = int(value)
-            except (TypeError, ValueError):
-                candidate = default
-            return max(1, candidate)
-
-        tp_size = _safe_int(getattr(self.pipeline_graph, "tp", getattr(self.time_calc, "tp", 1)))
-        cp_size = _safe_int(getattr(self.pipeline_graph, "cp", getattr(self.time_calc, "cp", 1)))
-        ep_size = _safe_int(getattr(self.time_calc, "ep", 1))
-        pp_size = _safe_int(getattr(self.pipeline_graph, "pp", getattr(self.time_calc, "pp", 1)))
-        dp_size = _safe_int(getattr(self.time_calc, "dp", 1))
-
-        axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "ep": ep_size, "pp": pp_size, "dp": dp_size}
+        degrees = workload.degrees
+        axis_sizes: Dict[str, int] = {
+            "tp": degrees.tp,
+            "cp": degrees.cp,
+            # the HARDWARE ep axis (``time_calc.ep``), which is the graph ep
+            # only when MoE is active; Placement cross-checks the product.
+            "ep": max(1, int(getattr(self.time_calc, "ep", 1) or 1)),
+            "pp": degrees.pp,
+            "dp": max(1, int(getattr(self.time_calc, "dp", 1) or 1)),
+        }
 
         enforce_layout = self.time_calc.execution_mode in {
             ExecutionMode.HYBRID,
             ExecutionMode.FULL_ASTRASIM_HIERARCHICAL,
         }
-        rank_layout, optimize_cfg = RankLayout.from_network_layout(layout, axis_sizes, enforce_layout)
+        rank_layout, optimize_cfg = RankLayout.from_network_layout(
+            layout, axis_sizes, enforce_layout
+        )
         self._first_dim_optimize_cfg = optimize_cfg
 
         def _subset_descriptor(allowed: Sequence[str]) -> Optional[Dict[str, Any]]:
@@ -138,9 +168,8 @@ class LLMExecutionDispatcher:
                 return None
             return subset.descriptor()
 
-        # Transformer graphs only encode TP/CP axes; pipeline graphs encode PP
-        # (DP replicas are handled externally). Store these subsets so callers
-        # can attach the appropriate layout before invoking AstraSim.
+        # Transformer graphs only encode TP/CP/EP axes; pipeline graphs encode PP
+        # (DP replicas are handled externally).
         self._transformer_rank_layout = _subset_descriptor(["tp", "cp", "ep"])
         self._pipeline_rank_layout = _subset_descriptor(["pp", "dp"])
 
@@ -203,9 +232,6 @@ class LLMExecutionDispatcher:
                     category="faults",
                 )
             log_message(f"  {'-' * max(len(header_axes),12)}-+-{'-' * 40}-+-------", category="faults")
-
-
-
 
     def _initialize_fault_mappings(self) -> None:
         hw_config = getattr(self.time_calc, "hw_config", None)
@@ -340,6 +366,91 @@ class LLMExecutionDispatcher:
             return None
         return self._fault_links_for(label)
 
+    # ==================================================================
+    # THE one construction path
+    # ==================================================================
+    def _build_program(
+        self,
+        granularity: Granularity,
+        *,
+        label: str,
+        workload: Optional[WorkloadSpec] = None,
+        gmap_workdir: Optional[str] = None,
+        directions: Optional[Tuple[Direction, ...]] = None,
+    ) -> Program:
+        """``build()`` — the ONLY Program constructor (INTERFACES §4.2).
+
+        Policy selection is :func:`program.policies.policies_for`; ``build()``
+        makes no policy decision of its own, and this method makes none either.
+        ``GroupRaceWarning`` is silenced because V6 is always-on in ``build()``
+        and a gradient reducer is a graph SINK by construction — two reducers of
+        one group on one device therefore trip a warning whose race cannot
+        happen under CONTEXT constraint 2 (INTERFACES §4.8).
+        """
+        from program.build import build
+        from program.policies import policies_for
+        from program.schedule.gpipe import GPipeSchedule
+        from program.validate import GroupRaceWarning
+
+        spec = workload if workload is not None else self.workload
+        fw = spec.freeze()
+        bundle = policies_for(fw, granularity=granularity)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", GroupRaceWarning)
+            return build(
+                fw,
+                granularity=granularity,
+                sharding=bundle.sharding,
+                schedule_policy=GPipeSchedule(),
+                recompute=bundle.recompute,
+                routing=bundle.routing,
+                overlap=bundle.overlap,
+                grad_accum=bundle.grad_accum,
+                label=label,
+                gmap_workdir=gmap_workdir,
+                directions=directions,
+            )
+
+    def _emission_program(
+        self,
+        granularity: Granularity,
+        *,
+        label: str,
+        artifact_dir: str,
+        workload: Optional[WorkloadSpec] = None,
+        directions: Optional[Tuple[Direction, ...]] = None,
+    ) -> Program:
+        """Build + apply the first-dimension SCOTCH remap (P5: the remap is a
+        post-build pass over the ops — see :mod:`program.mapping`)."""
+        from program.mapping import apply_first_dim_mapping
+
+        optimize_cfg = dict(self._first_dim_optimize_cfg) if self._first_dim_optimize_cfg else None
+        gmap_workdir = (
+            artifact_dir if (optimize_cfg and self.time_calc.persist_astrasim_artifacts) else None
+        )
+        program = self._build_program(
+            granularity,
+            label=label,
+            workload=workload,
+            gmap_workdir=gmap_workdir,
+            directions=directions,
+        )
+        return apply_first_dim_mapping(
+            program, optimize_2dmap=optimize_cfg, workdir=gmap_workdir
+        )
+
+    def _interleave_scale(self) -> float:
+        """Class B item 8, now a :class:`~program.workload.RunPolicy` method."""
+        return self.workload.run.interleave_scale(
+            self.workload.degrees, self.workload.shape
+        )
+
+    def _coarse_label(self) -> str:
+        return "coarse_no_dp" if self.no_data_parallel else "coarse"
+
+    # ==================================================================
+    # modes
+    # ==================================================================
     def run(self, mode: ExecutionMode) -> ExecutionResult:
         if mode == ExecutionMode.ANALYTICAL:
             return self._run_pipeline_with_analytical_comm(ExecutionMode.ANALYTICAL)
@@ -349,119 +460,40 @@ class LLMExecutionDispatcher:
             return self._run_full_astrasim_hierarchical()
         if mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
             return self._run_full_astrasim_flattened()
-
-    def _pipeline_interleave_scale(self) -> float:
-        """Analytical interleaved-1F1B (virtual pipeline) bubble correction.
-
-        The pipeline graph is built with a GPipe-style schedule whose span is
-        (mb + pp - 1) uniform slots. Interleaving each rank's layers into v
-        virtual stages shrinks the bubble to (pp - 1) / v slots, so the total
-        scales by (mb + (pp - 1) / v) / (mb + pp - 1). This is exact under the
-        simulator's own uniform-stage-time assumption; the DP grad-sync tail
-        is scaled along with it, bounding the error by the (small) comm share.
-        """
-        v = int(getattr(self.time_calc, "pipeline_interleave", 1) or 1)
-        pp = int(getattr(self.time_calc, "pp", 1) or 1)
-        mb = int(getattr(self.time_calc, "mb", 1) or 1)
-        if v <= 1 or pp <= 1:
-            return 1.0
-        return (mb + (pp - 1) / float(v)) / float(mb + pp - 1)
-
-    def _run_type(self) -> str:
-        return str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-
-    def _retime_dp_count(self) -> int:
-        """Per-DP duration-profile length (legacy ``_apply_transformer_time``
-        rule: inference forces 1, training uses the dp degree)."""
-        if self._run_type() == "inference":
-            return 1
-        return max(1, getattr(self.time_calc, "dp", 1))
-
-    def _build_coarse_program(self) -> Any:
-        """Build the COARSE pipeline Program (M5) for analytical/hybrid.
-
-        Reads the SAME inputs the legacy ``construct_fwd_bwd_graph`` call in
-        ``_prepare_execution_graphs`` consumed: the pipeline graph's
-        comp_times/comm_metadata/misc_metadata, ``include_backward`` from the
-        run type and ``include_optimizer`` from the grad-accum cycle (the
-        nonfinal no-DP graph is built without the optimizer tail).
-        """
-        from program.pipeline_coarse import build_coarse_program
-        from program.schedule import ScheduleSpec
-
-        run_type = self._run_type()
-        include_backward = run_type != "inference"
-        misc = getattr(self.pipeline_graph, "misc_metadata", None) or {}
-        include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
-
-        spec = ScheduleSpec.from_pipeline_graph(
-            self.pipeline_graph,
-            include_backward=include_backward,
-            include_optimizer=include_optimizer,
-        )
-
-        layout_obj: Optional[RankLayout] = None
-        pipeline_layout = getattr(self, "_pipeline_rank_layout", None)
-        if pipeline_layout and pipeline_layout.get("axis_order"):
-            layout_obj = RankLayout(
-                axis_order=tuple(pipeline_layout.get("axis_order", [])),
-                axis_sizes=dict(pipeline_layout.get("axis_sizes", {})),
-                axis_strides=dict(pipeline_layout.get("axis_strides", {})),
-            )
-
-        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
-        return build_coarse_program(
-            spec,
-            layout_obj,
-            dp_count=effective_dp,
-            label="coarse_no_dp" if self.no_data_parallel else "coarse",
-        )
+        raise ValueError(f"Unknown execution mode {mode!r}")
 
     def _collect_block_timings(
         self,
         timings: Optional[TransformerTimings],
         moe_timings: Optional[TransformerTimings],
-    ) -> "Any":
-        """Bundle the AstraSim block timings for ``program.retime`` (same
-        baseline fallbacks as the legacy ``_apply_transformer_time``)."""
+    ) -> Any:
+        """Bundle the AstraSim block timings for :mod:`program.retime`."""
         from program.retime import BlockTimings
 
         return BlockTimings(
             dense=timings or self._transformer_baseline_timings,
             moe=moe_timings or self._transformer_moe_baseline_timings,
-            stage_dense=dict(getattr(self, "_transformer_stage_timings", {})),
-            stage_moe=dict(getattr(self, "_transformer_stage_moe_timings", {})),
+            stage_dense=dict(self._transformer_stage_timings),
+            stage_moe=dict(self._transformer_stage_moe_timings),
         )
 
     def _run_pipeline_with_analytical_comm(
         self,
         declared_mode: ExecutionMode,
-        coarse_program: Optional[Any] = None,
+        coarse_program: Optional[Program] = None,
     ) -> ExecutionResult:
-        """Analytical pipeline evaluation over the COARSE Program (M5).
-
-        Replaces the legacy ``convert_comm_sizes_to_times`` +
-        ``Graph.simulate`` pair: ``program.pipeline_coarse`` builds the typed
-        coarse program from the same schedule events, and
-        ``program.analytic_sim.evaluate`` replays the exact legacy
-        conversion + list-scheduler discipline over it. The hybrid mode
-        passes its retimed program in ``coarse_program``.
-        """
+        """Analytical evaluation of the COARSE Program."""
         from program import analytic_sim
 
         if declared_mode == ExecutionMode.HYBRID:
-            if self.no_data_parallel:
-                filename = "/hybrid_graph_no_dp"
-            else:
-                filename = "/hybrid_graph"
-        else: # must be "ANALYTICAL"
-            if self.no_data_parallel:
-                filename = "/analytical_graph_no_dp"
-            else:
-                filename = "/analytical_graph"
+            filename = "/hybrid_graph_no_dp" if self.no_data_parallel else "/hybrid_graph"
+        else:  # ANALYTICAL
+            filename = "/analytical_graph_no_dp" if self.no_data_parallel else "/analytical_graph"
 
         if coarse_program is None:
-            coarse_program = self._build_coarse_program()
+            coarse_program = self._build_program(
+                Granularity.COARSE, label=self._coarse_label()
+            )
         self.coarse_program = coarse_program
 
         total_time = analytic_sim.evaluate(
@@ -469,22 +501,16 @@ class LLMExecutionDispatcher:
             self.time_calc.network_model,
             self.interconnect_params,
         )
-        #: the memory-path FINE build replays the comm-size conversion on
-        #: its own coarse events (legacy flatten inherited the durations).
+        #: the memory replay times the dp/ZeRO collectives once a mode has run
+        #: the conversion (legacy: the flatten inherited the converted durations).
         self._comm_sizes_converted = True
 
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
-            # Render the coarse schedule events (converted comm durations +
-            # retimed compute durations, like the legacy timed graph).
-            from program.viz import save_events_graph
+            from program.viz import save_program_graph
 
-            save_events_graph(
-                coarse_program.meta.misc["coarse_proto_root"],
-                self.time_calc.output_dir,
-                filename,
-            )
+            save_program_graph(coarse_program, self.time_calc.output_dir, filename)
 
-        total_time *= self._pipeline_interleave_scale()
+        total_time *= self._interleave_scale()
         return ExecutionResult(total_time=total_time)
 
     def _run_hybrid(self) -> ExecutionResult:
@@ -492,182 +518,105 @@ class LLMExecutionDispatcher:
 
         transformer_time, moe_transformer_time = self._run_transformer_astrasim()
 
-        # Build from the pristine analytical comp_times (the legacy pipeline
-        # graph predated the write-back), then retime the layer ops.
-        coarse_program = self._build_coarse_program()
+        # Build from the PRISTINE analytical durations (the coarse program
+        # predates the write-back), then retime the layer ops.
+        coarse_program = self._build_program(
+            Granularity.COARSE, label=self._coarse_label()
+        )
         if transformer_time is not None or moe_transformer_time is not None:
-            self._update_comp_times_from_timings(transformer_time, moe_transformer_time)
+            self._write_block_durations(transformer_time, moe_transformer_time)
             apply_block_timings(
                 coarse_program,
                 self._collect_block_timings(transformer_time, moe_transformer_time),
-                self._retime_dp_count(),
+                self.workload.run.retime_dp_count(self.workload.degrees),
             )
         return self._run_pipeline_with_analytical_comm(
             ExecutionMode.HYBRID, coarse_program=coarse_program
         )
 
     def _run_full_astrasim_hierarchical(self) -> ExecutionResult:
-        """Hierarchical pipeline phase over the retimed COARSE Program (M6).
+        """Hierarchical pipeline phase: the COARSE Program IS the emitted one.
 
-        Replaces the legacy pipeline-graph AstraSim path (attach
-        ``_astrasim_rank_layout``/``_optimize_2dmap`` to ``pipeline_root``,
-        retime via the ``_apply_transformer_time`` name-prefix walk, feed
-        the legacy Node graph to the converter): the coarse Program is
-        built from the schedule events, retimed with
-        ``program.retime.apply_block_timings`` (same per-(dp, stage)
-        fault-variant override semantics), and lowered for emission over
-        the ("pp","dp") pipeline sublayout by
-        ``program.pipeline_coarse.lower_coarse_for_emission`` — sharing the
-        emission-order pass with the fine builder. Bundle labels/dirs
-        (``astra_hier``), the pipeline fault override, the interleave scale
-        and the non-positive-duration error are unchanged.
+        There is no lowering step any more — ``build()`` at COARSE produces the
+        program the emitter consumes, over the ("pp","dp") sublayout that
+        ``Placement`` derives for that granularity.
         """
-        from program.pipeline_coarse import lower_coarse_for_emission
         from program.retime import apply_block_timings
 
         transformer_time, moe_transformer_time = self._run_transformer_astrasim()
 
-        if not self.pipeline_graph:
-            raise RuntimeError("Pipeline graph is not available for AstraSim execution")
-
-        # Build from the pristine analytical comp_times (the legacy pipeline
-        # graph predated the write-back too), then retime the layer ops.
-        # Inference dp_override=1 lives in the builder: the coarse Program's
-        # dp_count is the effective dp (_build_coarse_program).
-        coarse_program = self._build_coarse_program()
-        if transformer_time is not None or moe_transformer_time is not None:
-            self._update_comp_times_from_timings(transformer_time, moe_transformer_time)
-            apply_block_timings(
-                coarse_program,
-                self._collect_block_timings(transformer_time, moe_transformer_time),
-                self._retime_dp_count(),
-            )
-        self.coarse_program = coarse_program
-
-        # Use hierarchical artifact directory when persisting artifacts
         artifact_dir = self.time_calc.output_dir
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
-        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
-            # Render the coarse schedule events (retimed durations mirrored
-            # by apply_block_timings, like the legacy retimed graph).
-            from program.viz import save_events_graph
-
-            filename = "/pipeline_graph_hierarchical_no_dp" if self.no_data_parallel else "/pipeline_graph_hierarchical"
-            save_events_graph(
-                coarse_program.meta.misc["coarse_proto_root"],
-                self.time_calc.output_dir,
-                filename,
-            )
-
-        optimize_cfg = dict(self._first_dim_optimize_cfg) if self._first_dim_optimize_cfg else None
-        gmap_workdir = artifact_dir if (optimize_cfg and self.time_calc.persist_astrasim_artifacts) else None
-        program = lower_coarse_for_emission(
-            coarse_program,
-            layout_descriptor=self._pipeline_rank_layout or None,
-            optimize_2dmap=optimize_cfg,
-            gmap_workdir=gmap_workdir,
+        coarse_program = self._emission_program(
+            Granularity.COARSE, label=self._coarse_label(), artifact_dir=artifact_dir
         )
+        if transformer_time is not None or moe_transformer_time is not None:
+            self._write_block_durations(transformer_time, moe_transformer_time)
+            apply_block_timings(
+                coarse_program,
+                self._collect_block_timings(transformer_time, moe_transformer_time),
+                self.workload.run.retime_dp_count(self.workload.degrees),
+            )
+        self.coarse_program = coarse_program
+
+        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
+            from program.viz import save_program_graph
+
+            filename = (
+                "/pipeline_graph_hierarchical_no_dp"
+                if self.no_data_parallel
+                else "/pipeline_graph_hierarchical"
+            )
+            save_program_graph(coarse_program, self.time_calc.output_dir, filename)
 
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
-            program,
+            coarse_program,
             self.time_calc,
             artifact_dir,
             persist_artifacts=self.time_calc.persist_astrasim_artifacts,
             faulty_links_override=self._fault_override("pipeline"),
+            rank_layout=self._pipeline_rank_layout or None,
         )
         if max_sec <= 0:
             raise RuntimeError("AstraSim pipeline execution returned non-positive duration")
-        max_sec *= self._pipeline_interleave_scale()
+        max_sec *= self._interleave_scale()
         return ExecutionResult(total_time=max_sec)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
-        """Flattened execution via ``program.pipeline_fine.build_fine_program``.
-
-        Builds the flattened Program directly from the pipeline graph's
-        ScheduleSpec + the transformer graph's BlockTemplate (no legacy
-        flattener clone), applies the proto-level overlap transforms, and
-        feeds the Program straight into ``run_astra_simulation_only_onepath``.
-        The Program is cached on ``self.fine_program`` so the memory path
-        (``build_fine_program_for_memory``) reuses it. Flattened *execution*
-        keeps rejecting MoE (the memory path accepts it — DESIGN.md §4).
-        """
-        if self.transformer_blocks is not None and self.transformer_blocks.moe is not None:
+        """Flattened execution: the FINE Program straight into AstraSim."""
+        if self.workload.blocks.moe is not None:
             raise NotImplementedError("MoE is not supported with full AstraSim flattened execution.")
-        if not self.pipeline_graph:
-            raise RuntimeError("Pipeline schedule inputs are not available for flattening")
-        if self.transformer_blocks is None:
-            raise RuntimeError("Transformer graph metadata is required for flattening")
 
-        from program.pipeline_fine import build_fine_program
-        from program.schedule import ScheduleSpec
-
-        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
-        include_backward = run_type != "inference"
-        # _prepare_execution_graphs builds the final-cycle graph with the
-        # optimizer and the nonfinal (grad-accum no-DP) graph without it.
-        misc = getattr(self.pipeline_graph, "misc_metadata", None) or {}
-        include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
-
-        spec = ScheduleSpec.from_pipeline_graph(
-            self.pipeline_graph,
-            include_backward=include_backward,
-            include_optimizer=include_optimizer,
-        )
-        block_templates = {"dense": self.transformer_blocks.dense}
-        if self.transformer_blocks.moe is not None:  # pragma: no cover - rejected above
-            block_templates["moe"] = self.transformer_blocks.moe
-
-        layout_obj: Optional[RankLayout] = None
-        if self._rank_layout and self._rank_layout.get("axis_order"):
-            layout_obj = RankLayout(
-                axis_order=tuple(self._rank_layout.get("axis_order", [])),
-                axis_sizes=dict(self._rank_layout.get("axis_sizes", {})),
-                axis_strides=dict(self._rank_layout.get("axis_strides", {})),
-            )
-
-        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
-            # Render the un-expanded pipeline schedule (the coarse events —
-            # add_child-order isomorphic to the retired legacy pre-flatten
-            # pipeline root, same filename).
-            from program.schedule import build_pipeline_events
-            from program.viz import save_events_graph
-
-            filename = "/pipeline_graph_pre_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_pre_flatten"
-            save_events_graph(
-                build_pipeline_events(spec).root,
-                self.time_calc.output_dir,
-                filename,
-            )
-
-        # Use flattened artifact directory when persisting artifacts
         artifact_dir = self.time_calc.output_dir
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")
 
-        optimize_cfg = dict(self._first_dim_optimize_cfg) if self._first_dim_optimize_cfg else None
-        gmap_workdir = artifact_dir if (optimize_cfg and self.time_calc.persist_astrasim_artifacts) else None
-
-        program = build_fine_program(
-            spec,
-            block_templates,
-            layout_obj,
-            no_data_parallel=self.no_data_parallel,
-            dp_count=effective_dp,
-            optimize_2dmap=optimize_cfg,
-            gmap_workdir=gmap_workdir,
-            parallelism_mode=self.time_calc.get_parallelism_mode(),
-            tp_overlap=getattr(self.time_calc, "tp_overlap", 0.0),
-            tp_sp_overlap=getattr(self.time_calc, "tp_sp_overlap", 0.0),
-            cp_overlap=getattr(self.time_calc, "cp_overlap", 0.0),
+        program = self._emission_program(
+            Granularity.FINE,
+            label="fine_no_dp" if self.no_data_parallel else "fine",
+            artifact_dir=artifact_dir,
         )
         self.fine_program = program
 
-        # Inference dp_override=1 semantics live in the builder: the FINE
-        # Program's dp_count is the effective dp (M6 removed the executor's
-        # dp_override plumbing along with the legacy-graph entry).
+        if _env_flag("RAPID_VISUALIZE_GRAPHS"):
+            # The un-expanded pipeline schedule, under the legacy filename: the
+            # COARSE build of the same workload (there is no proto graph to
+            # render any more — the coarse Program *is* that schedule).
+            from program.viz import save_program_graph
+
+            filename = (
+                "/pipeline_graph_pre_flatten_no_dp"
+                if self.no_data_parallel
+                else "/pipeline_graph_pre_flatten"
+            )
+            save_program_graph(
+                self._build_program(Granularity.COARSE, label=self._coarse_label()),
+                self.time_calc.output_dir,
+                filename,
+            )
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             program,
             self.time_calc,
@@ -679,10 +628,12 @@ class LLMExecutionDispatcher:
         if not per_rank_sec:
             raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
 
+        effective_dp = self.workload.run.effective_dp(self.workload.degrees)
         expected_rank_count = effective_dp * len(program.compute_devices())
 
-        # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
-        # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
+        # Special case: if the expected rank count is 1 then 2 is fine, but we
+        # prune the extra result — the AstraSim backend only supports > 1 ranks,
+        # so the executor duplicates the single trace.
         if expected_rank_count == 1:
             if len(per_rank_sec) > 2:
                 raise RuntimeError(
@@ -699,142 +650,82 @@ class LLMExecutionDispatcher:
         if max_sec <= 0:
             raise RuntimeError("AstraSim flattened execution returned non-positive duration")
 
-        return ExecutionResult(
-            total_time=max_sec * self._pipeline_interleave_scale(),
-        )
+        return ExecutionResult(total_time=max_sec * self._interleave_scale())
 
-    def build_fine_program_for_memory(self) -> Any:
+    # ==================================================================
+    # memory
+    # ==================================================================
+    def build_fine_program_for_memory(self) -> Program:
         """Build (and cache) the FINE Program the memory replay consumes.
 
-        Replacement of ``build_flattened_root_for_memory`` (M3b): the fine
-        program is built from this dispatcher's own coarse pipeline graph —
-        with the MoE block template when the spec has MoE layers (the legacy
-        flattener flattened MoE for memory even though flattened *execution*
-        rejects it) — and cached per dispatcher, exactly like the legacy
-        flattened root was. When the flattened execution path already built
-        the fine program, that Program is reused verbatim.
-
-        No SCOTCH/gmap hint is attached (the legacy memory flatten never
-        carried ``_optimize_2dmap``). For the analytical/hybrid modes the
-        coarse events replay ``convert_comm_sizes_to_times`` first, because
-        the legacy flatten cloned the already-converted coarse edge
-        durations into the memory graph.
+        Reuses the flattened path's Program when it built one (same workload,
+        same granularity). The comm-duration vector the replay needs is stamped
+        here, because the dispatcher is the only thing that knows whether a mode
+        ran the analytical conversion (:mod:`program.memory_sim`).
         """
         if self._memory_fine_program is not None:
             return self._memory_fine_program
 
-        if self.fine_program is not None:
-            # Flattened execution already built the FINE program from the
-            # same schedule/template/layout inputs; the proto root is
-            # identical to a fresh build (gmap only affects Program stage
-            # numbering, never the proto graph).
-            self._memory_fine_program = self.fine_program
-            return self._memory_fine_program
-
-        if not self.pipeline_graph:
-            raise RuntimeError("Pipeline schedule inputs are not available for memory flattening")
-        if self.transformer_blocks is None:
-            raise RuntimeError("Transformer graph metadata is required for memory flattening")
-
-        from program.pipeline_fine import build_fine_program
-        from program.schedule import ScheduleSpec
-
-        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
-        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
-        include_backward = run_type != "inference"
-        misc = getattr(self.pipeline_graph, "misc_metadata", None) or {}
-        include_optimizer = str(misc.get("grad_accum_cycle", "final") or "final").lower() != "nonfinal"
-
-        spec = ScheduleSpec.from_pipeline_graph(
-            self.pipeline_graph,
-            include_backward=include_backward,
-            include_optimizer=include_optimizer,
-        )
-        block_templates = {"dense": self.transformer_blocks.dense}
-        if self.transformer_blocks.moe is not None:
-            block_templates["moe"] = self.transformer_blocks.moe
-
-        layout_obj: Optional[RankLayout] = None
-        if self._rank_layout and self._rank_layout.get("axis_order"):
-            layout_obj = RankLayout(
-                axis_order=tuple(self._rank_layout.get("axis_order", [])),
-                axis_sizes=dict(self._rank_layout.get("axis_sizes", {})),
-                axis_strides=dict(self._rank_layout.get("axis_strides", {})),
+        program = self.fine_program
+        if program is None:
+            program = self._build_program(
+                Granularity.FINE,
+                label="fine_no_dp" if self.no_data_parallel else "fine",
             )
-
-        events_hook = None
-        if self._comm_sizes_converted:
-            from program.analytic_sim import convert_comm_sizes_to_times
-
-            def events_hook(events_root: Any) -> None:
-                convert_comm_sizes_to_times(
-                    events_root,
-                    self.time_calc.network_model,
-                    self.interconnect_params,
-                )
-
-        program = build_fine_program(
-            spec,
-            block_templates,
-            layout_obj,
-            no_data_parallel=self.no_data_parallel,
-            dp_count=effective_dp,
-            parallelism_mode=self.time_calc.get_parallelism_mode(),
-            tp_overlap=getattr(self.time_calc, "tp_overlap", 0.0),
-            tp_sp_overlap=getattr(self.time_calc, "tp_sp_overlap", 0.0),
-            cp_overlap=getattr(self.time_calc, "cp_overlap", 0.0),
-            events_hook=events_hook,
-        )
+        self._stamp_memory_comm_durations(program)
         self._memory_fine_program = program
         return program
 
+    def _stamp_memory_comm_durations(self, program: Program) -> None:
+        from program.analytic_sim import COMM_DURATIONS_KEY, comm_durations
+
+        if not self._comm_sizes_converted:
+            program.meta.misc.pop(COMM_DURATIONS_KEY, None)
+            return
+        program.meta.misc[COMM_DURATIONS_KEY] = comm_durations(
+            program,
+            self.time_calc.network_model,
+            self.interconnect_params,
+            collective_keys=set(self.workload.comm),
+        )
+
+    # ==================================================================
+    # BLOCK measurements
+    # ==================================================================
     def _build_transformer_block_programs(
-        self,
-        template: Any,
-        *,
-        include_backward: bool,
-        label: str,
-    ) -> Tuple[Optional[Any], Optional[Any]]:
-        """Build the (forward, backward) BLOCK Programs for one template.
+        self, *, moe: bool, label: str
+    ) -> Tuple[Optional[Program], Optional[Program]]:
+        """The (forward, backward) BLOCK Programs for one template.
 
-        The overlap transforms are applied inside ``build_block_program`` at
-        the same point in the flow as the legacy path (train_timing applied
-        them to the freshly constructed transformer roots).
+        Two bundles, because AstraSim returns ONE makespan per bundle and the
+        retiming needs a forward time AND a backward time — INTERFACES §4.2's
+        "a caller measuring a single direction builds a single direction's
+        workload" (``build(directions=...)``).
         """
-        from program.block_program import build_block_program
-
-        blocks = self.transformer_blocks
-        layout = getattr(self, "_transformer_rank_layout", None)
-        tc = self.time_calc
-        common = dict(
-            tp=blocks.tp,
-            cp=blocks.cp,
-            ep=blocks.ep,
-            parallelism_mode=tc.get_parallelism_mode(),
-            tp_overlap=getattr(tc, "tp_overlap", 0.0),
-            tp_sp_overlap=getattr(tc, "tp_sp_overlap", 0.0),
-            cp_overlap=getattr(tc, "cp_overlap", 0.0),
+        block_workload = self.workload.for_block(
+            layout=_layout_of(self._transformer_rank_layout), moe=moe
         )
-        forward_program = build_block_program(
-            template, "forward", layout, label=f"{label}_forward", **common
+        forward = self._build_program(
+            Granularity.BLOCK,
+            label=f"{label}_forward",
+            workload=block_workload,
+            directions=(Direction.FORWARD,),
         )
-        backward_program = None
-        if include_backward:
-            backward_program = build_block_program(
-                template, "backward", layout, label=f"{label}_backward", **common
+        backward = None
+        if self.workload.run.include_backward:
+            backward = self._build_program(
+                Granularity.BLOCK,
+                label=f"{label}_backward",
+                workload=block_workload,
+                directions=(Direction.BACKWARD,),
             )
-        return forward_program, backward_program
+        return forward, backward
 
     def _run_transformer_astrasim(
         self,
     ) -> Tuple[Optional[TransformerTimings], Optional[TransformerTimings]]:
-        blocks = self.transformer_blocks
-        has_dense = blocks is not None and blocks.dense is not None
-        has_moe = blocks is not None and blocks.moe is not None
-        if not has_dense and not has_moe:
-            if getattr(self, "_transformer_stage_dp_faults", {}):
-                raise ValueError("Transformer faults require transformer graph metadata, but none is available.")
-            return None, None
+        blocks = self.workload.blocks
+        has_moe = blocks.moe is not None
 
         persist = self.time_calc.persist_astrasim_artifacts
         os.makedirs(self.time_calc.output_dir, exist_ok=True)
@@ -843,48 +734,45 @@ class LLMExecutionDispatcher:
         self._transformer_baseline_timings = None
         self._transformer_moe_baseline_timings = None
 
-        baseline_timings: Optional[TransformerTimings] = None
-        if has_dense:
-            forward_program, backward_program = self._build_transformer_block_programs(
-                blocks.dense, include_backward=blocks.include_backward, label="block_dense"
-            )
-            # Baseline run (no transformer faults)
-            baseline_fwd_dir, baseline_bwd_dir = self._transformer_artifact_dirs(label=None, persist=persist)
-            baseline_timings, baseline_fwd_per_rank, baseline_bwd_per_rank = self._execute_transformer_run(
-                baseline_fwd_dir,
-                baseline_bwd_dir,
+        forward_program, backward_program = self._build_transformer_block_programs(
+            moe=False, label="block_dense"
+        )
+        # Baseline run (no transformer faults)
+        baseline_fwd_dir, baseline_bwd_dir = self._transformer_artifact_dirs(label=None, persist=persist)
+        baseline_timings, baseline_fwd_per_rank, baseline_bwd_per_rank = self._execute_transformer_run(
+            baseline_fwd_dir,
+            baseline_bwd_dir,
+            forward_program=forward_program,
+            backward_program=backward_program,
+            faulty_links_override=(),
+        )
+        self._transformer_baseline_timings = baseline_timings
+        self.time_calc.transformer_astrasim_per_rank_forward = baseline_fwd_per_rank
+        self.time_calc.transformer_astrasim_per_rank_backward = baseline_bwd_per_rank
+        self.time_calc.transformer_astrasim_time_forward = baseline_timings.forward
+        self.time_calc.transformer_astrasim_time_backward = baseline_timings.backward
+
+        # Per-stage fault runs (dense only): the fault links change the AstraSim
+        # network configs, never the emitted bundle, so the same Programs are
+        # re-emitted per variant.
+        stage_dp_faults = self._transformer_stage_dp_faults
+        for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
+            variant = f"fault{fault_index}_dp{dp_idx}_stage{stage_id}"
+            stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=variant, persist=persist)
+            stage_timings, _, _ = self._execute_transformer_run(
+                stage_fwd_dir,
+                stage_bwd_dir,
                 forward_program=forward_program,
                 backward_program=backward_program,
-                faulty_links_override=(),
+                faulty_links_override=fault_links,
             )
-            self._transformer_baseline_timings = baseline_timings
-            self.time_calc.transformer_astrasim_per_rank_forward = baseline_fwd_per_rank
-            self.time_calc.transformer_astrasim_per_rank_backward = baseline_bwd_per_rank
-            self.time_calc.transformer_astrasim_time_forward = baseline_timings.forward
-            self.time_calc.transformer_astrasim_time_backward = baseline_timings.backward
-
-            # Per-stage fault runs (dense only): the fault links change the
-            # AstraSim network configs, never the emitted bundle, so the same
-            # Programs are re-emitted per variant (legacy reused the roots).
-            stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
-            for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
-                label = f"fault{fault_index}_dp{dp_idx}_stage{stage_id}"
-                stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=label, persist=persist)
-                stage_timings, _, _ = self._execute_transformer_run(
-                    stage_fwd_dir,
-                    stage_bwd_dir,
-                    forward_program=forward_program,
-                    backward_program=backward_program,
-                    faulty_links_override=fault_links,
-                )
-                self._transformer_stage_timings[(dp_idx, stage_id)] = stage_timings
+            self._transformer_stage_timings[(dp_idx, stage_id)] = stage_timings
 
         moe_timings: Optional[TransformerTimings] = None
         if has_moe:
             moe_forward_program, moe_backward_program = self._build_transformer_block_programs(
-                blocks.moe, include_backward=blocks.include_backward, label="block_moe"
+                moe=True, label="block_moe"
             )
-            stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
             moe_fwd_dir, moe_bwd_dir = self._transformer_artifact_dirs(label="moe", persist=persist)
             moe_timings, moe_fwd_per_rank, moe_bwd_per_rank = self._execute_transformer_run(
                 moe_fwd_dir,
@@ -899,8 +787,8 @@ class LLMExecutionDispatcher:
             self.time_calc.transformer_astrasim_time_forward_moe = moe_timings.forward
             self.time_calc.transformer_astrasim_time_backward_moe = moe_timings.backward
             for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
-                label = f"moe_fault{fault_index}_dp{dp_idx}_stage{stage_id}"
-                stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=label, persist=persist)
+                variant = f"moe_fault{fault_index}_dp{dp_idx}_stage{stage_id}"
+                stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=variant, persist=persist)
                 stage_timings, _, _ = self._execute_transformer_run(
                     stage_fwd_dir,
                     stage_bwd_dir,
@@ -934,16 +822,11 @@ class LLMExecutionDispatcher:
         artifact_dir_fwd: str,
         artifact_dir_bwd: str,
         *,
-        forward_program: Optional[Any],
-        backward_program: Optional[Any],
+        forward_program: Optional[Program],
+        backward_program: Optional[Program],
         faulty_links_override: Optional[Tuple[Tuple[int, int, float], ...]],
     ) -> Tuple[TransformerTimings, Optional[List[float]], Optional[List[float]]]:
-        """Run the (forward, backward) BLOCK Programs through AstraSim.
-
-        The Program entry of ``run_astra_simulation_only_onepath`` reads
-        ``Program.dp_count`` (1 for block programs — the legacy
-        ``dp_override=1`` semantics live in the builder now).
-        """
+        """Run the (forward, backward) BLOCK Programs through AstraSim."""
         fwd_per_rank = None
         bwd_per_rank = None
         fwd_max = 0
@@ -956,6 +839,7 @@ class LLMExecutionDispatcher:
                 artifact_dir_fwd,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
                 faulty_links_override=faulty_links_override,
+                rank_layout=self._transformer_rank_layout or None,
             )
             if fwd_max <= 0:
                 raise RuntimeError("AstraSim transformer forward execution returned non-positive duration")
@@ -967,43 +851,39 @@ class LLMExecutionDispatcher:
                 artifact_dir_bwd,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
                 faulty_links_override=faulty_links_override,
+                rank_layout=self._transformer_rank_layout or None,
             )
             if bwd_max < 0:
                 raise RuntimeError("AstraSim transformer backward execution returned non-positive duration")
 
         return TransformerTimings(forward=fwd_max, backward=bwd_max), fwd_per_rank, bwd_per_rank
 
-    def _update_comp_times_from_timings(
+    def _write_block_durations(
         self,
         timings: Optional[TransformerTimings],
         moe_timings: Optional[TransformerTimings] = None,
     ) -> None:
-        """Write the AstraSim transformer baselines into the pipeline graph's
-        ``comp_times`` (shared hybrid/hierarchical half of the legacy
-        ``_apply_transformer_time``; the memory-path FINE build reads these).
-        """
+        """Write the AstraSim transformer baselines into the workload's
+        :class:`~program.workload.DurationTable` — the one mutable member, whose
+        ``revision`` is stamped onto every Program built after the write."""
         if timings is None and moe_timings is None:
             return
-        if timings is not None and (timings.forward < 0 or timings.backward < 0):
-            raise ValueError("AstraSim transformer times must be positive")
-        if moe_timings is not None and (moe_timings.forward < 0 or moe_timings.backward < 0):
-            raise ValueError("AstraSim transformer times must be positive")
+        baseline = timings or self._transformer_baseline_timings
+        moe_baseline = moe_timings or self._transformer_moe_baseline_timings
+        self.workload.durations.write_block_timings(
+            dense_forward=None if baseline is None else baseline.forward,
+            dense_backward=None if baseline is None else baseline.backward,
+            moe_forward=None if moe_baseline is None else moe_baseline.forward,
+            moe_backward=None if moe_baseline is None else moe_baseline.backward,
+        )
 
-        baseline_timings = timings or self._transformer_baseline_timings
-        moe_baseline_timings = moe_timings or self._transformer_moe_baseline_timings
 
-        comp_times = getattr(self.pipeline_graph, "comp_times", None)
-        if isinstance(comp_times, dict):
-            if baseline_timings:
-                comp_times["transformer_f"] = baseline_timings.forward
-                comp_times["transformer_b"] = baseline_timings.backward
-                comp_times["transformer_f_dense"] = baseline_timings.forward
-                comp_times["transformer_b_dense"] = baseline_timings.backward
-            if moe_baseline_timings:
-                comp_times["transformer_f_moe"] = moe_baseline_timings.forward
-                comp_times["transformer_b_moe"] = moe_baseline_timings.backward
-
-    # M6 note: the legacy-graph retime walk (_apply_transformer_time +
-    # _assign_transformer_durations, the name-prefix recursion over legacy
-    # pipeline Node graphs) is deleted — every mode retimes through
-    # program.retime.apply_block_timings on the coarse Program now.
+def _layout_of(descriptor: Optional[Mapping[str, Any]]) -> Optional[RankLayout]:
+    """Descriptor dict -> :class:`RankLayout` (``None`` when there is none)."""
+    if not descriptor or not descriptor.get("axis_order"):
+        return None
+    return RankLayout(
+        axis_order=tuple(descriptor["axis_order"]),
+        axis_sizes=dict(descriptor["axis_sizes"]),
+        axis_strides=dict(descriptor["axis_strides"]),
+    )
