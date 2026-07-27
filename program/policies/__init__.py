@@ -35,8 +35,11 @@ B 10g        ``et_emit`` (unchanged)
 B 10h        ``gradaccum.GradAccumPolicy.last_microbatch``
 A2           ``work.SyncSpread`` / ``sharding._spread_for``
 A3           derived from ``WorkItem`` — already impossible
-D 10b        ``work.enumerate_work`` (one OPTIMIZER per stage)
-D 10c        ``work.ByteSplit.CEIL_DIV_CLUSTER`` on ``cross_layer``
+10b (fixed)  ``work.enumerate_work`` (one FUSED OPTIMIZER per stage) +
+             ``work.optimizer_duration`` (priced over the stage's OWN layers)
+10c (fixed)  ``work.ByteSplit.CEIL_DIV_CLUSTER`` on ``cross_layer``, divided
+             by ``placement.Placement.activation_shard_size()`` (``tp*cp``) —
+             NOT by ``cluster_size()`` (``tp*cp*ep``)
 ===========  ===========================================================
 """
 

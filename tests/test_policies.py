@@ -107,6 +107,7 @@ from program.work import (
     enumerate_work,
     is_moe,
     mem_kind,
+    stage_layers,
 )
 from program.workload import (
     BlockTemplates,
@@ -147,7 +148,10 @@ COMP_TIMES: Dict[str, float] = {
     "transformer_b_dense": 200.0,
     "transformer_f_moe": 150.0,
     "transformer_b_moe": 300.0,
+    #: PER-LAYER apply-grad prices (BUG_LEDGER 10b); the fused per-stage
+    #: optimizer node scales them by the layers its own stage owns.
     "optimizer": 7.0,
+    "optimizer_moe": 9.0,
 }
 
 
@@ -1182,7 +1186,9 @@ def test_enumerate_work_shape() -> None:
     assert len(work.of_kind(WorkKind.EMBEDDING)) == 2 * cfg.mb
     assert len(work.of_kind(WorkKind.SOFTMAX)) == 2 * cfg.mb
     assert len(work.of_kind(WorkKind.LAYER)) == 2 * cfg.mb * cfg.num_layers
-    # Class D 10b: one OPTIMIZER per pipeline stage, not per layer.
+    # 10b: one FUSED OPTIMIZER per pipeline stage, not one per layer. The
+    # STRUCTURE is the owner's decision; its DURATION covers the stage's whole
+    # layer set (see test_optimizer_duration_scales_with_the_layers_its_stage_owns).
     assert len(work.of_kind(WorkKind.OPTIMIZER)) == cfg.pp
     assert work.items == tuple(sorted(work.items, key=WorkItem.sort_key))
 
@@ -1218,6 +1224,105 @@ def test_derived_facts_are_functions_not_fields() -> None:
         )
     ).freeze()
     assert duration_for(dense_layer, stripped) == COMP_TIMES["transformer_f"]
+
+
+def _optimizer_durations(cfg: Cfg) -> Dict[int, float]:
+    """``stage -> the fused optimizer node's duration`` for one config."""
+    fw = make_workload(cfg).freeze()
+    work = enumerate_work(fw, NoRecompute())
+    return {
+        int(item.stage): duration_for(item, fw)
+        for item in work.of_kind(WorkKind.OPTIMIZER)
+    }
+
+
+def test_optimizer_duration_scales_with_the_layers_its_stage_owns() -> None:
+    """BUG_LEDGER 10b. The graph structure is unchanged — ONE fused optimizer
+    node per pipeline stage — but its DURATION must cover every layer that
+    stage owns, not one layer.
+
+    ``durations['optimizer']`` is a PER-LAYER price
+    (``train_timing.get_data_parallel_reduction_llm`` sums one layer's
+    QKV + output + FFN1 + FFN2), so the total weight-update work in a step is a
+    function of ``L`` alone and must NOT depend on how the layers are split
+    across pipeline stages.
+    """
+    dense = COMP_TIMES["optimizer"]
+
+    # 1. pp=1 vs pp=8 at equal L: the SAME total optimizer work, differently split.
+    one_stage = _optimizer_durations(Cfg(pp=1, num_layers=8, mb=1))
+    eight_stages = _optimizer_durations(Cfg(pp=8, num_layers=8, mb=1))
+    assert one_stage == {0: 8 * dense}
+    assert eight_stages == {stage: dense for stage in range(8)}
+    assert sum(one_stage.values()) == pytest.approx(sum(eight_stages.values()))
+    assert sum(one_stage.values()) == pytest.approx(8 * dense)
+
+    # 2. the split is REMAINDER-FIRST, hence uneven: L=9,pp=4 -> (3,2,2,2).
+    #    A 3-layer stage costs exactly 3x a 1-layer stage; no global scalar
+    #    (`ceil(L/pp)`=3 or `floor`=2) is right for all four.
+    uneven = _optimizer_durations(Cfg(pp=4, num_layers=9, mb=1))
+    assert uneven == {0: 3 * dense, 1: 2 * dense, 2: 2 * dense, 3: 2 * dense}
+    assert uneven[0] == pytest.approx(3 * eight_stages[0])
+    assert sum(uneven.values()) == pytest.approx(9 * dense)
+
+
+def test_optimizer_duration_prices_each_layer_with_its_own_kind() -> None:
+    """BUG_LEDGER 10b, MoE half. A stage's layers may be a MIX of dense and MoE
+    (``moe_layer_mask`` / ``first_k_dense_replace``), and the MoE apply-grad
+    price differs (expert + router params instead of FFN1/FFN2). Each layer is
+    charged at its own kind's price."""
+    dense = COMP_TIMES["optimizer"]
+    moe = COMP_TIMES["optimizer_moe"]
+    assert moe != dense, "the fixture must distinguish the two prices"
+
+    # ``Cfg.moe_layer_mask`` alternates: even layers MoE, odd layers dense.
+    # L=6, pp=4 -> stages own (0,1) (2,3) (4,) (5,) : two MIXED stages, one
+    # MoE-only stage and one dense-only stage.
+    cfg = Cfg(pp=4, num_layers=6, mb=1, moe=True)
+    fw = make_workload(cfg).freeze()
+    assert [fw.is_moe_layer(l) for l in range(6)] == [True, False] * 3
+
+    durations = _optimizer_durations(cfg)
+    assert durations == {
+        0: moe + dense,   # layers 0 (moe) + 1 (dense)
+        1: moe + dense,   # layers 2 (moe) + 3 (dense)
+        2: moe,           # layer 4
+        3: dense,         # layer 5
+    }
+    assert sum(durations.values()) == pytest.approx(3 * moe + 3 * dense)
+
+    # A producer that never registered the MoE price falls back to the dense
+    # one rather than raising (inference_timing, and every legacy comp_times).
+    no_moe_price = make_workload(cfg).with_(
+        durations=DurationTable({k: v for k, v in COMP_TIMES.items() if k != "optimizer_moe"})
+    ).freeze()
+    optimizer0 = WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=0)
+    assert duration_for(optimizer0, no_moe_price) == pytest.approx(2 * dense)
+
+
+def test_stage_layers_follows_the_supplied_layer_assignment() -> None:
+    """The per-stage layer set is read from the AUTHORITATIVE
+    ``LayerAssignment`` when one is supplied, and reconstructed with the same
+    remainder-first rule when it is not."""
+    from program.schedule.policy import LayerAssignment
+
+    cfg = Cfg(pp=4, num_layers=9, mb=1)
+    fw = make_workload(cfg).freeze()
+    items = [
+        WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=stage) for stage in range(4)
+    ]
+    contiguous = LayerAssignment.contiguous(cfg.num_layers, cfg.pp)
+    reconstructed = [stage_layers(item, fw) for item in items]
+    assert reconstructed == [tuple(contiguous.layers_of(stage)) for stage in range(4)]
+    assert reconstructed == [(0, 1, 2), (3, 4), (5, 6), (7, 8)]
+
+    # An explicit (non-contiguous) assignment is honored, not second-guessed.
+    explicit = LayerAssignment.explicit((3, 3, 3, 3, 3, 3, 3, 3, 0))
+    assert stage_layers(items[3], fw, explicit) == tuple(range(8))
+    assert stage_layers(items[0], fw, explicit) == (8,)
+    assert duration_for(items[3], fw, explicit) == pytest.approx(
+        8 * COMP_TIMES["optimizer"]
+    )
 
 
 def test_work_item_validation() -> None:

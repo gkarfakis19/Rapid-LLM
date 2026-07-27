@@ -230,7 +230,7 @@
   "hier/fwd": true
  },
  "error_tail": "",
- "git_rev": "5191c9f",
+ "git_rev": "3220a3f",
  "memory": {
   "LLM": {
    "fields": {
@@ -249,5 +249,5 @@
  "phase_times": {},
  "spec_id": "train:hybrid:dp1tp2cp1pp2mb2sp1",
  "status": "ok",
- "total_time": 0.02474348
+ "total_time": 0.02745533
 }

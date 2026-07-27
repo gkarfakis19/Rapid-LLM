@@ -5005,6 +5005,23 @@ class TimeCalculationLLM(TimeCalculation):
                 else 0.0
             )
 
+        # BUG_LEDGER 10b — the two PER-LAYER apply-grad prices. `optimizer` is
+        # unchanged (one dense layer's QKV + output + FFN1 + FFN2); `optimizer_moe`
+        # is the MoE variant of the same quantity (expert + router params in place
+        # of FFN1/FFN2), needed because a stage's layers may be a MIX of dense and
+        # MoE (`moe_layer_mask` / `first_k_dense_replace`) and each must be priced
+        # with its own kind.
+        optimizer_per_layer_dense = self.get_data_parallel_reduction_llm(
+            hidden_dim, intermediate_size
+        )
+        optimizer_per_layer_moe = optimizer_per_layer_dense
+        if has_moe_layers:
+            optimizer_per_layer_moe = self.get_data_parallel_reduction_llm(
+                hidden_dim,
+                self.moe_intermediate_size,
+                moe=True,
+            )
+
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),
             "embedding_b": node_breakdown.get('embedding_b', 0.0) if include_pipeline_backward else 0.0,
@@ -5016,7 +5033,14 @@ class TimeCalculationLLM(TimeCalculation):
             "transformer_b_dense": dense_transformer_b,
             "transformer_f_moe": moe_transformer_f,
             "transformer_b_moe": moe_transformer_b,
-            "optimizer": self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size),
+            # PER-LAYER apply-grad price. The optimizer is emitted as one fused
+            # node per pipeline stage, and `program.work.optimizer_duration`
+            # multiplies these by the layers THAT stage owns, pricing each layer
+            # with its own kind (BUG_LEDGER 10b). Both keys are per-layer; do not
+            # pre-scale them here — the layer split is remainder-first and uneven,
+            # so no single global scalar is correct.
+            "optimizer": optimizer_per_layer_dense,
+            "optimizer_moe": optimizer_per_layer_moe,
         }
         comp_times_no_dp = None
         if need_no_dp_variant:

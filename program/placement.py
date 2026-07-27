@@ -396,6 +396,29 @@ class Placement:
     def cluster_size(self) -> int:
         return self._cluster_size
 
+    def activation_shard_size(self) -> int:
+        """How many ways a **per-token activation tensor** is sharded across one
+        stage's cluster: ``tp*cp`` at FINE/BLOCK, ``1`` at COARSE.
+
+        This is deliberately NOT :meth:`cluster_size`. A cluster has
+        ``tp*cp*ep`` devices, but ``ep`` is **not** a sharding axis for a
+        token-indexed tensor: in training every EP rank owns a DISTINCT
+        microbatch (``base_timing.py:493-495`` sets ``dp_dense = dp*ep``, so
+        ``micro_batch`` already carries the ``/ep``; ``train_timing.py:417-431``
+        and ``memory_estimation.py:499-510`` say so in words), and it therefore
+        holds a full copy of *its own* residual stream — sequence-sharded by
+        ``tp`` (under SP) and ``cp``, and by nothing else. Dividing a value that
+        is already one owner's microbatch by ``ep`` a second time is the
+        double-division that was BUG_LEDGER **D 10c (ep half)**.
+
+        Axis sizes come from the layout, exactly as :meth:`cluster_size`'s
+        cross-check does, so a mesh layout that re-factors the cluster is
+        honored rather than second-guessed.
+        """
+        if self._granularity is Granularity.COARSE:
+            return 1
+        return max(1, int(self._sizes["tp"]) * int(self._sizes["cp"]))
+
     def num_stages(self) -> int:
         return int(self._degrees.pp)
 
@@ -490,7 +513,8 @@ class Placement:
             if work.stage is None:
                 raise PlacementError(
                     "OPTIMIZER WorkItem carries no stage; its identity IS per-stage "
-                    "(BUG_LEDGER Class D 10b)"
+                    "(BUG_LEDGER 10b: one fused node per stage, priced over the "
+                    "layers that stage owns)"
                 )
             return StageId(int(work.stage))
         raise PlacementError(f"Unhandled WorkKind {kind!r}")
@@ -823,8 +847,12 @@ class BlockExpander:
         At COARSE this is every WorkItem (``duration = durations[duration_key]``).
         At FINE it is embedding / softmax / optimizer, which the legacy
         flattener also cloned as single nodes — ``pipeline_fine.py:409-457``.
+
+        The :class:`LayerAssignment` is handed to ``duration_for`` because the
+        fused per-stage OPTIMIZER node is priced from the layers ITS OWN stage
+        owns (BUG_LEDGER 10b), and that split is remainder-first, hence uneven.
         """
-        duration = float(duration_for(work, self._fw))
+        duration = float(duration_for(work, self._fw, self._placement.layers))
         kind_of_memory = mem_kind(work)
         stem = work_name(work)
         devices = self._placement.devices_for(work)

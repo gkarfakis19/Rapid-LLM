@@ -40,6 +40,7 @@
 | 2026-07-29 | §4.7, §4.8, §6 | **`Op.succs` is DELETED.** `meta.misc["schedule_edges"]` is DERIVED from the edge table at `_finish` instead of recorded at R3 time; overlap re-parenting PRESERVES `DepClass` | **P5 verification.** §4.7 and §6 said `analytic_sim` / `memory_sim` / `viz` read `Op.succs`; they do not — all three build their own successor map from `deps`, and no other production reader exists. It was a write-only mirror that every mutation had to keep in sync. `schedule_edges` was stale wherever overlap ran (6/13 pairs on `dp1tp2cp1pp2mb2sp1`, 14/25 on `dp2tp2cp2pp2mb2sp1`) because `_split_compute`/`_split_collective` re-parent AFTER R3; deriving it from the surviving edge cannot go stale. Those re-parents also re-added every moved edge as `DATA_FLOW`, erasing the class that `via` dispatches on. |
 | 2026-07-29 | §4.8 (new **V9**), L5 | **Always-on emission postcondition: an op with successors in the Program keeps at least one in the emitted trace** (`et_emit._check_no_lost_successors`) | **P5 verification.** A dropped ordering edge is invisible to every existing gate — same op multiset, same bytes, same collectives, `dlsim` still completes, the group-order postcondition still holds — and moves only the AstraSim wall clock. This is the check that catches the class at the place it happens. `validate.py`'s **V6** asks a similar question of the IR and only about collectives. |
 | 2026-07-29 | §1.7, §1.8 (W1) | `_prepare_execution_graphs` returns a **2-tuple** `(WorkloadSpec, Optional[WorkloadSpec])`, not the 3-tuple §1.7 binds; `WorkloadSpec.from_timing` reads every `misc_metadata` key as REQUIRED (`REQUIRED_MISC_KEYS`, `WorkloadError` on a miss) | **P5 verification.** `BlockTemplates` moved ONTO the spec (§1.6), so the third element the signature block declares does not exist and never did — the text was stale, the code is right. W1's own wording forbids `dict.get(k, fallback)` as well as `getattr(obj, name, default)`, but the grep gate only caught the second, so the producer seam still read all eight of its fields with a fallback: a producer that stopped writing `num_layer` yielded a 0-layer model and one that stopped writing `model_type` yielded `""`, which the ViT naming path dispatches on. The gate now covers `from_timing` explicitly. |
+| 2026-07-27 (late) | §2.2, §4.3 R2, §7 | New `Placement.activation_shard_size()` (`tp*cp` at FINE/BLOCK, `1` at COARSE); `build._cross_layer_size` divides by it instead of `cluster_size()` | **D 10c, ep half.** The `cross_layer` raw value is `activations · micro_batch · hidden · seq` and `micro_batch` is already `batch/(dp*ep*mb)` (`base_timing.py:490-495`), i.e. ONE EP owner's microbatch — EP ranks own DISTINCT tokens, so `/ep` was a second application of a division the value already carried (legacy `par_degree = tp*cp*ep`, `git show 85894c6:llm_execution.py:369,822`, a device count reused as a byte-sharding degree). Measured at `tp=cp=1`, fixed global batch 16, `ep 1→2→4`: the per-dp-replica boundary aggregate scaled `1/ep` (16,777,216 → 8,388,608 → 4,194,304 B) where it must be invariant; and `memory_estimation`'s per-device residual for the SAME tensor said `raw/(tp*cp)` throughout. `cluster_size()` is untouched — the transfer COUNT is still one per device. Moves 2 of 45 goldens (the FINE MoE `ep2` rows). |
 
 ---
 
@@ -487,7 +488,8 @@ destination type does.
 | `durations["transformer_f"]` / `_b` | `float` | `:5029-5030` |
 | `durations["transformer_f_dense"]` / `_b_dense` | `float` | `:5031-5032` |
 | `durations["transformer_f_moe"]` / `_b_moe` | `float` | `:5033-5034` |
-| `durations["optimizer"]` | `float` | `self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size)` — `:5035` (Class D 10b: per-STAGE, not per-layer; unchanged here) |
+| `durations["optimizer"]` | `float` | `self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size)` — the **PER-LAYER** dense apply-grad price (10b, fixed 2026-07-27) |
+| `durations["optimizer_moe"]` | `float` | `self.get_data_parallel_reduction_llm(hidden_dim, self.moe_intermediate_size, moe=True)` — the **PER-LAYER** MoE apply-grad price; equals `["optimizer"]` when the model has no MoE layer, and falls back to it when absent (10b) |
 | `comm["transformer_dense"]` | `CommSpec` | `_build_comm_metadata` `:4397-4404` — kind `grad_collective` `:4392`, axes `("dp",)`, participants `self.dp` |
 | `comm["transformer_moe"]` | `CommSpec` | `:4405-4412` |
 | `comm["embedding"]` | `CommSpec` | `:4413-4420` |
@@ -616,7 +618,7 @@ def enumerate_work(fw: FrozenWorkload, recompute: "RecomputePolicy") -> WorkSet:
           SOFTMAX/BACKWARD(b); LAYER/BACKWARD(b,l) for l; EMBEDDING/BACKWARD(b)
           RECOMPUTE/FORWARD(b,l) for each l where recompute.materializes(...)
       if include_backward and include_optimizer and durations['optimizer'] > 0:
-        OPTIMIZER/BACKWARD(stage=s) for s in range(pp)   # one per stage — Class D 10b
+        OPTIMIZER/BACKWARD(stage=s) for s in range(pp)   # one FUSED node per stage (10b)
     """
 ```
 
@@ -667,7 +669,7 @@ class SyncSpread(Enum):
 
 class ByteSplit(Enum):
     WHOLE             = auto()  # each instance carries the full size_bytes  [Class B item 1]
-    CEIL_DIV_CLUSTER  = auto()  # ceil(total / instances)      [pipeline_fine.py:645; Class D 10c]
+    CEIL_DIV_CLUSTER  = auto()  # ceil(total / shards)         [pipeline_fine.py:645; D 10c]
 
 
 @dataclass(frozen=True)
@@ -689,6 +691,21 @@ class ByteSource:
 > at `tp=2` where COARSE wants `4096.0`, i.e. wrong `cross_layer` bytes on every
 > coarse/hybrid/hierarchical row with `cluster_size > 1`. The unit test hid it by passing
 > `instances == cluster_size`; it now passes a differing value.
+
+> **AMENDMENT 2026-07-27 (D 10c, ep half): the divisor is a SHARD count, not a device
+> count.** `build._cross_layer_size` passes `Placement.activation_shard_size()` (`tp*cp` at
+> FINE/BLOCK, `1` at COARSE), **not** `cluster_size()` (`tp*cp*ep`). The pipeline-boundary
+> tensor is the residual stream, and `ep` does not shard it: in training every EP rank owns a
+> DISTINCT microbatch (`base_timing.py:493-495` → `dp_dense = dp*ep`, so the raw value
+> `activations · micro_batch · hidden · seq` is already ONE owner's microbatch), so it holds a
+> whole copy of its own residual stream, sequence-sharded by `tp` (under SP) and `cp` only.
+> Dividing by `ep` applied a division the value already carried. Measured at `tp=cp=1` (no
+> confound), fixed global batch 16, `ep 1→2→4`: the per-dp-replica boundary aggregate was
+> `16,777,216 → 8,388,608 → 4,194,304` B — a conserved quantity scaling `1/ep` — while
+> `memory_estimation`'s per-device residual for the same tensor stayed `raw/(tp*cp)`. After the
+> fix the aggregate is invariant and the two paths agree to the byte on every `ep>1` shape.
+> `cluster_size()` is unchanged: the stage still emits one transfer per device, so `ep`
+> multiplies the transfer COUNT, not the payload.
 
 ```python
 
@@ -1570,8 +1587,11 @@ entry is its `RECOMPUTE` chain when present):
 
 ```
 # -- AMENDED 2026-07-27: the SIZE is decided per STAGE, the ENDPOINTS per device
+# -- AMENDED 2026-07-27 (D 10c ep half): the divisor is the SHARD count tp*cp,
+#    not the device count tp*cp*ep -- ep ranks own distinct microbatches
 size = 0 if placement.same_stage(producer_work, consumer_work) else \
-       ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, placement.cluster_size())
+       ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(
+           fw, placement.activation_shard_size())
 
 for each producer chain p (device dp) and consumer chain c (device dc):
     emit TransferOp(src=dp, dst=dc, size=size,
@@ -1992,8 +2012,9 @@ default is today's (wrong) value, so P7 is a default change plus a delta table.
 | C 3 | manifest records `ALL_REDUCE` as `-1` | `et_emit` manifest | unchanged | — |
 | C 7 | Step-11 pre-SCOTCH-remap iteration | deleted with `legacy_lowering` | — | — |
 | C 10e | non-unique op ids from overlap splits | deleted by §4.6 | — | — |
-| D 10b | optimizer once per stage | `enumerate_work` emits one `OPTIMIZER` per stage | per stage | owner call |
-| D 10c | cross-layer activation bytes `/cluster_size` | `ByteSource.split` on `cross_layer` | `CEIL_DIV_CLUSTER`, divided by the caller's `instances` = `placement.cluster_size()` (§2.2 amendment 2026-07-26) | A/B per the ledger |
+| D 10b ✅ FIXED 2026-07-27 | optimizer once per stage, priced at one layer | `enumerate_work` emits one `OPTIMIZER` per stage (structure KEPT); `work.optimizer_duration` prices it | sum over the stage's OWN layers, each at its own dense/MoE per-layer price, from the authoritative `LayerAssignment` | 23 of 37 training goldens move, +5.3 % … +18.1 % |
+| **D 12** *(new 2026-07-27)* | embedding + vocab-projection apply-grad never counted | `train_timing.get_data_parallel_reduction_llm` sums transformer params only | missing entirely | add `durations["optimizer_embedding"]`/`["optimizer_softmax"]`, added on `stage 0` / `stage pp-1` |
+| D 10c ✅ FIXED 2026-07-27 (ep half) · resolved-CORRECT (tp/cp half) | cross-layer activation bytes `/cluster_size` | `ByteSource.split` on `cross_layer`, divided by `placement.activation_shard_size()` | `CEIL_DIV_CLUSTER` divided by `cluster_size() = tp*cp*ep` | **ep**: dropped — EP ranks own distinct microbatches, so the raw value already carried the `/ep` (double division). Moves the 2 FINE MoE `ep2` goldens: per-rank p2p payload ×2, `bytes_by_axis[p2p]` ×2.0000, `total_time` +0.58 % / +0.03 %. **tp/cp**: kept — the boundary tensor is genuinely sequence-sharded under `tp_sp`/`cp`, and under plain TP Megatron's `--scatter-gather-tensors-in-pipeline` splits it for the p2p send anyway |
 
 ---
 

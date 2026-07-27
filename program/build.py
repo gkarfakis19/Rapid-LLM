@@ -834,11 +834,25 @@ class _Builder:
     # phase 5b — R2 (cross-layer data flow)
     # ------------------------------------------------------------------
     def _cross_layer_size(self) -> float:
-        """``ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, instances)``
-        with ``instances = placement.cluster_size()`` — 1 at COARSE (raw bytes,
-        ``pipeline_coarse.py:222,238``), ``tp*cp*ep`` at FINE/BLOCK (divided,
+        """``ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, shards)``
+        with ``shards = placement.activation_shard_size()`` — 1 at COARSE (raw
+        bytes, ``pipeline_coarse.py:222,238``), ``tp*cp`` at FINE/BLOCK (divided,
         ``pipeline_fine.py:645``). B3's amendment is what lets ONE rule reproduce
-        both."""
+        both.
+
+        The divisor is a **shard count, not a device count** (BUG_LEDGER D 10c,
+        ep half, fixed 2026-07-27). Legacy passed ``par_degree = tp*cp*ep``
+        (``git show 85894c6:llm_execution.py:369,822``) and the rewrite carried
+        it over as ``cluster_size()``. But the raw value
+        (``train_timing.py:2893-2902``) is ``activations * micro_batch * hidden *
+        seq`` and ``micro_batch`` is ALREADY ``batch/(dp*ep*mb)``
+        (``base_timing.py:490-495``), i.e. one EP owner's own microbatch. EP
+        ranks own DISTINCT tokens, so ``/ep`` divided a value that already
+        carried the ``/ep``. Measured at ``tp=cp=1`` (no confound): fixed global
+        batch 16, ``ep 1->2->4`` moved the per-dp-replica boundary aggregate
+        16,777,216 -> 8,388,608 -> 4,194,304 B, a conserved quantity scaling
+        ``1/ep``, while ``memory_estimation``'s per-device residual for the SAME
+        tensor stayed ``raw/(tp*cp)``."""
         if self._cross_layer_bytes is None:
             if CROSS_LAYER_KEY not in self._fw.spec.comm:
                 raise BuildError(
@@ -848,7 +862,7 @@ class _Builder:
                 )
             self._cross_layer_bytes = ByteSource(
                 key=CROSS_LAYER_KEY, split=ByteSplit.CEIL_DIV_CLUSTER
-            ).bytes_for(self._fw, self._placement.cluster_size())
+            ).bytes_for(self._fw, self._placement.activation_shard_size())
         return self._cross_layer_bytes
 
     def _cross_layer_spec(self):

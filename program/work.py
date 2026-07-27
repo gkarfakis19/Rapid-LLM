@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from functools import total_ordering
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     FrozenSet,
@@ -50,6 +51,9 @@ from timing_model import CollectiveType
 
 from program.types import DP_AXIS, AxisName, CommKey, LayerId, MicroBatch, StageId
 from program.workload import CommSpec, FrozenWorkload, ceil_div
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; L3 must not be imported at L1
+    from program.schedule.policy import LayerAssignment
 
 try:  # MemKind lives in memory_estimation; keep this module importable without it.
     from memory_estimation import MemKind
@@ -68,6 +72,8 @@ __all__ = [
     "enumerate_work",
     "duration_key",
     "duration_for",
+    "optimizer_duration",
+    "stage_layers",
     "mem_kind",
     "is_moe",
     "block_prefix",
@@ -284,20 +290,32 @@ _DURATION_KEYS: Dict[Tuple[WorkKind, Direction], Tuple[str, str]] = {
     (WorkKind.LAYER, Direction.FORWARD): ("transformer_f_dense", "transformer_f_moe"),
     (WorkKind.LAYER, Direction.BACKWARD): ("transformer_b_dense", "transformer_b_moe"),
     (WorkKind.RECOMPUTE, Direction.FORWARD): ("transformer_f_dense", "transformer_f_moe"),
-    (WorkKind.OPTIMIZER, Direction.BACKWARD): ("optimizer", "optimizer"),
+    (WorkKind.OPTIMIZER, Direction.BACKWARD): ("optimizer", "optimizer_moe"),
 }
 
 #: Legacy fallback chain: the dense/moe split keys fall back to the undifferentiated
 #: ``transformer_f``/``transformer_b`` (schedule.py:539-542). One place, not four.
+#: ``optimizer_moe`` falls back to ``optimizer`` the same way, so a producer that
+#: never registered the MoE apply-grad price (dense-only runs, and every legacy
+#: ``comp_times`` dict) prices every layer dense instead of raising.
 _DURATION_FALLBACK: Dict[str, str] = {
     "transformer_f_dense": "transformer_f",
     "transformer_f_moe": "transformer_f",
     "transformer_b_dense": "transformer_b",
     "transformer_b_moe": "transformer_b",
+    "optimizer_moe": "optimizer",
 }
 
 
 def duration_key(item: WorkItem, fw: FrozenWorkload) -> str:
+    """The PER-LAYER duration key ``item`` reads.
+
+    For an OPTIMIZER item this is the price of ONE layer's apply-grad; the node
+    itself covers every layer of its stage (see :func:`optimizer_duration`).
+    An OPTIMIZER item carries a ``stage``, not a ``layer``, so ``is_moe`` is
+    False for it and this returns the dense key — the MoE key is selected
+    per owned layer inside :func:`optimizer_duration`.
+    """
     entry = _DURATION_KEYS.get((item.kind, item.direction))
     if entry is None:
         raise WorkError(f"No duration key for {item!r}")
@@ -305,13 +323,90 @@ def duration_key(item: WorkItem, fw: FrozenWorkload) -> str:
     return moe_key if is_moe(item, fw) else dense_key
 
 
-def duration_for(item: WorkItem, fw: FrozenWorkload) -> float:
-    """The duration this WorkItem contributes, with the ONE documented legacy
-    fallback applied explicitly (see :data:`_DURATION_FALLBACK`)."""
-    key = duration_key(item, fw)
+def _duration_by_key(key: str, fw: FrozenWorkload) -> float:
     fallback_key = _DURATION_FALLBACK.get(key)
     fallback = 0.0 if fallback_key is None else fw.durations.get_or(fallback_key, 0.0)
     return fw.durations.get_or(key, fallback)
+
+
+def stage_layers(
+    item: WorkItem,
+    fw: FrozenWorkload,
+    layers: Optional["LayerAssignment"] = None,
+) -> Tuple[LayerId, ...]:
+    """The transformer layers whose parameters ``item``'s pipeline stage owns.
+
+    The layer split is REMAINDER-FIRST and therefore uneven: at ``L=10, pp=4``
+    stage 0 owns 3 layers and stage 3 owns 2. Any per-stage quantity derived
+    from "how many layers do I own" is consequently per-stage and cannot be a
+    single global scalar (``ceil(L/pp)`` over-counts the tail stages,
+    ``floor`` under-counts the head ones).
+
+    ``layers`` is the AUTHORITATIVE :class:`LayerAssignment` and should be
+    passed whenever the caller has one (``BlockExpander`` does) — it is the
+    same map ``Placement.stage_of`` uses, so a future non-contiguous
+    assignment stays consistent. Without it the legacy remainder-first split
+    is reconstructed from ``(num_layers, pp)``.
+    """
+    if item.stage is None:
+        raise WorkError(f"{item!r} carries no stage, so it owns no layers")
+    if layers is None:
+        # Lazy: program.policies.sharding imports this module, so a top-level
+        # import would close the cycle. Same pattern as workload._declare_axes.
+        from program.policies.sharding import ContiguousStages
+
+        layers = ContiguousStages.legacy(fw.shape.num_layers, fw.degrees.pp)
+    return tuple(LayerId(int(layer)) for layer in layers.layers_of(StageId(int(item.stage))))
+
+
+def optimizer_duration(
+    item: WorkItem,
+    fw: FrozenWorkload,
+    layers: Optional["LayerAssignment"] = None,
+) -> float:
+    """The fused per-stage optimizer node's duration (BUG_LEDGER 10b).
+
+    The GRAPH structure is deliberately unchanged: **one** optimizer node per
+    pipeline stage, which is how real frameworks fuse the weight update. What
+    is fixed here is the DURATION. ``durations['optimizer']`` is the apply-grad
+    cost of ONE layer's parameters (``train_timing.get_data_parallel_reduction_llm``
+    sums QKV + output + FFN1 + FFN2 for a single layer), so charging a stage
+    that owns ``ceil(L/pp)`` layers one layer's worth under-counted the weight
+    update by that factor.
+
+    Each owned layer is priced with ITS OWN kind: a stage whose layers are a
+    mix of dense and MoE (``moe_layer_mask`` / ``first_k_dense_replace``) pays
+    ``durations['optimizer']`` for the dense ones and
+    ``durations['optimizer_moe']`` for the MoE ones.
+
+    NOT covered, and deliberately so: the embedding (stage 0) and the
+    softmax/vocab projection (last stage) contribute no apply-grad time at all
+    — ``get_data_parallel_reduction_llm`` never sums their parameters. That is
+    a separate omission, filed separately; scaling it here would be inventing a
+    term rather than fixing one.
+    """
+    per_layer_dense = _duration_by_key("optimizer", fw)
+    per_layer_moe = _duration_by_key("optimizer_moe", fw)
+    total = 0.0
+    for layer in stage_layers(item, fw, layers):
+        total += per_layer_moe if fw.is_moe_layer(layer) else per_layer_dense
+    return total
+
+
+def duration_for(
+    item: WorkItem,
+    fw: FrozenWorkload,
+    layers: Optional["LayerAssignment"] = None,
+) -> float:
+    """The duration this WorkItem contributes, with the ONE documented legacy
+    fallback applied explicitly (see :data:`_DURATION_FALLBACK`).
+
+    Every kind but OPTIMIZER is one unit of work priced by one key. OPTIMIZER
+    is one node per STAGE covering every layer that stage owns, so it is priced
+    by :func:`optimizer_duration`."""
+    if item.kind is WorkKind.OPTIMIZER:
+        return optimizer_duration(item, fw, layers)
+    return _duration_by_key(duration_key(item, fw), fw)
 
 
 _MEM_KIND_NAMES: Dict[WorkKind, str] = {
@@ -357,7 +452,7 @@ def enumerate_work(fw: FrozenWorkload, recompute: Any) -> WorkSet:
             SOFTMAX/BACKWARD(b); LAYER/BACKWARD(b,l) for l; EMBEDDING/BACKWARD(b)
             RECOMPUTE/FORWARD(b,l) for each l where recompute.materializes(...)
         if include_backward and include_optimizer and durations['optimizer'] > 0:
-          OPTIMIZER/BACKWARD(stage=s) for s in range(pp)   # one per stage - Class D 10b
+          OPTIMIZER/BACKWARD(stage=s) for s in range(pp)   # one FUSED node per stage
     """
     shape = fw.spec.shape
     run = fw.spec.run
@@ -386,9 +481,14 @@ def enumerate_work(fw: FrozenWorkload, recompute: Any) -> WorkSet:
         and run.include_optimizer
         and fw.durations.get_or("optimizer", 0.0) > 0.0
     ):
-        # Class D 10b: the optimizer apply-grad is modeled once per pipeline
-        # STAGE (train_timing.py:2949-2971 supplies one layer's params), not
-        # once per layer. Preserved verbatim; the ledger records the question.
+        # BUG_LEDGER 10b (owner decision, 2026-07-27): the optimizer stays ONE
+        # FUSED node per pipeline STAGE — that is the intended structure and
+        # matches how real frameworks fuse the weight update. What was wrong was
+        # the DURATION: train_timing supplies ONE layer's apply-grad price, and
+        # a stage owns ceil(L/pp) of them. `optimizer_duration` now sums the
+        # stage's own layers, each at its own dense/MoE price. The gate below
+        # still reads the per-layer key, since a zero per-layer price means no
+        # apply-grad work exists at all.
         for stage in range(fw.spec.degrees.pp):
             items.append(WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=StageId(stage)))
 
@@ -489,8 +589,16 @@ class ByteSplit(Enum):
     ``WHOLE`` is BUG_LEDGER **Class B item 1** (ZeRO-3 per-rank gather bytes
     "un-divided"): not a bug for tp/cp — each cluster rank owns its own TP shard
     and gathers from the dp group, so total fine traffic ``cp*ep*P_layer`` is
-    correct. ``CEIL_DIV_CLUSTER`` is **Class D 10c** (cross-layer activation
-    bytes split by the cluster size, pipeline_fine.py:645).
+    correct. ``CEIL_DIV_CLUSTER`` is BUG_LEDGER **D 10c** (cross-layer activation
+    bytes split across the stage's cluster, pipeline_fine.py:645).
+
+    ⚠ The argument ``CEIL_DIV_CLUSTER`` divides by is a **SHARD count, not a
+    device count**. Its one caller (``build.py::_cross_layer_size``) passes
+    ``Placement.activation_shard_size() == tp*cp``, NOT ``cluster_size() ==
+    tp*cp*ep``: EP ranks own distinct microbatches, so the ``/ep`` was a second
+    application of a division the raw value already carried (D 10c ep half,
+    fixed 2026-07-27). Reusing a placement device count as a byte-sharding
+    degree is exactly how that defect entered.
     """
 
     WHOLE = auto()
@@ -514,9 +622,12 @@ class ByteSource:
     split: ByteSplit = ByteSplit.WHOLE
 
     def bytes_for(self, fw: FrozenWorkload, instances: int) -> float:
-        """``instances`` is the number of copies of this collective/transfer the
-        caller is about to materialize — i.e. ``Placement.cluster_size()``
-        (INTERFACES §4.3 R2, §4.4).
+        """``instances`` is how many ways the VALUE is split — for a collective
+        whose bytes are a whole-cluster quantity that is the number of copies the
+        caller materializes (``len(devices)``), and for ``cross_layer`` it is
+        ``Placement.activation_shard_size()`` (INTERFACES §4.3 R2, §4.4). The two
+        coincide on every axis that shards tokens and differ on ``ep``, which
+        does not (see :class:`ByteSplit`).
 
         AMENDMENT to INTERFACES §2.2 (dated 2026-07-26): ``CEIL_DIV_CLUSTER``
         divides by ``instances``, NOT by ``FrozenWorkload.cluster_size()``. The

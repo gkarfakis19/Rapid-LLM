@@ -90,9 +90,13 @@ from program.workload import (
 
 @dataclass(frozen=True)
 class _LayerAssignment:
-    """The contract's ``LayerAssignment`` (INTERFACES §4.1) reduced to the two
+    """The contract's ``LayerAssignment`` (INTERFACES §4.1) reduced to the three
     members L2 consumes. Uses the legacy remainder-first split so the FINE
-    oracle sees the same layer->stage map as ``ScheduleSpec.stage_for_layer``."""
+    oracle sees the same layer->stage map as ``ScheduleSpec.stage_for_layer``.
+
+    ``layers_of`` joined ``stage_of``/``min_layer`` when the fused per-stage
+    optimizer node started being priced from the layer set its stage owns
+    (BUG_LEDGER 10b) — ``BlockExpander._expand_single`` reads it."""
 
     stage_of_layer: Tuple[int, ...]
     num_stages: int
@@ -107,6 +111,13 @@ class _LayerAssignment:
 
     def stage_of(self, layer: int) -> int:
         return self.stage_of_layer[layer]
+
+    def layers_of(self, stage: int) -> Tuple[int, ...]:
+        return tuple(
+            layer
+            for layer, assigned in enumerate(self.stage_of_layer)
+            if int(assigned) == int(stage)
+        )
 
     def min_layer(self, stage: int) -> Optional[int]:
         for layer, assigned in enumerate(self.stage_of_layer):
@@ -314,6 +325,33 @@ def test_device_sets_per_granularity(grid: Grid) -> None:
     # BLOCK has no pipeline: every stage collapses onto the same cluster.
     for stage in range(grid.pp):
         assert block.cluster_devices(stage) == tuple(range(cluster))
+
+
+@pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
+def test_activation_shard_size_excludes_ep(grid: Grid) -> None:
+    """BUG_LEDGER **D 10c, ep half** (fixed 2026-07-27).
+
+    ``cluster_size()`` counts the stage's DEVICES (``tp*cp*ep``);
+    ``activation_shard_size()`` counts how many ways a TOKEN-INDEXED tensor is
+    cut across them (``tp*cp``). They differ by exactly ``ep``, because an EP
+    rank owns a distinct microbatch and therefore holds a whole copy of its own
+    residual stream. Only the latter may divide ``cross_layer`` bytes.
+    """
+    shards = grid.tp * grid.cp
+    cluster = grid.tp * grid.cp * grid.ep
+
+    coarse, _ = _placement(grid, Granularity.COARSE)
+    # COARSE: the stage IS the device, so the raw value is already per-device.
+    assert coarse.activation_shard_size() == 1
+
+    for granularity in (Granularity.FINE, Granularity.BLOCK):
+        placement, _ = _placement(grid, granularity)
+        assert placement.activation_shard_size() == shards
+        assert placement.cluster_size() == cluster
+        assert (
+            placement.cluster_size()
+            == placement.activation_shard_size() * grid.ep
+        )
 
 
 # P5: ``test_fine_device_ids_match_legacy_rank_formula`` is DELETED with
@@ -564,6 +602,43 @@ def test_coarse_expansion_is_one_op_per_workitem() -> None:
     # Durations come from the FrozenDurations, keyed by L1's duration_key.
     embedding = WorkItem(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=0)
     assert expander.expand(embedding)[0].steps[0].duration == DURATIONS["embedding_f"]
+
+
+@pytest.mark.parametrize("granularity", [Granularity.COARSE, Granularity.FINE])
+def test_optimizer_node_is_priced_for_every_layer_its_stage_owns(
+    granularity: Granularity,
+) -> None:
+    """BUG_LEDGER 10b, at the expander. ONE fused optimizer node per stage
+    (structure unchanged), priced for ALL the layers that stage owns.
+
+    The ``:ragged`` grid is the point: ``L=5, pp=3`` splits remainder-first into
+    ``(2, 2, 1)``, so the stage-0 node is twice the stage-2 node and no single
+    global scalar reproduces both. Every cluster rank of a stage carries the
+    same duration (the apply-grad price is already per-rank).
+    """
+    grid = Grid("dp1tp3cp1pp3mb2:ragged", tp=3, cp=1, ep=1, pp=3, mb=2, num_layers=5)
+    counts = _contiguous_counts(grid.num_layers, grid.pp)
+    assert counts == (2, 2, 1)
+
+    placement, fw = _placement(grid, granularity)
+    expander = BlockExpander(fw, placement)
+    per_layer = DURATIONS["optimizer"]
+    for stage, layer_count in enumerate(counts):
+        item = WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=stage)
+        chains = expander.expand(item)
+        assert chains
+        for chain in chains:
+            assert len(chain.steps) == 1
+            assert chain.steps[0].duration == pytest.approx(layer_count * per_layer)
+
+    # The total per pipeline replica is L x the per-layer price, independent of pp.
+    total = sum(
+        expander.expand(WorkItem(WorkKind.OPTIMIZER, Direction.BACKWARD, stage=stage))[0]
+        .steps[0]
+        .duration
+        for stage in range(grid.pp)
+    )
+    assert total == pytest.approx(grid.num_layers * per_layer)
 
 
 def test_block_expansion_covers_every_cluster_rank() -> None:

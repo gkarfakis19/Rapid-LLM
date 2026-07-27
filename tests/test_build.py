@@ -517,6 +517,50 @@ def test_r2_fine_divides_cross_layer_bytes_by_the_cluster_size():
     assert fine_sizes == {int(math.ceil(total / 2))}
 
 
+def test_r2_does_not_divide_cross_layer_bytes_by_ep():
+    """BUG_LEDGER **D 10c, ep half** (fixed 2026-07-27).
+
+    The pipeline-boundary tensor is the RESIDUAL STREAM. ``ep`` shards experts,
+    not tokens: in training every EP rank owns a DISTINCT microbatch
+    (``base_timing.py:493-495`` -> ``dp_dense = dp*ep``, so the raw value is
+    already ONE owner's microbatch), and it holds a full copy of its own residual
+    stream sequence-sharded by ``tp``/``cp`` only. Dividing by ``cluster_size()
+    == tp*cp*ep`` applied the ``/ep`` a second time.
+
+    The stage still emits one transfer PER DEVICE (``cluster_size()`` of them) —
+    only the payload changed — so the whole-cluster aggregate is now the ``ep``
+    distinct microbatches the stage actually ships.
+    """
+    def payload(cfg):
+        raw = float(raw_comm_metadata(cfg)["cross_layer"]["size"])
+        program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+        ops = [
+            op for op in program.ops if isinstance(op, TransferOp) and op.size_bytes > 0
+        ]
+        sizes = {op.size_bytes for op in ops}
+        assert len(sizes) == 1, f"one payload size per program, got {sizes}"
+        return raw, sizes.pop(), len(ops)
+
+    kw = dict(dp=1, pp=2, tp=2, cp=1, mb=1, num_layers=2, moe=True)
+    raw1, size1, count1 = payload(Cfg(ep=1, **kw))
+    raw2, size2, count2 = payload(Cfg(ep=2, **kw))
+    raw4, size4, count4 = payload(Cfg(ep=4, **kw))
+    assert raw1 == raw2 == raw4, "the stub raw value must not move with ep"
+
+    # The divisor is tp*cp on all three, NOT tp*cp*ep.
+    expected = int(math.ceil(raw1 / 2))
+    assert (size1, size2, size4) == (expected, expected, expected)
+    assert size4 != int(math.ceil(raw4 / 8)), "tp*cp*ep would give raw/8 here"
+
+    # One transfer per device, so ep multiplies the COUNT, not the payload...
+    assert (count2, count4) == (2 * count1, 4 * count1)
+    # ...and the aggregate therefore rises with ep instead of staying flat: at a
+    # fixed per-owner microbatch a stage with ep experts groups ships ep distinct
+    # microbatches across the boundary.
+    assert size2 * count2 == 2 * size1 * count1
+    assert size4 * count4 == 4 * size1 * count1
+
+
 def test_r2_pairs_cluster_ranks_and_never_invents_a_cross_rank_payload():
     """At FINE the pairing is ``r -> r`` (``pipeline_fine.py:659-694``), and the
     BYTE decision is per STAGE: an embedding -> layer 0 link inside one stage

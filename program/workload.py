@@ -518,7 +518,11 @@ DURATION_KEYS: Tuple[str, ...] = (
     "transformer_b_dense",
     "transformer_f_moe",
     "transformer_b_moe",
+    #: PER-LAYER apply-grad prices. The fused per-stage optimizer node scales
+    #: these by the layers its own stage owns (``program.work.optimizer_duration``,
+    #: BUG_LEDGER 10b), so neither is a whole-stage duration.
     "optimizer",
+    "optimizer_moe",
 )
 
 #: The six keys the AstraSim BLOCK write-back replaces atomically
