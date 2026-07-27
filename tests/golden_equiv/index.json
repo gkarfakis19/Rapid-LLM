@@ -1,212 +1,212 @@
 {
  "inf:analytical:dp1tp1cp1pp1mb1sp0": {
   "file": "inf_analytical_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:analytical:dp2tp2cp1pp2mb2sp1": {
   "file": "inf_analytical_dp2tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:flattened:dp1tp1cp1pp1mb1sp0": {
   "file": "inf_flattened_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:flattened:dp2tp2cp1pp2mb2sp1": {
   "file": "inf_flattened_dp2tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:hierarchical:dp1tp1cp1pp1mb1sp0": {
   "file": "inf_hierarchical_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:hierarchical:dp1tp2cp1pp2mb2sp0:vit": {
   "file": "inf_hierarchical_dp1tp2cp1pp2mb2sp0_vit.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "inf:hierarchical:dp2tp2cp1pp2mb2sp1": {
   "file": "inf_hierarchical_dp2tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp1tp1cp1pp1mb1sp0": {
   "file": "train_analytical_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp1tp1cp2pp2mb2sp0": {
   "file": "train_analytical_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp1tp2cp1pp2mb2sp1": {
   "file": "train_analytical_dp1tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp2tp1cp1pp2mb2sp0": {
   "file": "train_analytical_dp2tp1cp1pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp2tp1cp1pp2mb2sp0:ga2": {
   "file": "train_analytical_dp2tp1cp1pp2mb2sp0_ga2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp2tp1cp1pp2mb2sp0:zero2": {
   "file": "train_analytical_dp2tp1cp1pp2mb2sp0_zero2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp2tp1cp1pp2mb2sp0:zero3": {
   "file": "train_analytical_dp2tp1cp1pp2mb2sp0_zero3.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:analytical:dp2tp2cp2pp2mb2sp1": {
   "file": "train_analytical_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp1cp1pp1mb1sp0": {
   "file": "train_flattened_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp1cp2pp2mb2sp0": {
   "file": "train_flattened_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp2cp1pp2mb2sp0:fault_tp": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp0_fault_tp.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp2cp1pp2mb2sp1": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp2cp1pp2mb2sp1:gqa": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1_gqa.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp2cp1pp2mb2sp1:recompute": {
   "file": "train_flattened_dp1tp2cp1pp2mb2sp1_recompute.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d": {
   "file": "train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp1tp4cp1pp1mb1sp0:mesh2d_gmap": {
   "file": "train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d_gmap.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0": {
   "file": "train_flattened_dp2tp1cp1pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0:ga2": {
   "file": "train_flattened_dp2tp1cp1pp2mb2sp0_ga2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0:zero2": {
   "file": "train_flattened_dp2tp1cp1pp2mb2sp0_zero2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0:zero3": {
   "file": "train_flattened_dp2tp1cp1pp2mb2sp0_zero3.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:flattened:dp2tp2cp2pp2mb2sp1": {
   "file": "train_flattened_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp1tp1cp1pp1mb1sp0": {
   "file": "train_hierarchical_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp1tp1cp2pp2mb2sp0": {
   "file": "train_hierarchical_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp1tp2cp1pp2mb2sp0:fault_pp": {
   "file": "train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_pp.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp1tp2cp1pp2mb2sp0:fault_tp": {
   "file": "train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_tp.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp1tp2cp1pp2mb2sp1": {
   "file": "train_hierarchical_dp1tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp2tp1cp1pp2mb2sp0": {
   "file": "train_hierarchical_dp2tp1cp1pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp2tp2cp1pp2mb2sp1:moe:ep2": {
   "file": "train_hierarchical_dp2tp2cp1pp2mb2sp1_moe_ep2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hierarchical:dp2tp2cp2pp2mb2sp1": {
   "file": "train_hierarchical_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp1tp1cp1pp1mb1sp0": {
   "file": "train_hybrid_dp1tp1cp1pp1mb1sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp1tp1cp2pp2mb2sp0": {
   "file": "train_hybrid_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp1tp2cp1pp2mb2sp1": {
   "file": "train_hybrid_dp1tp2cp1pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp2tp1cp1pp2mb2sp0": {
   "file": "train_hybrid_dp2tp1cp1pp2mb2sp0.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp2tp2cp1pp2mb2sp1:moe:ep2": {
   "file": "train_hybrid_dp2tp2cp1pp2mb2sp1_moe_ep2.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  },
  "train:hybrid:dp2tp2cp2pp2mb2sp1": {
   "file": "train_hybrid_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "d4f92ed",
+  "git_rev": "5191c9f",
   "status": "ok"
  }
 }

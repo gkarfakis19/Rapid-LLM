@@ -1,18 +1,18 @@
 {
  "astra_times": {
   "flat": {
-   "max_sec": 0.22019727900000002,
+   "max_sec": 0.220202279,
    "per_rank_sec": [
-    0.15130443400000002,
-    0.15130443400000002,
-    0.22019727900000002,
-    0.22019727900000002
+    0.15130943400000002,
+    0.15130943400000002,
+    0.220202279,
+    0.220202279
    ]
   }
  },
  "bundles": {
   "flat": {
-   "bundle_hash": "13137474e4362e10c7bd615ccab2eaf35d7554a63ff74309f2d8fc72b94eca1f",
+   "bundle_hash": "b0e94f7b30ddc7227a3e3ad638c7fc84c989576b3ca18af6f28a86c88340b727",
    "byte_hist_by_kind": {
     "COLL": {
      "262144000": 12,
@@ -20,7 +20,7 @@
      "314572800": 48
     },
     "RECV": {
-     "1": 8,
+     "1": 16,
      "2097152": 8
     },
     "SEND": {
@@ -30,11 +30,11 @@
    },
    "bytes_by_axis": {
     "dp": 19302187008,
-    "p2p": 33554456
+    "p2p": 33554464
    },
    "bytes_by_kind": {
     "COLL": 19302187008,
-    "RECV": 16777224,
+    "RECV": 16777232,
     "SEND": 16777232
    },
    "collectives_by_group": {
@@ -98,7 +98,7 @@
       "COMP:68": 8,
       "COMP:70": 4,
       "COMP:728": 4,
-      "RECV:1": 2,
+      "RECV:1": 4,
       "RECV:2097152": 2,
       "SEND:1": 4,
       "SEND:2097152": 2
@@ -120,7 +120,7 @@
       "COMP:68": 8,
       "COMP:70": 4,
       "COMP:728": 4,
-      "RECV:1": 2,
+      "RECV:1": 4,
       "RECV:2097152": 2,
       "SEND:1": 4,
       "SEND:2097152": 2
@@ -142,7 +142,7 @@
       "COMP:68": 8,
       "COMP:70": 4,
       "COMP:728": 4,
-      "RECV:1": 2,
+      "RECV:1": 4,
       "RECV:2097152": 2,
       "SEND:1": 4,
       "SEND:2097152": 2
@@ -164,7 +164,7 @@
       "COMP:68": 8,
       "COMP:70": 4,
       "COMP:728": 4,
-      "RECV:1": 2,
+      "RECV:1": 4,
       "RECV:2097152": 2,
       "SEND:1": 4,
       "SEND:2097152": 2
@@ -172,86 +172,86 @@
     },
     "version": "df-astra-manifest/1"
    },
-   "manifest_sha256": "a37c6ee2cd554b00f02be7f3812504765714ddfaec980e13f7692ddc3c6e3861",
+   "manifest_sha256": "9838f4e1ced6de174b23bfaba210a4710391b863a5c7c2c61a5e7b0b2d8f3798",
    "n_ranks": 4,
-   "n_recv": 16,
+   "n_recv": 24,
    "n_transfers": 24,
    "ranks": {
     "0": {
      "bytes_by_kind": {
       "COLL": 5351931904,
-      "RECV": 4194306,
+      "RECV": 4194308,
       "SEND": 4194308
      },
      "compute_micros": 15076,
-     "critical_path_nodes": 30,
+     "critical_path_nodes": 28,
      "critical_path_weight": 2107604,
-     "dag_hash": "233f6625de5c6068d52d03c3e04624e36bd55c9b8c597a3f3f6161a79de05aa6",
-     "n_nodes": 81,
+     "dag_hash": "c01944803f24f463b94609b982c5c8e06d44c2197660aa0efed545ce642d66e3",
+     "n_nodes": 83,
      "op_counts": {
       "COLL": 18,
       "COMP": 53,
-      "RECV": 4,
+      "RECV": 6,
       "SEND": 6
      },
-     "ops_hash": "d440616af29b6bfd027b7d87d5502fa6347412fe44cdedacccec5863b011a0b8"
+     "ops_hash": "9d7ddb54228c4c78cf1284853be4060731fb1ca60657bcd4fbf3221d2018fe16"
     },
     "1": {
      "bytes_by_kind": {
       "COLL": 4299161600,
-      "RECV": 4194306,
+      "RECV": 4194308,
       "SEND": 4194308
      },
      "compute_micros": 16518,
-     "critical_path_nodes": 57,
-     "critical_path_weight": 4209100,
-     "dag_hash": "4bdf4068a62f2f5e5e169ad88a18faa6f03edbbd5be5cc4fe38dee99cd592fff",
-     "n_nodes": 77,
+     "critical_path_nodes": 54,
+     "critical_path_weight": 4209098,
+     "dag_hash": "ef91b731e6683b332d29789dfba96de4de2489f23bc63cdf3ed768dd3ea6aba8",
+     "n_nodes": 79,
      "op_counts": {
       "COLL": 14,
       "COMP": 53,
-      "RECV": 4,
+      "RECV": 6,
       "SEND": 6
      },
-     "ops_hash": "83cf11e3441a537eecbb82abfb24604a041dc29b38f85ddfa0668737f6cefb40"
+     "ops_hash": "ee104aa2cf4f62cfb5a892f3bd663b847dece94531ab60d3d169b7a9abedf7fc"
     },
     "2": {
      "bytes_by_kind": {
       "COLL": 5351931904,
-      "RECV": 4194306,
+      "RECV": 4194308,
       "SEND": 4194308
      },
      "compute_micros": 15076,
-     "critical_path_nodes": 30,
+     "critical_path_nodes": 28,
      "critical_path_weight": 2107604,
-     "dag_hash": "26e2ad489742e18285dcb216cdc11742458c00a512e8ce2e52936eac733334ef",
-     "n_nodes": 81,
+     "dag_hash": "8d4b60e595d1891c32e2a7155da063cbb7725bb8aceb7c304d0054caa570164a",
+     "n_nodes": 83,
      "op_counts": {
       "COLL": 18,
       "COMP": 53,
-      "RECV": 4,
+      "RECV": 6,
       "SEND": 6
      },
-     "ops_hash": "c5b4ad64841cdd52588b355cc327b2ef3bc433f66474c29b6fd8c4a176246d37"
+     "ops_hash": "0949ef3d1a60877fc6013362c4b8e6127c619d6a312d3f0f4d225321afa4c6d7"
     },
     "3": {
      "bytes_by_kind": {
       "COLL": 4299161600,
-      "RECV": 4194306,
+      "RECV": 4194308,
       "SEND": 4194308
      },
      "compute_micros": 16518,
-     "critical_path_nodes": 57,
-     "critical_path_weight": 4209100,
-     "dag_hash": "de07e88f4193c375b28dcf135a4140e1ad39dd416e3704b0e62e11189821e917",
-     "n_nodes": 77,
+     "critical_path_nodes": 54,
+     "critical_path_weight": 4209098,
+     "dag_hash": "ac672fc2c23cc679f339b0e0a2056887d306ac8f46a83141df911062ede143f2",
+     "n_nodes": 79,
      "op_counts": {
       "COLL": 14,
       "COMP": 53,
-      "RECV": 4,
+      "RECV": 6,
       "SEND": 6
      },
-     "ops_hash": "4a4aa7c3fec85ed606853c53ec6f5d635b2d586fd74e6300f50eb695e6f7231c"
+     "ops_hash": "175b90a23d75bb3693a9e280632aa4e328bef20cba7a205bc18cc19f146aa8e8"
     }
    }
   }
@@ -260,7 +260,7 @@
   "flat": true
  },
  "error_tail": "",
- "git_rev": "d4f92ed",
+ "git_rev": "5191c9f",
  "memory": {
   "LLM": {
    "fields": {
@@ -279,5 +279,5 @@
  "phase_times": {},
  "spec_id": "train:flattened:dp2tp1cp1pp2mb2sp0:zero3",
  "status": "ok",
- "total_time": 0.22019728
+ "total_time": 0.22020228
 }

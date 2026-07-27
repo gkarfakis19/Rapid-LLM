@@ -99,16 +99,16 @@
      2
     ],
     "1000": [
-     0
-    ],
-    "1001": [
-     2
-    ],
-    "1002": [
      1
     ],
-    "1003": [
+    "1001": [
      3
+    ],
+    "1002": [
+     0
+    ],
+    "1003": [
+     2
     ],
     "2": [
      1,
@@ -1093,13 +1093,13 @@
   "hier/moe_fwd": true
  },
  "error_tail": "",
- "git_rev": "d4f92ed",
+ "git_rev": "5191c9f",
  "memory": {
   "LLM": {
    "fields": {
     "hardware_memory_capacity_per_gpu": 80.0,
-    "remaining_memory_headroom": 76.0,
-    "simulated_peak_memory_usage_per_gpu": 4.0,
+    "remaining_memory_headroom": 77.32,
+    "simulated_peak_memory_usage_per_gpu": 2.68,
     "simulation_mode": "training"
    },
    "warnings": []
