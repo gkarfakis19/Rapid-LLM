@@ -157,5 +157,3 @@ Deferred. The previous proposed replacement was rejected.
 
 - Several figure labels are too small to read.
 - Figures 8 and 9 may be reduced or consolidated to recover space.
-- Do not add a whole-model ablation unless the result supports a clear claim.
-- Nanotron should remain completely removed.
