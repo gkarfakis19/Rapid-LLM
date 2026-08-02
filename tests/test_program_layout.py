@@ -493,26 +493,26 @@ def test_cluster_coords_matches_legacy_hw_id_formula():
     for stage in range(2):
         for rank in range(4):
             coords = cluster_coords(
-                layout.axis_order, rank, stage, tp_size=2, cp_size=2, ep_size=1, pp_size=2
+                layout.axis_order, rank, stage, sizes={"tp": 2, "cp": 2, "ep": 1, "pp": 2}
             )
             assert coords == {"tp": rank % 2, "cp": (rank // 2) % 2, "pp": stage}
             assert layout.linearize(coords) == stage * 4 + rank
 
 
 def test_cluster_coords_only_sets_axes_in_order():
-    coords = cluster_coords(("tp",), 3, 0, tp_size=4, cp_size=1, ep_size=1, pp_size=1)
+    coords = cluster_coords(("tp",), 3, 0, sizes={"tp": 4, "cp": 1, "ep": 1, "pp": 1})
     assert coords == {"tp": 3}
 
 
 def test_cluster_coords_ep_decomposition():
     coords = cluster_coords(
-        ("tp", "cp", "ep"), 7, 0, tp_size=2, cp_size=2, ep_size=2, pp_size=1
+        ("tp", "cp", "ep"), 7, 0, sizes={"tp": 2, "cp": 2, "ep": 2, "pp": 1}
     )
     assert coords == {"tp": 1, "cp": 1, "ep": 1}
 
 
 def test_cluster_coords_pp_bounds_check_message():
     with pytest.raises(ValueError, match=re.escape("stage_id 5 is out of range for pp=2")):
-        cluster_coords(("pp",), 0, 5, tp_size=1, cp_size=1, ep_size=1, pp_size=2)
+        cluster_coords(("pp",), 0, 5, sizes={"tp": 1, "cp": 1, "ep": 1, "pp": 2})
     with pytest.raises(ValueError, match=re.escape("stage_id -1 is out of range for pp=2")):
-        cluster_coords(("pp",), 0, -1, tp_size=1, cp_size=1, ep_size=1, pp_size=2)
+        cluster_coords(("pp",), 0, -1, sizes={"tp": 1, "cp": 1, "ep": 1, "pp": 2})

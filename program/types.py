@@ -38,7 +38,10 @@ Coords = Mapping[AxisName, int]
 #: (``SyncRequirement.is_dp``) and L2 (``Placement`` / ``CommunicatorFactory``)
 #: agree on the name without either dispatching on a bare string literal, and
 #: without an import edge between them.
-DP_AXIS: AxisName = "dp"
+#: The REPLICA-role axis. Defined in ``program.axes``; re-exported here
+#: because ``program.types`` deliberately imports nothing from program.*,
+#: and ``program.axes`` is likewise dependency-free.
+from program.axes import DP_AXIS  # noqa: E402,F401
 
 __all__ = [
     "AxisName",

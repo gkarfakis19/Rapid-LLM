@@ -1605,20 +1605,54 @@ def test_a2_dp_collectives_exist_on_every_cluster_rank(cfg):
         emit_chakra(program, out)
         groups = canonicalize_bundle(out).summary()["collectives_by_group"]
     n_devices = len(program.devices)
-    dp_members = {
-        tuple(int(d) + idx * n_devices for idx in range(program.dp_count))
-        for d in sorted(load)
+    # BUG_LEDGER 19 made the communicator dp x cp, so its SIZE is dp * cp and its
+    # members are a cp sibling set crossed with the dp replicas — not the
+    # per-device dp pair this test used to hard-code. What A2 actually protects
+    # is unchanged and is what is asserted: every cluster rank that carries dp
+    # load appears in exactly one dp communicator, and those communicators
+    # partition the cluster ranks (no rank left out, none doubled).
+    cp_degree = max(1, int(cfg.cp))
+
+    # The expected dp communicator of a device: its cp SIBLINGS (BUG_LEDGER 19 —
+    # cp ranks hold replicated parameters and partial gradients, so they reduce
+    # together) crossed with the dp replicas. At cp == 1 the sibling set is the
+    # device itself and this is the pre-19 dp pair. Identified STRUCTURALLY, not
+    # by group size: at cp == 1 the dp pair and a tp/ep wire group are both
+    # 2-tuples, and only the structure tells them apart.
+    def _cp_siblings(device: int) -> Tuple[int, ...]:
+        own = dict(placement.coords_of(device).coords)
+        fixed = {a: int(v) for a, v in own.items() if a != "cp"}
+        return tuple(
+            sorted(
+                int(d)
+                for d in placement.devices()
+                if all(
+                    int(dict(placement.coords_of(d).coords).get(a, -1)) == v
+                    for a, v in fixed.items()
+                )
+            )
+        )
+
+    expected_groups = {
+        tuple(
+            sorted(
+                sibling + idx * n_devices
+                for sibling in _cp_siblings(int(device))
+                for idx in range(program.dp_count)
+            )
+        )
+        for device in sorted(load)
     }
-    seen = {
-        tuple(int(part) for part in key.split(","))
-        for key in groups
-        if len(key.split(",")) == program.dp_count
-    }
-    assert dp_members <= seen, f"missing dp communicators: {sorted(dp_members - seen)}"
-    assert len(dp_members) == len(load) == par_degree * len(
-        {stage_of_device[d] for d in load}
+    seen = {tuple(int(part) for part in key.split(",")) for key in groups}
+    assert expected_groups <= seen, (
+        f"missing dp communicators: {sorted(expected_groups - seen)}"
     )
-    flat = [rank for members in dp_members for rank in members]
+    for members in expected_groups:
+        assert len(members) == program.dp_count * cp_degree, members
+    stages_with_load = len({stage_of_device[d] for d in load})
+    assert len(expected_groups) == (par_degree // cp_degree) * stages_with_load
+    assert len(load) == par_degree * stages_with_load
+    flat = [rank for members in expected_groups for rank in members]
     assert len(flat) == len(set(flat)), "dp communicators are not disjoint"
 
 
@@ -2068,3 +2102,225 @@ def test_build_is_deterministic_and_emits_a_completable_bundle(spec, tmp_path):
             )
             assert bundle.rank_ids
     assert checked
+
+
+# ---------------------------------------------------------------------------
+# R3 reachability: the slot-floor bound (D2)
+# ---------------------------------------------------------------------------
+
+
+_R3_BOUND_CFGS = [
+    Cfg(dp=2, tp=2, cp=1, pp=2, mb=3),
+    Cfg(dp=2, tp=2, cp=1, pp=2, mb=3, ep=2, moe=True),
+    Cfg(dp=2, tp=1, cp=1, pp=2, mb=3, zero_stage=3),
+    Cfg(dp=2, tp=1, cp=1, pp=2, mb=3, zero_stage=2),
+    Cfg(dp=1, tp=2, cp=1, pp=2, mb=3, full_recomputation=True),
+    Cfg(dp=2, tp=1, cp=1, pp=2, mb=3, dp_microbatch="last_mb"),
+    Cfg(dp=1, tp=1, cp=2, pp=2, mb=3),
+    Cfg(dp=1, tp=2, cp=1, pp=2, mb=3, run_type="inference"),
+    Cfg(dp=1, tp=1, cp=1, pp=4, mb=6, num_layers=8),
+]
+
+
+@pytest.mark.parametrize("granularity", [Granularity.COARSE, Granularity.FINE])
+def test_r3_slot_floor_answers_exactly_what_the_unbounded_walk_answers(granularity):
+    """The ``slot_floor`` prune in ``_reaches`` is an EXACT optimization.
+
+    It is what keeps R3 linear in the schedule length instead of quadratic (see
+    ``_reaches``), and its soundness rests on D2. If the bound ever disagreed
+    with the unbounded walk, R3 would add a redundant SCHEDULE edge and the only
+    thing that would notice is a golden diff — so the agreement is asserted here
+    directly, on every R3 query the matrix generates.
+    """
+    import program.build as build_mod
+
+    seen_queries = 0
+    disagreements = []
+    original = build_mod._Builder._reaches
+
+    def checking(self, source, target, *, slot_floor=None):
+        bounded = original(self, source, target, slot_floor=slot_floor)
+        if slot_floor is not None:
+            nonlocal seen_queries
+            seen_queries += 1
+            unbounded = original(self, source, target)
+            if bounded != unbounded:
+                disagreements.append(
+                    (self._nodes[source].name, self._nodes[target].name,
+                     slot_floor, bounded, unbounded)
+                )
+        return bounded
+
+    build_mod._Builder._reaches = checking
+    try:
+        for cfg in _R3_BOUND_CFGS:
+            _program(replace(cfg, flattened=granularity is Granularity.FINE),
+                     granularity=granularity)
+    finally:
+        build_mod._Builder._reaches = original
+
+    assert seen_queries, "no bounded R3 queries were exercised"
+    assert not disagreements, (
+        "slot_floor changed a reachability answer (D2 broken):\n"
+        + "\n".join(str(d) for d in disagreements[:8])
+    )
+
+
+def test_r3_is_linear_in_schedule_length_not_quadratic():
+    """Guard against the ``_apply_r3`` blow-up that made GPT 1T unrunnable.
+
+    Before the ``slot_floor`` bound, every microbatch-boundary query walked the
+    whole ancestor set, so doubling the microbatch count roughly QUADRUPLED
+    build time; a ``pp=32, L=64, mb=512`` COARSE build took over two CPU-hours.
+    The assertion is on the RATIO, not on absolute seconds, so it does not
+    depend on machine speed.
+    """
+    import time
+
+    def build_seconds(micro_batches: int) -> float:
+        cfg = Cfg(dp=1, tp=1, cp=1, pp=8, mb=micro_batches, num_layers=16)
+        start = time.perf_counter()
+        _program(cfg, granularity=Granularity.COARSE)
+        return time.perf_counter() - start
+
+    build_seconds(8)  # warm any lazy imports so they are not billed to the first point
+    small = build_seconds(32)
+    large = build_seconds(128)
+    # 4x the microbatches. Linear => ~4x; quadratic => ~16x. 8x is a wide band
+    # that still fails loudly on a return to the quadratic walk.
+    assert large < small * 8.0, (
+        f"R3 looks superlinear again: mb=32 took {small:.3f}s, mb=128 took "
+        f"{large:.3f}s (ratio {large / small:.1f}x for a 4x input)"
+    )
+
+
+def test_r3_rejects_a_graph_whose_edges_run_backwards_in_schedule_slots():
+    """D2 is CHECKED, not assumed — a violation raises instead of silently
+    producing an extra SCHEDULE edge."""
+    import program.build as build_mod
+
+    original = build_mod._Builder._apply_r3
+
+    def sabotaged(self):
+        # Flip one existing edge's endpoints in slot space by rewriting the
+        # dep's order key to something later than its consumer's.
+        for (dep_nid, node_nid) in self._edges:
+            dep_node = self._nodes[dep_nid]
+            node = self._nodes[node_nid]
+            if dep_node.order[0] < node.order[0]:
+                dep_node.order = (node.order[0] + 1,) + tuple(dep_node.order[1:])
+                break
+        else:  # pragma: no cover - the matrix always has such an edge
+            pytest.skip("no strictly increasing edge to sabotage")
+        return original(self)
+
+    build_mod._Builder._apply_r3 = sabotaged
+    try:
+        with pytest.raises(BuildError, match="D2 violated"):
+            _program(Cfg(dp=1, tp=1, cp=1, pp=2, mb=3), granularity=Granularity.COARSE)
+    finally:
+        build_mod._Builder._apply_r3 = original
+
+
+# ---------------------------------------------------------------------------
+# BUG_LEDGER 19 — the gradient reduction group is dp x cp
+# ---------------------------------------------------------------------------
+
+
+def test_gradient_reducer_spans_cp_because_cp_gradients_are_partial():
+    """The dp reducer's communicator is ``dp x cp``, not ``dp``.
+
+    CP ranks hold REPLICATED parameters (``layer_params_per_rank`` divides by tp
+    only) and compute PARTIAL gradients — ``_shard_gemm_descriptor`` under
+    ``ParallelismMode.CONTEXT`` sets ``shard_m = ceil(m / cp)`` for every GEMM
+    type, QKV/FFN1/FFN2/OUT_PROJ included. Reducing only over dp leaves those
+    partials never summed, and the ring-attention cp collectives do not do it:
+    they reduce dL/dx, not dL/dW.
+    """
+    from program.work import DP_AXIS
+
+    for cp, expect_cp in ((1, False), (2, True)):
+        program = _program(
+            Cfg(dp=2, tp=1, cp=cp, pp=2, mb=2, flattened=True),
+            granularity=Granularity.FINE,
+        )
+        reducers = [
+            op for op in program.ops
+            if isinstance(op, CollectiveOp) and op.is_dp
+        ]
+        assert reducers, f"cp={cp}: no dp reducer built"
+        for op in reducers:
+            assert DP_AXIS in op.axes, f"cp={cp}: {op.name} lost the dp axis"
+            has_cp = "cp" in op.axes
+            assert has_cp is expect_cp, (
+                f"cp={cp}: {op.name} axes={op.axes}; expected cp "
+                f"{'present' if expect_cp else 'absent'}"
+            )
+            assert op.participants == 2 * cp, (
+                f"cp={cp}: {op.name} participants={op.participants}, expected {2 * cp}"
+            )
+
+
+def test_dp_cp_reducer_emits_one_communicator_per_cp_sibling_set(tmp_path):
+    """Emission: cp siblings share ONE process group, of size ``dp * cp``.
+
+    This is the half that makes the fix real — a correct ``participants`` count
+    with per-device communicators would still never sum across cp. Also pins the
+    id-space property that made the naive version wrong: a ``dp x cp`` group is
+    interned by MEMBER SET, so it can never collide with the per-device dp stage
+    group ids that pure-dp collectives (e.g. the ZeRO gathers) still use.
+    """
+    from program.et_emit import emit_chakra
+
+    program = _program(
+        Cfg(dp=2, tp=1, cp=2, pp=2, mb=2, flattened=True), granularity=Granularity.FINE
+    )
+    out = tmp_path / "emit_dpcp"
+    bundle = emit_chakra(program, str(out))
+    groups = bundle.comm_groups
+
+    dp_cp_groups = {
+        gid: members for gid, members in groups.items() if len(members) == 4
+    }
+    assert dp_cp_groups, f"no dp x cp (4-member) group emitted; groups={groups}"
+
+    dp_count = program.dp_count
+    devices = list(program.devices)
+    per_replica = len(devices)
+    for gid, members in dp_cp_groups.items():
+        # members must be <cp sibling devices> x <dp replicas>
+        by_replica = {}
+        for rank in members:
+            by_replica.setdefault(rank // per_replica, []).append(rank % per_replica)
+        assert len(by_replica) == dp_count, (
+            f"group {gid} members {members} do not span all {dp_count} dp replicas"
+        )
+        sibling_sets = {tuple(sorted(v)) for v in by_replica.values()}
+        assert len(sibling_sets) == 1, (
+            f"group {gid} uses different device sets per dp replica: {by_replica}"
+        )
+        assert len(next(iter(sibling_sets))) == 2, (
+            f"group {gid} should hold cp=2 sibling devices, got {sibling_sets}"
+        )
+
+    # id-space: no member set is served by two ids, and no id by two member sets
+    seen = {}
+    for gid, members in groups.items():
+        key = tuple(sorted(members))
+        assert key not in seen or seen[key] == gid, (
+            f"member set {key} interned under two ids: {seen[key]} and {gid}"
+        )
+        seen[key] = gid
+
+
+def test_cp1_is_byte_identical_after_the_dp_cp_change():
+    """cp == 1 must be untouched: the sibling set is the device itself, so the
+    communicator, its id and the emitted bytes are the pre-19 ones. This is what
+    keeps 41 of 44 goldens bit-identical."""
+    program = _program(
+        Cfg(dp=2, tp=2, cp=1, pp=2, mb=2, flattened=True), granularity=Granularity.FINE
+    )
+    for op in program.ops:
+        if isinstance(op, CollectiveOp) and op.is_dp:
+            assert op.axes == ("dp",), f"{op.name} axes drifted to {op.axes} at cp=1"
+            assert op.interconnect == "dp"

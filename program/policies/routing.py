@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
+from program.axes import CLUSTER_AXES
 from program.types import AxisName, Coords
 
 __all__ = [
@@ -121,7 +122,9 @@ class AxisRouting(MoERoutingPolicy):
 
     name: str
     axes: Tuple[AxisName, ...]
-    cluster_axes: Tuple[AxisName, ...] = ("tp", "cp", "ep")
+    #: DERIVED from AxisRole.CLUSTER (program.axes) — a routing mode can only
+    #: route over axes that exist inside a stage's device cluster.
+    cluster_axes: Tuple[AxisName, ...] = CLUSTER_AXES
 
     def __post_init__(self) -> None:
         if not self.axes:

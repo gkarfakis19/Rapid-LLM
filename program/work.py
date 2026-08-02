@@ -49,8 +49,15 @@ from typing import (
 
 from timing_model import CollectiveType
 
+from program.axes import axes_needing_gradient_reduction
 from program.types import DP_AXIS, AxisName, CommKey, LayerId, MicroBatch, StageId
 from program.workload import CommSpec, FrozenWorkload, ceil_div
+
+#: The in-device-space axes a dp collective may ALSO span (BUG_LEDGER 19).
+#: DERIVED, not hand-kept: an axis qualifies exactly when it shards the work
+#: (partial gradients) while replicating the parameters (one tensor to sum) —
+#: see ``program.axes.axes_needing_gradient_reduction``. Today that is ``cp``.
+_DP_COMPANION_AXES: Tuple[str, ...] = axes_needing_gradient_reduction()
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; L3 must not be imported at L1
     from program.schedule.policy import LayerAssignment
@@ -798,15 +805,31 @@ class SyncRequirement:
                 "data-flow TransferOp (R2), not a SyncRequirement"
             )
         if DP_AXIS in tuple(self.axes) and tuple(self.axes) != (DP_AXIS,):
+            # BUG_LEDGER 19 RELAXED THIS, and the distinction is worth stating
+            # precisely because the original guard's reasoning was RIGHT about
+            # the thing it actually protects.
+            #
             # dp is stamped at emission over PRE-dp device ids (ir.py:93-104), so
-            # it can never be one axis of a composite communicator built from a
-            # device layout. Every production dp spec declares
-            # interconnect_type="dp" alone; a mixed tuple is a declaration bug.
-            raise SyncError(
-                f"SyncRequirement {self.key!r} declares axes {tuple(self.axes)}: "
-                "'dp' is replicated at emission and cannot be combined with a "
-                "device-layout axis"
-            )
+            # a dp axis can never be one component of a ``GroupKey`` built by
+            # ``CommunicatorFactory.group_for`` — that layout has no dp axis at
+            # all, so the members would not be devices of this program. That
+            # invariant is UNCHANGED and is enforced structurally: ``is_dp`` (now
+            # ``DP_AXIS in axes``) makes ``build.py`` emit ``group=None`` and
+            # never consult the factory.
+            #
+            # What is now allowed is a dp collective that ALSO spans in-device-
+            # space axes -- the ``dp x cp`` gradient reducer. Its membership is
+            # resolved at emission by folding each device with its siblings along
+            # the companion axes (``et_emit._dp_group_devices``), which composes
+            # with dp replication instead of competing with it.
+            companions = tuple(a for a in self.axes if a != DP_AXIS)
+            unknown = [a for a in companions if a not in _DP_COMPANION_AXES]
+            if unknown:
+                raise SyncError(
+                    f"SyncRequirement {self.key!r} declares axes {tuple(self.axes)}: "
+                    f"'dp' may only be combined with an in-device-space axis "
+                    f"{_DP_COMPANION_AXES}, got {unknown}"
+                )
         if self.mode is AttachMode.AFTER:
             pass  # anchors may be a WorkItem OR another SyncKey (S3/S5/S10 chaining)
         elif any(isinstance(anchor, SyncKey) for anchor in self.anchors):
@@ -877,7 +900,7 @@ class SyncRequirement:
 
     @property
     def is_dp(self) -> bool:
-        """``True`` iff this collective's communicator is the dp replica group.
+        """``True`` iff this collective's communicator SPANS the dp replica axis.
 
         A dp collective has **no** ``GroupKey``: its members are not devices of
         the program's device space at all. dp replication is stamped at emission
@@ -885,8 +908,28 @@ class SyncRequirement:
         ``CollectiveOp.is_dp`` / ``label is None``), so the builder must emit
         ``group=None, is_dp=True`` — never a communicator built from the device
         layout (INTERFACES §3.3 amendment, 2026-07-26).
+
+        **BUG_LEDGER 19.** This is ``DP_AXIS in axes``, not ``axes == (DP_AXIS,)``.
+        A gradient reducer under context parallelism spans ``dp x cp``: the dp
+        half lives outside the device space (emission replication) and the cp
+        half inside it (cp sibling devices), so it is neither a pure dp
+        collective nor an ordinary layout communicator. Membership over the
+        in-space axes is resolved by the emitter, which folds each device
+        together with its siblings along every non-dp axis named here
+        (``et_emit._dp_group_devices``). At ``cp == 1`` the sibling set is the
+        device itself, so the pure-dp behavior is recovered exactly.
         """
-        return tuple(self.axes) == (DP_AXIS,)
+        return DP_AXIS in tuple(self.axes)
+
+    @property
+    def dp_companion_axes(self) -> Tuple[str, ...]:
+        """The IN-DEVICE-SPACE axes a dp collective's communicator also spans.
+
+        Empty for a plain dp reducer; ``('cp',)`` for the dp x cp gradient
+        reduction. The emitter uses this to widen the communicator; nothing else
+        may re-derive it from a participant count (**K5**).
+        """
+        return tuple(axis for axis in self.axes if axis != DP_AXIS)
 
     def size_bytes(self, fw: FrozenWorkload, instances: int = 1) -> float:
         return self.bytes.bytes_for(fw, instances)

@@ -210,6 +210,102 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
             raise EmissionError(f"Device {device} is not in Program.devices")
         return dp_idx * ns_initial + idx
 
+    layout = program.layout
+    _dp_sibling_cache: Dict[Tuple[int, Tuple[str, ...]], Tuple[int, ...]] = {}
+
+    def _intern_dp_group(siblings: Tuple[int, ...]) -> str:
+        """Intern the communicator of a composite dp collective (BUG_LEDGER 19).
+
+        Its members are the dp replicas of every sibling device — one group
+        spanning dp, unlike a wire group, which lives inside a single dp
+        replica. Interning is BY MEMBER SET, through the same
+        ``members_to_gid``/``gid_members`` tables the wire groups use, so an id
+        is never shared by two different member sets and
+        ``_write_comm_groups`` publishes it without further help.
+        """
+        members = tuple(
+            sorted(
+                rank_for(device, dp_idx)
+                for device in siblings
+                for dp_idx in range(dp_count)
+            )
+        )
+        gid = members_to_gid.get(members)
+        if gid is None:
+            gid = str(next(gid_counter))
+            members_to_gid[members] = gid
+            gid_members[gid] = list(members)
+        return gid
+
+    _dependents: Optional[set] = None
+
+    def _has_dependents(uid: int) -> bool:
+        """Does any op depend on ``uid``? Computed once, lazily.
+
+        A dp collective that nothing waits on and that has no communicator can
+        be dropped (the legacy Step-10 skip). One that IS waited on must still
+        produce an ET node, or the dependent's edge dangles.
+        """
+        nonlocal _dependents
+        if _dependents is None:
+            found = set()
+            for other in ops:
+                for dep in getattr(other, "deps", ()):
+                    found.add(int(dep))
+                producer = getattr(other, "producer", None)
+                if producer is not None:
+                    found.add(int(producer))
+                for consumer in getattr(other, "consumers", ()) or ():
+                    found.add(int(consumer))
+            _dependents = found
+        return int(uid) in _dependents
+
+    def _dp_group_devices(op: "CollectiveOp") -> Tuple[int, ...]:
+        """The in-device-space members of a dp collective's communicator.
+
+        ``('dp',)`` -> just the owning device: the group is its dp replicas, and
+        that is the whole legacy behavior. ``('dp','cp')`` (BUG_LEDGER 19) -> the
+        owning device AND its cp siblings, so the emitted communicator is the
+        ``dp x cp`` group Megatron reduces gradients over.
+
+        Membership is resolved from the DECLARED axes against the rank layout —
+        never from ``op.participants`` (**K5**). If the layout cannot answer
+        (a legacy program with an empty ``axis_order``), the sibling set
+        degenerates to the device itself, which is the pre-19 behavior.
+        """
+        companions = tuple(a for a in (op.axes or ()) if a != "dp")
+        key = (int(op.device), companions)
+        cached = _dp_sibling_cache.get(key)
+        if cached is not None:
+            return cached
+        # A companion axis that this granularity does not MATERIALIZE as devices
+        # is not an error. COARSE devices are stages
+        # (``_GRANULARITY_AXES[COARSE] == ("pp","dp")``), so ``cp`` has no device
+        # extent there and the dp x cp reducer collapses to one collective whose
+        # ``participants`` (dp*cp) still carries the group size to the analytical
+        # evaluator — the same treatment COARSE already gives tp and ep.
+        live = tuple(a for a in companions if a in layout.axis_order)
+        if not live or not layout.axis_order:
+            result = (int(op.device),)
+        else:
+            own = layout.coords_of(int(op.device))
+            companions = live
+            fixed = {a: v for a, v in own.items() if a not in companions}
+            result = tuple(
+                sorted(
+                    d
+                    for d in devices
+                    if all(layout.coords_of(int(d)).get(a) == v for a, v in fixed.items())
+                )
+            )
+            if int(op.device) not in result:  # pragma: no cover - defensive
+                raise EmissionError(
+                    f"Collective {op.name!r}: owning device {op.device} is not in its "
+                    f"own communicator {result}"
+                )
+        _dp_sibling_cache[key] = result
+        return result
+
     # --- traces: one per (compute device, dp) — legacy Step 2 -------------
     traces: Dict[int, _Trace] = {}
     for dp_idx in range(dp_count):
@@ -373,8 +469,13 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
             continue
 
         # CollectiveOp
-        if dp_count <= 1 and op.is_dp:
-            # Legacy Step-10 skip of dp stage collectives at dp <= 1.
+        singleton_dp = op.is_dp and len(_dp_group_devices(op)) * dp_count <= 1
+        if singleton_dp and not _has_dependents(op.uid):
+            # Legacy Step-10 skip, stated precisely: a dp collective with a
+            # one-member communicator contributes nothing, and if it is a SINK
+            # dropping it also loses no edge. Its own ``deps`` are irrelevant —
+            # deleting a sink cannot orphan anything. Only a collective some
+            # other op WAITS ON has to survive as a node (below).
             continue
         for dp_idx in range(dp_count):
             rank = rank_for(op.device, dp_idx)
@@ -399,15 +500,48 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
                     group_records[str(gid)][rank].append(
                         (comm_node, _collective_enum(op.coll), int(op.size_bytes))
                     )
+            elif singleton_dp:
+                # A one-member communicator cannot be a real collective — a
+                # single-member native ring deadlocks, which is why the labeled
+                # path above emits a no-op for the same shape. It is emitted
+                # rather than skipped because ops DEPEND on it: at COARSE the cp
+                # axis has no device extent, so a dp x cp reducer at ``dp == 1``
+                # collapses to one device here while still being a real 2-rank
+                # collective in the model. Skipping it outright left R5b's
+                # ``optimizer -> reducer`` edge pointing at a node with no ET
+                # id (BUG_LEDGER 19 residual). The analytical evaluator still
+                # prices it from ``participants``; only the ET node is vacuous.
+                noop = new_comp_node(node_id, f"{op.name}_{op.uid}_dp{dp_idx}_noop", 0)
+                noop.ctrl_deps.extend(unique_deps)
+                trace.append_node(noop)
+                et_ids[(op.uid, rank)] = node_id
+                continue
             else:
                 comm_name = f"{op.name}_{op.uid}_dp{dp_idx}"
                 comm_node = new_comm_node(node_id, comm_name, _collective_enum(op.coll), op.size_bytes)
-                if dp_count > 1:
-                    gid = str(device_index[op.device] + 1)
+                siblings = _dp_group_devices(op)
+                if len(siblings) * dp_count > 1:
+                    if len(siblings) == 1:
+                        # Pure dp: the legacy stage group, id ``stage_idx + 1``.
+                        # Untouched, so every cp == 1 program is byte-identical.
+                        gid = str(device_index[op.device] + 1)
+                    else:
+                        # BUG_LEDGER 19 — a dp x cp communicator spans the dp
+                        # replicas of EVERY cp sibling, so it is one group over
+                        # all of them, not one group per device.
+                        #
+                        # It gets an INTERNED id from the wire-group space rather
+                        # than ``device_index + 1``: at cp > 1 the ZeRO gathers
+                        # are still pure-dp and keep the legacy per-device ids,
+                        # so reusing ``min(sibling) + 1`` here would hand two
+                        # DIFFERENT member sets the same id. Interning by member
+                        # set is what makes that unrepresentable.
+                        gid = _intern_dp_group(siblings)
                     comm_node.attr.append(pb.AttributeProto(name="pg_name", string_val=gid))
                     group_records[gid][rank].append(
                         (comm_node, _collective_enum(op.coll), int(op.size_bytes))
                     )
+                    gid_axes[gid].update(op.axes or ("dp",))
             comm_node.ctrl_deps.extend(unique_deps)
             trace.append_node(comm_node)
             et_ids[(op.uid, rank)] = node_id

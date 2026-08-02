@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from program.policies.gradaccum import GradAccumPolicy
+from program.axes import axes_needing_gradient_reduction
 from program.types import CommKey, LayerId, StageId
 from program.work import (
     AttachMode,
@@ -826,19 +827,48 @@ _ZERO3_HANDLERS: Mapping[Tuple[WorkKind, Direction], Any] = {
 SHARDING_POLICIES: Mapping[int, Any] = {0: DDP, 1: ZeRO1, 2: ZeRO2, 3: ZeRO3}
 
 
+
+def _reduction_companion_degree(degrees: Any) -> int:
+    """Product of the degrees of the axes that share a gradient reducer with dp.
+
+    ``program.axes`` decides WHICH axes those are (work-sharding +
+    parameter-replicating); this only multiplies their degrees.
+    """
+    total = 1
+    for axis in axes_needing_gradient_reduction():
+        total *= max(1, int(getattr(degrees, axis, 1) or 1))
+    return total
+
+
 def sharding_policy_for(run: Any, degrees: Any) -> ShardingPolicy:
     """``{0: DDP, 1: ZeRO1, 2: ZeRO2, 3+: ZeRO3}[run.zero_stage]``.
 
-    ``dp <= 1`` selects :class:`NullSharding`, which emits nothing — today that
-    is ``if spec.dp > 1`` at schedule.py:797 *plus* the ``dp <= 1`` early return
-    in ``should_emit_dp_comm`` (:257).
+    ``dp * cp <= 1`` selects :class:`NullSharding`, which emits nothing — today
+    that is ``if spec.dp > 1`` at schedule.py:797 *plus* the ``dp <= 1`` early
+    return in ``should_emit_dp_comm`` (:257).
+
+    **BUG_LEDGER 19 — the test is the REDUCTION GROUP, ``dp * cp``, not ``dp``.**
+    The group is non-trivial whenever either axis is: at ``dp == 1, cp > 1`` the
+    cp ranks each hold a partial gradient over their own sequence chunk
+    (``_shard_gemm_descriptor`` divides the GEMM M-dim by cp) and nothing summed
+    them. The companion degree is DERIVED from
+    ``program.axes.axes_needing_gradient_reduction`` — an axis counts when it
+    shards the work while replicating the parameters — so a new axis with that
+    property is picked up here without an edit.
+
+    This needed the emitter to stop DROPPING a one-member dp communicator: at
+    COARSE the cp axis has no device extent, so the group collapses to a single
+    device even though the collective is real. ``et_emit`` now emits a
+    zero-duration no-op for that shape instead of skipping it, which keeps R5b's
+    ``optimizer -> reducer`` edge resolvable while the analytical evaluator
+    still prices the collective from ``participants``.
 
     ``not include_backward`` also selects :class:`NullSharding`: the ENTIRE
     lattice lives after ``build_pipeline_events``' inference early return
     (schedule.py:674-680), so a dp>1 inference run emits no gradient sync. One
     documented line replaces that control-flow accident.
     """
-    if int(degrees.dp) <= 1 or not run.include_backward:
+    if int(degrees.dp) * _reduction_companion_degree(degrees) <= 1 or not run.include_backward:
         return NullSharding()
     stage = int(run.zero_stage)
     if stage < 0:

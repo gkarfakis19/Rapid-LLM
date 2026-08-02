@@ -59,6 +59,7 @@ from timing_model import CollectiveType
 
 from program.block import BlockTemplate, CommMeta
 from program.layout import RankLayout
+from program.axes import CANONICAL_AXES, axis_sizes_from
 from program.types import AxisName, CommKey, LayerId
 
 __all__ = [
@@ -159,7 +160,7 @@ class ParallelDegrees:
 
     def of(self, axis: AxisName) -> int:
         """Degree of one canonical axis. Raises on an unknown axis name."""
-        table = {"tp": self.tp, "cp": self.cp, "ep": self.ep, "pp": self.pp, "dp": self.dp}
+        table = axis_sizes_from(self)
         if axis not in table:
             raise WorkloadError(
                 f"Unknown parallelism axis {axis!r} (known: {sorted(table)})"
@@ -167,7 +168,7 @@ class ParallelDegrees:
         return table[axis]
 
     def __post_init__(self) -> None:
-        for name in ("tp", "cp", "ep", "pp", "dp"):
+        for name in CANONICAL_AXES:
             value = self.__dict__[name]
             if not isinstance(value, int) or isinstance(value, bool):
                 raise WorkloadError(f"ParallelDegrees.{name} must be an int (got {value!r})")
@@ -260,7 +261,16 @@ def _declare_axes(
             f"comm_metadata[{key!r}] has neither 'interconnect_type' nor "
             "'moe_routing_mode'; the communicator axis cannot be declared"
         )
-    return (str(interconnect),)
+    # A composite axis is DECLARED, never recovered from a participant count.
+    # ``'dp*cp'`` is the gradient reducer's communicator when context
+    # parallelism is on (BUG_LEDGER 19): cp ranks hold REPLICATED parameters and
+    # compute PARTIAL gradients from different sequence chunks, so the reduction
+    # group is dp x cp exactly as in Megatron. Spelled as one table value so the
+    # composite stays a property of the comm rule, not of this function.
+    text = str(interconnect)
+    if "*" in text:
+        return tuple(part for part in text.split("*") if part)
+    return (text,)
 
 
 @dataclass(frozen=True)

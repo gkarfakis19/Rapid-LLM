@@ -314,10 +314,7 @@ class MemoryEstimator:
                 layout.axis_order,
                 tp_rank,
                 stage_id,
-                tp_size=axis_sizes.get("tp", 1),
-                cp_size=axis_sizes.get("cp", 1),
-                ep_size=axis_sizes.get("ep", 1),
-                pp_size=axis_sizes.get("pp", 1),
+                sizes=axis_sizes,
             )
             return layout.linearize(coords)
 

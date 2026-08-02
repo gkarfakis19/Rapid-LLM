@@ -34,10 +34,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-AxisName = str
-
-#: Canonical parallelism axes, in canonical order (tp fastest-varying).
-CANONICAL_AXES: Tuple[AxisName, ...] = ("tp", "cp", "ep", "pp", "dp")
+from program.axes import (  # noqa: F401 - re-exported for existing importers
+    AXES,
+    AXIS_BY_NAME,
+    CANONICAL_AXES,
+    CLUSTER_AXES,
+    PIPELINE_AXES,
+    REPLICA_AXES,
+    AxisName,
+    AxisRole,
+    cluster_strides,
+)
 
 
 def cluster_coords(
@@ -45,10 +52,7 @@ def cluster_coords(
     tp_rank: int,
     stage_id: int,
     *,
-    tp_size: int,
-    cp_size: int,
-    ep_size: int,
-    pp_size: int,
+    sizes: Mapping[AxisName, int],
 ) -> Dict[AxisName, int]:
     """Decompose a flat transformer-cluster rank + pipeline stage into coords.
 
@@ -57,20 +61,28 @@ def cluster_coords(
     ``_hw_id_for_rank``: ``tp_rank`` is split row-major into tp/cp/ep
     coordinates (tp fastest) and ``stage_id`` becomes the pp coordinate, with
     the legacy pp bounds check. Only axes present in ``axis_order`` receive a
-    coordinate; the divisor sizes are supplied by the caller because the two
-    legacy call sites use different fallbacks for axes absent from the layout.
+    coordinate; ``sizes`` is supplied by the caller because the two legacy call
+    sites use different fallbacks for axes absent from the layout.
+
+    Both loops are driven by ``program.axes`` roles, so a new axis needs no
+    edit here and none in this signature.
     """
     coords: Dict[AxisName, int] = {}
-    if "tp" in axis_order:
-        coords["tp"] = tp_rank % tp_size
-    if "cp" in axis_order:
-        coords["cp"] = (tp_rank // tp_size) % cp_size
-    if "ep" in axis_order:
-        coords["ep"] = (tp_rank // max(1, tp_size * cp_size)) % ep_size
-    if "pp" in axis_order:
-        if stage_id < 0 or stage_id >= pp_size:
-            raise ValueError(f"stage_id {stage_id} is out of range for pp={pp_size}")
-        coords["pp"] = stage_id % pp_size
+    # One rule for every CLUSTER axis, from program.axes: coordinate =
+    # (flat_rank // stride) % size, stride = product of the earlier cluster
+    # axes' sizes. The three hand-written lines this replaces were that formula
+    # spelled out for tp/cp/ep specifically.
+    for name, stride in cluster_strides(axis_order, sizes).items():
+        coords[name] = (tp_rank // max(1, stride)) % max(1, int(sizes[name]))
+    for name in PIPELINE_AXES:
+        if name not in axis_order:
+            continue
+        extent = max(1, int(sizes.get(name, 1)))
+        if stage_id < 0 or stage_id >= extent:
+            raise ValueError(
+                f"stage_id {stage_id} is out of range for {name}={extent}"
+            )
+        coords[name] = stage_id % extent
     return coords
 
 
@@ -245,7 +257,7 @@ class RankLayout:
         # across PP (and potentially DP) axes; sub-graph simulations can only
         # include whole network dimensions, never a slice of one.
         if execution_mode_enforce_cluster:
-            cluster_axes = sorted(axis for axis in ("tp", "cp", "ep") if axis_sizes[axis] > 1)
+            cluster_axes = sorted(axis for axis in CLUSTER_AXES if axis_sizes[axis] > 1)
             covered: List[str] = []
             for dim in dimensions:
                 if sorted(set(covered)) == cluster_axes:
@@ -254,10 +266,10 @@ class RankLayout:
                     continue
                 dim_axes_l = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
                 cluster_here = [
-                    axis for axis in dim_axes_l if axis in ("tp", "cp", "ep") and axis_sizes[axis] > 1
+                    axis for axis in dim_axes_l if axis in CLUSTER_AXES and axis_sizes[axis] > 1
                 ]
                 sched_here = [
-                    axis for axis in dim_axes_l if axis in ("pp", "dp") and axis_sizes[axis] > 1
+                    axis for axis in dim_axes_l if axis in PIPELINE_AXES + REPLICA_AXES and axis_sizes[axis] > 1
                 ]
                 if sched_here:
                     raise ValueError(
@@ -300,21 +312,22 @@ class RankLayout:
                 )
 
         if axis_order:
-            ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
+            ordered_axes = list(CANONICAL_AXES)
             axis_order = [axis for axis in ordered_axes if axis in axis_order]
 
         if empty_axis_order_is_none and not axis_order:
             return None, optimize_cfg
 
         # Ensure the layout covers active parallel axes
-        if axis_sizes.get("tp", 1) > 1 and "tp" not in axis_order:
-            raise ValueError("Network layout must include 'tp' when tensor parallelism > 1.")
-        if axis_sizes.get("cp", 1) > 1 and "cp" not in axis_order:
-            raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
-        if axis_sizes.get("ep", 1) > 1 and "ep" not in axis_order:
-            raise ValueError("Network layout must include 'ep' when expert parallelism > 1.")
-        if axis_sizes.get("pp", 1) > 1 and "pp" not in axis_order:
-            raise ValueError("Network layout must include 'pp' when pipeline parallelism > 1.")
+        # One check per CLUSTER axis, driven by program.axes rather than three
+        # near-identical hand-written blocks.
+        for _name in CLUSTER_AXES + PIPELINE_AXES:
+            if int(axis_sizes.get(_name, 1)) > 1 and _name not in axis_order:
+                raise ValueError(
+                    f"Network layout must include {_name!r} when "
+                    f"{AXIS_BY_NAME[_name].label} > 1."
+                )
+
 
         axis_strides: Dict[str, int] = {}
         span = 1

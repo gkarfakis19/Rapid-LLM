@@ -161,16 +161,32 @@ def policies_for(
     coupling is one documented argument, not a ``misc["flattened_mode"]`` read
     inside a builder.
 
-    No granularity-specific SHARDING override is needed: a BLOCK workload is a
-    single-replica block measurement (``degrees.dp == 1``, which ``build()``
-    enforces — INTERFACES §3.1 and the legacy ``dp_override=1``), and
-    ``sharding_policy_for`` already answers :class:`NullSharding` at ``dp <= 1``.
+    **BLOCK selects :class:`NullSharding` EXPLICITLY.** A BLOCK program is one
+    layer expanded over the ``(tp, cp, ep)`` sublayout to MEASURE that layer for
+    retiming; it carries no ``dp`` and no ``pp`` axis at all
+    (``_GRANULARITY_AXES``), so a gradient reducer is not representable in it and
+    would corrupt the very duration the block exists to produce.
+
+    This used to be left to an accident: a block workload is single-replica
+    (``degrees.dp == 1``, which ``build()`` enforces) and the old
+    ``sharding_policy_for`` answered ``NullSharding`` at ``dp <= 1``. BUG_LEDGER
+    19 made that test the reduction GROUP (``dp * cp``), so at ``cp > 1`` the
+    accident stopped holding and dp reducers appeared inside the block —
+    measured as a **+1192 us** shift in the retimed transformer duration on
+    ``train:hierarchical:dp2tp2cp2pp2mb2sp1``. The dependency was real; it is now
+    stated instead of relied upon.
     """
+    from program.placement import Granularity
     from program.workload import WorkloadSpec
 
     fw = spec.freeze() if isinstance(spec, WorkloadSpec) else spec
+    sharding = (
+        NullSharding()
+        if granularity is Granularity.BLOCK
+        else sharding_policy_for(fw.spec.run, fw.spec.degrees)
+    )
     return PolicyBundle(
-        sharding=sharding_policy_for(fw.spec.run, fw.spec.degrees),
+        sharding=sharding,
         grad_accum=grad_accum_policy_for(fw),
         recompute=recompute_policy_for(
             fw, granularity, block_expanded=block_expanded

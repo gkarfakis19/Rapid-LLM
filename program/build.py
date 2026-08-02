@@ -109,7 +109,7 @@ from program.policies.recompute import RecomputePolicy
 from program.policies.routing import MoERoutingPolicy, ep_sync_requirements
 from program.policies.sharding import ShardingContext, ShardingPolicy
 from program.schedule.policy import Schedule, SchedulePolicy
-from program.types import CommKey, DeviceId
+from program.types import DP_AXIS, CommKey, DeviceId
 from program.work import (
     AttachMode,
     ByteSource,
@@ -134,6 +134,28 @@ __all__ = [
     "check_granularity_preconditions",
     "restrict_work_for",
 ]
+
+
+
+def _pricing_axis(axes: Sequence[str]) -> Optional[str]:
+    """The axis key a collective is PRICED against (``WorkloadSpec.interconnect``).
+
+    Distinct from ``axes``, which declares MEMBERSHIP. They coincide for every
+    single-axis collective; they diverge for the ``dp x cp`` gradient reducer
+    (**BUG_LEDGER 19**), whose members span two axes but whose cost is dominated
+    by the dp fabric — the outer, slower network the reduction has to cross.
+    ``canonical_axis_label`` would hand the analytical evaluator ``"cp+dp"``,
+    which is not a key in the interconnect table
+    (``analytic_sim``: ``Invalid interconnect type``).
+
+    Rule: a communicator that spans dp prices as dp; otherwise the canonical
+    label, unchanged.
+    """
+    if not axes:
+        return None
+    if DP_AXIS in tuple(axes):
+        return DP_AXIS
+    return canonical_axis_label(axes)
 
 
 class BuildError(ValueError):
@@ -621,17 +643,36 @@ class _Builder:
         self._nodes[node].deps.remove(dep)
         self._nodes[dep].succs.remove(node)
 
-    def _reaches(self, source: int, target: int) -> bool:
+    def _reaches(self, source: int, target: int, *, slot_floor: Optional[int] = None) -> bool:
         """Transitive reachability ``source -> target`` in the graph so far.
 
         Backward BFS from ``target`` over ``deps`` (which carries every edge
         class, including the producer/consumer wiring of a ``TransferOp``), so
         R3 sees exactly the graph INTERFACES §4.3 describes: R1 + R2 + the R3
-        edges already added. Early-exits on a hit; the "not implied" answer costs
-        one ancestor-set walk, and R3 asks ``O(devices x slots)`` questions.
+        edges already added. Early-exits on a hit.
+
+        ``slot_floor`` prunes the walk to nodes whose schedule slot is ``>=`` the
+        floor. It is an EXACT optimization, not an approximation, and it is only
+        sound because every edge in the R1+R2+R3 graph is slot-monotone
+        (``order[0]`` of a dep ``<=`` ``order[0]`` of its node) — R1 is
+        intra-chain (same slot), R2 runs layer ``L -> L+1`` in schedule order,
+        and R3's own edges come from ``Schedule.implied_deps``, whose contract is
+        a monotone slot sequence. Any path ``source -> ... -> target`` therefore
+        has slots in ``[slot(source), slot(target)]``, so a node below the floor
+        can neither BE ``source`` nor lead back to it. ``_apply_r3`` VERIFIES the
+        invariant rather than assuming it (**D2**).
+
+        Without the floor a microbatch-boundary query — the "not implied" answer,
+        which is the one R3 actually has to add an edge for — costs a walk of the
+        whole ancestor set, and R3 asks ``O(devices x slots)`` of them. That is
+        quadratic in the schedule length: at ``pp=64, L=128, mb=512`` (GPT 1T)
+        it was ~65k full-graph walks over a ~130k-node DAG, measured at over two
+        CPU-hours in ``_apply_r3`` alone. With the floor each query is bounded by
+        the work between the two slots.
         """
         if source == target:
             return True
+        nodes = self._nodes
         stack = [target]
         seen: Set[int] = set()
         while stack:
@@ -639,12 +680,50 @@ class _Builder:
             if current in seen:
                 continue
             seen.add(current)
-            for dep in self._nodes[current].deps:
+            for dep in nodes[current].deps:
                 if dep == source:
                     return True
-                if dep not in seen:
-                    stack.append(dep)
+                if dep in seen:
+                    continue
+                if slot_floor is not None and nodes[dep].order[0] < slot_floor:
+                    continue
+                stack.append(dep)
         return False
+
+    def _ancestors_of(self, target: int) -> Set[int]:
+        """Every node that transitively reaches ``target`` (excluding it).
+
+        The set form of :meth:`_reaches`, for callers that ask the SAME question
+        about one target many times. ``source in self._ancestors_of(target)`` is
+        by construction identical to ``self._reaches(source, target)``.
+        """
+        nodes = self._nodes
+        ancestors: Set[int] = set()
+        stack = list(nodes[target].deps)
+        while stack:
+            current = stack.pop()
+            if current in ancestors:
+                continue
+            ancestors.add(current)
+            stack.extend(nodes[current].deps)
+        return ancestors
+
+    def _grow_ancestors(self, ancestors: Set[int], source: int) -> None:
+        """Fold ``source`` and its ancestors into an existing ancestor set.
+
+        Called right after ``source -> target`` is materialized, so ``ancestors``
+        keeps describing ``target`` exactly. Nodes already present are not
+        re-expanded, so a loop that adds many sources to one target visits each
+        node at most once in total.
+        """
+        nodes = self._nodes
+        stack = [source]
+        while stack:
+            current = stack.pop()
+            if current in ancestors:
+                continue
+            ancestors.add(current)
+            stack.extend(nodes[current].deps)
 
     # ------------------------------------------------------------------
     # phase 4/5 — expansion (R1)
@@ -810,7 +889,10 @@ class _Builder:
             self._add_dep(producer, nid, DepClass.DATA_FLOW)
             return nid
 
-        is_dp = tuple(spec.axes) == ("dp",)
+        # BUG_LEDGER 19 — ``in``, not ``==``: a dp x cp gradient reducer still
+        # takes the dp path (no GroupKey; replicated at emission), and the
+        # emitter widens its communicator over the cp siblings named in ``axes``.
+        is_dp = "dp" in tuple(spec.axes)
         group = (
             None
             if is_dp
@@ -1064,7 +1146,24 @@ class _Builder:
         True and nothing is added — reproducing legacy, which only ever wires
         the MICROBATCH BOUNDARY. Blanket serialization would inflate the DAG
         with edges AstraSim then has to carry per rank.
+
+        **D2 — the slot-monotone precondition.** Every reachability query is
+        bounded below by ``slot(source)``; see :meth:`_reaches`. The invariant
+        that makes that exact is CHECKED here, once, in ``O(E)``, rather than
+        assumed: a violation would let a query answer "not implied" when it is,
+        which adds a redundant SCHEDULE edge and silently changes the emitted
+        DAG. Nothing downstream would catch it except a golden diff.
         """
+        nodes = self._nodes
+        for (dep_nid, node_nid) in self._edges:
+            if nodes[dep_nid].order[0] > nodes[node_nid].order[0]:
+                raise BuildError(
+                    "D2 violated before R3: edge "
+                    f"{nodes[dep_nid].name!r} (slot {nodes[dep_nid].order[0]}) -> "
+                    f"{nodes[node_nid].name!r} (slot {nodes[node_nid].order[0]}) "
+                    "runs backwards in schedule slots. R3's reachability bound "
+                    "assumes the R1+R2 graph is slot-monotone (see _reaches)."
+                )
         for dep in self._schedule.implied_deps(self._placement.devices_for):
             device = int(dep.device)
             before = self._chain_nodes.get((dep.before, device))
@@ -1076,7 +1175,16 @@ class _Builder:
                 )
             source = before[self._chain_by_device[(dep.before, device)].exit]
             target = after[self._chain_by_device[(dep.after, device)].entry]
-            if self._reaches(source, target):
+            floor = nodes[source].order[0]
+            if nodes[target].order[0] < floor:  # pragma: no cover - see D2
+                raise BuildError(
+                    "D2 violated by an implied_deps pair: "
+                    f"{dep.before!r} (slot {floor}) is scheduled AFTER "
+                    f"{dep.after!r} (slot {nodes[target].order[0]}) on device "
+                    f"{device}; Schedule.implied_deps must return a monotone "
+                    "slot sequence."
+                )
+            if self._reaches(source, target, slot_floor=floor):
                 continue
             self._add_dep(source, target, DepClass.SCHEDULE)
 
@@ -1407,6 +1515,19 @@ class _Builder:
             for chain in self._chains.get(optimizer, ()):
                 device = int(chain.device)
                 target = self._chain_nodes[(optimizer, device)][chain.entry]
+                # ONE ancestor set per target, grown in place, instead of one
+                # ancestor walk PER SOURCE. Every question this loop asks is
+                # "does <source> already reach <target>", and the answer is
+                # exactly ``source in ancestors``; re-deriving that set for each
+                # of a stage's gradient producers is what made R5 quadratic
+                # (measured on GPT 1T, ``pp=64 L=128 mb=512``: 64 optimizers x
+                # ~1024 backward items = ~65k full-graph walks, 427 s of a 441 s
+                # build). ``_grow_ancestors`` stops at nodes already in the set,
+                # so each node is visited at most once per target and the whole
+                # loop is O(V+E) — and it is EXACT, with no reliance on D2 or on
+                # any slot ordering, which matters here because R5 runs after R4
+                # and the sync lattice may carry edges D2 does not constrain.
+                ancestors = self._ancestors_of(target)
                 for item in sorted(producers, key=WorkItem.sort_key):
                     if int(self._schedule.stage_of(item)) != stage:
                         continue
@@ -1414,13 +1535,14 @@ class _Builder:
                     if entry is None:
                         continue
                     source = self._chain_nodes[(item, device)][entry.exit]
-                    if source == target or self._reaches(source, target):
+                    if source == target or source in ancestors:
                         continue
                     self._add_dep(source, target, DepClass.DATA_FLOW)
                     self._r5_edges.append((source, target))
+                    self._grow_ancestors(ancestors, source)
                 # R5b — the gradient the optimizer applies is the REDUCED one.
                 for source in sorted(reducers.get((stage, device), ())):
-                    if source == target or self._reaches(source, target):
+                    if source == target or source in ancestors:
                         continue
                     if self._reaches(target, source):
                         raise BuildError(
@@ -1429,6 +1551,7 @@ class _Builder:
                             f"(stage {stage}, device {device})"
                         )
                     self._add_dep(source, target, DepClass.DATA_FLOW)
+                    self._grow_ancestors(ancestors, source)
                     self._r5_edges.append((source, target))
                 # R5c — and anything that broadcasts the UPDATED parameters runs
                 # after it. Must land WITH R5b, never alone: excluding ZeRO-2's
@@ -1439,6 +1562,11 @@ class _Builder:
                 # correct 0.09309056 s, against 0.09766584 s for the inverted
                 # ordering. Only the pair is right.
                 exit_nid = self._chain_nodes[(optimizer, device)][chain.exit]
+                # R5c asks the MIRROR question ("does the optimizer's exit reach
+                # this sink"), so it needs the sink's ancestors, not the
+                # target's. There are only a handful of post-update collectives
+                # per (stage, device) — unlike R5's producer list — so this side
+                # stays a direct query.
                 for sink in sorted(after_update.get((stage, device), ())):
                     if sink == exit_nid or self._reaches(exit_nid, sink):
                         continue
@@ -1679,7 +1807,7 @@ class _Builder:
                     coll=node.coll,
                     size_bytes=node.size_bytes,
                     participants=node.participants,
-                    interconnect=canonical_axis_label(node.axes) if node.axes else None,
+                    interconnect=_pricing_axis(node.axes),
                     is_dp=node.is_dp,
                     label=label,
                     group=node.group,

@@ -308,6 +308,13 @@ class TimeCalculationLLM(TimeCalculation):
                 "ViT inference does not support execution_backend.astra.mode='full_astrasim_flattened'."
             )
 
+        #: Whether ``calc_time_llm`` also runs the memory pass. Default True =
+        #: today's behavior. It is a separate OUTPUT, not a step of the timing
+        #: computation, and in the COARSE-emitting modes it dominates wall clock
+        #: because the replay needs a FINE program nothing else built.
+        self.estimate_memory = bool(
+            getattr(getattr(self, "sw_config", None), "estimate_memory", True)
+        )
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0
@@ -333,16 +340,39 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_astrasim_per_rank_backward_moe: Optional[List[float]] = None
 
     def _sequence_parallel_degree(self) -> int:
-        """Return tensor-parallel degree used for sequence-parallel collectives.
-            return 1 if no sequence parallelism is used.
-            return tp if tp-sp is True and no context parallelism is used
-            return cp if context parallelism is used
+        """How many ranks one SEQUENCE is split across, for the memory census.
+
+            1   no sequence sharding
+            tp  tp-sp on, no context parallelism
+            cp  context parallelism on
+
+        **This is deliberately NOT ``Placement.activation_shard_size()``**, and
+        the difference is a documented modeling position, not a bug — see
+        ``tests/test_activation_sharding_contract.py``, which pins the full
+        divergence map cell by cell.
+
+        The short version: this function answers "how much of the residual is
+        RESIDENT on this device", while ``activation_shard_size`` answers "how
+        much of it CROSSES a pipeline boundary". Under plain TP those genuinely
+        differ — the device holds a replicated copy but Megatron's
+        ``--scatter-gather-tensors-in-pipeline`` splits it across the TP group
+        for the p2p send, so residency is ``/cp`` while transport is ``/(tp*cp)``
+        (BUG_LEDGER 10c, tp/cp half, resolved CORRECT with the code unchanged).
+
+        **The one cell that is a gap, not a position:** ``tp_sp and tp > 1 and
+        cp > 1``. There the residual IS sequence-sharded on BOTH axes, so
+        residency should be ``tp*cp`` too — but the ``elif`` below can only
+        return one axis and returns ``cp``, so memory is over-reported by ``tp``.
+        That is a fall-through, not a decision. It is left alone here because
+        changing it moves the memory peak on the four ``tp2cp2...sp1`` goldens
+        and is a modeling call the owner has not made; the contract test names
+        it explicitly so it cannot be mistaken for intent again.
         """
-        if self.tp_sp and self.cp == 1: #tensor parallelism only
+        if self.tp_sp and self.cp == 1:  # tensor parallelism only
             return self.tp
-        elif self.cp > 1: #context parallelism or cp-tp hybrid parallelism
+        elif self.cp > 1:  # context parallelism, or the cp+tp hybrid (see above)
             return self.cp
-        else: 
+        else:
             return 1
 
     def get_parallelism_mode(self):
@@ -3002,8 +3032,12 @@ class TimeCalculationLLM(TimeCalculation):
         the per-component ``ceil`` is preserved verbatim from the original so
         the rounding is unchanged.
         """
-        if not getattr(self, "dp", 1) or self.dp <= 1:
-            # No communication needed for dp=1
+        # BUG_LEDGER 19 — the payload exists whenever the REDUCTION GROUP
+        # (dp x cp) is non-trivial. The payload itself is the per-rank gradient
+        # volume and does not depend on the group size; the old `dp <= 1`
+        # short-circuit returned 0 bytes at `dp == 1, cp > 1`, where the cp
+        # ranks each hold a partial gradient that must still be summed.
+        if int(getattr(self, "dp", 1) or 1) * max(1, int(getattr(self, "cp", 1) or 1)) <= 1:
             return 0
         params = self.layer_params_per_rank(d, intermediate_size, moe=moe)
         grad_comm = self.precision.grad_communication
@@ -4519,36 +4553,51 @@ class TimeCalculationLLM(TimeCalculation):
         def _dp_comm_flag(required_every_cycle: bool) -> Dict[str, bool]:
             return {"ga_required_every_cycle": bool(required_every_cycle)}
 
+        # BUG_LEDGER 19 — the gradient reduction group is dp x cp, not dp.
+        # CP ranks hold REPLICATED parameters (`layer_params_per_rank` divides by
+        # tp only) and compute PARTIAL gradients: `_shard_gemm_descriptor` under
+        # ParallelismMode.CONTEXT sets `shard_m = ceil(m / cp)` for EVERY gemm
+        # type, including QKV/FFN1/FFN2/OUT_PROJ. Partial contributions that are
+        # never summed are not a modeling simplification, they are a wrong
+        # gradient -- and the only cp-axis collectives in the model
+        # (COMMUNICATION_RULES) are ring-attention ACTIVATION collectives, which
+        # reduce dL/dx, not dL/dW. Megatron reduces over the DP x CP group.
+        # The composite axis is DECLARED here; nothing downstream may recover it
+        # from a participant count (K5).
+        grad_cp = max(1, int(self.cp))
+        grad_axis = "dp" if grad_cp == 1 else "dp*cp"
+        grad_participants = int(self.dp) * grad_cp
+
         metadata = {
             'transformer_dense': {
                 'size': reduction_sizes_dense,
                 'type': grad_collective,
-                'participants': self.dp,
-                'interconnect_type': 'dp',
+                'participants': grad_participants,
+                'interconnect_type': grad_axis,
                 'local_comp_time': local_comp_dense,
                 **_dp_comm_flag(False),
             },
             'transformer_moe': {
                 'size': reduction_sizes_moe,
                 'type': grad_collective,
-                'participants': self.dp,
-                'interconnect_type': 'dp',
+                'participants': grad_participants,
+                'interconnect_type': grad_axis,
                 'local_comp_time': local_comp_moe,
                 **_dp_comm_flag(False),
             },
             'embedding': {
                 'size': embedding_size,
                 'type': grad_collective,
-                'participants': self.dp,
-                'interconnect_type': 'dp',
+                'participants': grad_participants,
+                'interconnect_type': grad_axis,
                 'local_comp_time': 0,
                 **_dp_comm_flag(False),
             },
             'softmax': {
                 'size': softmax_size,
                 'type': grad_collective,
-                'participants': self.dp,
-                'interconnect_type': 'dp',
+                'participants': grad_participants,
+                'interconnect_type': grad_axis,
                 'local_comp_time': 0,
                 **_dp_comm_flag(False),
             },
@@ -4702,21 +4751,26 @@ class TimeCalculationLLM(TimeCalculation):
                 )
 
         # these are used for dp all-reduce/reduce-scatter.
-        if self._is_vit_model():
-            embedding_params = llm_util.vit_patch_embed_param_count(
-                hidden_dim=hidden_dim,
-                patch_size=self.patch_size,
-                in_chans=self.in_chans,
-            )
-            output_params = llm_util.vit_head_param_count(
-                hidden_dim=hidden_dim,
-                num_classes=getattr(self, "num_classes", 0),
-            )
-            embedding_size = math.ceil(self.precision.grad_communication * embedding_params)
-            softmax_size = math.ceil(self.precision.grad_communication * output_params)
-        else:
-            embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
-            softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
+        #
+        # BUG_LEDGER 15 (FIXED) — the endpoint gradient PAYLOAD is the endpoint
+        # parameter census, same as the apply-grad PRICE (item 12) and the
+        # memory census (``_param_stats_per_rank``). It used to be written
+        # inline here as ``grad_comm * vocab * hidden`` with:
+        #   * no ``/tp``, contradicting a census that divides;
+        #   * no ``tied_embeddings`` awareness, so a tied projection whose
+        #     apply-grad price is correctly 0.0 s still all-reduced a full
+        #     ``hidden x vocab`` payload — every golden runs tied;
+        #   * an ``+ seq_len * hidden * batch`` term that is ACTIVATION-shaped,
+        #     not parameter-shaped (a learned position table is
+        #     ``seq_len * hidden`` with no batch factor, and it is not a
+        #     gradient the dp group reduces per microbatch).
+        # This was the LAST disagreement with the census; items 12/13/18
+        # removed the others.
+        embedding_params, output_params = self._embedding_softmax_params_per_rank(
+            hidden_dim, vocab_size
+        )
+        embedding_size = math.ceil(self.precision.grad_communication * embedding_params)
+        softmax_size = math.ceil(self.precision.grad_communication * output_params)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
 
         ep_dense_sync_bytes_dense = 0
@@ -5509,8 +5563,25 @@ class TimeCalculationLLM(TimeCalculation):
             raise NotImplementedError(f"{exc}. Selected execution mode '{mode.value}'.") from exc
         time_fw_bw = result.total_time
 
-        memory_program = dispatcher.build_fine_program_for_memory()
-        _, training_peak_gb = mem_estimator.simulate_peak(memory_program, memory_data, mode="training", filename="memory_graph_training")
+        # The memory pass is a SECOND OUTPUT of this call, not a step of the
+        # timing one: `tot_time` never reads it, but `simulate_peak` sets
+        # `memory_peak_gb` / capacity / headroom on `self` and writes the
+        # memory-summary artifacts, and memory peaks are T1-gated. It is also
+        # the dominant cost at scale in the COARSE-emitting modes, because
+        # nothing else has built a FINE program there and one must be built for
+        # the replay (GPT 1T: ~5 min against ~23 s for the coarse build).
+        #
+        # So it is separable, and separating it is the point: `estimate_memory`
+        # defaults to today's behavior and a caller that only wants a time can
+        # turn it off without touching this function.
+        if self.estimate_memory:
+            memory_program = dispatcher.build_fine_program_for_memory()
+            mem_estimator.simulate_peak(
+                memory_program,
+                memory_data,
+                mode="training",
+                filename="memory_graph_training",
+            )
 
 
 

@@ -205,36 +205,40 @@ def raw_comm_metadata(cfg: Cfg) -> Dict[str, Dict[str, Any]]:
     flags, with byte values stubbed (bytes are upstream math; the seam is the
     dict shape)."""
     grad = REDUCE_SCATTER if (cfg.zero_stage >= 2 and cfg.dp > 1) else ALL_REDUCE
+    # BUG_LEDGER 19 — mirror train_timing's dp x cp gradient reduction group.
+    grad_cp = max(1, int(cfg.cp))
+    grad_axis = "dp" if grad_cp == 1 else "dp*cp"
+    grad_participants = int(cfg.dp) * grad_cp
     md: Dict[str, Dict[str, Any]] = {
         "transformer_dense": {
             "size": 1000.5,
             "type": grad,
-            "participants": cfg.dp,
-            "interconnect_type": "dp",
+            "participants": grad_participants,
+            "interconnect_type": grad_axis,
             "local_comp_time": 3.5,
             "ga_required_every_cycle": False,
         },
         "transformer_moe": {
             "size": 2000.5,
             "type": grad,
-            "participants": cfg.dp,
-            "interconnect_type": "dp",
+            "participants": grad_participants,
+            "interconnect_type": grad_axis,
             "local_comp_time": 4.5,
             "ga_required_every_cycle": False,
         },
         "embedding": {
             "size": 3000.25,
             "type": grad,
-            "participants": cfg.dp,
-            "interconnect_type": "dp",
+            "participants": grad_participants,
+            "interconnect_type": grad_axis,
             "local_comp_time": 0,
             "ga_required_every_cycle": False,
         },
         "softmax": {
             "size": 4000.75,
             "type": grad,
-            "participants": cfg.dp,
-            "interconnect_type": "dp",
+            "participants": grad_participants,
+            "interconnect_type": grad_axis,
             "local_comp_time": 0,
             "ga_required_every_cycle": False,
         },

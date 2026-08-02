@@ -51,6 +51,14 @@ tech_param:
     latency: 0
     util: 1
 
+# BUG_LEDGER 20 — NON-MONOTONE MEMORY HIERARCHY (deliberate, documented).
+# This config's LAST level (l3 = DRAM) is NOT its SLOWEST: the stacked-DRAM
+# bandwidth here exceeds SRAM-L2's. `roofline`'s multi-level branch takes a max
+# over per-level times, so nothing is mispriced today -- but LEVEL ORDER IS NOT
+# A SPEED PROXY in this file. Any code that reaches for `num_levels-1` meaning
+# "the slowest level" (rather than "DRAM, where this buffer lives") is wrong
+# here. 10 of the 96 parseable shipped configs are like this: A100_SXM4_80GB
+# and H100_SXM5_80GB cases C-G. The other 86 are monotone.
 memory_hierarchy:
   l0:
     type: SRAM-R

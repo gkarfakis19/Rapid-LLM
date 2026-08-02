@@ -81,6 +81,13 @@ from memory_estimation import mem_kind_from_op_name
 
 from program.block import BlockTemplate, GemmEntry
 from program.groups import CommunicatorFactory, GroupError, canonical_axis_label
+from program.axes import (
+    CLUSTER_AXES as _REGISTRY_CLUSTER_AXES,
+    PIPELINE_AXES,
+    REPLICA_AXES,
+    activation_sharding_axes,
+    axis_sizes_from,
+)
 from program.layout import CANONICAL_AXES, RankLayout, cluster_coords
 from program.types import DP_AXIS, AxisName, CommKey, Coords, DeviceId, LayerId, StageId
 from program.work import (
@@ -130,14 +137,17 @@ class Granularity(Enum):
 #: emission, never here — INTERFACES §3.3).
 _GRANULARITY_AXES: Mapping[Granularity, Tuple[AxisName, ...]] = MappingProxyType(
     {
-        Granularity.COARSE: ("pp", "dp"),
+        # Derived from AxisRole (program.axes): COARSE devices ARE stages,
+        # so it materializes the PIPELINE + REPLICA axes; BLOCK is one layer
+        # over the cluster; FINE is everything.
+        Granularity.COARSE: PIPELINE_AXES + REPLICA_AXES,
         Granularity.FINE: CANONICAL_AXES,
-        Granularity.BLOCK: ("tp", "cp", "ep"),
+        Granularity.BLOCK: _REGISTRY_CLUSTER_AXES,
     }
 )
 
 #: Axes forming the transformer cluster (one pipeline stage).
-CLUSTER_AXES: Tuple[AxisName, ...] = ("tp", "cp", "ep")
+CLUSTER_AXES: Tuple[AxisName, ...] = _REGISTRY_CLUSTER_AXES
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +313,7 @@ class Placement:
         if full is None or not full.axis_order:
             full = canonical_layout(
                 {
-                    "tp": degrees.tp,
-                    "cp": degrees.cp,
-                    "ep": degrees.ep,
-                    "pp": degrees.pp,
-                    "dp": degrees.dp,
+                    **axis_sizes_from(degrees),
                 }
             )
 
@@ -321,11 +327,13 @@ class Placement:
                 max(1, int(sizes[axis])) if axis in sizes else degrees.of(axis)
             )
         cluster = degrees.cluster_size()
-        layout_cluster = self._sizes["tp"] * self._sizes["cp"] * self._sizes["ep"]
+        layout_cluster = 1
+        for _axis in CLUSTER_AXES:
+            layout_cluster *= max(1, int(self._sizes[_axis]))
         if layout_cluster != cluster:
             raise PlacementError(
                 "Inconsistent tensor/context/expert parallel factors: layout says "
-                f"tp={self._sizes['tp']}, cp={self._sizes['cp']}, ep={self._sizes['ep']} "
+                + ", ".join(f"{a}={self._sizes[a]}" for a in CLUSTER_AXES) + " "
                 f"(product {layout_cluster}) but the degrees say {cluster}"
             )
 
@@ -417,7 +425,12 @@ class Placement:
         """
         if self._granularity is Granularity.COARSE:
             return 1
-        return max(1, int(self._sizes["tp"]) * int(self._sizes["cp"]))
+        # ``tp * cp`` derived from ``AxisSpec.shards_activations`` rather than
+        # written as a literal product — the 10c fact now lives on the axes.
+        size = 1
+        for _axis in activation_sharding_axes():
+            size *= max(1, int(self._sizes[_axis]))
+        return max(1, size)
 
     def num_stages(self) -> int:
         return int(self._degrees.pp)
@@ -462,10 +475,7 @@ class Placement:
             self._layout.axis_order,
             rank,
             stage_id,
-            tp_size=self._sizes["tp"],
-            cp_size=self._sizes["cp"],
-            ep_size=self._sizes["ep"],
-            pp_size=self._sizes["pp"],
+            sizes=self._sizes,
         )
         return DeviceId(self._layout.linearize(coords))
 
@@ -485,10 +495,7 @@ class Placement:
                 self._layout.axis_order,
                 rank,
                 int(coords.get("pp", 0)),
-                tp_size=self._sizes["tp"],
-                cp_size=self._sizes["cp"],
-                ep_size=self._sizes["ep"],
-                pp_size=self._sizes["pp"],
+                sizes=self._sizes,
             )
             if all(coords.get(axis, 0) == value for axis, value in candidate.items()):
                 return rank

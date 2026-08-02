@@ -54,6 +54,9 @@ class GradAccumPolicy:
 
     name: str = "legacy"
     dp: int = 1
+    #: BUG_LEDGER 19 — the gradient reduction group is dp x cp, so "is there a
+    #: data-parallel collective at all" is a question about ``dp * cp``.
+    cp: int = 1
     zero_stage: int = 0
     cycle: GradAccumCycle = GradAccumCycle.FINAL
     mode: DpMicrobatchMode = DpMicrobatchMode.EVERY_MB
@@ -61,7 +64,9 @@ class GradAccumPolicy:
     last_microbatch: int = 0
 
     def emits(self, spec: CommSpec, microbatch: Optional[MicroBatch]) -> bool:
-        if self.dp <= 1:
+        # BUG_LEDGER 19: the reduction GROUP, dp * cp — at dp == 1, cp > 1 the
+        # cp ranks still hold partial gradients that have to be summed.
+        if self.dp * max(1, int(self.cp)) <= 1:
             return False
         if self.cycle is GradAccumCycle.NONFINAL:
             return spec.ga_required_every_cycle
@@ -87,6 +92,7 @@ def grad_accum_policy_for(fw: FrozenWorkload) -> GradAccumPolicy:
     return GradAccumPolicy(
         name="legacy",
         dp=int(fw.spec.degrees.dp),
+        cp=int(getattr(fw.spec.degrees, "cp", 1) or 1),
         zero_stage=int(run.zero_stage),
         cycle=run.grad_accum_cycle,
         mode=run.dp_microbatch_mode,
