@@ -75,7 +75,7 @@ L1  work.py             WorkItem(kind, microbatch, layer, direction) — what wo
     replacing the skip_non_comm_children / skip_comm_children boolean escape hatches.
 
 L2  placement.py        Placement: WorkItem -> DeviceCoord(s). GRANULARITY IS A PARAMETER:
-    block.py            COARSE = one op on the stage; FINE = expand via BlockTemplate;
+    block.py            PIPELINE = one op on the stage; FLAT = expand via BlockTemplate;
                         BLOCK = one layer over the (tp,cp,ep) sublayout.
                         Replaces pipeline_coarse.py + pipeline_fine.py + block_program.py
                         Communicator groups are CONSTRUCTED here from (axis, fixed coords)
@@ -154,7 +154,7 @@ Each lands independently with T1/T3/T5 green. Only P5 and P7 may move T2 numbers
 | **P5** L4 direct IR — **the rebaseline** | ✅ **COMPLETE, rebaseline APPROVED** | `f06ef6f`, `5191c9f`, `70938f8` | `build()` is the only Program constructor. `legacy_lowering.py`, `schedule.py`, `pipeline_fine.py`, `pipeline_coarse.py`, `block_program.py`, `transforms.py`, the proto graphs, the clone cache and all ordering metadata are **deleted**. Delta table: `REBASELINE.md`. Owner accepted the residual T2 movement (max \|Δ\| 0.215% on `total_time`, −12.554% on one rank sample); goldens recaptured; **T4 ledger 449 → 0 entries**. |
 | **P6** L5 consumers onto the IR | ✅ **COMPLETE** | `f06ef6f` | `analytic_sim`, `memory_sim`, `retime`, `viz` all read the `Program`. The IR-level tie discipline is normative and was **measured to be free**: program order (ascending uid) gives bit-identical totals to the deleted proto-graph evaluator on all 10 analytical + all hybrid specs, and it is the order AstraSim already consumes as node-id priority. |
 | **P7** Bug fixes, one commit each | 🔶 **PARTIAL** | `11fe448` (A1), `f06ef6f` (A3) | **A1** (AstraSim cache key omitted all DAG structure) fixed first, as planned — it masked exactly the changes the restructure makes. **A3** (`is_moe_layer` dropped on the tp-overlap head split → memory double-count) fixed with the cutover. **A4** and **A5** are recorded as **dormant / unreachable today** (no reachable config found) and are not fixed. **A2** and **A6** are the ones with real modelling content and large predicted movement, and each needs its own delta table + owner approval — `BUG_LEDGER.md` is the authority on their current state. |
-| **P8** Capabilities | 🔶 **IN PROGRESS** | — | Flattened MoE: the audit's blocker was that the memory path does **not** validate MoE comm topology (`memory_sim` reads no comm attributes; template edges are created at `duration=0`), so it is real work at ~6 sites. The FINE MoE program builds for the memory replay but its group-order postcondition did not hold at the cutover (`REBASELINE.md` §6). A second sharding policy (FSDP prefetch) is deferred to a student project (#5 below). Check `equiv/configs.py` for the current matrix. |
+| **P8** Capabilities | 🔶 **IN PROGRESS** | — | Flattened MoE: the audit's blocker was that the memory path does **not** validate MoE comm topology (`memory_sim` reads no comm attributes; template edges are created at `duration=0`), so it is real work at ~6 sites. The FLAT MoE program builds for the memory replay but its group-order postcondition did not hold at the cutover (`REBASELINE.md` §6). A second sharding policy (FSDP prefetch) is deferred to a student project (#5 below). Check `equiv/configs.py` for the current matrix. |
 | **P9** Cleanup + docs + student scaffolding | 🔶 **IN PROGRESS** | — | **Docs done:** `CONTEXT.md` rewritten to the current architecture (the M8 description with proto graphs and `legacy_lowering` is gone, and the historical part is marked as such); `TESTING.md` updated for the T1–T5 tier split, the ledger↔`equiv.capture` workflow, and the fact that the four `RAPID_*_DIFF` sweeps are replaced by one `RAPID_BUILD_DIFF` sweep; `REBASELINE.md` corrected (mesh2d attribution, cause (2) everywhere, the per-rank column, four arithmetic nits); `STUDENT_PROJECTS.md` written. **Code cleanup done:** `RunPolicy` owns `interleave_scale` (Class B item 8) and the `include_backward`/`include_optimizer` derivations; `WorkloadSpec.from_timing` is the single producer seam, and the five construction flows (`train_timing`, `inference_timing`, `llm_util.estimate_inference_memory`, `simulate_inference_graph`, the validation drivers) now all go through `_prepare_execution_graphs` → `LLMExecutionDispatcher(tc, workload)` with no per-caller re-derivation. **Still open:** `tests/test_program_ir.py`'s literal-id assertions were removed with the lowering pass they tested rather than rewritten against `canonicalize_bundle`. |
 
 **Net effect on the extension exercises** — the reason the restructure was done, re-run as
@@ -191,7 +191,7 @@ the lattice is *derived* rather than hardcoded. Lift attachment decisions out of
 name-keyed `comm_metadata` (bytes stay upstream); unify the two `should_emit_dp_comm` copies and the
 three-way-split EP-sync policy. *Gate: T1 exact, T2 exact.*
 
-**P3 — L2 placement + granularity unification.** One `placement.py` + `BlockTemplate`; COARSE/FINE/
+**P3 — L2 placement + granularity unification.** One `placement.py` + `BlockTemplate`; PIPELINE/FLAT/
 BLOCK become a parameter. Groups constructed from `RankLayout`, killing the participant-count
 inference. Honor `CommMeta.placement` (pre/post) in the fine path. Deletes the three-builder split.
 *Gate: T1 exact, T2 exact.*
@@ -265,7 +265,7 @@ policy or consumer behind a stable interface, and the existing gates prove they 
   sweeps were deleted with their builders in `f06ef6f`. Their determinism property is now held by
   the always-on `test_reemission_deterministic` (two separate processes, compared canonically) and
   by one env-gated whole-matrix sweep, `RAPID_BUILD_DIFF=1` on `tests/test_build.py`
-  (every spec × {COARSE, FINE}: **O1** field-for-field on the Program, then canonically on the
+  (every spec × {PIPELINE, FLAT}: **O1** field-for-field on the Program, then canonically on the
   bundle, then dlsim). See `docs/rewrite/TESTING.md` §Tier 3.
 - **T5 physical suites within existing error thresholds at every phase** — the real evidence that
   predictions did not move.

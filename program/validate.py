@@ -291,13 +291,18 @@ def _warn_group_races(program: Program) -> None:
             for consumer in op.consumers:
                 consumer_transfers[int(consumer)].append(op)
 
-    def preds(uid: int) -> List[int]:
-        op = ops[uid]
+    # The reverse adjacency is built ONCE, not re-derived per visited node.
+    # It used to be a closure called from inside the walk, so a check that
+    # visits N nodes rebuilt N little lists: 6.6M calls on GPT 175B, and V6
+    # asks ~295k of these queries. Same edges, same answers.
+    pred_list: List[List[int]] = []
+    for uid, op in enumerate(ops):  # ``ops`` is indexed BY uid (see below)
         if isinstance(op, TransferOp):
-            return [op.producer]
-        result = [int(d) for d in op.deps]
-        result.extend(t.producer for t in consumer_transfers.get(uid, ()))
-        return result
+            pred_list.append([int(op.producer)])
+            continue
+        entry = [int(d) for d in op.deps]
+        entry.extend(int(t.producer) for t in consumer_transfers.get(uid, ()))
+        pred_list.append(entry)
 
     def has_path(src: int, dst: int) -> bool:
         """Is there a dependency path src -> dst (src < dst)?"""
@@ -310,7 +315,7 @@ def _warn_group_races(program: Program) -> None:
             if cur in seen or cur < src:
                 continue
             seen.add(cur)
-            stack.extend(preds(cur))
+            stack.extend(pred_list[cur])
         return False
 
     per_device_group: Dict[Tuple[GroupKey, int], List[int]] = defaultdict(list)

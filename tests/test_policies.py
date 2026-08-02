@@ -551,18 +551,28 @@ def test_attach_mode_census_reproduces_the_interfaces_table() -> None:
     assert set(rows) == expected_rows
 
     modes = Counter(req.mode for req in reqs)
-    assert modes[AttachMode.BEFORE] == 1  # S1 only
+    # BEFORE is S1 PLUS the stage-entry gathers of rows S8/S15 (BUG_LEDGER A6,
+    # fixed 2026-08-02). A prefetch anchor is a DEVICE-LOCAL notion: where the
+    # window ``layer -+ prefetch_depth`` lands on another stage, the gather is
+    # issued BEFORE the work it feeds on its own device instead of PARALLEL_TO
+    # a foreign stage's op. At pp=2 that is one boundary per direction per
+    # microbatch, so mb=3 gives 3 forward + 3 backward.
+    boundary_gathers = 2 * cfg.mb
+    assert modes[AttachMode.BEFORE] == 1 + boundary_gathers
     assert modes[AttachMode.AFTER] == rows["S2"] + rows["S4"] + rows["S9"] + rows["S12"]
     assert modes[AttachMode.PARALLEL_TO] == (
         rows["S6"] + rows["S7"] + rows["S8"] + rows["S11"]
         + rows["S13"] + rows["S14"] + rows["S15"] + rows["S16"]
-    )
+    ) - boundary_gathers
     assert AttachMode.OVERLAP_WITH not in modes  # OverlapPolicy-only, honestly
 
     via = Counter(req.via for req in reqs if req.mode is AttachMode.PARALLEL_TO)
     assert via[VIA_NON_DATA_FLOW] == rows["S6"] + rows["S14"]
-    assert via[VIA_DATA_FLOW] > 0  # the cross-device S8/S15 instances
     assert via[VIA_ALL] > 0
+    # VIA_DATA_FLOW was "the cross-device S8/S15 instances". Those are exactly
+    # the instances A6 re-anchored, and a same-stage anchor takes VIA_ALL, so a
+    # surviving PARALLEL_TO S8/S15 can no longer be cross-device.
+    assert via[VIA_DATA_FLOW] == 0
 
     # every non-PARALLEL_TO requirement carries the neutral via
     for req in reqs:
@@ -1488,11 +1498,11 @@ def test_b3_byte_source_honors_instances_not_cluster_size() -> None:
     ``CEIL_DIV_CLUSTER`` always divided by ``fw.spec.cluster_size()``.
 
     The two differ exactly where it matters. ``Placement.cluster_size()`` is 1
-    at COARSE (the stage IS the device) while ``fw.spec.cluster_size()`` is
-    always ``tp*cp*ep``, and legacy COARSE uses the RAW cross-layer byte count
-    (``pipeline_coarse.py:222,238``) where legacy FINE divides
+    at PIPELINE (the stage IS the device) while ``fw.spec.cluster_size()`` is
+    always ``tp*cp*ep``, and legacy PIPELINE uses the RAW cross-layer byte count
+    (``pipeline_coarse.py:222,238``) where legacy FLAT divides
     (``pipeline_fine.py:645``). At ``tp=2`` the pre-fix call returned 2048.0
-    where COARSE wants 4096.0 — wrong cross_layer bytes on every
+    where PIPELINE wants 4096.0 — wrong cross_layer bytes on every
     coarse/hybrid/hierarchical row with ``cluster_size > 1``.
     """
     fw = make_workload(Cfg(dp=1, tp=2, cp=1, ep=1)).freeze()
@@ -1501,9 +1511,9 @@ def test_b3_byte_source_honors_instances_not_cluster_size() -> None:
     assert raw == 4096.0
 
     split = ByteSource("cross_layer", ByteSplit.CEIL_DIV_CLUSTER)
-    # COARSE: Placement.cluster_size() == 1 -> the RAW value.
+    # PIPELINE: Placement.cluster_size() == 1 -> the RAW value.
     assert split.bytes_for(fw, 1) == raw
-    # FINE: cluster_size instances -> divided.
+    # FLAT: cluster_size instances -> divided.
     assert split.bytes_for(fw, 2) == raw / 2
     # ... and the divisor tracks `instances`, not the workload's cluster.
     assert split.bytes_for(fw, 4) == raw / 4

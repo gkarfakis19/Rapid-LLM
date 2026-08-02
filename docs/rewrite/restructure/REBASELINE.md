@@ -128,7 +128,7 @@ object with both producers as deps — and, since 2026-07-29, its SEND carries *
 > **Every one of the nine down-movers is cause (2), the R3 per-device over-constraint removal.**
 
 **(2) R3 is per DEVICE** (INTERFACES §4.3) — **the whole of the T2 movement.** Legacy attached the
-COARSE cross-microbatch GPipe boundary to *every cluster rank of a stage* and lowered each
+PIPELINE cross-microbatch GPipe boundary to *every cluster rank of a stage* and lowered each
 cross-device pair to a zero-byte `pipeline_send_control` message; `build()` records the boundary as
 a device-local dep, which needs no wire.
 
@@ -182,7 +182,7 @@ and shape hold exactly. Timing unaffected. **Unchanged from the first revision.*
 
 `train:hierarchical:dp2tp2cp1pp2mb2sp1:moe:ep2`, `comm_groups.json`: gids 1000..1003 hold the member
 sets `[0],[2],[1],[3]` instead of `[0],[1],[2],[3]`. All four are **singletons** (the ep-axis
-communicator of a COARSE program, whose device space carries no ep axis), and a singleton wire group
+communicator of a PIPELINE program, whose device space carries no ep axis), and a singleton wire group
 is emitted as a zero-duration `*_noop` COMP, never as a collective (Class B 10g). The *set* of member
 sets is unchanged; only which gid each interned under moved. `collectives_by_group` — the T1 quantity
 keyed on the member set — is identical. **Unchanged from the first revision.**
@@ -202,7 +202,7 @@ verification flagged, resolved.
 
 ### 2.6 Analytical bit-exactness, proved separately
 
-The 10 fully-analytical specs emit no ETs. Verified by evaluating the COARSE program of every
+The 10 fully-analytical specs emit no ETs. Verified by evaluating the PIPELINE program of every
 analytical **and** hybrid case through `program.analytic_sim`, `repr`-identical to the golden:
 
 ```
@@ -472,7 +472,7 @@ and `tests/golden_equiv/bug_ledger.json` is back to `"entries": []` — its stea
   deliberate modeling change with its own delta table — not a cutover artifact — so P5 makes the two
   evaluators agree on the *current* anchor instead (§4.2).
 * **BUG_LEDGER D 11** *(new, Class D)* — **nothing orders the optimizer after its stage's gradient
-  reducer**, at HEAD and at HEAD~1 alike (0 of 9 COARSE / 0 of 18 FINE paths). R5 deliberately stops
+  reducer**, at HEAD and at HEAD~1 alike (0 of 9 PIPELINE / 0 of 18 FLAT paths). R5 deliberately stops
   at the backward COMPUTE items. If the weight update must also wait for the all-reduce that produces
   the gradients it applies, add the reducer's `SyncKey` to R5's source set; totals will **increase**,
   most at large `dp` and small `pp`.
@@ -501,11 +501,11 @@ AstraSim scheduling contract and reports no blocked rank and no cycle;
 * `test_reemission_deterministic` — two independent whole-matrix runs, compared canonically — is
   green on all 42;
 * `tests/test_build.py::test_build_is_deterministic_and_emits_a_completable_bundle`
-  (`RAPID_BUILD_DIFF=1`, 42 specs × {COARSE, FINE}) asserts **O1** field-for-field on the Program and
+  (`RAPID_BUILD_DIFF=1`, 42 specs × {PIPELINE, FLAT}) asserts **O1** field-for-field on the Program and
   then canonically on the bundle, plus dlsim.
 
-One bundle is deliberately **built but not emitted**: FINE + MoE. Flattened MoE execution is rejected
-in production and lands in P8; the FINE MoE program exists only for the memory replay, and its
+One bundle is deliberately **built but not emitted**: FLAT + MoE. Flattened MoE execution is rejected
+in production and lands in P8; the FLAT MoE program exists only for the memory replay, and its
 group-order postcondition does not hold yet (`ext_moe_flat.md`).
 
 ---
@@ -572,7 +572,7 @@ env RAPID_BUILD_DIFF=1 RAPID_ASTRA_CACHE_MODE=NO_CACHE LD_LIBRARY_PATH=... \
     ./.venv/bin/python -m pytest tests/test_build.py -q -p no:randomly
 ```
 
-This is the **only** surviving builder sweep. The four `RAPID_{FINE,BLOCK,COARSE,HIER}_DIFF`
+This is the **only** surviving builder sweep. The four `RAPID_{FLAT,BLOCK,PIPELINE,HIER}_DIFF`
 sweeps were deleted with the builders they differentially compared (`f06ef6f`); see
 `docs/rewrite/TESTING.md` §Tier 3 for what replaced them.
 
@@ -722,7 +722,7 @@ ZeRO-2 and **silently dropped the EP gradient sync** (row S12, `policies/routing
 set the new flag — the phase filter had been picking it up for free. Item 11's own bug, reintroduced
 on the ep axis, one commit after fixing it.
 
-Measured on `dp2 ep2 moe pp2` FINE: **16 `ep_sync` collectives became graph sinks, 0 edges to the
+Measured on `dp2 ep2 moe pp2` FLAT: **16 `ep_sync` collectives became graph sinks, 0 edges to the
 optimizer**, against 16 edges before.
 
 **And it is not free — a `total_time` diff says it is.** On

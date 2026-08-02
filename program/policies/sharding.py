@@ -302,7 +302,7 @@ def _spread_for(spec: CommSpec) -> SyncSpread:
     ``group=None, is_dp=True`` and dp membership stays an emission-time stamp
     over pre-dp device ids).
 
-    Nothing moves where ``cluster_size == 1``: COARSE placement reports a
+    Nothing moves where ``cluster_size == 1``: PIPELINE placement reports a
     cluster of one (the stage IS the device) and ``tp*cp*ep == 1`` workloads
     have one cluster rank, so ``PER_CLUSTER_RANK`` and ``CLUSTER_RANK_0``
     resolve to the same single device.
@@ -525,6 +525,73 @@ class ZeRO3(ZeRO2):
         """
         return VIA_ALL if ctx.same_stage(host, target) else VIA_DATA_FLOW
 
+    # -- the prefetch anchor is a DEVICE-LOCAL notion (BUG_LEDGER A6) -------
+    def _prefetch_attach(
+        self,
+        target: WorkItem,
+        candidates: Sequence[WorkItem],
+        ctx: ShardingContext,
+    ) -> Tuple[WorkItem, AttachMode, Any]:
+        """``(anchor, mode, via)`` for a parameter gather feeding ``target``.
+
+        ``candidates`` is the prefetch window, DEEPEST FIRST. The first entry
+        that shares ``target``'s stage is the anchor and the gather runs
+        ``PARALLEL_TO`` it — today's behavior whenever the window stays on one
+        device, which is every layer except a stage's entry one.
+
+        When none does, ``target`` IS its stage's entry layer, so "``depth``
+        layers earlier" names a layer on ANOTHER device. Anchoring there is what
+        **BUG_LEDGER A6** is: ``PARALLEL_TO`` means ``deps(req) += deps(anchor)``
+        and :meth:`~program.build._Builder._resolve_anchor` falls back to every
+        chain of an anchor with none on the requirement's device, so the gather
+        inherited the *foreign* stage's predecessor set. That is not a
+        dependency in any sense — the gather is a **dp-axis** collective over
+        ``stage(target)``'s replicas, no rank of another stage participates, and
+        no other stage produces its input. Prefetch depth is a device-local
+        notion; at a stage boundary "one layer earlier" resolves to a layer where
+        it means nothing.
+
+        The local reading is ``BEFORE(target)``: the gather takes ``target``'s
+        deps (the inbound cross-stage transfer) and ``target`` waits for it —
+        i.e. *a stage issues its entry layer's gather when it becomes active*,
+        which is what real FSDP + PP does, each stage prefetching against its own
+        schedule. It is the same shape row **S1** already uses for the forward
+        entry gather, so no new attach vocabulary is needed.
+
+        Note the fallback can only fire at a stage boundary: on stage 0 the
+        layers shallower than ``prefetch_depth`` are row S7's, off the embedding.
+        So it never turns a gather into a program ROOT (which
+        ``analytic_sim._ROOT_COMM_IS_UNTIMED`` would then price at zero) —
+        asserted by ``test_no_zero3_gather_becomes_an_untimed_root``.
+        """
+        for host in candidates:
+            if ctx.same_stage(host, target):
+                return host, AttachMode.PARALLEL_TO, self._via(host, target, ctx)
+        return target, AttachMode.BEFORE, VIA_ALL
+
+    def _forward_prefetch_window(
+        self, microbatch: int, layer: LayerId, ctx: ShardingContext
+    ) -> Tuple[WorkItem, ...]:
+        """Row S8's candidate anchors, deepest first: layers
+        ``[layer - depth, layer)``. Only reached at ``layer >= depth``."""
+        return tuple(
+            ctx.layer_item(Direction.FORWARD, microbatch, candidate)
+            for candidate in range(layer - int(self.prefetch_depth), layer)
+        )
+
+    def _backward_prefetch_window(
+        self, microbatch: int, layer: LayerId, ctx: ShardingContext
+    ) -> Tuple[WorkItem, ...]:
+        """Row S15's candidate anchors, deepest first: layers
+        ``(layer, layer + depth]`` walked DOWN, with :meth:`_backward_host`'s
+        past-the-end rule (the backward softmax) applied to each."""
+        out: List[WorkItem] = []
+        for ahead in range(layer + int(self.prefetch_depth), layer, -1):
+            host = self._backward_host_at(microbatch, ahead, ctx)
+            if host not in out:
+                out.append(host)
+        return tuple(out)
+
     def _cross_device_forward_hosts(
         self, microbatch: int, ctx: ShardingContext
     ) -> Tuple[WorkItem, ...]:
@@ -538,9 +605,22 @@ class ZeRO3(ZeRO2):
         return tuple(hosts)
 
     def _backward_host(self, microbatch: int, layer: LayerId, ctx: ShardingContext) -> WorkItem:
-        num_layers = ctx.fw.spec.shape.num_layers
-        ahead = layer + int(self.prefetch_depth)
-        if ahead > num_layers - 1:
+        """The UNCLAMPED host ``prefetch_depth`` layers ahead of ``layer``.
+
+        Row S14 uses it to DETECT stage boundaries, which is a question about
+        where the unclamped arithmetic lands, so it must stay unclamped. Row S15
+        goes through :meth:`_prefetch_attach` instead (BUG_LEDGER A6).
+        """
+        return self._backward_host_at(
+            microbatch, layer + int(self.prefetch_depth), ctx
+        )
+
+    def _backward_host_at(
+        self, microbatch: int, ahead: LayerId, ctx: ShardingContext
+    ) -> WorkItem:
+        """The backward item at layer ``ahead``, or the backward softmax when
+        ``ahead`` runs past the last layer."""
+        if ahead > ctx.fw.spec.shape.num_layers - 1:
             return ctx.work.require(
                 WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=microbatch
             )
@@ -675,7 +755,7 @@ class ZeRO3(ZeRO2):
         self, work: WorkItem, ctx: ShardingContext
     ) -> Tuple[SyncRequirement, ...]:
         """Row S8: layer ``l``'s parameter gather prefetched at layer
-        ``l - prefetch_depth``."""
+        ``l - prefetch_depth``, clamped to ``l``'s own device (A6)."""
         layer = int(work.layer)
         depth = int(self.prefetch_depth)
         if layer < depth:
@@ -683,15 +763,17 @@ class ZeRO3(ZeRO2):
         spec = ctx.emits(ZERO3_TRANSFORMER_KEY, work.microbatch)
         if spec is None:
             return ()
-        host = ctx.layer_item(Direction.FORWARD, work.microbatch, layer - depth)
+        host, mode, via = self._prefetch_attach(
+            work, self._forward_prefetch_window(work.microbatch, layer, ctx), ctx
+        )
         return (
             SyncRequirement.from_spec(
                 spec,
                 key=SyncKey(ZERO3_TRANSFORMER_KEY, SyncPhase.FWD, work.microbatch, layer),
                 place_on=work,
-                mode=AttachMode.PARALLEL_TO,
+                mode=mode,
                 anchors=(host,),
-                via=self._via(host, work, ctx),
+                via=via,
                 spread=_spread_for(spec),
                 origin="S8",
             ),
@@ -767,21 +849,24 @@ class ZeRO3(ZeRO2):
         self, work: WorkItem, ctx: ShardingContext
     ) -> Tuple[SyncRequirement, ...]:
         """Row S15: layer ``l``'s parameter gather prefetched at layer
-        ``l + prefetch_depth`` (or at the backward softmax past the end)."""
+        ``l + prefetch_depth`` (or at the backward softmax past the end),
+        clamped to ``l``'s own device (A6)."""
         spec = ctx.emits(ZERO3_TRANSFORMER_KEY, work.microbatch)
         if spec is None:
             return ()
         layer = int(work.layer)
-        host = self._backward_host(work.microbatch, layer, ctx)
         target = ctx.backward_entry(work.microbatch, layer)
+        host, mode, via = self._prefetch_attach(
+            target, self._backward_prefetch_window(work.microbatch, layer, ctx), ctx
+        )
         return (
             SyncRequirement.from_spec(
                 spec,
                 key=SyncKey(ZERO3_TRANSFORMER_KEY, SyncPhase.BWD, work.microbatch, layer),
                 place_on=target,
-                mode=AttachMode.PARALLEL_TO,
+                mode=mode,
                 anchors=(host,),
-                via=self._via(host, target, ctx),
+                via=via,
                 spread=_spread_for(spec),
                 origin="S15",
             ),
@@ -857,7 +942,7 @@ def sharding_policy_for(run: Any, degrees: Any) -> ShardingPolicy:
     property is picked up here without an edit.
 
     This needed the emitter to stop DROPPING a one-member dp communicator: at
-    COARSE the cp axis has no device extent, so the group collapses to a single
+    PIPELINE the cp axis has no device extent, so the group collapses to a single
     device even though the collective is real. ``et_emit`` now emits a
     zero-duration no-op for that shape instead of skipping it, which keeps R5b's
     ``optimizer -> reducer`` edge resolvable while the analytical evaluator

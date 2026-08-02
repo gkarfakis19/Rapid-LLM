@@ -597,7 +597,7 @@ class SyncSpread(Enum):
     count is a whole-cluster quantity rather than a per-rank one.
     """
 
-    STAGE = auto()  #: one instance; the stage IS the device (COARSE/BLOCK)
+    STAGE = auto()  #: one instance; the stage IS the device (PIPELINE/BLOCK)
     CLUSTER_RANK_0 = auto()  #: one instance, on cluster rank 0 of the stage [legacy default]
     PER_CLUSTER_RANK = auto()  #: one instance per cluster rank [A2's fix; every dp collective]
 
@@ -652,11 +652,11 @@ class ByteSource:
         AMENDMENT to INTERFACES §2.2 (dated 2026-07-26): ``CEIL_DIV_CLUSTER``
         divides by ``instances``, NOT by ``FrozenWorkload.cluster_size()``. The
         two differ exactly where it matters: ``Placement`` reports
-        ``cluster_size() == 1`` at COARSE (the stage IS the device) while
-        ``fw.spec.cluster_size()`` is always ``tp*cp*ep``. Legacy COARSE uses
-        the RAW value (pipeline_coarse.py:222,238) and legacy FINE divides
+        ``cluster_size() == 1`` at PIPELINE (the stage IS the device) while
+        ``fw.spec.cluster_size()`` is always ``tp*cp*ep``. Legacy PIPELINE uses
+        the RAW value (pipeline_coarse.py:222,238) and legacy FLAT divides
         (pipeline_fine.py:645), so ignoring ``instances`` returned 2048.0 where
-        COARSE wants 4096.0 on every coarse/hybrid/hierarchical row with
+        PIPELINE wants 4096.0 on every coarse/hybrid/hierarchical row with
         ``cluster_size > 1``.
         """
         count = int(instances)

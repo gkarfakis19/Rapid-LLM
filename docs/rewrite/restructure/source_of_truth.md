@@ -6,7 +6,7 @@ DESIGN.md §1 claims "one `Program` of placed ops … every consumer is a pure f
 
 ### 1. Two decisive experiments (run against this tree)
 
-**(a) The op list is literally deletable for the memory path.** Built a FINE program (76 ops), ran `memory_sim.simulate_memory`, then set `p.ops=[]; p.groups={}; p.devices=(); p.dp_count=99` and re-ran:
+**(a) The op list is literally deletable for the memory path.** Built a FLAT program (76 ops), ran `memory_sim.simulate_memory`, then set `p.ops=[]; p.groups={}; p.devices=(); p.dp_count=99` and re-ran:
 
 ```
 with full op list: (0.00306, 0.0)
@@ -15,7 +15,7 @@ with ops WIPED   : (0.00306, 0.0)     IDENTICAL: True
 
 `program/memory_sim.py` contains **zero** references to `program.ops`. It takes a `Program` solely to `meta.misc.get("fine_proto_root")` (`memory_sim.py:73`) and then runs the legacy list scheduler over `event.children` / `parent.done` (`memory_sim.py:458-460`), mutating `done`/`scheduled`/`finish_time` attributes that aren't even declared on `FineNode` — the legacy mutable graph, verbatim. 529 LOC of consumer, 0 LOC of IR.
 
-**(b) Writing through the typed IR is silently discarded at emission.** Built a COARSE program, set `op.duration=(0.777,)` on all 8 `TRANSFORMER_LAYER` ops (the exact thing `retime` exists to do), then called `lower_coarse_for_emission`:
+**(b) Writing through the typed IR is silently discarded at emission.** Built a PIPELINE program, set `op.duration=(0.777,)` on all 8 `TRANSFORMER_LAYER` ops (the exact thing `retime` exists to do), then called `lower_coarse_for_emission`:
 
 ```
 durations in the LOWERED (emitted) program: [(1e-05,), (0.001,), (0.002,)]
@@ -71,9 +71,9 @@ The `analyze_for_compute` walker diffs to *nothing but the deleted `debug_en` pr
 
 Four module docstrings assert the same law: the event graph must stay because *"the FIFO/tie discipline depends on children-list adjacency order, which uid order cannot represent"* (`memory_sim.py:41-48`, `analytic_sim.py:55-58`, `pipeline_coarse.py:34-40`, `legacy_lowering.py:16-30`).
 
-That is a statement about **this** IR, not about IRs. `ComputeOp`/`CollectiveOp` carry `deps` and no ordered successor list — and the lowering **actively destroys** the ordering information it would need: `unique_deps = tuple(dict.fromkeys(sorted(dep_uids)))` (`legacy_lowering.py:768`, `:787`). Two fields — an ordered `succs` tuple, or simply not sorting `deps` — would let every consumer run on ops. Similarly `analytic_sim` must read comm sizes off the events because `CollectiveOp.size_bytes` is narrowed to `int` at construction (`pipeline_coarse.py:222,238`) while "dp reducer sizes are floats and must stay floats" (`analytic_sim.py:49-51`). The COARSE program also drops `device` to a `-1` sentinel (`:236`) and registers `groups={}` (`:266`) — `GroupKey`/`CommGroup`, one of DESIGN §2's core abstractions, is *empty* on the coarse program. **A self-inflicted expressiveness gap in the IR is being reported as a law of nature and used to make the second graph permanent.**
+That is a statement about **this** IR, not about IRs. `ComputeOp`/`CollectiveOp` carry `deps` and no ordered successor list — and the lowering **actively destroys** the ordering information it would need: `unique_deps = tuple(dict.fromkeys(sorted(dep_uids)))` (`legacy_lowering.py:768`, `:787`). Two fields — an ordered `succs` tuple, or simply not sorting `deps` — would let every consumer run on ops. Similarly `analytic_sim` must read comm sizes off the events because `CollectiveOp.size_bytes` is narrowed to `int` at construction (`pipeline_coarse.py:222,238`) while "dp reducer sizes are floats and must stay floats" (`analytic_sim.py:49-51`). The PIPELINE program also drops `device` to a `-1` sentinel (`:236`) and registers `groups={}` (`:266`) — `GroupKey`/`CommGroup`, one of DESIGN §2's core abstractions, is *empty* on the coarse program. **A self-inflicted expressiveness gap in the IR is being reported as a law of nature and used to make the second graph permanent.**
 
-Corroborating: `Program.validate` is not a real gate. Every production call is `validate_program(..., check_races=False)` (`legacy_lowering.py:851`, `et_emit.py:189`, `transforms.py:556`), so **V6 — the group-race / deadlock invariant, i.e. CONTEXT constraint 2's "deadlock-freedom by construction" — never runs outside tests** (`validate.py:21-26,196`). COARSE programs are built with validation off entirely and knowingly violate V1 and V5 (`pipeline_coarse.py:58-66`). The only real deadlock guard is `et_emit`'s group-order postcondition — enforced on emitted protobuf nodes, after the fact, not by the IR.
+Corroborating: `Program.validate` is not a real gate. Every production call is `validate_program(..., check_races=False)` (`legacy_lowering.py:851`, `et_emit.py:189`, `transforms.py:556`), so **V6 — the group-race / deadlock invariant, i.e. CONTEXT constraint 2's "deadlock-freedom by construction" — never runs outside tests** (`validate.py:21-26,196`). PIPELINE programs are built with validation off entirely and knowingly violate V1 and V5 (`pipeline_coarse.py:58-66`). The only real deadlock guard is `et_emit`'s group-order postcondition — enforced on emitted protobuf nodes, after the fact, not by the IR.
 
 ---
 

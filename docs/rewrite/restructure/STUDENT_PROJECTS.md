@@ -370,7 +370,7 @@ justification.
   is the existing MoE validation entry point.
 - **Know the terrain:** `ext_moe_flat.md` records that the memory replay does **not** validate MoE
   comm topology (it reads no `comm_type`, no participants, no group), and that flattened MoE
-  execution has its own history (`REBASELINE.md` §6: the FINE MoE program is built for the memory
+  execution has its own history (`REBASELINE.md` §6: the FLAT MoE program is built for the memory
   replay but its group-order postcondition does not hold yet). Check the current state of flattened
   MoE in `equiv/configs.py` before assuming either way.
 

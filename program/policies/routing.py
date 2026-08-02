@@ -239,10 +239,10 @@ def ep_sync_requirements(work: Any, ctx: Any) -> Tuple[Any, ...]:
     stamps the op per-dp. An ``ep`` group's members are DIFFERENT devices of the
     same stage, so a single instance means one member issues the all-reduce and
     the others issue nothing — the silent AstraSim deadlock, which the emitter's
-    group-order postcondition now rejects outright. At COARSE/BLOCK-with-
+    group-order postcondition now rejects outright. At PIPELINE/BLOCK-with-
     ``cluster_size==1`` this resolves to the same single stage device as before,
     so it is a no-op for every hierarchical/hybrid golden; it only has content
-    where the cluster is materialized, i.e. the FINE (flattened) build.
+    where the cluster is materialized, i.e. the FLAT (flattened) build.
     """
     from program.work import (
         AttachMode,

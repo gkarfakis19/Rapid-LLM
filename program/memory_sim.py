@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Peak-memory replay over a FINE :class:`~program.ir.Program` (P6).
+"""Peak-memory replay over a FLAT :class:`~program.ir.Program` (P6).
 
-Reads the **Program**. The FINE proto graph (``meta.misc["fine_proto_root"]``,
+Reads the **Program**. The FLAT proto graph (``meta.misc["fine_proto_root"]``,
 ``FineNode``/``FineEdge``) is gone; the census and the scheduling state that
 used to live on it are ``ComputeOp`` fields (``mem_kind``, ``layer``,
 ``is_moe_layer``, ``direction``, ``param_gather``) and evaluator locals.
@@ -80,16 +80,16 @@ debug = False
 BYTES_PER_GIB = 1024 ** 3
 
 
-def require_fine_program(program: Program) -> Program:
-    """Return ``program`` when it is a FINE Program, else raise."""
+def require_flat_program(program: Program) -> Program:
+    """Return ``program`` when it is a FLAT Program, else raise."""
     if not isinstance(program, Program):
         raise TypeError(
             f"simulate_memory expects a Program (got {type(program).__name__})"
         )
-    if program.meta.misc.get("granularity") != "fine":
+    if program.meta.misc.get("granularity") != "flat":
         raise RuntimeError(
-            "Memory simulation requires a FINE program. "
-            "Use LLMExecutionDispatcher.build_fine_program_for_memory()."
+            "Memory simulation requires a FLAT program. "
+            "Use LLMExecutionDispatcher.build_flat_program_for_memory()."
         )
     return program
 
@@ -254,8 +254,8 @@ def simulate_memory(
     output_folder: str = "output/LLM/",
     filename: str = "memory_graph",
 ) -> Tuple[float, float]:
-    """Replay the FINE program and return ``(finish_time, peak_gib)``."""
-    require_fine_program(program)
+    """Replay the FLAT program and return ``(finish_time, peak_gib)``."""
+    require_flat_program(program)
     ops = program.ops
 
     persistent_by_kind = memory_data.get("persistent_bytes_by_kind", {}) or {}

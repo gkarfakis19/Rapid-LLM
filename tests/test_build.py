@@ -123,7 +123,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _program(
     cfg: Cfg,
-    granularity: Granularity = Granularity.COARSE,
+    granularity: Granularity = Granularity.PIPELINE,
     *,
     spec_override: Any = None,
     **kwargs: Any,
@@ -230,7 +230,7 @@ def _tp_comm(size: float = 4096.0, axis: str = "tp") -> Dict[str, Any]:
 def test_s1_slot_indices_are_dense_and_unique():
     cfg = Cfg(dp=1, pp=2, mb=2, num_layers=4)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
     assert [slot.index for slot in schedule.ordered_slots] == list(range(len(work)))
@@ -246,7 +246,7 @@ def test_s1_non_dense_indices_are_rejected():
 def test_s2_every_work_item_appears_exactly_once_across_stages():
     cfg = Cfg(dp=1, pp=2, mb=2, num_layers=5)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
     seen = Counter()
@@ -265,7 +265,7 @@ def test_s3_schedule_is_a_permutation_of_the_workset():
         Cfg(dp=2, pp=2, mb=2, num_layers=4, full_recomputation=True, flattened=True),
     ):
         fw = make_workload(cfg).freeze()
-        bundle = policies_for(fw, granularity=Granularity.FINE, block_expanded=cfg.flattened)
+        bundle = policies_for(fw, granularity=Granularity.FLAT, block_expanded=cfg.flattened)
         work = enumerate_work(fw, bundle.recompute)
         schedule = GPipeSchedule().schedule(fw, work)
         assert sorted(schedule.order(), key=WorkItem.sort_key) == list(work.items)
@@ -277,7 +277,7 @@ def test_gpipe_order_is_forward_ascending_then_backward_descending():
     (schedule.py:580) and backward DESCENDING (:693)."""
     cfg = Cfg(dp=1, pp=2, mb=3, num_layers=2)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
     order = schedule.order()
@@ -305,7 +305,7 @@ def test_gpipe_order_is_forward_ascending_then_backward_descending():
 def test_recompute_immediately_precedes_its_backward_layer():
     cfg = Cfg(dp=1, pp=1, mb=1, num_layers=3, full_recomputation=True, flattened=True)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.FINE, block_expanded=True)
+    bundle = policies_for(fw, granularity=Granularity.FLAT, block_expanded=True)
     work = enumerate_work(fw, bundle.recompute)
     order = GPipeSchedule().schedule(fw, work).order()
     for layer in range(3):
@@ -319,7 +319,7 @@ def test_last_microbatch_of_is_computed_not_hardcoded():
     descends, and ``GradAccumPolicy.for_schedule`` reads it from the schedule."""
     cfg = Cfg(dp=2, pp=2, mb=4, num_layers=4)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
     assert schedule.last_microbatch_of() == 0
@@ -359,13 +359,13 @@ def test_layer_assignment_expresses_interleaving():
     # LayerAssignment, ShardingContext as a StagePartition.
     cfg = Cfg(dp=1, pp=2, mb=1, num_layers=4)
     fw = make_workload(cfg).freeze()
-    placement = Placement(fw, Granularity.COARSE, interleaved)
+    placement = Placement(fw, Granularity.PIPELINE, interleaved)
     layer2 = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=2)
     assert placement.stage_of(layer2) == 0
     ShardingContext(
         fw=fw,
-        work=enumerate_work(fw, policies_for(fw, granularity=Granularity.COARSE).recompute),
-        grad_accum=policies_for(fw, granularity=Granularity.COARSE).grad_accum,
+        work=enumerate_work(fw, policies_for(fw, granularity=Granularity.PIPELINE).recompute),
+        grad_accum=policies_for(fw, granularity=Granularity.PIPELINE).grad_accum,
         stages=interleaved,
     )
 
@@ -376,10 +376,10 @@ def test_implied_deps_are_per_device_and_reproduce_the_legacy_gpipe_edges():
     the adjacent pair IS ``schedule.py:663-664``'s hand-wired edge."""
     cfg = Cfg(dp=1, pp=2, mb=2, num_layers=4)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
-    placement = Placement(fw, Granularity.COARSE, schedule.layers)
+    placement = Placement(fw, Granularity.PIPELINE, schedule.layers)
     deps = schedule.implied_deps(placement.devices_for)
 
     layer1_f0 = work.require(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=1)
@@ -401,14 +401,14 @@ def test_implied_deps_are_per_device_and_reproduce_the_legacy_gpipe_edges():
 
 
 def test_device_projection_is_per_device_not_per_stage():
-    """At FINE a stage is ``cluster_size`` devices and a PINNED kind lives on one
+    """At FLAT a stage is ``cluster_size`` devices and a PINNED kind lives on one
     of them (Class B 10d), so the two projections genuinely differ."""
     cfg = Cfg(dp=1, pp=1, tp=2, mb=2, num_layers=2)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.FINE)
+    bundle = policies_for(fw, granularity=Granularity.FLAT)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
-    placement = Placement(fw, Granularity.FINE, schedule.layers)
+    placement = Placement(fw, Granularity.FLAT, schedule.layers)
     projection = schedule.device_projection(placement.devices_for)
     assert len(projection) == 2
     softmax = work.require(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=0)
@@ -429,7 +429,7 @@ def test_r1_chain_steps_depend_on_their_predecessor():
     cfg = Cfg(dp=1, pp=1, tp=1, mb=1, num_layers=1)
     spec = make_workload(cfg)
     spec = spec.with_(blocks=BlockTemplates(dense=template))
-    program = _program(cfg, Granularity.FINE, spec_override=spec, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, spec_override=spec, overlap=NoOverlap())
 
     qkv = _one(program, "qkv_proj_forward")
     mlp = _one(program, "MLP_forward")
@@ -440,13 +440,13 @@ def test_r1_chain_steps_depend_on_their_predecessor():
 
 
 def test_r1_honors_comm_spec_placement_pre():
-    """INTERFACES §3.4: the FINE path MUST honor ``CommSpec.placement``.
+    """INTERFACES §3.4: the FLAT path MUST honor ``CommSpec.placement``.
     ``pipeline_fine.py:577-589`` chains every key POST regardless."""
     comm = {"pre_gather": {**_tp_comm(), "placement": "pre"}}
     template = _block_template([("qkv_proj", ["pre_gather"], []), ("MLP", [], [])], comm)
     cfg = Cfg(dp=1, pp=1, tp=1, mb=1, num_layers=1)
     spec = make_workload(cfg).with_(blocks=BlockTemplates(dense=template))
-    program = _program(cfg, Granularity.FINE, spec_override=spec, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, spec_override=spec, overlap=NoOverlap())
     gather = _one(program, "pre_gather")
     qkv = _one(program, "qkv_proj_forward")
     assert qkv.deps == (gather.uid,), "a placement='pre' collective FEEDS its GEMM"
@@ -458,7 +458,7 @@ def test_r1_backward_reverses_the_template():
     template = _block_template([("qkv_proj", [], []), ("MLP", [], [])], {})
     cfg = Cfg(dp=1, pp=1, tp=1, mb=1, num_layers=1)
     spec = make_workload(cfg).with_(blocks=BlockTemplates(dense=template))
-    program = _program(cfg, Granularity.FINE, spec_override=spec, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, spec_override=spec, overlap=NoOverlap())
     mlp_b = _one(program, "MLP_backward")
     qkv_b = _one(program, "qkv_proj_backward")
     assert qkv_b.deps == (mlp_b.uid,)
@@ -475,7 +475,7 @@ def test_r2_same_stage_link_is_a_zero_byte_transfer_op():
     load-bearing for the analytical evaluator's ready-scan, so R2 emits it as a
     same-device ``TransferOp`` rather than collapsing it into a bare dep."""
     cfg = Cfg(dp=1, pp=1, tp=1, mb=1, num_layers=2)
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     transfers = [op for op in program.ops if isinstance(op, TransferOp)]
     assert transfers
     for op in transfers:
@@ -487,7 +487,7 @@ def test_r2_same_stage_link_is_a_zero_byte_transfer_op():
 
 def test_r2_cross_stage_transfer_carries_the_declared_bytes():
     cfg = Cfg(dp=1, pp=2, tp=1, mb=1, num_layers=2)
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     payload = [
         op for op in program.ops if isinstance(op, TransferOp) and op.size_bytes > 0
     ]
@@ -495,7 +495,7 @@ def test_r2_cross_stage_transfer_carries_the_declared_bytes():
     assert payload, "a pp=2 workload must move activations between stages"
     for op in payload:
         assert op.src_device != op.dst_device
-        # COARSE: instances == placement.cluster_size() == 1 -> RAW bytes (B3).
+        # PIPELINE: instances == placement.cluster_size() == 1 -> RAW bytes (B3).
         assert op.size_bytes == int(total)
 
 
@@ -504,8 +504,8 @@ def test_r2_fine_divides_cross_layer_bytes_by_the_cluster_size():
     ``pipeline_coarse.py:222,238`` (raw) and ``pipeline_fine.py:645`` (divided)."""
     cfg = Cfg(dp=1, pp=2, tp=2, mb=1, num_layers=2)
     total = float(raw_comm_metadata(cfg)["cross_layer"]["size"])
-    coarse = _program(cfg, Granularity.COARSE)
-    fine = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+    coarse = _program(cfg, Granularity.PIPELINE)
+    fine = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
     coarse_sizes = {
         op.size_bytes
         for op in coarse.ops
@@ -534,7 +534,7 @@ def test_r2_does_not_divide_cross_layer_bytes_by_ep():
     """
     def payload(cfg):
         raw = float(raw_comm_metadata(cfg)["cross_layer"]["size"])
-        program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+        program = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
         ops = [
             op for op in program.ops if isinstance(op, TransferOp) and op.size_bytes > 0
         ]
@@ -563,12 +563,12 @@ def test_r2_does_not_divide_cross_layer_bytes_by_ep():
 
 
 def test_r2_pairs_cluster_ranks_and_never_invents_a_cross_rank_payload():
-    """At FINE the pairing is ``r -> r`` (``pipeline_fine.py:659-694``), and the
+    """At FLAT the pairing is ``r -> r`` (``pipeline_fine.py:659-694``), and the
     BYTE decision is per STAGE: an embedding -> layer 0 link inside one stage
     must not acquire a ``cross_layer`` payload just because the embedding is
     pinned to cluster rank 0."""
     cfg = Cfg(dp=1, pp=2, tp=2, mb=1, num_layers=2)
-    program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
     for op in program.ops:
         if not isinstance(op, TransferOp) or op.size_bytes == 0:
             continue
@@ -589,7 +589,7 @@ def test_r2_transfer_is_one_object_with_the_compute_anchor_as_a_second_dep():
     template = _block_template([("qkv_proj", [], []), ("MLP", ["mlp_tp"], [])], comm)
     cfg = Cfg(dp=1, pp=2, tp=1, mb=1, num_layers=2)
     spec = make_workload(cfg).with_(blocks=BlockTemplates(dense=template))
-    program = _program(cfg, Granularity.FINE, spec_override=spec, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, spec_override=spec, overlap=NoOverlap())
     payload = [
         op for op in program.ops if isinstance(op, TransferOp) and op.size_bytes > 0
     ]
@@ -624,7 +624,7 @@ def test_r2_recompute_to_backward_layer_is_a_plain_same_device_dep():
     so the ``RECOMPUTE -> LAYER/BACKWARD`` link inside one layer is a dep and not
     a transfer (legacy: ``recompute_node.add_child(transformer_node_b)``)."""
     cfg = Cfg(dp=1, pp=1, tp=2, mb=1, num_layers=1, full_recomputation=True, flattened=True)
-    program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
     remat = [op for op in program.ops if isinstance(op, ComputeOp) and op.recompute]
     assert remat, "full recomputation must materialize RECOMPUTE work"
     succs = _succs(program)
@@ -662,13 +662,21 @@ def test_r3_no_redundant_schedule_edges():
     been wrong, and both edges are semantically distinct claims.
     """
     for cfg, granularity in (
-        (Cfg(dp=1, pp=2, mb=3, num_layers=4), Granularity.COARSE),
-        (Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FINE),
-        (Cfg(dp=2, pp=2, mb=2, num_layers=4, zero_stage=3), Granularity.COARSE),
+        (Cfg(dp=1, pp=2, mb=3, num_layers=4), Granularity.PIPELINE),
+        (Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FLAT),
+        (Cfg(dp=2, pp=2, mb=2, num_layers=4, zero_stage=3), Granularity.PIPELINE),
     ):
         program = _program(cfg, granularity, overlap=NoOverlap())
         edges = program.meta.misc["schedule_edges"]
-        later = set(program.meta.misc["r5_edges"])
+        # Every edge added AFTER R3 ran. R4 belongs here for the same reason
+        # R5 does, and A6 is what made it observable: an ``AttachMode.BEFORE``
+        # requirement inserts itself between its target and the target's own
+        # deps, so each of those deps gains a second, longer path to the target
+        # and its direct R3 edge reads as redundant afterwards. R3 was right
+        # when it ran; the shortcut did not exist yet.
+        later = set(program.meta.misc["r5_edges"]) | set(
+            program.meta.misc["r4_edges"]
+        )
         assert edges, f"{cfg.label()} must need at least one serialization edge"
         for source, target in edges:
             skip = later | {(source, target)}
@@ -685,12 +693,12 @@ def test_r3_does_not_blanket_serialize_a_device():
     below the number of adjacent pairs."""
     cfg = Cfg(dp=1, pp=2, mb=3, num_layers=6)
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     schedule = GPipeSchedule().schedule(fw, work)
-    placement = Placement(fw, Granularity.COARSE, schedule.layers)
+    placement = Placement(fw, Granularity.PIPELINE, schedule.layers)
     adjacent = len(schedule.implied_deps(placement.devices_for))
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     added = len(program.meta.misc["schedule_edges"])
     assert 0 < added < adjacent, (
         f"R3 added {added} of {adjacent} adjacent pairs; blanket serialization "
@@ -703,7 +711,7 @@ def test_r3_materializes_the_cross_microbatch_edge():
     cross-microbatch dependency must be IN THE DAG (legacy materializes it
     explicitly: git show 85894c6:simulate_train_graph.py:836-856)."""
     cfg = Cfg(dp=1, pp=2, mb=2, num_layers=4)
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     embedding_mb1 = _one(program, "embedding_mb1")
     layer1_mb0 = _one(program, "layer_l1_mb0")
     assert layer1_mb0.uid in embedding_mb1.deps, (
@@ -721,7 +729,7 @@ def test_r3_puts_the_optimizer_where_legacy_attached_it():
     those ARE the last backward items in each stage's device projection because
     GPipe's backward walk descends both microbatches and layers."""
     cfg = Cfg(dp=1, pp=2, mb=2, num_layers=4)
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     layers = LayerAssignment.contiguous(cfg.num_layers, cfg.pp)
 
     stage0 = _one(program, "optimizer_stage0")
@@ -814,7 +822,7 @@ def test_r2_softmax_forward_precedes_its_own_backward_under_any_schedule(
     before, only R3's adjacency did, and R3 is free to drop what it finds
     implied."""
     cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
-    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    program = _program(cfg, Granularity.PIPELINE, schedule_policy=schedule_policy)
     for b in range(cfg.mb):
         fwd = _chain_ends(program, WorkKind.SOFTMAX, Direction.FORWARD, microbatch=b)
         bwd = _chain_ends(program, WorkKind.SOFTMAX, Direction.BACKWARD, microbatch=b)
@@ -836,7 +844,7 @@ def test_r2_layer_forward_precedes_its_own_recompute_under_any_schedule(
         dp=1, pp=2, tp=2, mb=3, num_layers=4, full_recomputation=True, flattened=True
     )
     program = _program(
-        cfg, Granularity.FINE, schedule_policy=schedule_policy, overlap=NoOverlap()
+        cfg, Granularity.FLAT, schedule_policy=schedule_policy, overlap=NoOverlap()
     )
     checked = 0
     for b in range(cfg.mb):
@@ -865,7 +873,7 @@ def test_r5_optimizer_waits_for_every_backward_item_of_its_stage(schedule_policy
     because GPipe's backward descends microbatches. Under ``_AscBackward`` the
     ordering used to be missing for every microbatch but the last."""
     cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
-    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    program = _program(cfg, Granularity.PIPELINE, schedule_policy=schedule_policy)
     optimizers = [
         op for op in program.ops
         if getattr(op, "work", None) is not None
@@ -895,7 +903,7 @@ def test_r5_adds_nothing_under_gpipe():
     """R5 is redundancy-eliminated exactly like R3 (**D1**): under GPipe every
     ordering it requires is already implied, so the artifact does not move."""
     cfg = Cfg(dp=1, pp=2, mb=3, num_layers=4)
-    program = _program(cfg, Granularity.COARSE)
+    program = _program(cfg, Granularity.PIPELINE)
     for op in program.ops:
         work = getattr(op, "work", None)
         if work is None or work.kind is not WorkKind.OPTIMIZER:
@@ -918,7 +926,7 @@ def test_zero3_prefetch_gathers_precede_their_declared_consumer(schedule_policy)
     and another attached to the wrong microbatch. The consumer is declared now,
     so both hold under either schedule."""
     cfg = Cfg(dp=2, pp=2, mb=3, num_layers=4, zero_stage=3)
-    program = _program(cfg, Granularity.COARSE, schedule_policy=schedule_policy)
+    program = _program(cfg, Granularity.PIPELINE, schedule_policy=schedule_policy)
     gathers = [
         op for op in program.ops
         if isinstance(op, CollectiveOp) and "zero3_embedding_gather_fwd_b" in op.name
@@ -962,7 +970,7 @@ class _FixedSharding:
 
 def _sync_fixture(cfg: Cfg):
     fw = make_workload(cfg).freeze()
-    bundle = policies_for(fw, granularity=Granularity.COARSE)
+    bundle = policies_for(fw, granularity=Granularity.PIPELINE)
     work = enumerate_work(fw, bundle.recompute)
     return fw, work, bundle
 
@@ -1020,7 +1028,7 @@ def test_r4_after_puts_the_requirement_off_the_anchor_and_before_the_optimizer()
     )
     program = _program(
         cfg,
-        Granularity.COARSE,
+        Granularity.PIPELINE,
         sharding=_FixedSharding(name="fixed", per_item=(req,)),
         routing=None,
     )
@@ -1046,7 +1054,7 @@ def test_r5b_selects_reducers_by_role_not_by_schedule_phase():
     ZeRO-2 workload.
     """
     cfg = Cfg(dp=2, pp=2, mb=2, num_layers=4, zero_stage=2)
-    for granularity in (Granularity.COARSE, Granularity.FINE):
+    for granularity in (Granularity.PIPELINE, Granularity.FLAT):
         program = _program(cfg, granularity, overlap=NoOverlap())
         succs = _succs(program)
         optimizers = {
@@ -1107,7 +1115,7 @@ def test_every_gradient_reducer_reaches_its_optimizer():
         Cfg(dp=2, pp=2, mb=2, num_layers=4, ep=2, moe=True),             # + S12 ep sync
     )
     for cfg in cases:
-        for granularity in (Granularity.COARSE, Granularity.FINE):
+        for granularity in (Granularity.PIPELINE, Granularity.FLAT):
             program = _program(cfg, granularity, overlap=NoOverlap())
             optimizers = {
                 op.uid for op in program.ops
@@ -1162,7 +1170,7 @@ def test_r4_before_splices_the_requirement_in_front_of_the_anchor():
     )
     program = _program(
         cfg,
-        Granularity.COARSE,
+        Granularity.PIPELINE,
         sharding=_FixedSharding(name="fixed", workload=(req,)),
         routing=None,
     )
@@ -1201,7 +1209,7 @@ def test_r4_parallel_to_inherits_deps_and_successors_filtered_by_via():
         )
         program = _program(
             cfg,
-            Granularity.COARSE,
+            Granularity.PIPELINE,
             sharding=_FixedSharding(name="fixed", per_item=(req,)),
             routing=None,
         )
@@ -1275,7 +1283,7 @@ def test_r4_after_a_sync_key_requires_it_to_be_earlier_in_sync_order():
     with pytest.raises(BuildError, match="strictly earlier in SyncOrder"):
         _program(
             cfg,
-            Granularity.COARSE,
+            Granularity.PIPELINE,
             sharding=_FixedSharding(name="fixed", per_item=(gather, reducer)),
             routing=None,
         )
@@ -1305,7 +1313,7 @@ def test_r4_drops_a_requirement_whose_anchors_resolve_to_nothing():
     # sanity: the anchor IS in the work set, so this requirement is materialized
     program = _program(
         cfg,
-        Granularity.COARSE,
+        Granularity.PIPELINE,
         sharding=_FixedSharding(name="fixed", per_item=(req,)),
         routing=None,
     )
@@ -1317,7 +1325,7 @@ def test_r4_drops_a_requirement_whose_anchors_resolve_to_nothing():
     dropped = replace(req, anchors=(missing,))
     program = _program(
         cfg,
-        Granularity.COARSE,
+        Granularity.PIPELINE,
         sharding=_FixedSharding(name="fixed", per_item=(dropped,)),
         routing=None,
     )
@@ -1327,7 +1335,7 @@ def test_r4_drops_a_requirement_whose_anchors_resolve_to_nothing():
 
 def test_r4_dp_requirement_carries_no_group_and_a_grouped_one_does():
     cfg = Cfg(dp=2, pp=2, tp=2, ep=2, mb=1, num_layers=2, moe=True)
-    program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
     for op in program.ops:
         if not isinstance(op, CollectiveOp):
             continue
@@ -1374,7 +1382,7 @@ def test_sync_order_is_phase_major_and_total():
 
 def test_o1_program_order_is_deterministic():
     cfg = Cfg(dp=2, pp=2, tp=2, ep=2, mb=2, num_layers=4, moe=True)
-    for granularity in (Granularity.COARSE, Granularity.FINE):
+    for granularity in (Granularity.PIPELINE, Granularity.FLAT):
         first = _program(cfg, granularity)
         second = _program(cfg, granularity)
         assert _describe(first) == _describe(second)
@@ -1401,7 +1409,7 @@ def _describe(program: Program) -> List[Any]:
 
 def test_o2_every_dep_precedes_its_op_and_no_op_is_orphaned():
     cfg = Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4, zero_stage=3)
-    for granularity in (Granularity.COARSE, Granularity.FINE):
+    for granularity in (Granularity.PIPELINE, Granularity.FLAT):
         program = _program(cfg, granularity)
         # O2 / V1
         for op in program.ops:
@@ -1427,7 +1435,7 @@ def test_o2_every_dep_precedes_its_op_and_no_op_is_orphaned():
 def test_deps_carry_every_edge_exactly_once():
     """``deps`` is the ONE edge structure (``Op.succs``, its write-only mirror,
     is deleted): every edge appears exactly once and nothing is duplicated."""
-    program = _program(Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FINE)
+    program = _program(Cfg(dp=2, pp=2, tp=2, mb=2, num_layers=4), Granularity.FLAT)
     forward = Counter()
     for op in program.ops:
         for dep in op.deps:
@@ -1547,10 +1555,10 @@ def test_a2_dp_collectives_exist_on_every_cluster_rank(cfg):
        communicators per stage, each of them a ``dp``-sized member set, and
        they partition the ranks (no rank is in two of them).
     """
-    program = _program(cfg, Granularity.FINE)
+    program = _program(cfg, Granularity.FLAT)
     fw = make_workload(cfg).freeze()
     placement = Placement(
-        fw, Granularity.FINE, LayerAssignment.contiguous(cfg.num_layers, cfg.pp)
+        fw, Granularity.FLAT, LayerAssignment.contiguous(cfg.num_layers, cfg.pp)
     )
     par_degree = placement.cluster_size()
     assert par_degree == cfg.tp * cfg.cp * cfg.ep > 1, "fixture is not a tp>1 shape"
@@ -1661,7 +1669,7 @@ def test_labels_are_one_to_one_with_member_sets():
     when one label maps to two member sets. The interner keys on the member set,
     so that is unrepresentable."""
     cfg = Cfg(dp=2, pp=2, tp=2, ep=2, mb=2, num_layers=4, moe=True)
-    program = _program(cfg, Granularity.FINE, overlap=NoOverlap())
+    program = _program(cfg, Granularity.FLAT, overlap=NoOverlap())
     by_label: Dict[str, set] = {}
     for op in program.ops:
         if isinstance(op, CollectiveOp) and op.label is not None:
@@ -1676,10 +1684,10 @@ def test_program_carries_the_duration_revision_it_was_built_from():
     be able to detect the staleness."""
     cfg = Cfg(dp=1, pp=1, mb=1, num_layers=1)
     spec = make_workload(cfg)
-    program = _program(cfg, Granularity.COARSE, spec_override=spec)
+    program = _program(cfg, Granularity.PIPELINE, spec_override=spec)
     assert program.meta.misc["duration_revision"] == spec.durations.revision
     spec.durations.write_block_timings(dense_forward=123.0)
-    later = _program(cfg, Granularity.COARSE, spec_override=spec)
+    later = _program(cfg, Granularity.PIPELINE, spec_override=spec)
     assert later.meta.misc["duration_revision"] > program.meta.misc["duration_revision"]
 
 
@@ -1695,7 +1703,7 @@ def test_block_restricts_work_to_transformer_block_kinds():
     work = enumerate_work(fw, bundle.recompute)
     restricted = restrict_work_for(Granularity.BLOCK, work)
     assert {item.kind for item in restricted} <= {WorkKind.LAYER, WorkKind.RECOMPUTE}
-    assert restrict_work_for(Granularity.FINE, work) is work
+    assert restrict_work_for(Granularity.FLAT, work) is work
     program = _program(cfg, Granularity.BLOCK, overlap=NoOverlap())
     assert program.meta.misc["work_restricted"] is True
     assert not _ops_by_name(program, "embedding")
@@ -1746,7 +1754,7 @@ def test_overlap_producer_splits_the_producing_compute():
     decl = OverlapDecl(fraction=0.25, anchor=OverlapAnchor.PRODUCER)
     program = _program(
         cfg,
-        Granularity.FINE,
+        Granularity.FLAT,
         spec_override=spec,
         overlap=_AlwaysOverlap(name="always", decl=decl),
     )
@@ -1786,7 +1794,7 @@ def test_overlap_producer_hoist():
     spec = make_workload(cfg).with_(blocks=BlockTemplates(dense=template))
     program = _program(
         cfg,
-        Granularity.FINE,
+        Granularity.FLAT,
         spec_override=spec,
         overlap=_AlwaysOverlap(
             name="hoist", decl=OverlapDecl(fraction=1.0, anchor=OverlapAnchor.PRODUCER)
@@ -1820,7 +1828,7 @@ def test_overlap_consumer_splits_the_collective_by_bytes():
     )
     program = _program(
         cfg,
-        Granularity.FINE,
+        Granularity.FLAT,
         spec_override=spec,
         overlap=_AlwaysOverlap(name="cp", decl=decl),
     )
@@ -1852,7 +1860,7 @@ def test_overlap_axis_fraction_policy_only_fires_on_declared_axes():
         overlap=replace(spec.overlap, by_axis={"tp": 0.5}),
     )
     program = _program(
-        cfg, Granularity.FINE, spec_override=spec, overlap=AxisFractionOverlap()
+        cfg, Granularity.FLAT, spec_override=spec, overlap=AxisFractionOverlap()
     )
     heads = [op.name for op in program.ops if op.name.endswith("_head")]
     assert any(name.startswith("MLP_forward") for name in heads), heads
@@ -2046,7 +2054,7 @@ def _describe_program(program: Program) -> List[Any]:
     return out
 
 
-_GRANULARITIES = (Granularity.COARSE, Granularity.FINE)
+_GRANULARITIES = (Granularity.PIPELINE, Granularity.FLAT)
 
 
 @_oracle_gate
@@ -2068,10 +2076,10 @@ def test_build_is_deterministic_and_emits_a_completable_bundle(spec, tmp_path):
     checked = 0
     for label, _tc, dispatcher in cases:
         # Every granularity is emittable, MoE included: flattened MoE execution
-        # is production (``ext_moe_flat.md`` P8, 2026-07-26), so the FINE MoE
+        # is production (``ext_moe_flat.md`` P8, 2026-07-26), so the FLAT MoE
         # bundle must satisfy the group-order postcondition and the AstraSim
         # scheduling contract like any other.
-        emittable = {Granularity.COARSE, Granularity.FINE}
+        emittable = {Granularity.PIPELINE, Granularity.FLAT}
         for granularity in _GRANULARITIES:
             first = dispatcher._build_program(granularity, label="a")
             second = dispatcher._build_program(granularity, label="b")
@@ -2122,7 +2130,7 @@ _R3_BOUND_CFGS = [
 ]
 
 
-@pytest.mark.parametrize("granularity", [Granularity.COARSE, Granularity.FINE])
+@pytest.mark.parametrize("granularity", [Granularity.PIPELINE, Granularity.FLAT])
 def test_r3_slot_floor_answers_exactly_what_the_unbounded_walk_answers(granularity):
     """The ``slot_floor`` prune in ``_reaches`` is an EXACT optimization.
 
@@ -2154,7 +2162,7 @@ def test_r3_slot_floor_answers_exactly_what_the_unbounded_walk_answers(granulari
     build_mod._Builder._reaches = checking
     try:
         for cfg in _R3_BOUND_CFGS:
-            _program(replace(cfg, flattened=granularity is Granularity.FINE),
+            _program(replace(cfg, flattened=granularity is Granularity.FLAT),
                      granularity=granularity)
     finally:
         build_mod._Builder._reaches = original
@@ -2171,7 +2179,7 @@ def test_r3_is_linear_in_schedule_length_not_quadratic():
 
     Before the ``slot_floor`` bound, every microbatch-boundary query walked the
     whole ancestor set, so doubling the microbatch count roughly QUADRUPLED
-    build time; a ``pp=32, L=64, mb=512`` COARSE build took over two CPU-hours.
+    build time; a ``pp=32, L=64, mb=512`` PIPELINE build took over two CPU-hours.
     The assertion is on the RATIO, not on absolute seconds, so it does not
     depend on machine speed.
     """
@@ -2180,7 +2188,7 @@ def test_r3_is_linear_in_schedule_length_not_quadratic():
     def build_seconds(micro_batches: int) -> float:
         cfg = Cfg(dp=1, tp=1, cp=1, pp=8, mb=micro_batches, num_layers=16)
         start = time.perf_counter()
-        _program(cfg, granularity=Granularity.COARSE)
+        _program(cfg, granularity=Granularity.PIPELINE)
         return time.perf_counter() - start
 
     build_seconds(8)  # warm any lazy imports so they are not billed to the first point
@@ -2217,7 +2225,7 @@ def test_r3_rejects_a_graph_whose_edges_run_backwards_in_schedule_slots():
     build_mod._Builder._apply_r3 = sabotaged
     try:
         with pytest.raises(BuildError, match="D2 violated"):
-            _program(Cfg(dp=1, tp=1, cp=1, pp=2, mb=3), granularity=Granularity.COARSE)
+            _program(Cfg(dp=1, tp=1, cp=1, pp=2, mb=3), granularity=Granularity.PIPELINE)
     finally:
         build_mod._Builder._apply_r3 = original
 
@@ -2242,7 +2250,7 @@ def test_gradient_reducer_spans_cp_because_cp_gradients_are_partial():
     for cp, expect_cp in ((1, False), (2, True)):
         program = _program(
             Cfg(dp=2, tp=1, cp=cp, pp=2, mb=2, flattened=True),
-            granularity=Granularity.FINE,
+            granularity=Granularity.FLAT,
         )
         reducers = [
             op for op in program.ops
@@ -2273,7 +2281,7 @@ def test_dp_cp_reducer_emits_one_communicator_per_cp_sibling_set(tmp_path):
     from program.et_emit import emit_chakra
 
     program = _program(
-        Cfg(dp=2, tp=1, cp=2, pp=2, mb=2, flattened=True), granularity=Granularity.FINE
+        Cfg(dp=2, tp=1, cp=2, pp=2, mb=2, flattened=True), granularity=Granularity.FLAT
     )
     out = tmp_path / "emit_dpcp"
     bundle = emit_chakra(program, str(out))
@@ -2318,9 +2326,110 @@ def test_cp1_is_byte_identical_after_the_dp_cp_change():
     communicator, its id and the emitted bytes are the pre-19 ones. This is what
     keeps 41 of 44 goldens bit-identical."""
     program = _program(
-        Cfg(dp=2, tp=2, cp=1, pp=2, mb=2, flattened=True), granularity=Granularity.FINE
+        Cfg(dp=2, tp=2, cp=1, pp=2, mb=2, flattened=True), granularity=Granularity.FLAT
     )
     for op in program.ops:
         if isinstance(op, CollectiveOp) and op.is_dp:
             assert op.axes == ("dp",), f"{op.name} axes drifted to {op.axes} at cp=1"
             assert op.interconnect == "dp"
+
+
+# ---------------------------------------------------------------------------
+# BUG_LEDGER A6 — the ZeRO-3 prefetch anchor is a DEVICE-LOCAL notion
+# ---------------------------------------------------------------------------
+
+
+def _zero3_prefetch_requirements(cfg: Cfg):
+    """Rows S8/S15 — the per-layer parameter gathers — with the context that
+    produced them, so a test can ask which stage each anchor lives on."""
+    from program.policies import policies_for
+    from program.policies.sharding import ContiguousStages, ShardingContext
+    from program.work import enumerate_work
+
+    fw = make_workload(cfg).freeze()
+    bundle = policies_for(fw, block_expanded=cfg.flattened)
+    work = enumerate_work(fw, bundle.recompute)
+    ctx = ShardingContext(
+        fw=fw,
+        work=work,
+        grad_accum=bundle.grad_accum,
+        stages=ContiguousStages.legacy(cfg.num_layers, cfg.pp),
+    )
+    out = []
+    for item in work:
+        for req in bundle.sharding.requirements(item, ctx):
+            if req.origin in ("S8", "S15"):
+                out.append(req)
+    return out, ctx
+
+
+def test_zero3_prefetch_anchor_never_crosses_a_stage():
+    """**BUG_LEDGER A6.** A layer's parameter gather is a dp-axis collective over
+    ITS OWN stage's replicas: no rank of another stage participates and no other
+    stage produces its input. So its anchor must be on its own device.
+
+    Before the fix, rows S8/S15 chose the anchor by LAYER ARITHMETIC
+    (``layer -+ prefetch_depth``), and at a stage boundary that names a layer on
+    the other stage — where ``PARALLEL_TO``'s ``deps(req) += deps(anchor)`` made
+    the gather inherit the foreign stage's predecessor set. Fails with
+    ``_prefetch_attach`` reverted to the raw arithmetic.
+    """
+    cfg = Cfg(dp=2, pp=4, mb=2, num_layers=8, zero_stage=3)
+    reqs, ctx = _zero3_prefetch_requirements(cfg)
+    assert reqs, "no S8/S15 requirements were produced"
+    offenders = [
+        (req.origin, req.key, req.place_on, anchor)
+        for req in reqs
+        for anchor in req.anchors
+        if not ctx.same_stage(anchor, req.place_on)
+    ]
+    assert not offenders, (
+        "ZeRO-3 prefetch gathers anchored on another stage's work: "
+        f"{offenders[:3]}"
+    )
+
+
+def test_zero3_stage_entry_gather_is_issued_before_its_own_layer():
+    """The stage-boundary fallback is ``BEFORE(target)``, not ``PARALLEL_TO``.
+
+    ``PARALLEL_TO(target)`` would run the gather *alongside* the layer that needs
+    the parameters and only order it before that layer's SUCCESSORS — i.e. the
+    layer would compute without waiting for its own gather. ``BEFORE`` takes the
+    layer's deps (the inbound cross-stage transfer) and makes the layer wait,
+    which is "a stage issues its entry layer's gather when it becomes active".
+    """
+    from program.work import AttachMode
+
+    cfg = Cfg(dp=2, pp=4, mb=2, num_layers=8, zero_stage=3)
+    reqs, ctx = _zero3_prefetch_requirements(cfg)
+    boundary = [req for req in reqs if req.anchors == (req.place_on,)]
+    assert boundary, "no stage-entry gather in a pp=4 workload"
+    for req in boundary:
+        assert req.mode is AttachMode.BEFORE, (
+            f"{req.origin} {req.key}: a gather anchored on the work it feeds must "
+            f"be BEFORE it, got {req.mode}"
+        )
+
+
+def test_no_zero3_gather_becomes_an_untimed_root():
+    """A6's fix must not create program ROOTS.
+
+    ``analytic_sim._ROOT_COMM_IS_UNTIMED`` prices a collective with no deps at
+    zero, so a gather that became a root would be silently free. It cannot
+    happen — the ``BEFORE(target)`` fallback only fires at a stage boundary, and
+    a stage's entry layer always has the inbound transfer as a dep — but the
+    reasoning is load-bearing, so it is checked rather than argued.
+    """
+    cfg = Cfg(dp=2, pp=4, mb=2, num_layers=8, zero_stage=3)
+    for granularity in (Granularity.PIPELINE, Granularity.FLAT):
+        program = _program(cfg, granularity, overlap=NoOverlap())
+        roots = [
+            op for op in program.ops
+            if isinstance(op, CollectiveOp)
+            and not op.deps
+            and "zero3_transformer_gather" in op.name
+        ]
+        assert not roots, (
+            f"{granularity.name}: transformer parameter gathers became untimed "
+            f"program roots: {[op.name for op in roots]}"
+        )

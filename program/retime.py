@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hybrid retiming write-back onto COARSE Programs (M5).
+"""Hybrid retiming write-back onto PIPELINE Programs (M5).
 
 :func:`apply_block_timings` replaces the coarse-program half of the legacy
 ``LLMExecutionDispatcher._assign_transformer_durations`` recursive graph
@@ -67,7 +67,7 @@ class BlockTimings:
 
 
 def apply_block_timings(
-    coarse_program: Program,
+    pipeline_program: Program,
     timings: BlockTimings,
     dp_count: int,
 ) -> int:
@@ -76,17 +76,17 @@ def apply_block_timings(
     Returns the number of retimed ops (0 when no baseline applied — the
     legacy no-op case).
     """
-    if not isinstance(coarse_program, Program):
+    if not isinstance(pipeline_program, Program):
         raise TypeError(
-            f"apply_block_timings expects a Program (got {type(coarse_program).__name__})"
+            f"apply_block_timings expects a Program (got {type(pipeline_program).__name__})"
         )
-    if coarse_program.meta.misc.get("granularity") != "coarse":
-        raise RuntimeError("apply_block_timings requires a COARSE program")
+    if pipeline_program.meta.misc.get("granularity") != "pipeline":
+        raise RuntimeError("apply_block_timings requires a PIPELINE program")
 
     dp_count = max(1, int(dp_count))
     retimed = 0
 
-    for op in coarse_program.ops:
+    for op in pipeline_program.ops:
         if not isinstance(op, ComputeOp) or op.role is not OpRole.TRANSFORMER_LAYER:
             continue
 

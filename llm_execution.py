@@ -23,12 +23,12 @@ the result:
 ======================  ===========  ===========================================
 mode                    granularity  consumer
 ======================  ===========  ===========================================
-ANALYTICAL              COARSE       ``program.analytic_sim.evaluate``
-HYBRID                  COARSE       BLOCK retime, then ``analytic_sim.evaluate``
-FULL_ASTRASIM_HIER..    COARSE       BLOCK retime, then AstraSim over (pp,dp)
-FULL_ASTRASIM_FLAT..    FINE         AstraSim over the full layout
+ANALYTICAL              PIPELINE       ``program.analytic_sim.evaluate``
+HYBRID                  PIPELINE       BLOCK retime, then ``analytic_sim.evaluate``
+FULL_ASTRASIM_HIER..    PIPELINE       BLOCK retime, then AstraSim over (pp,dp)
+FULL_ASTRASIM_FLAT..    FLAT         AstraSim over the full layout
 transformer blocks      BLOCK        AstraSim, one bundle per direction
-memory                  FINE         ``program.memory_sim.simulate_memory``
+memory                  FLAT         ``program.memory_sim.simulate_memory``
 ======================  ===========  ===========================================
 
 The dispatcher takes a **typed** :class:`~program.workload.WorkloadSpec` (L0),
@@ -112,12 +112,12 @@ class LLMExecutionDispatcher:
             self.workload.interconnect
         )
 
-        #: FINE Program built by the flattened execution path (reused by the
+        #: FLAT Program built by the flattened execution path (reused by the
         #: memory path) and the memory path's own cached build.
-        self.fine_program: Optional[Program] = None
-        self._memory_fine_program: Optional[Program] = None
-        #: COARSE Program evaluated/emitted by the other three modes.
-        self.coarse_program: Optional[Program] = None
+        self.flat_program: Optional[Program] = None
+        self._memory_flat_program: Optional[Program] = None
+        #: PIPELINE Program evaluated/emitted by the other three modes.
+        self.pipeline_program: Optional[Program] = None
         #: True once a mode ran the analytical comm-size conversion: the memory
         #: replay then times the dp/ZeRO collectives too (memory_sim docstring).
         self._comm_sizes_converted = False
@@ -445,8 +445,8 @@ class LLMExecutionDispatcher:
             self.workload.degrees, self.workload.shape
         )
 
-    def _coarse_label(self) -> str:
-        return "coarse_no_dp" if self.no_data_parallel else "coarse"
+    def _pipeline_label(self) -> str:
+        return "pipeline_no_dp" if self.no_data_parallel else "pipeline"
 
     # ==================================================================
     # modes
@@ -480,9 +480,9 @@ class LLMExecutionDispatcher:
     def _run_pipeline_with_analytical_comm(
         self,
         declared_mode: ExecutionMode,
-        coarse_program: Optional[Program] = None,
+        pipeline_program: Optional[Program] = None,
     ) -> ExecutionResult:
-        """Analytical evaluation of the COARSE Program."""
+        """Analytical evaluation of the PIPELINE Program."""
         from program import analytic_sim
 
         if declared_mode == ExecutionMode.HYBRID:
@@ -490,14 +490,14 @@ class LLMExecutionDispatcher:
         else:  # ANALYTICAL
             filename = "/analytical_graph_no_dp" if self.no_data_parallel else "/analytical_graph"
 
-        if coarse_program is None:
-            coarse_program = self._build_program(
-                Granularity.COARSE, label=self._coarse_label()
+        if pipeline_program is None:
+            pipeline_program = self._build_program(
+                Granularity.PIPELINE, label=self._pipeline_label()
             )
-        self.coarse_program = coarse_program
+        self.pipeline_program = pipeline_program
 
         total_time = analytic_sim.evaluate(
-            coarse_program,
+            pipeline_program,
             self.time_calc.network_model,
             self.interconnect_params,
         )
@@ -508,7 +508,7 @@ class LLMExecutionDispatcher:
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
             from program.viz import save_program_graph
 
-            save_program_graph(coarse_program, self.time_calc.output_dir, filename)
+            save_program_graph(pipeline_program, self.time_calc.output_dir, filename)
 
         total_time *= self._interleave_scale()
         return ExecutionResult(total_time=total_time)
@@ -520,24 +520,24 @@ class LLMExecutionDispatcher:
 
         # Build from the PRISTINE analytical durations (the coarse program
         # predates the write-back), then retime the layer ops.
-        coarse_program = self._build_program(
-            Granularity.COARSE, label=self._coarse_label()
+        pipeline_program = self._build_program(
+            Granularity.PIPELINE, label=self._pipeline_label()
         )
         if transformer_time is not None or moe_transformer_time is not None:
             self._write_block_durations(transformer_time, moe_transformer_time)
             apply_block_timings(
-                coarse_program,
+                pipeline_program,
                 self._collect_block_timings(transformer_time, moe_transformer_time),
                 self.workload.run.retime_dp_count(self.workload.degrees),
             )
         return self._run_pipeline_with_analytical_comm(
-            ExecutionMode.HYBRID, coarse_program=coarse_program
+            ExecutionMode.HYBRID, pipeline_program=pipeline_program
         )
 
     def _run_full_astrasim_hierarchical(self) -> ExecutionResult:
-        """Hierarchical pipeline phase: the COARSE Program IS the emitted one.
+        """Hierarchical pipeline phase: the PIPELINE Program IS the emitted one.
 
-        There is no lowering step any more — ``build()`` at COARSE produces the
+        There is no lowering step any more — ``build()`` at PIPELINE produces the
         program the emitter consumes, over the ("pp","dp") sublayout that
         ``Placement`` derives for that granularity.
         """
@@ -549,17 +549,17 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
-        coarse_program = self._emission_program(
-            Granularity.COARSE, label=self._coarse_label(), artifact_dir=artifact_dir
+        pipeline_program = self._emission_program(
+            Granularity.PIPELINE, label=self._pipeline_label(), artifact_dir=artifact_dir
         )
         if transformer_time is not None or moe_transformer_time is not None:
             self._write_block_durations(transformer_time, moe_transformer_time)
             apply_block_timings(
-                coarse_program,
+                pipeline_program,
                 self._collect_block_timings(transformer_time, moe_transformer_time),
                 self.workload.run.retime_dp_count(self.workload.degrees),
             )
-        self.coarse_program = coarse_program
+        self.pipeline_program = pipeline_program
 
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
             from program.viz import save_program_graph
@@ -569,10 +569,10 @@ class LLMExecutionDispatcher:
                 if self.no_data_parallel
                 else "/pipeline_graph_hierarchical"
             )
-            save_program_graph(coarse_program, self.time_calc.output_dir, filename)
+            save_program_graph(pipeline_program, self.time_calc.output_dir, filename)
 
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
-            coarse_program,
+            pipeline_program,
             self.time_calc,
             artifact_dir,
             persist_artifacts=self.time_calc.persist_astrasim_artifacts,
@@ -585,7 +585,7 @@ class LLMExecutionDispatcher:
         return ExecutionResult(total_time=max_sec)
 
     def _run_full_astrasim_flattened(self) -> ExecutionResult:
-        """Flattened execution: the FINE Program straight into AstraSim.
+        """Flattened execution: the FLAT Program straight into AstraSim.
 
         MoE included: ``build()`` expands the MoE block template through the
         same :class:`~program.placement.BlockExpander` at every granularity, so
@@ -598,15 +598,15 @@ class LLMExecutionDispatcher:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")
 
         program = self._emission_program(
-            Granularity.FINE,
-            label="fine_no_dp" if self.no_data_parallel else "fine",
+            Granularity.FLAT,
+            label="flat_no_dp" if self.no_data_parallel else "flat",
             artifact_dir=artifact_dir,
         )
-        self.fine_program = program
+        self.flat_program = program
 
         if _env_flag("RAPID_VISUALIZE_GRAPHS"):
             # The un-expanded pipeline schedule, under the legacy filename: the
-            # COARSE build of the same workload (there is no proto graph to
+            # PIPELINE build of the same workload (there is no proto graph to
             # render any more — the coarse Program *is* that schedule).
             from program.viz import save_program_graph
 
@@ -616,7 +616,7 @@ class LLMExecutionDispatcher:
                 else "/pipeline_graph_pre_flatten"
             )
             save_program_graph(
-                self._build_program(Granularity.COARSE, label=self._coarse_label()),
+                self._build_program(Granularity.PIPELINE, label=self._pipeline_label()),
                 self.time_calc.output_dir,
                 filename,
             )
@@ -659,25 +659,25 @@ class LLMExecutionDispatcher:
     # ==================================================================
     # memory
     # ==================================================================
-    def build_fine_program_for_memory(self) -> Program:
-        """Build (and cache) the FINE Program the memory replay consumes.
+    def build_flat_program_for_memory(self) -> Program:
+        """Build (and cache) the FLAT Program the memory replay consumes.
 
         Reuses the flattened path's Program when it built one (same workload,
         same granularity). The comm-duration vector the replay needs is stamped
         here, because the dispatcher is the only thing that knows whether a mode
         ran the analytical conversion (:mod:`program.memory_sim`).
         """
-        if self._memory_fine_program is not None:
-            return self._memory_fine_program
+        if self._memory_flat_program is not None:
+            return self._memory_flat_program
 
-        program = self.fine_program
+        program = self.flat_program
         if program is None:
             program = self._build_program(
-                Granularity.FINE,
-                label="fine_no_dp" if self.no_data_parallel else "fine",
+                Granularity.FLAT,
+                label="flat_no_dp" if self.no_data_parallel else "flat",
             )
         self._stamp_memory_comm_durations(program)
-        self._memory_fine_program = program
+        self._memory_flat_program = program
         return program
 
     def _stamp_memory_comm_durations(self, program: Program) -> None:

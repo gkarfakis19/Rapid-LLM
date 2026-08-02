@@ -48,7 +48,7 @@ What this module deletes (INTERFACES §3.6):
   keys off :class:`program.work.WorkKind` through a named, swappable
   :class:`PlacementPolicy`.
 
-Divergence from the FINE builder, deliberate and documented (INTERFACES §3.4):
+Divergence from the FLAT builder, deliberate and documented (INTERFACES §3.4):
 :class:`BlockExpander` **honors ``CommSpec.placement``** (``"pre"``/``"post"``).
 ``pipeline_fine.py:577-589`` chains every comm key *after* its GEMM regardless
 of the declared placement; ``block_program._split_comm_keys`` honors it. This
@@ -119,17 +119,22 @@ class PlacementError(ValueError):
 class Granularity(Enum):
     """What a build makes of one :class:`~program.work.WorkItem`.
 
-    ==========  ==============================  ==========================
-    Granularity device space                    WorkItem expands to
-    ==========  ==============================  ==========================
-    COARSE      ``layout.subset(("pp","dp"))``  1 ComputeStep on the stage
-    FINE        the full ``layout``             cluster_size block chains
-    BLOCK       ``layout.subset(("tp","cp","ep"))``  1 chain per cluster rank
-    ==========  ==============================  ==========================
+    ===========  ==================================  ==========================
+    Granularity  device space                        WorkItem expands to
+    ===========  ==================================  ==========================
+    PIPELINE     ``layout.subset(("pp","dp"))``      1 ComputeStep on the stage
+    FLAT         the full ``layout``                 cluster_size block chains
+    BLOCK        ``layout.subset(("tp","cp","ep"))`` 1 chain per cluster rank
+    ===========  ==================================  ==========================
+
+    Named ``PIPELINE``/``FLAT`` until 2026-08-02. The names now say what the
+    granularity IS rather than how much of it there is: ``PIPELINE`` is the
+    pipeline-stage view the hierarchical and analytical modes evaluate, and
+    ``FLAT`` is the every-GPU view the flattened mode emits.
     """
 
-    COARSE = auto()
-    FINE = auto()
+    PIPELINE = auto()
+    FLAT = auto()
     BLOCK = auto()
 
 
@@ -137,11 +142,11 @@ class Granularity(Enum):
 #: emission, never here — INTERFACES §3.3).
 _GRANULARITY_AXES: Mapping[Granularity, Tuple[AxisName, ...]] = MappingProxyType(
     {
-        # Derived from AxisRole (program.axes): COARSE devices ARE stages,
+        # Derived from AxisRole (program.axes): PIPELINE devices ARE stages,
         # so it materializes the PIPELINE + REPLICA axes; BLOCK is one layer
-        # over the cluster; FINE is everything.
-        Granularity.COARSE: PIPELINE_AXES + REPLICA_AXES,
-        Granularity.FINE: CANONICAL_AXES,
+        # over the cluster; FLAT is everything.
+        Granularity.PIPELINE: PIPELINE_AXES + REPLICA_AXES,
+        Granularity.FLAT: CANONICAL_AXES,
         Granularity.BLOCK: _REGISTRY_CLUSTER_AXES,
     }
 )
@@ -345,20 +350,20 @@ class Placement:
         self._full_layout = full
 
         axes = _GRANULARITY_AXES[granularity]
-        self._layout = full if granularity is Granularity.FINE else full.subset(axes)
+        self._layout = full if granularity is Granularity.FLAT else full.subset(axes)
         #: the axes a device id ranges over (dp excluded — see module docstring)
         self._device_axes: Tuple[AxisName, ...] = tuple(
             axis for axis in self._layout.axis_order if axis != DP_AXIS
         )
         # THE COMMUNICATOR LAYOUT EXCLUDES dp. ``devices()`` never varies the dp
         # coordinate, so a group built over a dp-carrying layout produced members
-        # that are not devices of this program at all (COARSE dp:(0,2) against
+        # that are not devices of this program at all (PIPELINE dp:(0,2) against
         # devices (0,1)). ``RankLayout`` always orders axes canonically with dp
         # LAST and assigns row-major strides, so dropping dp is stride-preserving:
         # every device id is unchanged. INTERFACES §3.3 amendment, 2026-07-26.
         self._group_layout = self._layout.subset(self._device_axes)
-        #: COARSE devices ARE stages, so a "cluster" is one device there.
-        self._cluster_size = 1 if granularity is Granularity.COARSE else cluster
+        #: PIPELINE devices ARE stages, so a "cluster" is one device there.
+        self._cluster_size = 1 if granularity is Granularity.PIPELINE else cluster
         self._communicators = CommunicatorFactory(self._group_layout)
 
     # -- identity ---------------------------------------------------------
@@ -406,7 +411,7 @@ class Placement:
 
     def activation_shard_size(self) -> int:
         """How many ways a **per-token activation tensor** is sharded across one
-        stage's cluster: ``tp*cp`` at FINE/BLOCK, ``1`` at COARSE.
+        stage's cluster: ``tp*cp`` at FLAT/BLOCK, ``1`` at PIPELINE.
 
         This is deliberately NOT :meth:`cluster_size`. A cluster has
         ``tp*cp*ep`` devices, but ``ep`` is **not** a sharding axis for a
@@ -423,7 +428,7 @@ class Placement:
         cross-check does, so a mesh layout that re-factors the cluster is
         honored rather than second-guessed.
         """
-        if self._granularity is Granularity.COARSE:
+        if self._granularity is Granularity.PIPELINE:
             return 1
         # ``tp * cp`` derived from ``AxisSpec.shards_activations`` rather than
         # written as a literal product — the 10c fact now lives on the axes.
@@ -480,7 +485,7 @@ class Placement:
         return DeviceId(self._layout.linearize(coords))
 
     def stage_device(self, stage: StageId) -> DeviceId:
-        """Cluster rank 0 of ``stage`` (at COARSE: the stage itself)."""
+        """Cluster rank 0 of ``stage`` (at PIPELINE: the stage itself)."""
         return self.device_for(stage, 0)
 
     def cluster_devices(self, stage: StageId) -> Tuple[DeviceId, ...]:
@@ -529,7 +534,7 @@ class Placement:
     def devices_for(self, work: WorkItem) -> Tuple[DeviceId, ...]:
         """The devices this WorkItem's chains are instantiated on.
 
-        COARSE: always one device (``cluster_size == 1``). FINE/BLOCK: one
+        PIPELINE: always one device (``cluster_size == 1``). FLAT/BLOCK: one
         device per cluster rank, unless :attr:`policy` pins the kind to cluster
         rank 0 (Class B 10d for ``SOFTMAX``; embedding at device 0).
         """
@@ -628,7 +633,7 @@ class ComputeStep:
     duration: float
     deps: Tuple[int, ...] = ()  #: local step indices within the same chain
     kind: StepKind = StepKind.COMPUTE
-    entry_name: Optional[str] = None  #: BlockTemplate entry (None at COARSE)
+    entry_name: Optional[str] = None  #: BlockTemplate entry (None at PIPELINE)
     mem_kind: Any = None
     param_gather: bool = False
     recompute: bool = False
@@ -701,7 +706,7 @@ class ExpandedChain:
 
 # ---------------------------------------------------------------------------
 # Comm-key grouping helpers, hoisted out of ``build_block_root``'s closure so
-# the FINE path can call them (INTERFACES §3.4 — this hoist is the single
+# the FLAT path can call them (INTERFACES §3.4 — this hoist is the single
 # biggest blocker in ext_moe_flat.md and it is discharged by hoisting, not by
 # a new branch).
 # ---------------------------------------------------------------------------
@@ -841,18 +846,18 @@ class BlockExpander:
     # -- public ------------------------------------------------------------
     def expand(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
         """One chain per device of ``placement.devices_for(work)``."""
-        if self._placement.granularity is Granularity.COARSE:
+        if self._placement.granularity is Granularity.PIPELINE:
             return self._expand_single(work)
         if work.kind is WorkKind.LAYER or work.kind is WorkKind.RECOMPUTE:
             return self._expand_template(work)
         return self._expand_single(work)
 
-    # -- single-step expansion (COARSE, and the non-layer FINE/BLOCK kinds) --
+    # -- single-step expansion (PIPELINE, and the non-layer FLAT/BLOCK kinds) --
     def _expand_single(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
         """One ComputeStep per device.
 
-        At COARSE this is every WorkItem (``duration = durations[duration_key]``).
-        At FINE it is embedding / softmax / optimizer, which the legacy
+        At PIPELINE this is every WorkItem (``duration = durations[duration_key]``).
+        At FLAT it is embedding / softmax / optimizer, which the legacy
         flattener also cloned as single nodes — ``pipeline_fine.py:409-457``.
 
         The :class:`LayerAssignment` is handed to ``duration_for`` because the
@@ -886,7 +891,7 @@ class BlockExpander:
             )
         return tuple(chains)
 
-    # -- block-template expansion (FINE / BLOCK) ----------------------------
+    # -- block-template expansion (FLAT / BLOCK) ----------------------------
     def _expand_template(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
         if work.layer is None:
             raise PlacementError(f"{work.kind.name} WorkItem carries no layer: {work!r}")
@@ -946,7 +951,7 @@ class BlockExpander:
                 )
             pre_keys, post_keys = split_comm_keys(cfg.comm_keys, specs)
 
-            # placement="pre": the collective feeds the GEMM. The FINE path
+            # placement="pre": the collective feeds the GEMM. The FLAT path
             # ignored this (pipeline_fine.py:577-589); here it is honored.
             for key in pre_keys:
                 previous = self._append_comm(steps, key, previous, specs)

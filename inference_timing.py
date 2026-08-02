@@ -824,7 +824,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 seq_len=prefill_len,
                 kv_cache_tokens=0 if getattr(self, "disable_kv_cache", False) else prefill_len,
             )
-            prefill_program = dispatcher.build_fine_program_for_memory()
+            prefill_program = dispatcher.build_flat_program_for_memory()
             _, prefill_peak_gb = mem_estimator.simulate_peak(
                 prefill_program,
                 prefill_memory_data,
@@ -851,7 +851,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 gemm_shapes=decode_gemm_shapes,
             )
             decode_dispatcher = LLMExecutionDispatcher(self, decode_workload)
-            decode_memory_program = decode_dispatcher.build_fine_program_for_memory()
+            decode_memory_program = decode_dispatcher.build_flat_program_for_memory()
             decode_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
                 batch_size=batch_size,

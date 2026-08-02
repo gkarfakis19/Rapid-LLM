@@ -310,8 +310,8 @@ class TimeCalculationLLM(TimeCalculation):
 
         #: Whether ``calc_time_llm`` also runs the memory pass. Default True =
         #: today's behavior. It is a separate OUTPUT, not a step of the timing
-        #: computation, and in the COARSE-emitting modes it dominates wall clock
-        #: because the replay needs a FINE program nothing else built.
+        #: computation, and in the PIPELINE-emitting modes it dominates wall clock
+        #: because the replay needs a FLAT program nothing else built.
         self.estimate_memory = bool(
             getattr(getattr(self, "sw_config", None), "estimate_memory", True)
         )
@@ -342,9 +342,10 @@ class TimeCalculationLLM(TimeCalculation):
     def _sequence_parallel_degree(self) -> int:
         """How many ranks one SEQUENCE is split across, for the memory census.
 
-            1   no sequence sharding
-            tp  tp-sp on, no context parallelism
-            cp  context parallelism on
+            1      no sequence sharding
+            tp     tp-sp on, no context parallelism
+            cp     context parallelism on, tp-sp off
+            tp*cp  BOTH shard the sequence
 
         **This is deliberately NOT ``Placement.activation_shard_size()``**, and
         the difference is a documented modeling position, not a bug — see
@@ -359,21 +360,23 @@ class TimeCalculationLLM(TimeCalculation):
         for the p2p send, so residency is ``/cp`` while transport is ``/(tp*cp)``
         (BUG_LEDGER 10c, tp/cp half, resolved CORRECT with the code unchanged).
 
-        **The one cell that is a gap, not a position:** ``tp_sp and tp > 1 and
-        cp > 1``. There the residual IS sequence-sharded on BOTH axes, so
-        residency should be ``tp*cp`` too — but the ``elif`` below can only
-        return one axis and returns ``cp``, so memory is over-reported by ``tp``.
-        That is a fall-through, not a decision. It is left alone here because
-        changing it moves the memory peak on the four ``tp2cp2...sp1`` goldens
-        and is a modeling call the owner has not made; the contract test names
-        it explicitly so it cannot be mistaken for intent again.
+        **The multiplication is the A6-class fix for the one cell that was a
+        gap rather than a position** (BUG_LEDGER "two memory models"): at
+        ``tp_sp and tp > 1 and cp > 1`` the residual is sequence-sharded on BOTH
+        axes — sp splits it across the TP group and cp splits the sequence
+        again — but the old ``elif`` chain could name only one axis and returned
+        ``cp``, over-reporting resident activation memory by exactly ``tp``.
+        Nothing chose that: it was a fall-through, and it contradicted the
+        transport leg, which has always multiplied both (``tp*cp`` at that same
+        cell). Written as a product, the four cases above are one rule and a
+        third sequence-sharding axis is one more ``if``.
         """
-        if self.tp_sp and self.cp == 1:  # tensor parallelism only
-            return self.tp
-        elif self.cp > 1:  # context parallelism, or the cp+tp hybrid (see above)
-            return self.cp
-        else:
-            return 1
+        degree = 1
+        if self.tp_sp and self.tp > 1:  # sp splits the residual across the TP group
+            degree *= self.tp
+        if self.cp > 1:  # context parallelism splits the sequence again
+            degree *= self.cp
+        return degree
 
     def get_parallelism_mode(self):
         if self.tp_sp and self.tp > 1 and self.cp == 1:
@@ -2880,12 +2883,26 @@ class TimeCalculationLLM(TimeCalculation):
     def get_layernorm_f(self, batch, seq_len, d_model, comm_after=False):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
-        if tp_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            elements = batch * math.ceil(seq_len / seq_degree) * d_model / self.tp
-        elif tp_mode == ParallelismMode.TENSOR_SEQUENCE:
-            elements = batch * math.ceil(seq_len / seq_degree) * d_model
-        else:
-            elements = batch * seq_len * d_model
+        # ONE expression for every mode, and the SAME one ``get_layernorm_b``
+        # uses: this rank's layernorm covers this rank's sequence shard, and
+        # ``seq_degree`` is what names every axis the sequence is split on.
+        # Two three-way branches collapsed into it, each an internal
+        # contradiction with a neighbour:
+        #
+        # * the HYBRID branch divided by ``self.tp`` a SECOND time, compensating
+        #   for the fall-through that made ``_sequence_parallel_degree`` answer
+        #   ``cp`` alone where sp and cp both shard. At ``tp_sp`` this rank's
+        #   element count is therefore UNCHANGED (``seq/(tp*cp)`` either way);
+        #   what changes is the ``tp_sp``-OFF hybrid, where plain TP REPLICATES
+        #   the layernorm across the tp group (that replication is exactly what
+        #   sp exists to remove) and the ``/ self.tp`` claimed a split that is
+        #   not there. No golden covers that cell.
+        # * the ``else`` charged the FULL sequence, which is right for TENSOR and
+        #   SINGLE (``seq_degree == 1``, so the expressions agree) and wrong for
+        #   CONTEXT, where each rank holds ``seq/cp`` tokens. ``get_layernorm_b``
+        #   has always divided there. One tensor, one forward and one backward,
+        #   two element counts differing by ``cp``.
+        elements = batch * math.ceil(seq_len / seq_degree) * d_model
         compute_flops = elements * LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.stats * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
         compute_time = self.roofline(
@@ -2918,10 +2935,9 @@ class TimeCalculationLLM(TimeCalculation):
     def get_layernorm_b(self, batch, seq_len, d_model, type = Optional):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
-        if tp_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            elements = batch * math.ceil(seq_len / seq_degree) * d_model / self.tp
-        else:
-            elements = batch * math.ceil(seq_len / seq_degree) * d_model
+        # The HYBRID's second ``/ self.tp`` is gone for the reason given in
+        # :meth:`get_layernorm_f` — ``seq_degree`` names both axes now.
+        elements = batch * math.ceil(seq_len / seq_degree) * d_model
         compute_flops = elements * LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.stats * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
 
@@ -5567,15 +5583,15 @@ class TimeCalculationLLM(TimeCalculation):
         # timing one: `tot_time` never reads it, but `simulate_peak` sets
         # `memory_peak_gb` / capacity / headroom on `self` and writes the
         # memory-summary artifacts, and memory peaks are T1-gated. It is also
-        # the dominant cost at scale in the COARSE-emitting modes, because
-        # nothing else has built a FINE program there and one must be built for
+        # the dominant cost at scale in the PIPELINE-emitting modes, because
+        # nothing else has built a FLAT program there and one must be built for
         # the replay (GPT 1T: ~5 min against ~23 s for the coarse build).
         #
         # So it is separable, and separating it is the point: `estimate_memory`
         # defaults to today's behavior and a caller that only wants a time can
         # turn it off without touching this function.
         if self.estimate_memory:
-            memory_program = dispatcher.build_fine_program_for_memory()
+            memory_program = dispatcher.build_flat_program_for_memory()
             mem_estimator.simulate_peak(
                 memory_program,
                 memory_data,
@@ -5607,7 +5623,7 @@ class TimeCalculationLLM(TimeCalculation):
         mem_estimator, memory_data = self._build_training_graphs_and_memory_data()
 
         dispatcher = LLMExecutionDispatcher(self, self.workload)
-        memory_program = dispatcher.build_fine_program_for_memory()
+        memory_program = dispatcher.build_flat_program_for_memory()
         _, training_peak_gb = mem_estimator.simulate_peak(
             memory_program,
             memory_data,

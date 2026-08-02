@@ -25,7 +25,7 @@ inventory is the docstring of `program/__init__.py`.
 L0  program/workload.py   WorkloadSpec / RunPolicy / DurationTable / CommSpecTable
 L1  program/work.py       WorkItem, WorkSet, SyncRequirement (what work exists, no order)
     program/policies/     sharding · gradaccum · recompute · routing · overlap
-L2  program/placement.py  Placement, Granularity (COARSE | FINE | BLOCK), BlockExpander
+L2  program/placement.py  Placement, Granularity (PIPELINE | FLAT | BLOCK), BlockExpander
     program/block.py      BlockTemplate / CommMeta
     program/groups.py     CommunicatorFactory — members CONSTRUCTED from (axis, coords)
     program/layout.py     RankLayout
@@ -48,12 +48,12 @@ result:
 
 | mode | granularity | consumer |
 |---|---|---|
-| analytical | COARSE | `analytic_sim.evaluate` |
-| hybrid | COARSE | BLOCK retime, then `analytic_sim.evaluate` |
-| full_astrasim_hierarchical | COARSE | BLOCK retime, then AstraSim over (pp, dp) |
-| full_astrasim_flattened | FINE | AstraSim over the full layout |
+| analytical | PIPELINE | `analytic_sim.evaluate` |
+| hybrid | PIPELINE | BLOCK retime, then `analytic_sim.evaluate` |
+| full_astrasim_hierarchical | PIPELINE | BLOCK retime, then AstraSim over (pp, dp) |
+| full_astrasim_flattened | FLAT | AstraSim over the full layout |
 | transformer blocks | BLOCK | AstraSim, one bundle per direction |
-| memory estimation | FINE | `memory_sim.simulate_memory` |
+| memory estimation | FLAT | `memory_sim.simulate_memory` |
 
 **Dependencies are computed, not walked.** `build()` is mechanical and makes no
 policy decision of its own; it composes L1+L2+L3 in a fixed phase order and

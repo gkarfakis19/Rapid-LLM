@@ -194,7 +194,7 @@ def test_writeback_revision_and_snapshot_isolation() -> None:
     revision = table.write_block_timings(dense_forward=10.0, dense_backward=20.0)
     assert revision == 1 and table.revision == 1
 
-    # the pre-write-back snapshot is unchanged (the hybrid COARSE build must see
+    # the pre-write-back snapshot is unchanged (the hybrid PIPELINE build must see
     # PRISTINE analytical durations - llm_execution.py:497 vs :500)
     assert before["transformer_f"] == 1.0
     assert before.revision == 0

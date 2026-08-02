@@ -4,7 +4,7 @@ The discoverable map of every test tier guarding the Program-core rewrite.
 Companion to `docs/rewrite/CONTEXT.md` (architecture/history) and
 `docs/rewrite/DESIGN.md` (the design the gates pin).
 
-> **Changed at the P5/P6 cutover.** The four `RAPID_{FINE,BLOCK,COARSE,HIER}_DIFF`
+> **Changed at the P5/P6 cutover.** The four `RAPID_{FLAT,BLOCK,PIPELINE,HIER}_DIFF`
 > builder sweeps **no longer exist**. They were differentials between two
 > builders, and there is only one builder now (`program.build.build()`), so
 > there is nothing left to difference. What replaced them, and where each
@@ -128,7 +128,7 @@ Highlights:
 ## Tier 3 — the env-gated build sweep (dev gate)
 
 **There is exactly one.** `tests/test_build.py` carries a whole-matrix sweep
-that, for every golden spec × `{COARSE, FINE}`, builds twice inside one
+that, for every golden spec × `{PIPELINE, FLAT}`, builds twice inside one
 process and asserts **O1** (INTERFACES §4.1) field-for-field on the two
 `Program`s, then canonically on the two emitted bundles, then runs `dlsim`
 on the result. It is skipped unless its env flag is set:

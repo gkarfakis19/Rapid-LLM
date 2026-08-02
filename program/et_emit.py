@@ -279,11 +279,11 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
         if cached is not None:
             return cached
         # A companion axis that this granularity does not MATERIALIZE as devices
-        # is not an error. COARSE devices are stages
-        # (``_GRANULARITY_AXES[COARSE] == ("pp","dp")``), so ``cp`` has no device
+        # is not an error. PIPELINE devices are stages
+        # (``_GRANULARITY_AXES[PIPELINE] == ("pp","dp")``), so ``cp`` has no device
         # extent there and the dp x cp reducer collapses to one collective whose
         # ``participants`` (dp*cp) still carries the group size to the analytical
-        # evaluator — the same treatment COARSE already gives tp and ep.
+        # evaluator — the same treatment PIPELINE already gives tp and ep.
         live = tuple(a for a in companions if a in layout.axis_order)
         if not live or not layout.axis_order:
             result = (int(op.device),)
@@ -504,7 +504,7 @@ def emit_chakra(program: Program, output_dir: str) -> EmittedBundle:
                 # A one-member communicator cannot be a real collective — a
                 # single-member native ring deadlocks, which is why the labeled
                 # path above emits a no-op for the same shape. It is emitted
-                # rather than skipped because ops DEPEND on it: at COARSE the cp
+                # rather than skipped because ops DEPEND on it: at PIPELINE the cp
                 # axis has no device extent, so a dp x cp reducer at ``dp == 1``
                 # collapses to one device here while still being a real 2-rank
                 # collective in the model. Skipping it outright left R5b's

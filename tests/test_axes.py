@@ -93,7 +93,7 @@ def test_placement_activation_shard_size_uses_the_registry():
     ):
         fw = make_workload(cfg).freeze()
         placement = Placement(
-            fw, Granularity.FINE, GPipeSchedule().layer_assignment(fw)
+            fw, Granularity.FLAT, GPipeSchedule().layer_assignment(fw)
         )
         assert placement.activation_shard_size() == expected, cfg
 

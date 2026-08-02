@@ -652,7 +652,7 @@ class MemoryEstimator:
         mode: str,
         filename: Optional[str] = None,
     ) -> Any:
-        """Run memory simulation on the provided FINE Program.
+        """Run memory simulation on the provided FLAT Program.
 
         The legacy ``_is_non_flattened`` graph walk (name sniffing for
         unexpanded transformer nodes) is replaced by a typed granularity
@@ -661,11 +661,11 @@ class MemoryEstimator:
         from program.ir import Program
 
         if not isinstance(memory_program, Program) or (
-            memory_program.meta.misc.get("granularity") != "fine"
+            memory_program.meta.misc.get("granularity") != "flat"
         ):
             raise RuntimeError(
-                "Memory simulation requires a FINE program. "
-                "Use LLMExecutionDispatcher.build_fine_program_for_memory()."
+                "Memory simulation requires a FLAT program. "
+                "Use LLMExecutionDispatcher.build_flat_program_for_memory()."
             )
         return self.time_calc._simulate_with_memory(
             memory_program,

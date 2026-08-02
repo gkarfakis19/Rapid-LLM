@@ -67,7 +67,7 @@ class FullRecompute(RecomputePolicy):
 
 
 def _granularity_expands_blocks(granularity: Any) -> bool:
-    """``granularity is not Granularity.COARSE`` — the legacy ``flattened_mode``.
+    """``granularity is not Granularity.PIPELINE`` — the legacy ``flattened_mode``.
 
     L2's ``Granularity`` (``program/placement.py``) lands in P3; until then
     callers pass ``block_expanded=`` explicitly and this import is never
@@ -76,7 +76,7 @@ def _granularity_expands_blocks(granularity: Any) -> bool:
     """
     from program.placement import Granularity  # lazy; lands in P3
 
-    return granularity is not Granularity.COARSE
+    return granularity is not Granularity.PIPELINE
 
 
 def recompute_policy_for(
@@ -97,7 +97,7 @@ def recompute_policy_for(
     and a caller may override it by passing a policy directly.
 
     ``block_expanded`` IS legacy ``misc["flattened_mode"]`` — the dispatcher
-    knows it as ``granularity is not Granularity.COARSE`` and passes it here.
+    knows it as ``granularity is not Granularity.PIPELINE`` and passes it here.
     """
     if block_expanded is None:
         if granularity is None:

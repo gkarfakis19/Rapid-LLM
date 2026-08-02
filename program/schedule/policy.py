@@ -310,7 +310,7 @@ class Schedule:
 
         ``devices_for`` is INJECTED (``Placement.devices_for``) rather than
         imported: L3 declares an order over work and must not know what a device
-        is. At FINE a stage is ``cluster_size`` devices and a pinned kind
+        is. At FLAT a stage is ``cluster_size`` devices and a pinned kind
         (softmax, Class B 10d) lives on only one of them, so the projection is
         genuinely per DEVICE and not per stage — which is exactly why R3 is
         stated per device (INTERFACES §4.3).

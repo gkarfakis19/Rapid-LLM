@@ -43,7 +43,7 @@ The `GroupKey` type in `ir.py:93` is real, but it is *produced by* the name-grou
 | `pipeline_fine.py:705` `and "optimizer" in child.name` | `:884` identical | **transplanted** |
 | `transforms.py:224` `"attention" in str(getattr(child,"name","")).lower()` | `:217` identical | **transplanted** |
 
-This is not "hard to fix." `program/schedule.py` **already stamps the field**: `role="softmax"` (`:586`), `"embedding"` (`:594`), `"softmax_b"` (`:709`), `"embedding_b"` (`:700`), `"optimizer"` (`:1070`) — and `pipeline_coarse.py:94-102` already maps all seven role strings to `OpRole`. The declared field is sitting one attribute away and the FINE builder reads `obj.name` instead. One branch got converted; the author stopped.
+This is not "hard to fix." `program/schedule.py` **already stamps the field**: `role="softmax"` (`:586`), `"embedding"` (`:594`), `"softmax_b"` (`:709`), `"embedding_b"` (`:700`), `"optimizer"` (`:1070`) — and `pipeline_coarse.py:94-102` already maps all seven role strings to `OpRole`. The declared field is sitting one attribute away and the FLAT builder reads `obj.name` instead. One branch got converted; the author stopped.
 
 ### 4. The `"bwd" in name` hack is half-typed, and the live half is name-sniffing
 

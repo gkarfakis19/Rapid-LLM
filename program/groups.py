@@ -68,7 +68,7 @@ and dp replication is stamped at emission (``ir.py:93-104``), so
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from program.ir import GroupKey
@@ -105,6 +105,16 @@ class CommunicatorFactory:
     """
 
     layout: RankLayout
+    #: Memo for :meth:`members`. NOT part of the value (``compare=False``): the
+    #: factory is frozen and ``members`` is a pure function of
+    #: ``(layout, axes, anchor)`` returning an immutable tuple, so caching it
+    #: cannot change an answer. It is here because membership is asked once per
+    #: collective INSTANCE while the distinct questions number
+    #: ``axes x devices`` — 294,912 calls resolving to a few hundred answers on
+    #: GPT 175B.
+    _memo: Dict[Tuple[Tuple[AxisName, ...], int], Tuple[DeviceId, ...]] = field(
+        default_factory=dict, compare=False, repr=False, hash=False
+    )
 
     # -- membership --------------------------------------------------------
     def members(self, axes: Sequence[AxisName], anchor: DeviceId) -> Tuple[DeviceId, ...]:
@@ -119,18 +129,26 @@ class CommunicatorFactory:
         such an axis is a singleton — matching legacy, where ``_build_axis_groups``
         skipped ``size <= 1`` axes and the caller fell back to ``[anchor]``.
         """
+        memo_key = (tuple(axes), int(anchor))
+        cached = self._memo.get(memo_key)
+        if cached is not None:
+            return cached
+
         spanned = self._spanned_axes(axes)
         base = self.layout.coords_of(int(anchor))
         if not spanned:
-            return (DeviceId(int(anchor)),)
+            result: Tuple[DeviceId, ...] = (DeviceId(int(anchor)),)
+        else:
+            ranges = [range(self.layout.axis_sizes[axis]) for axis in spanned]
+            found: List[int] = []
+            for combo in itertools.product(*ranges):
+                coords: Dict[AxisName, int] = dict(base)
+                coords.update(zip(spanned, combo))
+                found.append(self.layout.linearize(coords))
+            result = tuple(DeviceId(rank) for rank in sorted(set(found)))
 
-        ranges = [range(self.layout.axis_sizes[axis]) for axis in spanned]
-        found: List[int] = []
-        for combo in itertools.product(*ranges):
-            coords: Dict[AxisName, int] = dict(base)
-            coords.update(zip(spanned, combo))
-            found.append(self.layout.linearize(coords))
-        return tuple(DeviceId(rank) for rank in sorted(set(found)))
+        self._memo[memo_key] = result
+        return result
 
     def group_for(self, axes: Sequence[AxisName], anchor: DeviceId) -> GroupKey:
         """``GroupKey(axis=canonical label, members=members(axes, anchor))``."""

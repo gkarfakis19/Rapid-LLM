@@ -48,18 +48,19 @@ from test_policies import Cfg, make_workload  # noqa: E402
 def _transport_degree(tp: int, cp: int) -> int:
     cfg = Cfg(dp=1, tp=tp, cp=cp, ep=1, pp=2, mb=2)
     fw = make_workload(cfg).freeze()
-    placement = Placement(fw, Granularity.FINE, GPipeSchedule().layer_assignment(fw))
+    placement = Placement(fw, Granularity.FLAT, GPipeSchedule().layer_assignment(fw))
     return placement.activation_shard_size()
 
 
 def _residency_degree(tp: int, cp: int, tp_sp: bool) -> int:
     """Mirror of ``train_timing._sequence_parallel_degree`` (kept in lockstep by
     :func:`test_residency_mirror_matches_train_timing`)."""
-    if tp_sp and cp == 1:
-        return tp
+    degree = 1
+    if tp_sp and tp > 1:
+        degree *= tp
     if cp > 1:
-        return cp
-    return 1
+        degree *= cp
+    return degree
 
 
 #: (tp, cp, tp_sp) -> (residency, transport, why they differ)
@@ -77,17 +78,19 @@ CONTRACT = {
     (4, 1, False): (1, 4, "PLAIN TP (10c), tp=4"),
     (2, 2, False): (2, 4, "PLAIN TP + cp: resident /cp, sent /(tp*cp)"),
     (4, 2, False): (2, 8, "PLAIN TP + cp, tp=4"),
-    # --- THE GAP: sp + cp shards on BOTH axes, residency reports only cp ---
-    (2, 2, True): (2, 4, "GAP: sp AND cp both shard the sequence, so residency "
-                         "should be tp*cp=4; _sequence_parallel_degree's elif "
-                         "returns cp alone. Memory over-reported by tp."),
-    (4, 2, True): (2, 8, "GAP: as above at tp=4; residency should be 8."),
+    # --- WAS the gap, FIXED 2026-08-02: sp + cp shard on BOTH axes ---------
+    (2, 2, True): (4, 4, "sp AND cp both shard the sequence, so residency is "
+                         "tp*cp — the two legs AGREE here now. Before the fix "
+                         "_sequence_parallel_degree's elif chain could name one "
+                         "axis and returned cp alone."),
+    (4, 2, True): (8, 8, "as above at tp=4."),
 }
 
-#: The cells where residency is UNDER-sharded because the function cannot name
-#: two axes at once. Fixing these moves the memory peak on the four
-#: ``tp2cp2...sp1`` goldens, so it is an owner call, not a cleanup.
-KNOWN_GAP_CELLS = {(2, 2, True), (4, 2, True)}
+#: Empty. It used to hold the two ``sp and cp`` cells, where residency was
+#: UNDER-sharded because the elif chain could not name two axes at once.
+#: :meth:`train_timing.TimeCalculationLLM._sequence_parallel_degree` is a
+#: PRODUCT now, so every remaining divergence is the deliberate plain-TP one.
+KNOWN_GAP_CELLS: set = set()
 
 
 @pytest.mark.parametrize("cell", sorted(CONTRACT))

@@ -96,7 +96,7 @@ Per `panel/design_A_ir_first.md` §3 with amendments:
   `(finish, counter)`, FIFO ready-scan, per-device compute exclusivity,
   comm/p2p slot-free, successor iteration in creation order, same-placement
   zero-byte events enqueued).
-- `memory_sim` ports `simulate_memory` onto FINE programs. **The FINE builder
+- `memory_sim` ports `simulate_memory` onto FLAT programs. **The FLAT builder
   must support MoE block templates from the moment memory migrates** (critic
   gap 5): hybrid/hier MoE goldens flatten MoE for memory today. Flattened MoE
   *execution* stays rejected until post-migration.
@@ -129,9 +129,9 @@ stage-internal and stricter than the gates. No golden regen before M9.
 | M0 | `RankLayout` unification; delete dead code (`extract_forward_graph`/`extract_backward_graph` — zero call sites) | 3 layout copies, ~310 LOC dead extractors |
 | M1 | `ir.py`, `layout.py`, `validate.py`, `legacy_lowering.py`, `et_emit.py` in **shadow mode**: lower legacy graphs → emit → diff (canonical + id sequences + `.grf`) on all 42 specs, no cutover | — |
 | M2 | Emitter cutover: `convert_rapid_llm_graph_to_chakra_et` = lower → optimize → emit | converter body (~1,150 LOC); walkers quarantined into `legacy_lowering` |
-| M3 | FINE builder (`schedule.py`, `block.py`, `pipeline.py` FINE, `transforms.py` overlap) replaces flattener, producing Programs natively; differential = `lower(legacy_flatten(root))` vs `build_fine()`; then memory replay → `memory_sim` (MoE templates required here) | `PipelineGraphFlattener`, `_propagate_local_hw_ids`, legacy overlap transforms, `build_flattened_root_for_memory`, `simulate_memory` graph plumbing |
+| M3 | FLAT builder (`schedule.py`, `block.py`, `pipeline.py` FLAT, `transforms.py` overlap) replaces flattener, producing Programs natively; differential = `lower(legacy_flatten(root))` vs `build_fine()`; then memory replay → `memory_sim` (MoE templates required here) | `PipelineGraphFlattener`, `_propagate_local_hw_ids`, legacy overlap transforms, `build_flattened_root_for_memory`, `simulate_memory` graph plumbing |
 | M4 | BLOCK programs power hybrid/hier transformer runs + `retime` | `construct_transformer_graph` |
-| M5 | COARSE programs + `analytic_sim` for analytical/hybrid (incl. ga2 no-dp twin) | `Graph.simulate`, `convert_comm_sizes_to_times`, `_apply_transformer_time`/`_assign_transformer_durations` |
+| M5 | PIPELINE programs + `analytic_sim` for analytical/hybrid (incl. ga2 no-dp twin) | `Graph.simulate`, `convert_comm_sizes_to_times`, `_apply_transformer_time`/`_assign_transformer_durations` |
 | M6 | Hierarchical pipeline emission over ("pp","dp"); gmap/faults adapters complete | remaining converter shell, `_remap_stages_for_mapping` |
 | M7 | Inference/decode port: `DecodeGraph` de-inherited, `estimate_inference_memory`, `prepare_decode_graphs` | decode graph plumbing |
 | M8 | Retirement: `simulate_train_graph.py`, `LLMExecutionDispatcher` graph fields, `legacy_lowering.py`, shims | ~5,600 LOC total legacy |

@@ -91,7 +91,7 @@ from program.workload import (
 @dataclass(frozen=True)
 class _LayerAssignment:
     """The contract's ``LayerAssignment`` (INTERFACES §4.1) reduced to the three
-    members L2 consumes. Uses the legacy remainder-first split so the FINE
+    members L2 consumes. Uses the legacy remainder-first split so the FLAT
     oracle sees the same layer->stage map as ``ScheduleSpec.stage_for_layer``.
 
     ``layers_of`` joined ``stage_of``/``min_layer`` when the fused per-stage
@@ -183,7 +183,7 @@ DURATIONS: Mapping[str, float] = {
 
 @dataclass(frozen=True)
 class Grid:
-    """One parallelism grid of the golden matrix (dp forced to 1 so the FINE
+    """One parallelism grid of the golden matrix (dp forced to 1 so the FLAT
     oracle contains no DP/ZeRO collectives — those are L1's lattice, not L2's
     placement)."""
 
@@ -282,7 +282,7 @@ def _workload(
             {"tp": grid.tp, "cp": grid.cp, "ep": grid.ep, "pp": grid.pp, "dp": dp}
         ),
         interconnect={},
-        granularity_hint=Granularity.FINE,
+        granularity_hint=Granularity.FLAT,
         durations=DurationTable(DURATIONS),
     )
     return spec, dense
@@ -308,14 +308,14 @@ def _placement(
 def test_device_sets_per_granularity(grid: Grid) -> None:
     cluster = grid.tp * grid.cp * grid.ep
 
-    coarse, _ = _placement(grid, Granularity.COARSE)
+    coarse, _ = _placement(grid, Granularity.PIPELINE)
     assert coarse.cluster_size() == 1
     assert coarse.devices() == tuple(range(grid.pp))
-    # At COARSE the device IS the stage.
+    # At PIPELINE the device IS the stage.
     for stage in range(grid.pp):
         assert coarse.stage_device(stage) == stage
 
-    fine, _ = _placement(grid, Granularity.FINE)
+    fine, _ = _placement(grid, Granularity.FLAT)
     assert fine.cluster_size() == cluster
     assert fine.devices() == tuple(range(grid.pp * cluster))
 
@@ -340,11 +340,11 @@ def test_activation_shard_size_excludes_ep(grid: Grid) -> None:
     shards = grid.tp * grid.cp
     cluster = grid.tp * grid.cp * grid.ep
 
-    coarse, _ = _placement(grid, Granularity.COARSE)
-    # COARSE: the stage IS the device, so the raw value is already per-device.
+    coarse, _ = _placement(grid, Granularity.PIPELINE)
+    # PIPELINE: the stage IS the device, so the raw value is already per-device.
     assert coarse.activation_shard_size() == 1
 
-    for granularity in (Granularity.FINE, Granularity.BLOCK):
+    for granularity in (Granularity.FLAT, Granularity.BLOCK):
         placement, _ = _placement(grid, granularity)
         assert placement.activation_shard_size() == shards
         assert placement.cluster_size() == cluster
@@ -363,7 +363,7 @@ def test_activation_shard_size_excludes_ep(grid: Grid) -> None:
 @pytest.mark.parametrize("grid", GRIDS, ids=[g.label for g in GRIDS])
 def test_cluster_rank_roundtrip(grid: Grid) -> None:
     """P5: ``devices_for`` is injective on ``(WorkItem, cluster_rank)``."""
-    placement, _ = _placement(grid, Granularity.FINE)
+    placement, _ = _placement(grid, Granularity.FLAT)
     seen: Dict[int, Tuple[int, int]] = {}
     for stage in range(grid.pp):
         for rank in range(placement.cluster_size()):
@@ -379,7 +379,7 @@ def test_placement_rules_key_off_workkind() -> None:
     """Embedding at device 0, softmax pinned to cluster rank 0 of the last
     stage, optimizer expanded per cluster rank — with no name in sight."""
     grid = Grid("rules", tp=2, cp=2, ep=1, pp=2, mb=2, num_layers=4)
-    placement, _ = _placement(grid, Granularity.FINE)
+    placement, _ = _placement(grid, Granularity.FLAT)
     cluster = placement.cluster_size()
 
     embedding = WorkItem(WorkKind.EMBEDDING, Direction.FORWARD, microbatch=0)
@@ -408,7 +408,7 @@ def test_placement_policy_is_swappable_class_b_10d() -> None:
     grid = Grid("b10d", tp=2, cp=2, ep=1, pp=2, mb=1, num_layers=2)
     softmax = WorkItem(WorkKind.SOFTMAX, Direction.FORWARD, microbatch=0)
 
-    legacy, fw = _placement(grid, Granularity.FINE)
+    legacy, fw = _placement(grid, Granularity.FLAT)
     assert legacy.policy.name == "legacy"
     assert len(legacy.devices_for(softmax)) == 1
 
@@ -421,7 +421,7 @@ def test_placement_policy_is_swappable_class_b_10d() -> None:
     )
     sharded = Placement(
         fw,
-        Granularity.FINE,
+        Granularity.FLAT,
         _LayerAssignment.contiguous(grid.num_layers, grid.pp),
         policy=sharded_policy,
     )
@@ -431,7 +431,7 @@ def test_placement_policy_is_swappable_class_b_10d() -> None:
 
 def test_placement_rejects_bad_input() -> None:
     grid = GRIDS[1]
-    placement, fw = _placement(grid, Granularity.FINE)
+    placement, fw = _placement(grid, Granularity.FLAT)
     with pytest.raises(PlacementError):
         placement.device_for(grid.pp, 0)
     with pytest.raises(PlacementError):
@@ -451,14 +451,14 @@ def test_placement_rejects_layout_degree_mismatch() -> None:
     with pytest.raises(PlacementError, match="Inconsistent tensor/context/expert"):
         Placement(
             spec.freeze(),
-            Granularity.FINE,
+            Granularity.FLAT,
             _LayerAssignment.contiguous(grid.num_layers, grid.pp),
         )
 
 
 def test_device_coord_is_hashable_and_shiftable() -> None:
     grid = GRIDS[1]
-    placement, _ = _placement(grid, Granularity.FINE)
+    placement, _ = _placement(grid, Granularity.FLAT)
     coord = placement.coords_of(placement.device_for(0, 1))
     assert isinstance(coord, DeviceCoord)
     assert {coord: "x"}[DeviceCoord(dict(coord.coords))] == "x"
@@ -484,7 +484,7 @@ def test_composite_tp_ep_group_is_declared_not_inferred() -> None:
     """The ``("tp","ep")`` communicator that ``legacy_lowering.py:243-248``
     recovers via ``participants == tp_size * ep_size`` is one ordinary call."""
     grid = Grid("tp_ep", tp=2, cp=2, ep=2, pp=2, mb=1, num_layers=2)
-    placement, _ = _placement(grid, Granularity.FINE)
+    placement, _ = _placement(grid, Granularity.FLAT)
     factory = placement.communicators
 
     # The legacy composite rule: every device sharing all coords EXCEPT tp/ep.
@@ -536,7 +536,7 @@ def test_group_members_are_layout_derived_not_count_derived() -> None:
     """P2: two collectives with the same participant count but different
     declared axes get different member sets."""
     grid = Grid("p2", tp=2, cp=2, ep=1, pp=2, mb=1, num_layers=2)
-    placement, _ = _placement(grid, Granularity.FINE)
+    placement, _ = _placement(grid, Granularity.FLAT)
     factory = placement.communicators
     tp_group = factory.members(("tp",), 3)
     cp_group = factory.members(("cp",), 3)
@@ -545,11 +545,11 @@ def test_group_members_are_layout_derived_not_count_derived() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. FINE placement oracle: build_fine_program
+# 3. FLAT placement oracle: build_fine_program
 # ---------------------------------------------------------------------------
 
 
-# P5: the FINE placement ORACLE (``_schedule_spec`` / ``_oracle_profile`` /
+# P5: the FLAT placement ORACLE (``_schedule_spec`` / ``_oracle_profile`` /
 # ``_l2_profile`` / ``test_fine_placement_matches_build_fine_program``) is
 # DELETED with ``pipeline_fine.build_fine_program``. It was the differential
 # that had to pass before ``pipeline_fine.py`` could be deleted; it did, and it
@@ -564,7 +564,7 @@ def test_fine_chains_are_well_formed(grid: Grid) -> None:
     spec, _ = _workload(grid)
     fw = spec.freeze()
     placement = Placement(
-        fw, Granularity.FINE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
+        fw, Granularity.FLAT, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
     )
     expander = BlockExpander(fw, placement)
     devices = set(placement.devices())
@@ -591,7 +591,7 @@ def test_coarse_expansion_is_one_op_per_workitem() -> None:
     spec, _ = _workload(grid)
     fw = spec.freeze()
     placement = Placement(
-        fw, Granularity.COARSE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
+        fw, Granularity.PIPELINE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
     )
     expander = BlockExpander(fw, placement)
     for item in enumerate_work(fw, NoRecompute()):
@@ -604,7 +604,7 @@ def test_coarse_expansion_is_one_op_per_workitem() -> None:
     assert expander.expand(embedding)[0].steps[0].duration == DURATIONS["embedding_f"]
 
 
-@pytest.mark.parametrize("granularity", [Granularity.COARSE, Granularity.FINE])
+@pytest.mark.parametrize("granularity", [Granularity.PIPELINE, Granularity.FLAT])
 def test_optimizer_node_is_priced_for_every_layer_its_stage_owns(
     granularity: Granularity,
 ) -> None:
@@ -656,12 +656,12 @@ def test_block_expansion_covers_every_cluster_rank() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. CommSpec.placement ("pre"/"post") — the FINE-path divergence
+# 4. CommSpec.placement ("pre"/"post") — the FLAT-path divergence
 # ---------------------------------------------------------------------------
 
 
 def test_fine_expansion_honors_pre_placement() -> None:
-    """INTERFACES §3.4: the FINE path MUST honor ``CommSpec.placement``.
+    """INTERFACES §3.4: the FLAT path MUST honor ``CommSpec.placement``.
     ``pipeline_fine.py:577-589`` chains every key post; this is one of the six
     flattened-MoE blockers. No production comm rule sets "pre", so the 42
     goldens are unaffected."""
@@ -692,7 +692,7 @@ def test_fine_expansion_honors_pre_placement() -> None:
     grid = Grid("pre", tp=2, cp=1, ep=1, pp=1, mb=1, num_layers=1)
     spec, _ = _workload(grid, comm=comm, gemms=gemms)
     fw = spec.freeze()
-    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(1, 1))
+    placement = Placement(fw, Granularity.FLAT, _LayerAssignment.contiguous(1, 1))
     chain = BlockExpander(fw, placement).expand(
         WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
     )[0]
@@ -722,7 +722,7 @@ def test_unregistered_comm_key_raises() -> None:
     grid = Grid("missing", tp=1, cp=1, ep=1, pp=1, mb=1, num_layers=1)
     spec, _ = _workload(grid, gemms=gemms)
     fw = spec.freeze()
-    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(1, 1))
+    placement = Placement(fw, Granularity.FLAT, _LayerAssignment.contiguous(1, 1))
     with pytest.raises(PlacementError, match="missing_key"):
         BlockExpander(fw, placement).expand(
             WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
@@ -787,7 +787,7 @@ def _moe_placement(tp: int, ep: int, routing):
         moe_layer_mask=(True,),
     )
     fw = spec.freeze()
-    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(1, 1))
+    placement = Placement(fw, Granularity.FLAT, _LayerAssignment.contiguous(1, 1))
     return fw, placement, BlockExpander(fw, placement, routing=routing)
 
 
@@ -852,7 +852,7 @@ def test_moe_group_without_routing_policy_raises() -> None:
         grid, comm=MOE_COMM, gemms=MOE_GEMMS, moe_gemms=MOE_GEMMS, moe_layer_mask=(True,)
     )
     fw = spec.freeze()
-    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(1, 1))
+    placement = Placement(fw, Granularity.FLAT, _LayerAssignment.contiguous(1, 1))
     with pytest.raises(PlacementError, match="MoERoutingPolicy"):
         BlockExpander(fw, placement).expand(
             WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=0)
@@ -866,7 +866,7 @@ def test_moe_group_without_routing_policy_raises() -> None:
 # P5: the BLOCK placement ORACLE (``_block_oracle_profile`` /
 # ``_block_l2_profile`` and the three ``*_matches_build_block_root`` tests) is
 # DELETED with ``block_program.build_block_root``, for the same reason as the
-# FINE oracle above.
+# FLAT oracle above.
 
 
 # ---------------------------------------------------------------------------
@@ -888,7 +888,7 @@ def test_devices_for_sync_resolves_every_spread() -> None:
     spec, _ = _workload(grid)
     fw = spec.freeze()
     placement = Placement(
-        fw, Granularity.FINE, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
+        fw, Granularity.FLAT, _LayerAssignment.contiguous(grid.num_layers, grid.pp)
     )
     layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=1)
 
@@ -969,12 +969,12 @@ DP_COMM: Mapping[str, Mapping[str, Any]] = {
 
 
 @pytest.mark.parametrize(
-    "granularity", [Granularity.COARSE, Granularity.FINE, Granularity.BLOCK]
+    "granularity", [Granularity.PIPELINE, Granularity.FLAT, Granularity.BLOCK]
 )
 def test_b2_dp_requirement_gets_no_communicator(granularity: Granularity) -> None:
     """B2. ``Placement``'s device space carries ``dp``, so a dp-axis requirement
     used to receive a communicator whose members are NOT devices of the program
-    (COARSE: ``dp:(0, 2)`` against ``devices() == (0, 1)``), and at BLOCK — where
+    (PIPELINE: ``dp:(0, 2)`` against ``devices() == (0, 1)``), and at BLOCK — where
     the layout has no dp at all — it silently degenerated to a singleton that
     ``et_emit`` substitutes with a zero-duration ``*_noop``, i.e. the reducer
     disappears. Contradicts INTERFACES §3.3 and ``ir.py:92-99``.
@@ -990,11 +990,11 @@ def test_b2_dp_requirement_gets_no_communicator(granularity: Granularity) -> Non
 
     # (a) THE DEFECT: a dp requirement resolves to instance devices but NO
     # GroupKey. Pre-fix this returned GroupKey(axis="dp", members=(0, 2)) at
-    # COARSE — member 2 is not in devices() == (0, 1) — and GroupKey(members=(0,))
+    # PIPELINE — member 2 is not in devices() == (0, 1) — and GroupKey(members=(0,))
     # at BLOCK, a singleton et_emit substitutes with a zero-duration noop.
     layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
     spread = (
-        SyncSpread.STAGE if granularity is not Granularity.FINE else SyncSpread.CLUSTER_RANK_0
+        SyncSpread.STAGE if granularity is not Granularity.FLAT else SyncSpread.CLUSTER_RANK_0
     )
     req = _sync_req(
         comm_key="transformer_dense", axes=("dp",), place_on=layer, spread=spread
@@ -1041,7 +1041,7 @@ def test_b2_group_partition_covers_exactly_the_device_set() -> None:
     the layout, ``partition`` iterated ``num_ranks()`` = ``devices * dp`` and
     invented groups outside the device space."""
     grid = Grid("b2part", tp=2, cp=2, ep=1, pp=2, mb=1, num_layers=2)
-    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    placement, _ = _placement(grid, Granularity.FLAT, dp=2, comm=DP_COMM)
     assert placement.group_layout.num_ranks() == len(placement.devices())
     for axis in ("tp", "cp", "pp"):
         flat = [d for group in placement.communicators.partition((axis,)) for d in group]
@@ -1066,7 +1066,7 @@ def test_b4_per_cluster_rank_spans_the_stage_when_place_on_is_pinned() -> None:
     from program.work import SyncSpread
 
     grid = Grid("b4", tp=2, cp=1, ep=1, pp=2, mb=1, num_layers=2)
-    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    placement, _ = _placement(grid, Granularity.FLAT, dp=2, comm=DP_COMM)
     assert placement.cluster_size() == 2
 
     pinned = {
@@ -1105,7 +1105,7 @@ def test_b4_per_cluster_rank_raises_when_it_cannot_span_the_cluster() -> None:
     from program.work import SyncSpread
 
     grid = Grid("b4guard", tp=2, cp=1, ep=1, pp=2, mb=1, num_layers=2)
-    placement, _ = _placement(grid, Granularity.FINE, dp=2, comm=DP_COMM)
+    placement, _ = _placement(grid, Granularity.FLAT, dp=2, comm=DP_COMM)
     layer = WorkItem(WorkKind.LAYER, Direction.BACKWARD, microbatch=0, layer=0)
     req = _sync_req(
         comm_key="transformer_dense",
@@ -1186,7 +1186,7 @@ def test_b1_block_expander_resolves_comm_through_the_layer_template() -> None:
     # Pre-fix the expander read the ONE flat ``WorkloadSpec.comm``, so a
     # block-template key was either absent from it or present exactly once —
     # both layers then got the same bytes (or a PlacementError).
-    placement = Placement(fw, Granularity.FINE, _LayerAssignment.contiguous(2, 1))
+    placement = Placement(fw, Granularity.FLAT, _LayerAssignment.contiguous(2, 1))
     expander = BlockExpander(fw, placement)
     by_layer = {}
     for layer in (0, 1):
@@ -1246,7 +1246,7 @@ def test_b5_contiguous_stages_satisfies_placement_and_sharding_together() -> Non
     stages = ContiguousStages.legacy(grid.num_layers, grid.pp)
 
     # (a) the LayerAssignment surface: Placement accepts it verbatim.
-    placement = Placement(fw, Granularity.FINE, stages)
+    placement = Placement(fw, Granularity.FLAT, stages)
     for layer in range(grid.num_layers):
         item = WorkItem(WorkKind.LAYER, Direction.FORWARD, microbatch=0, layer=layer)
         assert placement.stage_of(item) == stages.stage_of(layer)

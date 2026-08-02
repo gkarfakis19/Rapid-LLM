@@ -930,7 +930,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             include_transformer_backward=False,
         )
         dispatcher = LLMExecutionDispatcher(tc, workload)
-        prefill_program = dispatcher.build_fine_program_for_memory()
+        prefill_program = dispatcher.build_flat_program_for_memory()
         prefill_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,
@@ -964,7 +964,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             gemm_shapes=decode_gemm_shapes,
         )
         decode_dispatcher = LLMExecutionDispatcher(tc, decode_workload)
-        decode_program = decode_dispatcher.build_fine_program_for_memory()
+        decode_program = decode_dispatcher.build_flat_program_for_memory()
         decode_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,

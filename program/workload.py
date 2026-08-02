@@ -590,9 +590,9 @@ class DurationTable:
 
     * **writer** — ``llm_execution._update_comp_times_from_timings`` after the
       AstraSim BLOCK runs;
-    * **reader-before** — ``_run_hybrid`` builds the COARSE program before the
+    * **reader-before** — ``_run_hybrid`` builds the PIPELINE program before the
       write-back and must see PRISTINE analytical durations;
-    * **reader-after** — ``build_fine_program_for_memory`` constructs a fresh
+    * **reader-after** — ``build_flat_program_for_memory`` constructs a fresh
       spec after the write-back and must see the UPDATED durations.
 
     ``revision`` increments on every write-back and is stamped onto the built

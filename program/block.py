@@ -31,7 +31,7 @@ two mappings are the complete block description. Dense and MoE variants are
 two templates, and ONE expander (:class:`program.placement.BlockExpander`)
 realizes both at every granularity: the MoE hot/cold joins + residual
 transfers the deleted ``construct_transformer_graph`` used to build are now
-produced by the FINE (flattened) build as well as the BLOCK one, which is
+produced by the FLAT (flattened) build as well as the BLOCK one, which is
 what let the flattened path stop rejecting MoE (``ext_moe_flat.md`` P8).
 
 ``CommMeta`` is shared with :mod:`program.schedule` for the pipeline graph's

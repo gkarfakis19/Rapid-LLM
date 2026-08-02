@@ -16,13 +16,13 @@
 | Date | § | Amendment | Why |
 |---|---|---|---|
 | 2026-07-26 | §1.2, §1.6, §1.7, §1.8, §3.4 | `BlockTemplates` carries `dense_comm` / `moe_comm` `CommSpecTable`s; `WorkloadSpec.comm` is **pipeline-level keys only**; new `WorkloadSpec.block_comm(layer)` / `all_comm_specs()`; `BlockExpander` resolves every block comm key through the template for `work.layer`; new invariant **W5** | **B1.** Block comm keys are named PER TEMPLATE (`train_timing._build_transformer_template` holds one `_register_specs` accumulator per call, and `_register_specs` itself RAISES on a byte conflict — `train_timing.py:4694-4711`). Measured on `train:hybrid:dp2tp2cp1pp2mb2sp1:moe:ep2`: `ep_dense_sync_layernorm1_backward` is **337,641,472** bytes dense and **67,141,632** MoE (5.0288x). One flat table keeps one → 5x wrong EP-sync bytes on both MoE golden rows; a mixed `moe_layer_mask` needs both at once and a flat table cannot express it. |
-| 2026-07-26 | §2.2, §3.3, §4.4 | `dp` is not a communicator axis of a device layout: `Placement.group_layout` (= `layout` minus `dp`) backs the `CommunicatorFactory`; `groups.py::_spanned_axes` **raises `GroupError`** on `"dp"`; `CommunicatorFactory.groups_for` returns `Tuple[Optional[GroupKey], ...]` with `None` per instance device of a dp requirement; new `SyncRequirement.is_dp`, and `dp` may not be composited with a device axis; `DP_AXIS` lives in `program/types.py` | **B2.** `Placement`'s device space included `dp`, so a dp-axis requirement got a communicator whose members are not devices (COARSE `dp:(0,2)` against `devices() == (0,1)`; FINE `(0,4)`), and at BLOCK it degenerated to a singleton that `et_emit` substitutes with a zero-duration `*_noop` — the reducer disappears. Contradicts §3.3 and `ir.py:92-99`. |
-| 2026-07-26 | §2.2, §4.3 R2 | `ByteSource.bytes_for` honors `instances`: `ByteSplit.CEIL_DIV_CLUSTER` is `ceil(total / instances)`, **not** `ceil(total / fw.spec.cluster_size())` | **B3.** `Placement.cluster_size()` is 1 at COARSE (the stage IS the device) while `fw.spec.cluster_size()` is always `tp*cp*ep`. Legacy COARSE uses the RAW cross-layer bytes (`pipeline_coarse.py:222,238`), legacy FINE divides (`pipeline_fine.py:645`). At `tp=2` the old call returned 2048.0 where COARSE wants 4096.0 → wrong `cross_layer` bytes on every coarse/hybrid/hierarchical row with `cluster_size > 1`. |
+| 2026-07-26 | §2.2, §3.3, §4.4 | `dp` is not a communicator axis of a device layout: `Placement.group_layout` (= `layout` minus `dp`) backs the `CommunicatorFactory`; `groups.py::_spanned_axes` **raises `GroupError`** on `"dp"`; `CommunicatorFactory.groups_for` returns `Tuple[Optional[GroupKey], ...]` with `None` per instance device of a dp requirement; new `SyncRequirement.is_dp`, and `dp` may not be composited with a device axis; `DP_AXIS` lives in `program/types.py` | **B2.** `Placement`'s device space included `dp`, so a dp-axis requirement got a communicator whose members are not devices (PIPELINE `dp:(0,2)` against `devices() == (0,1)`; FLAT `(0,4)`), and at BLOCK it degenerated to a singleton that `et_emit` substitutes with a zero-duration `*_noop` — the reducer disappears. Contradicts §3.3 and `ir.py:92-99`. |
+| 2026-07-26 | §2.2, §4.3 R2 | `ByteSource.bytes_for` honors `instances`: `ByteSplit.CEIL_DIV_CLUSTER` is `ceil(total / instances)`, **not** `ceil(total / fw.spec.cluster_size())` | **B3.** `Placement.cluster_size()` is 1 at PIPELINE (the stage IS the device) while `fw.spec.cluster_size()` is always `tp*cp*ep`. Legacy PIPELINE uses the RAW cross-layer bytes (`pipeline_coarse.py:222,238`), legacy FLAT divides (`pipeline_fine.py:645`). At `tp=2` the old call returned 2048.0 where PIPELINE wants 4096.0 → wrong `cross_layer` bytes on every coarse/hybrid/hierarchical row with `cluster_size > 1`. |
 | 2026-07-26 | §3.2 | `SyncSpread.PER_CLUSTER_RANK` resolves against `cluster_devices(stage_of(place_on))`, not `devices_for(place_on)`; `PlacementError` if it ever yields fewer than `cluster_size` devices | **B4.** `PER_CLUSTER_RANK` collapsed to ONE device whenever `place_on`'s kind is pinned to cluster rank 0 by `LEGACY_PLACEMENT` (EMBEDDING/SOFTMAX) — exactly ZeRO-3 rows **S7** and **S13**. Legacy `_ensure_zero3_per_rank_edges` builds `hw_ids` for every `par_degree` rank (`pipeline_fine.py:471-480`). Invisible in the matrix only because every zero2/zero3 spec is `tp=cp=1`. |
 | 2026-07-26 | §2.4, §4.1 | `StagePartition` shrinks to **`same_stage(a, b)`** only; `ContiguousStages` implements `LayerAssignment`'s `stage_of(layer)` / `layers_of` / `min_layer` and its WorkItem rule is renamed `stage_of_work` | **B5.** `StagePartition.stage_of(work: WorkItem)` and `LayerAssignment.stage_of(layer: LayerId)` shared a name with incompatible argument types, so **no object satisfied both** — yet `Placement.__init__` consumes a `LayerAssignment` and `ShardingContext` a `StagePartition`, from one stage partition. `same_stage` was the only member L1 ever called. |
-| 2026-07-27 | §4.1 | `Schedule` gains **`implied_deps(devices_for)`** (and `device_projection`, `last_microbatch_of`, `check_permutation`); new `ScheduleDep(before, after, device)`; `LayerAssignment` gains `explicit()` / `contiguous_layers()` | **L3.** §4.1's `Schedule` declared only an order. AstraSim's one-slot rule constrains CONCURRENCY, not ORDER, so an order that is not in the DAG is not an order: legacy materializes the cross-microbatch edge explicitly (`git show 85894c6:simulate_train_graph.py:836-856`). The schedule must therefore DECLARE those deps and R3 materialize them. `devices_for` is injected rather than imported so L3 stays free of L2 (`ScheduleDep` is per DEVICE — at FINE a stage is `cluster_size` devices and a pinned kind lives on one). `last_microbatch_of` is what `GradAccumPolicy.for_schedule` already called (Class B 10h). |
+| 2026-07-27 | §4.1 | `Schedule` gains **`implied_deps(devices_for)`** (and `device_projection`, `last_microbatch_of`, `check_permutation`); new `ScheduleDep(before, after, device)`; `LayerAssignment` gains `explicit()` / `contiguous_layers()` | **L3.** §4.1's `Schedule` declared only an order. AstraSim's one-slot rule constrains CONCURRENCY, not ORDER, so an order that is not in the DAG is not an order: legacy materializes the cross-microbatch edge explicitly (`git show 85894c6:simulate_train_graph.py:836-856`). The schedule must therefore DECLARE those deps and R3 materialize them. `devices_for` is injected rather than imported so L3 stays free of L2 (`ScheduleDep` is per DEVICE — at FLAT a stage is `cluster_size` devices and a pinned kind lives on one). `last_microbatch_of` is what `GradAccumPolicy.for_schedule` already called (Class B 10h). |
 | 2026-07-27 | §4.2, §3.1 | `build()` gains keyword-only `placement_policy`, `sync_order`, `validate`, `check_group_membership`; new `restrict_work_for(granularity, work)` and `check_granularity_preconditions(granularity, fw)` | **L4.** §3.1 says BLOCK is "one layer over the (tp,cp,ep) sublayout only, **no pipeline**", but §4.2 phase 1 enumerates the whole workload. BLOCK's device space carries neither `pp` nor `dp`, so pipeline work and data-parallel sync are not REPRESENTABLE there: the restriction and the `dp==pp==1` precondition state that instead of leaving it to whichever dispatcher built the spec. With the precondition in place no granularity-specific POLICY override is needed — at `dp == 1`, `sharding_policy_for` already answers `NullSharding` and `GradAccumPolicy.emits` is unconditionally False, so neither the ZeRO lattice nor the EP grad sync can leak into a block measurement. |
-| 2026-07-27 | §4.3 R2 | The zero-byte-vs-payload decision of a cross-layer link is **per STAGE, not per device**: `size = 0 if placement.same_stage(producer, consumer) else ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, placement.cluster_size())` | **L4.** R2's pseudocode keys the transfer on `dp == dc` (device). At FINE the embedding is pinned to cluster rank 0 (Class B 10d) while layer 0 spans the stage, so the `EMBEDDING -> LAYER 0` link IS cross-device inside ONE stage — keying on the device invented a `cross_layer` payload between tp ranks (measured: 4 bogus 2 MB transfers on `train:analytical:dp1tp2cp1pp2mb2sp1`). Legacy decides it at the coarse level with `prev_node.hw_id == curr_node.hw_id` (`schedule.py:628,639,648,755,763,771`), i.e. per STAGE, and the FINE expansion inherits the zero-byte control edge. |
+| 2026-07-27 | §4.3 R2 | The zero-byte-vs-payload decision of a cross-layer link is **per STAGE, not per device**: `size = 0 if placement.same_stage(producer, consumer) else ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, placement.cluster_size())` | **L4.** R2's pseudocode keys the transfer on `dp == dc` (device). At FLAT the embedding is pinned to cluster rank 0 (Class B 10d) while layer 0 spans the stage, so the `EMBEDDING -> LAYER 0` link IS cross-device inside ONE stage — keying on the device invented a `cross_layer` payload between tp ranks (measured: 4 bogus 2 MB transfers on `train:analytical:dp1tp2cp1pp2mb2sp1`). Legacy decides it at the coarse level with `prev_node.hw_id == curr_node.hw_id` (`schedule.py:628,639,648,755,763,771`), i.e. per STAGE, and the FLAT expansion inherits the zero-byte control edge. |
 | 2026-07-27 | §4.3 R2 | The `RECOMPUTE -> LAYER/BACKWARD` link *inside one layer* is a plain same-device dep, not a `TransferOp` | **L4.** R2 says a layer's backward entry is its RECOMPUTE chain, but not what joins the two. Legacy wires it as a direct `recompute_node.add_child(transformer_node_b)` (`schedule.py:750`) with no `CommEvent` — the rematerialized activation never leaves the device that recomputed it. |
 | 2026-07-27 | §4.7, §4.8 | `validate_program` gains `check_group_membership` (**V7**, opt-in) and always-on **V8**; `TransferOp.moe_component`, `CollectiveOp.axes`, `Op.work`, `Op.succs` land as defaulted fields | **L4.** V7 ("every member device of a communicator issues the group's collectives") is CONTRADICTED by BUG_LEDGER **A2** (`SyncSpread.CLUSTER_RANK_0`: one instance on cluster rank 0), which §7 preserves as the default. Any non-dp requirement whose group spans >1 device therefore fails V7 today — e.g. the `ep` grad sync at `tp*cp*ep > 1`. V7 cannot be fatal by default without making today's modeling content unbuildable; flipping the spread in P7 is exactly what lets the default flip. V8 needs `moe_component` on the op to be checkable at all. |
 | 2026-07-28 | §4.7 | `TransferOp` gains `participants` / `interconnect`; `CollectiveOp` gains `comm_key` — all defaulted | **P6.** The analytical evaluator needs a p2p's ANALYTICAL timing surface (participant count + interconnect axis) and the memory replay needs to know which comm TABLE a collective came from. Both were `CommEvent` fields on the deleted proto graph and no IR field expressed them; re-deriving either from the op's NAME would be rule-§8.2 name dispatch. `comm_key` is what makes "the memory replay times the PIPELINE-LEVEL collectives only" (§1.6's namespace split) statable as data instead of as a name test. |
@@ -40,7 +40,7 @@
 | 2026-07-29 | §4.7, §4.8, §6 | **`Op.succs` is DELETED.** `meta.misc["schedule_edges"]` is DERIVED from the edge table at `_finish` instead of recorded at R3 time; overlap re-parenting PRESERVES `DepClass` | **P5 verification.** §4.7 and §6 said `analytic_sim` / `memory_sim` / `viz` read `Op.succs`; they do not — all three build their own successor map from `deps`, and no other production reader exists. It was a write-only mirror that every mutation had to keep in sync. `schedule_edges` was stale wherever overlap ran (6/13 pairs on `dp1tp2cp1pp2mb2sp1`, 14/25 on `dp2tp2cp2pp2mb2sp1`) because `_split_compute`/`_split_collective` re-parent AFTER R3; deriving it from the surviving edge cannot go stale. Those re-parents also re-added every moved edge as `DATA_FLOW`, erasing the class that `via` dispatches on. |
 | 2026-07-29 | §4.8 (new **V9**), L5 | **Always-on emission postcondition: an op with successors in the Program keeps at least one in the emitted trace** (`et_emit._check_no_lost_successors`) | **P5 verification.** A dropped ordering edge is invisible to every existing gate — same op multiset, same bytes, same collectives, `dlsim` still completes, the group-order postcondition still holds — and moves only the AstraSim wall clock. This is the check that catches the class at the place it happens. `validate.py`'s **V6** asks a similar question of the IR and only about collectives. |
 | 2026-07-29 | §1.7, §1.8 (W1) | `_prepare_execution_graphs` returns a **2-tuple** `(WorkloadSpec, Optional[WorkloadSpec])`, not the 3-tuple §1.7 binds; `WorkloadSpec.from_timing` reads every `misc_metadata` key as REQUIRED (`REQUIRED_MISC_KEYS`, `WorkloadError` on a miss) | **P5 verification.** `BlockTemplates` moved ONTO the spec (§1.6), so the third element the signature block declares does not exist and never did — the text was stale, the code is right. W1's own wording forbids `dict.get(k, fallback)` as well as `getattr(obj, name, default)`, but the grep gate only caught the second, so the producer seam still read all eight of its fields with a fallback: a producer that stopped writing `num_layer` yielded a 0-layer model and one that stopped writing `model_type` yielded `""`, which the ViT naming path dispatches on. The gate now covers `from_timing` explicitly. |
-| 2026-07-27 (late) | §2.2, §4.3 R2, §7 | New `Placement.activation_shard_size()` (`tp*cp` at FINE/BLOCK, `1` at COARSE); `build._cross_layer_size` divides by it instead of `cluster_size()` | **D 10c, ep half.** The `cross_layer` raw value is `activations · micro_batch · hidden · seq` and `micro_batch` is already `batch/(dp*ep*mb)` (`base_timing.py:490-495`), i.e. ONE EP owner's microbatch — EP ranks own DISTINCT tokens, so `/ep` was a second application of a division the value already carried (legacy `par_degree = tp*cp*ep`, `git show 85894c6:llm_execution.py:369,822`, a device count reused as a byte-sharding degree). Measured at `tp=cp=1`, fixed global batch 16, `ep 1→2→4`: the per-dp-replica boundary aggregate scaled `1/ep` (16,777,216 → 8,388,608 → 4,194,304 B) where it must be invariant; and `memory_estimation`'s per-device residual for the SAME tensor said `raw/(tp*cp)` throughout. `cluster_size()` is untouched — the transfer COUNT is still one per device. Moves 2 of 45 goldens (the FINE MoE `ep2` rows). |
+| 2026-07-27 (late) | §2.2, §4.3 R2, §7 | New `Placement.activation_shard_size()` (`tp*cp` at FLAT/BLOCK, `1` at PIPELINE); `build._cross_layer_size` divides by it instead of `cluster_size()` | **D 10c, ep half.** The `cross_layer` raw value is `activations · micro_batch · hidden · seq` and `micro_batch` is already `batch/(dp*ep*mb)` (`base_timing.py:490-495`), i.e. ONE EP owner's microbatch — EP ranks own DISTINCT tokens, so `/ep` was a second application of a division the value already carried (legacy `par_degree = tp*cp*ep`, `git show 85894c6:llm_execution.py:369,822`, a device count reused as a byte-sharding degree). Measured at `tp=cp=1`, fixed global batch 16, `ep 1→2→4`: the per-dp-replica boundary aggregate scaled `1/ep` (16,777,216 → 8,388,608 → 4,194,304 B) where it must be invariant; and `memory_estimation`'s per-device residual for the SAME tensor said `raw/(tp*cp)` throughout. `cluster_size()` is untouched — the transfer COUNT is still one per device. Moves 2 of 45 goldens (the FLAT MoE `ep2` rows). |
 
 ---
 
@@ -272,10 +272,10 @@ it is designed explicitly here rather than inherited by accident.
 * **Writer:** `llm_execution._update_comp_times_from_timings` (`llm_execution.py:976-1004`) writes
   `transformer_f/b`, `transformer_f/b_dense`, `transformer_f/b_moe` after the AstraSim BLOCK runs
   (hybrid `:499`, hierarchical).
-* **Reader-before:** `_run_hybrid` builds the COARSE program at `:497` **before** the write-back
+* **Reader-before:** `_run_hybrid` builds the PIPELINE program at `:497` **before** the write-back
   and then retimes it (`retime.apply_block_timings`, `:500`). It must see the PRISTINE analytical
   durations.
-* **Reader-after:** `build_fine_program_for_memory` (`llm_execution.py:748`) constructs a fresh
+* **Reader-after:** `build_flat_program_for_memory` (`llm_execution.py:748`) constructs a fresh
   spec **after** the write-back and must see the UPDATED durations.
 
 ```python
@@ -662,7 +662,7 @@ VIA_ALL           = frozenset(DepClass)
 class SyncSpread(Enum):
     """How many instances of the requirement exist inside one pipeline stage.
     NAMED POLICY for BUG_LEDGER A2 and B/10d — see §7."""
-    STAGE            = auto()   # one instance; the stage IS the device (COARSE/BLOCK granularity)
+    STAGE            = auto()   # one instance; the stage IS the device (PIPELINE/BLOCK granularity)
     CLUSTER_RANK_0   = auto()   # one instance, on cluster rank 0 of the stage  [legacy default]
     PER_CLUSTER_RANK = auto()   # one instance per cluster rank                 [A2's fix; ZeRO-3 tp_shard]
 
@@ -684,17 +684,17 @@ class ByteSource:
 
 > **AMENDMENT 2026-07-26 (B3): `CEIL_DIV_CLUSTER` divides by `instances`, not by
 > `fw.spec.cluster_size()`.** The two differ exactly where it matters: `Placement.cluster_size()`
-> is **1** at COARSE (the stage IS the device, §3.1) while `fw.spec.cluster_size()` is always
-> `tp*cp*ep`. Legacy COARSE uses the **raw** cross-layer byte count
-> (`pipeline_coarse.py:222,238` — `int(event.comm_size_bytes)`) and legacy FINE divides it
+> is **1** at PIPELINE (the stage IS the device, §3.1) while `fw.spec.cluster_size()` is always
+> `tp*cp*ep`. Legacy PIPELINE uses the **raw** cross-layer byte count
+> (`pipeline_coarse.py:222,238` — `int(event.comm_size_bytes)`) and legacy FLAT divides it
 > (`pipeline_fine.py:645` — `ceil(total / par_degree)`). Ignoring `instances` returned `2048.0`
-> at `tp=2` where COARSE wants `4096.0`, i.e. wrong `cross_layer` bytes on every
+> at `tp=2` where PIPELINE wants `4096.0`, i.e. wrong `cross_layer` bytes on every
 > coarse/hybrid/hierarchical row with `cluster_size > 1`. The unit test hid it by passing
 > `instances == cluster_size`; it now passes a differing value.
 
 > **AMENDMENT 2026-07-27 (D 10c, ep half): the divisor is a SHARD count, not a device
 > count.** `build._cross_layer_size` passes `Placement.activation_shard_size()` (`tp*cp` at
-> FINE/BLOCK, `1` at COARSE), **not** `cluster_size()` (`tp*cp*ep`). The pipeline-boundary
+> FLAT/BLOCK, `1` at PIPELINE), **not** `cluster_size()` (`tp*cp*ep`). The pipeline-boundary
 > tensor is the residual stream, and `ep` does not shard it: in training every EP rank owns a
 > DISTINCT microbatch (`base_timing.py:493-495` → `dp_dense = dp*ep`, so the raw value
 > `activations · micro_batch · hidden · seq` is already ONE owner's microbatch), so it holds a
@@ -1147,15 +1147,15 @@ duplicate ids cannot exist (audit item 10e, Class C).
 ```python
 # program/placement.py
 class Granularity(Enum):
-    COARSE = auto()   # one op per WorkItem, on the stage device        (was pipeline_coarse.py)
-    FINE   = auto()   # WorkItem -> BlockTemplate chain x cluster_size  (was pipeline_fine.py)
+    PIPELINE = auto()   # one op per WorkItem, on the stage device        (was pipeline_coarse.py)
+    FLAT   = auto()   # WorkItem -> BlockTemplate chain x cluster_size  (was pipeline_fine.py)
     BLOCK  = auto()   # one layer expanded over the (tp,cp,ep) sublayout only (was block_program.py)
 ```
 
 | Granularity | device space | `WorkItem` maps to | `SyncSpread` default |
 |---|---|---|---|
-| `COARSE` | `layout.subset(("pp","dp"))`; device == stage | 1 `ComputeOp` | `STAGE` |
-| `FINE` | full `layout`; device == `linearize(cluster_coords(rank, stage))` | `cluster_size` chains of `len(template.entries)` computes + their comm keys | `CLUSTER_RANK_0` (`PER_CLUSTER_RANK` iff `CommSpec.tp_shard`) |
+| `PIPELINE` | `layout.subset(("pp","dp"))`; device == stage | 1 `ComputeOp` | `STAGE` |
+| `FLAT` | full `layout`; device == `linearize(cluster_coords(rank, stage))` | `cluster_size` chains of `len(template.entries)` computes + their comm keys | `CLUSTER_RANK_0` (`PER_CLUSTER_RANK` iff `CommSpec.tp_shard`) |
 | `BLOCK` | `layout.subset(("tp","cp","ep"))`; device == cluster rank | 1 chain per cluster rank, one layer only, no pipeline | `STAGE` |
 
 ### 3.2 Placement
@@ -1199,8 +1199,8 @@ class Placement:
         """EMBEDDING -> 0; SOFTMAX -> pp-1; LAYER/RECOMPUTE -> layers.stage_of(work.layer);
         OPTIMIZER -> work.stage. Verbatim placement rules of schedule.py:583,592,603,1054."""
     def devices_for(self, work: WorkItem) -> Tuple[DeviceId, ...]:
-        """COARSE/BLOCK: one device. FINE: `cluster_size` devices in cluster-rank
-        order. Softmax at FINE returns ONE device (cluster rank 0) — Class B 10d."""
+        """PIPELINE/BLOCK: one device. FLAT: `cluster_size` devices in cluster-rank
+        order. Softmax at FLAT returns ONE device (cluster rank 0) — Class B 10d."""
     def devices_for_sync(self, req: SyncRequirement) -> Tuple[DeviceId, ...]:
         """Resolves `req.spread` against `req.place_on`:
            STAGE            -> (stage device,)
@@ -1235,7 +1235,7 @@ class Placement:
 > new development with new goldens, not pinned behavior.
 
 > **Placement checkpoint (P3, measure before landing).** For the *non*-per-rank ZeRO-2/3 gathers and
-> the DP reducers, FINE today declares `local_hw_id = <stage>` and then `propagate_local_hw_ids`
+> the DP reducers, FLAT today declares `local_hw_id = <stage>` and then `propagate_local_hw_ids`
 > (`pipeline_fine.py:796-850`) overwrites it with the first placed parent's device — i.e. cluster
 > rank 0. `SyncSpread.CLUSTER_RANK_0` is chosen as the default precisely to reproduce that. The P3
 > gate must confirm T1-exact per-rank collective multisets on all ZeRO-2/3 golden rows before
@@ -1290,8 +1290,8 @@ Rules that fall out and must be asserted:
 >
 > | granularity | `Placement.layout` | `devices()` | `members(("dp",), 0)` was | wrong because |
 > |---|---|---|---|---|
-> | COARSE | `("pp","dp")` | `(0, 1)` | `(0, 2)` | member 2 is not a device |
-> | FINE | `("tp","cp","ep","pp","dp")` | `(0,1,2,3)` | `(0, 4)` | member 4 is not a device |
+> | PIPELINE | `("pp","dp")` | `(0, 1)` | `(0, 2)` | member 2 is not a device |
+> | FLAT | `("tp","cp","ep","pp","dp")` | `(0,1,2,3)` | `(0, 4)` | member 4 is not a device |
 > | BLOCK | `("tp","cp","ep")` | `(0, 1)` | `(0,)` | `_spanned_axes` skipped the absent axis → singleton → `et_emit` substitutes a zero-duration `*_noop`, **deleting the reducer** |
 >
 > Three changes, all required (any one alone still leaves a silent failure mode):
@@ -1299,8 +1299,8 @@ Rules that fall out and must be asserted:
 > 1. `CommunicatorFactory` is built over `Placement.group_layout` (= `layout` minus `dp`), so no
 >    reachable layout carries `dp` at all. As a bonus `partition()` — which V7 uses — now iterates
 >    exactly the device set instead of `devices * dp`.
-> 2. `groups.py::_spanned_axes` **raises `GroupError`** on `"dp"`. Without this, (1) turns the COARSE
->    and FINE cases into the BLOCK case: a silent singleton, i.e. a deleted collective.
+> 2. `groups.py::_spanned_axes` **raises `GroupError`** on `"dp"`. Without this, (1) turns the PIPELINE
+>    and FLAT cases into the BLOCK case: a silent singleton, i.e. a deleted collective.
 > 3. dp requirements carry `group=None, is_dp=True` (`SyncRequirement.is_dp`, §2.2), which is what
 >    `CollectiveOp` already models (`is_dp` / `label is None`, `ir.py:146-151`) and what emission
 >    already expects.
@@ -1330,8 +1330,8 @@ class BlockExpander:
         layer resolves no block keys and raises."""
 
     def expand(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
-        """COARSE: one single-step chain (duration = durations[duration_key(work)]).
-        FINE/BLOCK: for each device, for each GemmEntry in template order
+        """PIPELINE: one single-step chain (duration = durations[duration_key(work)]).
+        FLAT/BLOCK: for each device, for each GemmEntry in template order
         (REVERSED for BACKWARD, pipeline_fine.py:542-543), resolving every comm
         key against `_specs_for(work)`:
 
@@ -1340,7 +1340,7 @@ class BlockExpander:
             for group in parallel_groups(post_keys(entry, direction)):     # placement="post"
                 emit the group (a single CommStep, or the MoE hot/cold join)
 
-        `pre_keys`/`post_keys` come from `CommSpec.placement`. THE FINE PATH MUST
+        `pre_keys`/`post_keys` come from `CommSpec.placement`. THE FLAT PATH MUST
         HONOR THEM (today it does not — block.py:126-127, pipeline_fine.py:577-589
         chain every key post). This is a NO-OP for all 42 goldens: no production
         comm rule sets placement="pre" (train_timing.py COMMUNICATION_RULES /
@@ -1350,7 +1350,7 @@ class BlockExpander:
 
 `parallel_groups` is the hoisted `_comm_parallel_groups` (`block_program.py:171-186`) and the MoE
 hot/cold join is the hoisted `_attach_moe_parallel_post_group` (`block_program.py:285-374`), both
-lifted out of the `build_block_root` closure so the FINE path can call them — this is the single
+lifted out of the `build_block_root` closure so the FLAT path can call them — this is the single
 biggest blocker in `ext_moe_flat.md` and it is discharged by hoisting, not by a new branch.
 
 ### 3.5 L2 invariants
@@ -1489,7 +1489,7 @@ student does not have to negotiate it.
 >
 > `devices_for` is **injected** (it is `Placement.devices_for`) rather than imported, so L3 keeps
 > knowing nothing about devices while `ScheduleDep` is still per DEVICE — which it must be, because
-> at FINE a stage is `cluster_size` devices and a pinned kind (softmax, Class B 10d) lives on only
+> at FLAT a stage is `cluster_size` devices and a pinned kind (softmax, Class B 10d) lives on only
 > one of them.
 >
 > **The interleaving seam is `LayerAssignment` and nothing else.** It is an explicit map, and no rule
@@ -1600,7 +1600,7 @@ for each producer chain p (device dp) and consumer chain c (device dc):
 ```
 
 > **AMENDMENT 2026-07-26 (B3).** The `instances` argument is `placement.cluster_size()` — **1 at
-> COARSE**, `tp*cp*ep` at FINE/BLOCK — which is what makes this one rule reproduce both
+> PIPELINE**, `tp*cp*ep` at FLAT/BLOCK — which is what makes this one rule reproduce both
 > `pipeline_coarse.py:222,238` (raw) and `pipeline_fine.py:645` (divided). It is NOT
 > `fw.spec.cluster_size()`; see §2.2.
 
@@ -1608,13 +1608,13 @@ for each producer chain p (device dp) and consumer chain c (device dc):
 > The original pseudocode keyed both the size and the "plain dep vs transfer" choice on
 > `dp == dc`. Both were wrong:
 >
-> 1. **Size.** `cross_layer` models PIPELINE activation movement. At FINE the embedding is pinned to
+> 1. **Size.** `cross_layer` models PIPELINE activation movement. At FLAT the embedding is pinned to
 >    cluster rank 0 (Class B 10d) while layer 0 spans the stage, so `EMBEDDING → LAYER 0` is
 >    *cross-device inside one stage* — keying the size on the device invented a `cross_layer` payload
 >    between tp ranks (measured: 4 bogus 2 MB transfers on `train:analytical:dp1tp2cp1pp2mb2sp1`
->    before the fix). Legacy decides it at the COARSE level with
+>    before the fix). Legacy decides it at the PIPELINE level with
 >    `prev_node.hw_id == curr_node.hw_id` (`schedule.py:628,639,648,755,763,771`) — hw_id IS the
->    stage — and the FINE expansion inherits the zero-byte control edge.
+>    stage — and the FLAT expansion inherits the zero-byte control edge.
 > 2. **Plain dep vs op.** The `dp == dc` branch above says "plain dep", but Class B item 9 (and §7's
 >    binding table) say the same-stage zero-byte PIPELINE event's PRESENCE is load-bearing for the
 >    analytical evaluator's ready-scan. R2 therefore ALWAYS emits a `TransferOp`; a same-device one
@@ -1627,7 +1627,7 @@ for each producer chain p (device dp) and consumer chain c (device dc):
 > link (`LAYER/BWD(l) → entry(l-1)`) is an ordinary R2 transfer, and `entry(l-1)` is the RECOMPUTE
 > chain when one exists (`_bwd_entry_node`, `schedule.py:682-687`).
 
-At FINE the pairing is per cluster rank `r → r` (`pipeline_fine.py:659-694`); when one side is
+At FLAT the pairing is per cluster rank `r → r` (`pipeline_fine.py:659-694`); when one side is
 pinned to a single device (embedding, softmax) that chain pairs with **every** chain of the other
 side, which is what legacy does by giving one edge many children. The
 *compute-anchor double-dep* (`pipeline_fine.py:672-687` — the SEND must fire off the last COMPUTE,
@@ -1672,7 +1672,7 @@ for dep in schedule.implied_deps(placement.devices_for):        # slot-monotone
         deps(target) += source                                  # DepClass.SCHEDULE
 ```
 
-* **Per DEVICE, not per stage.** At FINE a stage is `cluster_size` devices; the projection is the
+* **Per DEVICE, not per stage.** At FLAT a stage is `cluster_size` devices; the projection is the
   stage's slot order restricted to the chains placed on that device.
 * **`reaches(a, b)`** is transitive reachability in the graph built so far (R1 + R2 + the R3 edges
   already added). *(Amended 2026-07-27: implemented as a backward BFS from `b` with early exit, over
@@ -2014,7 +2014,7 @@ default is today's (wrong) value, so P7 is a default change plus a delta table.
 | C 10e | non-unique op ids from overlap splits | deleted by §4.6 | — | — |
 | D 10b ✅ FIXED 2026-07-27 | optimizer once per stage, priced at one layer | `enumerate_work` emits one `OPTIMIZER` per stage (structure KEPT); `work.optimizer_duration` prices it | sum over the stage's OWN layers, each at its own dense/MoE per-layer price, from the authoritative `LayerAssignment` | 23 of 37 training goldens move, +5.3 % … +18.1 % |
 | **D 12** *(new 2026-07-27)* | embedding + vocab-projection apply-grad never counted | `train_timing.get_data_parallel_reduction_llm` sums transformer params only | missing entirely | add `durations["optimizer_embedding"]`/`["optimizer_softmax"]`, added on `stage 0` / `stage pp-1` |
-| D 10c ✅ FIXED 2026-07-27 (ep half) · resolved-CORRECT (tp/cp half) | cross-layer activation bytes `/cluster_size` | `ByteSource.split` on `cross_layer`, divided by `placement.activation_shard_size()` | `CEIL_DIV_CLUSTER` divided by `cluster_size() = tp*cp*ep` | **ep**: dropped — EP ranks own distinct microbatches, so the raw value already carried the `/ep` (double division). Moves the 2 FINE MoE `ep2` goldens: per-rank p2p payload ×2, `bytes_by_axis[p2p]` ×2.0000, `total_time` +0.58 % / +0.03 %. **tp/cp**: kept — the boundary tensor is genuinely sequence-sharded under `tp_sp`/`cp`, and under plain TP Megatron's `--scatter-gather-tensors-in-pipeline` splits it for the p2p send anyway |
+| D 10c ✅ FIXED 2026-07-27 (ep half) · resolved-CORRECT (tp/cp half) | cross-layer activation bytes `/cluster_size` | `ByteSource.split` on `cross_layer`, divided by `placement.activation_shard_size()` | `CEIL_DIV_CLUSTER` divided by `cluster_size() = tp*cp*ep` | **ep**: dropped — EP ranks own distinct microbatches, so the raw value already carried the `/ep` (double division). Moves the 2 FLAT MoE `ep2` goldens: per-rank p2p payload ×2, `bytes_by_axis[p2p]` ×2.0000, `total_time` +0.58 % / +0.03 %. **tp/cp**: kept — the boundary tensor is genuinely sequence-sharded under `tp_sp`/`cp`, and under plain TP Megatron's `--scatter-gather-tensors-in-pipeline` splits it for the p2p send anyway |
 
 ---
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Analytical evaluation of COARSE :class:`~program.ir.Program`\\ s (P6).
+"""Analytical evaluation of PIPELINE :class:`~program.ir.Program`\\ s (P6).
 
 Reads the **Program** — there is one representation. The proto event graph the
 M5 evaluator walked (``meta.misc["coarse_events"]`` /
@@ -188,10 +188,10 @@ def evaluate_detailed(
     """Convert comm sizes and replay the legacy list scheduler over the ops."""
     if not isinstance(program, Program):
         raise TypeError(f"evaluate expects a Program (got {type(program).__name__})")
-    if program.meta.misc.get("granularity") != "coarse":
+    if program.meta.misc.get("granularity") != "pipeline":
         raise RuntimeError(
-            "Analytical evaluation requires a COARSE program "
-            "(build(..., granularity=Granularity.COARSE))."
+            "Analytical evaluation requires a PIPELINE program "
+            "(build(..., granularity=Granularity.PIPELINE))."
         )
 
     ops = program.ops
@@ -270,6 +270,6 @@ def evaluate(
     network_model: Any,
     interconnect_params: Mapping[str, Tuple[float, float]],
 ) -> float:
-    """Total analytical time of a COARSE program (legacy ``Graph.simulate``
+    """Total analytical time of a PIPELINE program (legacy ``Graph.simulate``
     return value: the finish time of the last completed event)."""
     return evaluate_detailed(program, network_model, interconnect_params).total_time

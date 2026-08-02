@@ -316,7 +316,7 @@ def restrict_work_for(
 ) -> WorkSet:
     """The work a granularity (and caller) can express (INTERFACES §3.1).
 
-    COARSE and FINE express the whole workload. BLOCK expresses transformer-block
+    PIPELINE and FLAT express the whole workload. BLOCK expresses transformer-block
     work only — see :data:`_BLOCK_KINDS`. Stated as one named function so the
     coupling is visible in a dumped program
     (``meta.misc["work_restricted"]``) instead of being an accident of which
@@ -363,7 +363,7 @@ def check_granularity_preconditions(granularity: Granularity, fw: FrozenWorkload
             f"(got dp={degrees.dp}, pp={degrees.pp}). BLOCK's device space is the "
             "(tp,cp,ep) sublayout, which carries no dp and no pp axis; a block "
             "run is a single-replica measurement (legacy dp_override=1). Build "
-            "the block spec with dp=pp=1, or use Granularity.FINE."
+            "the block spec with dp=pp=1, or use Granularity.FLAT."
         )
 
 
@@ -438,7 +438,7 @@ def build(
     ``PER_CLUSTER_RANK`` for every dp requirement and row S12 declares it too,
     so no production requirement puts a grouped collective on one member of its
     group any more, and ``build(..., check_group_membership=True)`` was measured
-    clean over 192 COARSE+FINE configurations (``dp/tp/cp/ep/pp`` in ``{1,2}`` x
+    clean over 192 PIPELINE+FLAT configurations (``dp/tp/cp/ep/pp`` in ``{1,2}`` x
     ``zero_stage`` in ``{0,2,3}`` x dense/MoE). The default stays OFF only
     because legacy-lowered / hand-built Programs are per-device clone programs
     for which V7 is false BY CONSTRUCTION (``program/ir.py`` module docstring);
@@ -522,6 +522,17 @@ class _Builder:
         #: after R4, so an R3 edge can be subsumed later without R3 having
         #: been wrong. The test skips these when re-deriving reachability.
         self._r5_edges: List[Tuple[int, int]] = []
+        #: R4 edges, recorded for the SAME reason as ``_r5_edges``: R4 also runs
+        #: after R3, so its sync attachments can subsume an R3 edge that was
+        #: not redundant when R3 added it. ``AttachMode.BEFORE`` does this by
+        #: construction — it inserts the requirement between the target and the
+        #: target's own deps, so every dep of the target gains a second, longer
+        #: path to it. Row S1 never showed it (the forward entry gather attaches
+        #: to the program root, which has no incoming schedule edge); the
+        #: stage-entry gathers A6 introduced do.
+        self._r4_edges: List[Tuple[int, int]] = []
+        #: When not ``None``, :meth:`_add_dep` appends every NEW edge here.
+        self._edge_recorder: Optional[List[Tuple[int, int]]] = None
         #: overlap work list: ``(collective nid, decl, producing compute nid)``.
         self._overlap_sites: List[Tuple[int, OverlapDecl, Optional[int]]] = []
         self._xfer_seq = 0
@@ -561,7 +572,13 @@ class _Builder:
         # 6 ---------------------------------------------------------------
         self._apply_r3()
         # 7 / 8 -----------------------------------------------------------
-        self._apply_r4(self._collect_requirements())
+        # Recorded so D1 stays exactly re-derivable on the artifact: R4 runs
+        # after R3 and can subsume an R3 edge (see ``_r4_edges``).
+        self._edge_recorder = self._r4_edges
+        try:
+            self._apply_r4(self._collect_requirements())
+        finally:
+            self._edge_recorder = None
         # 8b ---------------------------------------------------------------
         self._apply_r5()
         # 9 ---------------------------------------------------------------
@@ -614,6 +631,8 @@ class _Builder:
             self._edges[key] = {dep_class}
             self._nodes[node].deps.append(dep)
             self._nodes[dep].succs.append(node)
+            if self._edge_recorder is not None:
+                self._edge_recorder.append(key)
         else:
             classes.add(dep_class)
 
@@ -696,17 +715,69 @@ class _Builder:
         The set form of :meth:`_reaches`, for callers that ask the SAME question
         about one target many times. ``source in self._ancestors_of(target)`` is
         by construction identical to ``self._reaches(source, target)``.
+
+        The membership test is done BEFORE pushing, not after popping. Both are
+        correct; the difference is that the pop-side form pushes one stack entry
+        per EDGE (``O(E)`` pops for a walk that visits ``O(V)`` nodes), and this
+        DAG's average in-degree is ~6.6, so the pop-side form did ~6.6x the list
+        churn. Measured on GPT 175B (pp=8 L=96 mb=64), where R5 walks 72 targets:
+        47.4M list pushes -> 7.4M.
         """
         nodes = self._nodes
         ancestors: Set[int] = set()
-        stack = list(nodes[target].deps)
+        stack = [dep for dep in nodes[target].deps]
         while stack:
             current = stack.pop()
             if current in ancestors:
                 continue
             ancestors.add(current)
-            stack.extend(nodes[current].deps)
+            for dep in nodes[current].deps:
+                if dep not in ancestors:
+                    stack.append(dep)
         return ancestors
+
+    def _ancestors_covering(
+        self, target: int, wanted: Set[int]
+    ) -> Tuple[Set[int], bool]:
+        """:meth:`_ancestors_of`, stopping as soon as all of ``wanted`` is seen.
+
+        Returns ``(ancestors, complete)``. ``complete`` is False ONLY when every
+        node in ``wanted`` was already found, so a caller whose entire question
+        is "are these particular nodes ancestors of ``target``" gets the same
+        answers either way — and in the ``complete is False`` case it gets them
+        without walking the rest of the graph.
+
+        This is R5's hot path and it is a REDUNDANCY PROOF: under GPipe every
+        source it considers is already an ancestor (R5 adds zero edges), so the
+        full set was computed only to conclude "nothing to do". The optimizer is
+        the last op of its stage, so its ancestor set is essentially the whole
+        upstream program — ``O(V+E)`` per optimizer INSTANCE, i.e. once per
+        device. On GPT 175B FLAT (64 devices) that was 16.4 s of a 53.8 s build.
+        The wanted set lives on the target's own device and its own stage, so
+        the bounded walk reaches all of it in a small neighborhood.
+
+        When some source is genuinely missing the walk runs to exhaustion and
+        the caller gets an exact, complete set — the slow path is the CORRECT
+        path, and it is the one that adds edges.
+        """
+        if not wanted:
+            return set(), False
+        nodes = self._nodes
+        ancestors: Set[int] = set()
+        remaining = set(wanted)
+        stack = [dep for dep in nodes[target].deps]
+        while stack:
+            current = stack.pop()
+            if current in ancestors:
+                continue
+            ancestors.add(current)
+            remaining.discard(current)
+            if not remaining:
+                return ancestors, False
+            for dep in nodes[current].deps:
+                if dep not in ancestors:
+                    stack.append(dep)
+        return ancestors, True
 
     def _grow_ancestors(self, ancestors: Set[int], source: int) -> None:
         """Fold ``source`` and its ancestors into an existing ancestor set.
@@ -723,7 +794,9 @@ class _Builder:
             if current in ancestors:
                 continue
             ancestors.add(current)
-            stack.extend(nodes[current].deps)
+            for dep in nodes[current].deps:  # test before push (see _ancestors_of)
+                if dep not in ancestors:
+                    stack.append(dep)
 
     # ------------------------------------------------------------------
     # phase 4/5 — expansion (R1)
@@ -928,8 +1001,8 @@ class _Builder:
     # ------------------------------------------------------------------
     def _cross_layer_size(self) -> float:
         """``ByteSource("cross_layer", CEIL_DIV_CLUSTER).bytes_for(fw, shards)``
-        with ``shards = placement.activation_shard_size()`` — 1 at COARSE (raw
-        bytes, ``pipeline_coarse.py:222,238``), ``tp*cp`` at FINE/BLOCK (divided,
+        with ``shards = placement.activation_shard_size()`` — 1 at PIPELINE (raw
+        bytes, ``pipeline_coarse.py:222,238``), ``tp*cp`` at FLAT/BLOCK (divided,
         ``pipeline_fine.py:645``). B3's amendment is what lets ONE rule reproduce
         both.
 
@@ -1060,7 +1133,7 @@ class _Builder:
         # payload however many devices the stage has: legacy decides it at the
         # coarse level with ``prev_node.hw_id == curr_node.hw_id`` (hw_id IS the
         # stage — ``schedule.py:628``, ``:639``, ``:648``, ``:755``, ``:763``,
-        # ``:771``) and the FINE expansion inherits the zero-byte control edge.
+        # ``:771``) and the FLAT expansion inherits the zero-byte control edge.
         # Keying it on the DEVICE instead would invent a cross-tp-rank
         # ``cross_layer`` payload for every embedding -> layer 0 link.
         size = (
@@ -1450,7 +1523,7 @@ class _Builder:
         after every ``SyncPhase.GRAD`` collective of stage ``s`` on its own
         device. Until this existed, every gradient reducer was a graph SINK
         (measured: 6/6 dp collectives on ``dp2tp1cp1pp2``, 24/24 on
-        ``dp2tp2cp2pp2`` FINE, at COARSE and FINE alike), so AstraSim — one COMP
+        ``dp2tp2cp2pp2`` FLAT, at PIPELINE and FLAT alike), so AstraSim — one COMP
         slot and one COMM slot per rank — issued the weight update CONCURRENTLY
         with the all-reduce producing the gradients it applies. That is not a
         modeling simplification; it is the one interleaving the hardware cannot
@@ -1527,21 +1600,35 @@ class _Builder:
                 # loop is O(V+E) — and it is EXACT, with no reliance on D2 or on
                 # any slot ordering, which matters here because R5 runs after R4
                 # and the sync lattice may carry edges D2 does not constrain.
-                ancestors = self._ancestors_of(target)
+                # The sources are known BEFORE the walk, so the walk can stop as
+                # soon as it has seen all of them — see _ancestors_covering.
+                r5_sources: List[Tuple[WorkItem, int]] = []
                 for item in sorted(producers, key=WorkItem.sort_key):
                     if int(self._schedule.stage_of(item)) != stage:
                         continue
                     entry = self._chain_by_device.get((item, device))
                     if entry is None:
                         continue
-                    source = self._chain_nodes[(item, device)][entry.exit]
+                    r5_sources.append(
+                        (item, self._chain_nodes[(item, device)][entry.exit])
+                    )
+                r5b_sources = sorted(reducers.get((stage, device), ()))
+                ancestors, _complete = self._ancestors_covering(
+                    target,
+                    # ``target`` is excluded: a node is never its own ancestor,
+                    # so leaving it in would make the walk run to exhaustion
+                    # every time looking for something it cannot find.
+                    ({source for _item, source in r5_sources} | set(r5b_sources))
+                    - {target},
+                )
+                for _item, source in r5_sources:
                     if source == target or source in ancestors:
                         continue
                     self._add_dep(source, target, DepClass.DATA_FLOW)
                     self._r5_edges.append((source, target))
                     self._grow_ancestors(ancestors, source)
                 # R5b — the gradient the optimizer applies is the REDUCED one.
-                for source in sorted(reducers.get((stage, device), ())):
+                for source in r5b_sources:
                     if source == target or source in ancestors:
                         continue
                     if self._reaches(target, source):
@@ -1883,6 +1970,14 @@ class _Builder:
                     sorted(
                         (uid_of[source], uid_of[target])
                         for (source, target) in self._r5_edges
+                        if (source, target) in self._edges
+                    )
+                ),
+                # R4's sync attachments, also post-R3 — see ``_r4_edges``.
+                "r4_edges": tuple(
+                    sorted(
+                        (uid_of[source], uid_of[target])
+                        for (source, target) in self._r4_edges
                         if (source, target) in self._edges
                     )
                 ),

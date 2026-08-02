@@ -41,7 +41,7 @@
  },
  "train:analytical:dp1tp1cp2pp2mb2sp0": {
   "file": "train_analytical_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:analytical:dp1tp2cp1pp2mb2sp1": {
@@ -66,12 +66,12 @@
  },
  "train:analytical:dp2tp1cp1pp2mb2sp0:zero3": {
   "file": "train_analytical_dp2tp1cp1pp2mb2sp0_zero3.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:analytical:dp2tp2cp2pp2mb2sp1": {
   "file": "train_analytical_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:flattened:dp1tp1cp1pp1mb1sp0": {
@@ -81,7 +81,7 @@
  },
  "train:flattened:dp1tp1cp2pp2mb2sp0": {
   "file": "train_flattened_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:flattened:dp1tp2cp1pp2mb2sp0:fault_tp": {
@@ -136,7 +136,7 @@
  },
  "train:flattened:dp2tp1cp1pp2mb2sp0:zero3": {
   "file": "train_flattened_dp2tp1cp1pp2mb2sp0_zero3.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:flattened:dp2tp2cp1pp2mb2sp1:moe:ep2": {
@@ -146,7 +146,7 @@
  },
  "train:flattened:dp2tp2cp2pp2mb2sp1": {
   "file": "train_flattened_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:hierarchical:dp1tp1cp1pp1mb1sp0": {
@@ -156,7 +156,7 @@
  },
  "train:hierarchical:dp1tp1cp2pp2mb2sp0": {
   "file": "train_hierarchical_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:hierarchical:dp1tp2cp1pp2mb2sp0:fault_pp": {
@@ -186,7 +186,7 @@
  },
  "train:hierarchical:dp2tp2cp2pp2mb2sp1": {
   "file": "train_hierarchical_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:hybrid:dp1tp1cp1pp1mb1sp0": {
@@ -196,7 +196,7 @@
  },
  "train:hybrid:dp1tp1cp2pp2mb2sp0": {
   "file": "train_hybrid_dp1tp1cp2pp2mb2sp0.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  },
  "train:hybrid:dp1tp2cp1pp2mb2sp1": {
@@ -216,7 +216,7 @@
  },
  "train:hybrid:dp2tp2cp2pp2mb2sp1": {
   "file": "train_hybrid_dp2tp2cp2pp2mb2sp1.json",
-  "git_rev": "85e635b",
+  "git_rev": "a0f1303",
   "status": "ok"
  }
 }
