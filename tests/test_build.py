@@ -2177,6 +2177,56 @@ def test_r3_implied_answers_exactly_what_the_unbounded_walk_answers(granularity)
     )
 
 
+@pytest.mark.parametrize("granularity", [Granularity.PIPELINE, Granularity.FLAT])
+def test_r3_window_certificate_branches_are_both_exercised(granularity):
+    """The perf-pass-4 window certificate must FIRE on this matrix — and so
+    must its fallback. A regression that silently disables the certificate
+    (everything falls back: slow but correct) or silently over-certifies
+    (nothing falls back: the turnaround windows would be walked restricted,
+    which is exactly the unproven case) changes no output, so the oracle test
+    above cannot see it; the branch census can."""
+    import program.build as build_mod
+    from bisect import bisect_left, bisect_right
+
+    counts = {"restricted": 0, "fallback": 0}
+    original = build_mod._Builder._r3_implied
+
+    def spy(self, source, target, floor):
+        if source not in self._nodes[target].deps:
+            ceiling = self._orders[target][0]
+            has_other = (
+                bisect_right(self._cross_slots_other, ceiling)
+                > bisect_left(self._cross_slots_other, floor)
+            )
+            has_fwd = (
+                bisect_right(self._cross_slots_fwd, ceiling)
+                > bisect_left(self._cross_slots_fwd, floor)
+            )
+            has_bwd = (
+                bisect_right(self._cross_slots_bwd, ceiling)
+                > bisect_left(self._cross_slots_bwd, floor)
+            )
+            if not has_other and not (has_fwd and has_bwd):
+                counts["restricted"] += 1
+            else:
+                counts["fallback"] += 1
+        return original(self, source, target, floor)
+
+    build_mod._Builder._r3_implied = spy
+    try:
+        for cfg in _R3_BOUND_CFGS:
+            _program(replace(cfg, flattened=granularity is Granularity.FLAT),
+                     granularity=granularity)
+    finally:
+        build_mod._Builder._r3_implied = original
+
+    assert counts["restricted"] > 0, "the window certificate never fired"
+    assert counts["fallback"] > 0, (
+        "no window ever fell back — the certificate is over-certifying "
+        "(mixed/MoE windows must take the exact full walk)"
+    )
+
+
 def test_r3_is_linear_in_schedule_length_not_quadratic():
     """Guard against the ``_apply_r3`` blow-up that made GPT 1T unrunnable.
 

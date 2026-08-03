@@ -18,6 +18,13 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 
 
+## Perf pass 4, 2026-08-02 ("try harder")
+
+| item | what |
+|---|---|
+| **R3 window certificate** | The same-device-restricted boundary walk LANDED — with the unprovable global no-round-trip assumption replaced by a PER-QUERY CERTIFICATE. Every cross-device dep edge that exists before R3 is recorded at creation with its slot and phase class (fwd / bwd by the producing work's direction; stage-0-delta MoE cross-rank edges as "other"). A boundary window containing cross edges of ONE phase class only (and no MoE edge) is stage-monotone: cross edges all step the same way, so an off-device ancestor cone can never contain a node of the query's device, and pruning off-device preds is EXACT. Mixed windows (the fwd/bwd turnaround) and MoE windows take the exact full walk. RECOMPUTE cross transfers are classified fwd though they run in the bwd phase — that can only make a window read MIXED and fall back, never mis-certify. Gated twice: the oracle test replays every matrix query against the unbounded walk, and `test_r3_window_certificate_branches_are_both_exercised` pins that BOTH branches fire on the matrix (a silently-disabled certificate is slow-but-correct; a silently over-certifying one is the dangerous direction — either changes no output, so only a branch census catches them). 175B `_apply_r3`: 2.0 s → **1.1 s**; 1T in the commit message. |
+| **V7 always-on** | `build(check_group_membership=True)` is the DEFAULT. V7 — every member device of a communicator issues the group's collectives — is the strongest static deadlock check in the tree (a violated group is a silent AstraSim hang), costs one O(collectives) pass, and its opt-in rationale (legacy-lowered per-device clone programs) was deleted with the lowering. Already measured clean over 192 configurations when A2 was fixed; the flip was flagged then as "a separate, now-unblocked decision" and is now taken. |
+
 ## Perf pass 3, 2026-08-02 ("as much as you can")
 
 Output-preserving throughout (gate 221/221 bit-identical per item; suite 1311).

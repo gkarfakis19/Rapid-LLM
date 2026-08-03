@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -340,7 +341,7 @@ def build(
     placement_policy: PlacementPolicy = LEGACY_PLACEMENT,
     sync_order: SyncOrder = SyncOrder(),
     validate: bool = True,
-    check_group_membership: bool = False,
+    check_group_membership: bool = True,
     directions: Optional[Sequence[Direction]] = None,
 ) -> Program:
     """Compose L1 + L2 + L3 into a :class:`~program.ir.Program`.
@@ -368,22 +369,17 @@ def build(
     emission-side concern (P5 wires it), and silently doing nothing with a path
     would be worse than saying so.
 
-    ``check_group_membership`` enables invariant **V7** and DEFAULTS TO OFF.
-    V7 says every member device of a communicator issues the group's
-    collectives, which used to contradict BUG_LEDGER **A2**
-    (``SyncSpread.CLUSTER_RANK_0``: exactly ONE instance of a stage-spanning
-    collective, on cluster rank 0) whenever a non-dp requirement's group spanned
-    more than one device — e.g. the ``ep`` grad sync at ``tp*cp*ep > 1``.
-
-    **A2 is fixed** (final wave): ``policies.sharding._spread_for`` returns
-    ``PER_CLUSTER_RANK`` for every dp requirement and row S12 declares it too,
-    so no production requirement puts a grouped collective on one member of its
-    group any more, and ``build(..., check_group_membership=True)`` was measured
-    clean over 192 PIPELINE+FLAT configurations (``dp/tp/cp/ep/pp`` in ``{1,2}`` x
-    ``zero_stage`` in ``{0,2,3}`` x dense/MoE). The default stays OFF only
-    because legacy-lowered / hand-built Programs are per-device clone programs
-    for which V7 is false BY CONSTRUCTION (``program/ir.py`` module docstring);
-    flipping it is a separate, now-unblocked decision.
+    ``check_group_membership`` enables invariant **V7** — every member device
+    of a communicator issues the group's collectives — and DEFAULTS TO ON
+    since 2026-08-02 (perf pass 4, "fix possible deadlocks"): a violated group
+    is a SILENT AstraSim deadlock, the check is one O(collectives) pass, and
+    the only reason it was opt-in — legacy-lowered per-device clone programs,
+    for which V7 is false by construction — was deleted with the lowering.
+    It used to contradict BUG_LEDGER **A2** (``SyncSpread.CLUSTER_RANK_0``);
+    A2 is fixed (final wave) and ``check_group_membership=True`` was measured
+    clean over 192 PIPELINE+FLAT configurations (``dp/tp/cp/ep/pp`` in ``{1,2}``
+    x ``zero_stage`` in ``{0,2,3}`` x dense/MoE). A caller hand-building a
+    clone-style Program can still pass False.
     """
     builder = _Builder(
         fw=fw,
@@ -455,6 +451,16 @@ class _Builder:
         self._orders: List[_OrderKey] = []
         self._succs: List[List[int]] = []
         self._entry_names: List[Optional[str]] = []
+        #: Slots of the CROSS-DEVICE dep edges that exist BEFORE R3 runs,
+        #: classified by the direction of the work that produced them (perf
+        #: pass 4, 2026-08-02). R3's window certificate bisects these: a
+        #: boundary window containing cross edges of ONE phase direction only
+        #: (and no stage-0-delta MoE cross-rank edge) is stage-monotone, so an
+        #: off-device ancestor cone can never re-enter the query's device and
+        #: the same-device-restricted walk is EXACT — checked, not assumed.
+        self._cross_slots_fwd: List[int] = []
+        self._cross_slots_bwd: List[int] = []
+        self._cross_slots_other: List[int] = []
         #: ``(u, v) -> the DepClasses that justify the edge``. An edge exists
         #: once; a second rule adding it contributes its class, not a duplicate.
         self._edges: Dict[Tuple[int, int], Set[DepClass]] = {}
@@ -835,6 +841,14 @@ class _Builder:
         node = self._nodes[nid]
         if isinstance(node, TransferOp):
             node.consumers.append(target)
+            src_device = int(node.src_device)
+        else:
+            src_device = int(node.device)
+        if src_device != int(self._nodes[target].device):
+            # A stage-0-delta cross-RANK edge (the MoE cold->hot join wiring):
+            # poisons the window certificate's monotonicity argument, so its
+            # presence forces the exact full walk.
+            self._cross_slots_other.append(self._orders[nid][0])
         self._add_dep(nid, target, DepClass.DATA_FLOW)
 
     def _add_comm_step(
@@ -883,6 +897,8 @@ class _Builder:
                 ),
                 order,
             )
+            if dst != device:
+                self._cross_slots_other.append(order[0])
             self._add_dep(producer, nid, DepClass.DATA_FLOW)
             return nid
 
@@ -1118,6 +1134,16 @@ class _Builder:
             ),
             order,
         )
+        if src != dst:
+            # RECOMPUTE items carry Direction.FORWARD, so a cross transfer
+            # between recompute chains lands in the fwd list even though it
+            # runs in the backward phase — that can only make a window read
+            # MIXED and fall back to the exact full walk, never mis-certify.
+            (
+                self._cross_slots_fwd
+                if producer.direction is Direction.FORWARD
+                else self._cross_slots_bwd
+            ).append(order[0])
         self._add_dep(producer_nid, nid, DepClass.DATA_FLOW)
         # The compute-anchor double-dep (``pipeline_fine.py:672-687``): the SEND
         # must fire off the last COMPUTE, not off a trailing collective.
@@ -1157,6 +1183,11 @@ class _Builder:
         """
         nodes = self._nodes
         orders = self._orders
+        # The window certificate's indices (perf pass 4): sorted once; R3 only
+        # ever ADDS same-device edges, so they stay valid for the whole pass.
+        self._cross_slots_fwd.sort()
+        self._cross_slots_bwd.sort()
+        self._cross_slots_other.sort()
         for (dep_nid, node_nid) in self._edges:
             if orders[dep_nid][0] > orders[node_nid][0]:
                 raise BuildError(
@@ -1214,6 +1245,54 @@ class _Builder:
         if source in nodes[target].deps:
             return True
 
+        # WINDOW CERTIFICATE (perf pass 4, 2026-08-02). If every cross-device
+        # edge whose slot falls in [floor, slot(target)] belongs to ONE phase
+        # direction — and none is a stage-0-delta MoE cross-rank edge — the
+        # window is stage-monotone: cross edges all step the same way, so the
+        # ancestor cone of any off-device node can never contain a node of the
+        # query's own device, and pruning off-device preds is EXACT. This is
+        # the checked replacement for the unprovable global no-round-trip
+        # assumption; mixed windows (the fwd/bwd turnaround) and MoE windows
+        # take the exact full walk below. The not-implied verdict — the one R3
+        # adds edges for, and the one whose full walk exhausted the whole slot
+        # window (~97 s of a GPT 1T build) — becomes O(one device's chains in
+        # the window).
+        ceiling = orders[target][0]
+        lo_f = bisect_left(self._cross_slots_fwd, floor)
+        hi_f = bisect_right(self._cross_slots_fwd, ceiling)
+        lo_b = bisect_left(self._cross_slots_bwd, floor)
+        hi_b = bisect_right(self._cross_slots_bwd, ceiling)
+        lo_o = bisect_left(self._cross_slots_other, floor)
+        hi_o = bisect_right(self._cross_slots_other, ceiling)
+        has_fwd = hi_f > lo_f
+        has_bwd = hi_b > lo_b
+        if not (hi_o > lo_o) and not (has_fwd and has_bwd):
+            device = nodes[target].device
+            stack = [target]
+            seen: Set[int] = set()
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                for dep in nodes[current].deps:
+                    if dep == source:
+                        return True
+                    if dep in seen:
+                        continue
+                    if orders[dep][0] < floor:
+                        continue
+                    dep_node = nodes[dep]
+                    dep_device = (
+                        dep_node.src_device
+                        if isinstance(dep_node, TransferOp)
+                        else dep_node.device
+                    )
+                    if dep_device != device:
+                        continue  # exact under the certificate (see above)
+                    stack.append(dep)
+            return False
+
         # Budgeted backward probe: when the backward window is small — the
         # common IMPLIED-via-short-path case at moderate scale — it decides in
         # a few pops either way. Only when it exceeds the budget (the huge
@@ -1242,7 +1321,6 @@ class _Builder:
         if decisive:
             return False
 
-        ceiling = orders[target][0]
         succs = self._succs
         stack = [source]
         fseen: Set[int] = set()
