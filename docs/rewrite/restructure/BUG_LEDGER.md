@@ -18,6 +18,19 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 
 
+## Perf pass 5, 2026-08-02 ("constant factor work, hard" + opt-in validation)
+
+| item | what |
+|---|---|
+| **validation is OPT-IN for production runs** | Owner call. `sw_param.validate_graph` (default false; `RAPID_VALIDATE_GRAPH=1` overrides without editing YAML) gates build-time V1-V8 + V6 races + V7 for the DISPATCHER path only: `build()`'s own default stays `validate=True`, so unit tests, the gate's direct-build tests and library callers keep full validation; and the wire-level emission postconditions (per-group issue order, V9 no-lost-successors) — the actual last line against silent AstraSim deadlocks — remain ALWAYS-ON. Every deadlock-shaped runtime error ("non-positive duration", "no per-rank timings") now names the switch, pinned by `test_deadlock_errors_name_the_validation_switch`. Rationale: production validation re-proves invariants `build()` holds by construction, at ~a minute per GPT-1T build. |
+| **edge-class sparsification** | `_edges` is a plain existence SET; the class annotation lives in `_edge_classes`, which holds ONLY edges whose class set is not the pure-DATA_FLOW default. `_classes` answers `{DATA_FLOW}` for the rest — the old `edges.get(key) or {DATA_FLOW}` semantics exactly, checked case by case (pure-SCHEDULE edges store sparse; a later class on a default edge promotes to `{DATA_FLOW, cls}`). Kills ~one 216-byte set allocation per edge — **~2.8 GB and its allocation time at GPT-1T scale** — and `meta.misc["schedule_edges"]` now iterates the tiny sparse dict instead of every edge. |
+| **`__new__` + setattr construction** | The hottest allocation site (the materialize compute loop) builds `ComputeOp` via `__new__` + attribute sets: measured 0.62 → 0.21 µs against the dataclass kwargs `__init__`, field-for-field identical. |
+| **inlined R1 wiring** | The per-chain dependency loop carries its own edge-set/succs/deps updates with hoisted locals instead of a `_add_dep` call per edge (R1 edges are DATA_FLOW, so the sparse dict is untouched). |
+
+Measured, GPT 175B analytical, production defaults: build(FLAT) 23.2 → **15.4 s**,
+whole run 36.9 → **28.9 s** — **20 % FASTER than the pre-branch flattener tree
+(36.1 s) with memory on**; 6.9 s time-only. GPT 1T in the commit message.
+
 ## Perf pass 4, 2026-08-02 ("try harder")
 
 | item | what |

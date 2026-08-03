@@ -320,6 +320,11 @@ class TimeCalculationLLM(TimeCalculation):
         self.estimate_memory = bool(
             getattr(hw_config.sw_config, "estimate_memory", True)
         )
+        #: Opt-in build-time graph validation; the env var wins so a failing
+        #: run can be re-diagnosed without editing the YAML.
+        self.validate_graph = bool(
+            getattr(hw_config.sw_config, "validate_graph", False)
+        ) or _env_flag("RAPID_VALIDATE_GRAPH")
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
         self.zero3_ephemeral_peak_bytes = 0.0

@@ -409,6 +409,17 @@ class LLMExecutionDispatcher:
                 label=label,
                 gmap_workdir=gmap_workdir,
                 directions=directions,
+                # Build-time validation (V1-V8, V6 races, V7 group membership)
+                # is OPT-IN for production runs (sw_param.validate_graph /
+                # RAPID_VALIDATE_GRAPH) — it re-proves invariants build() holds
+                # by construction and costs ~a minute at GPT-1T scale. The
+                # wire-level emission postconditions in et_emit (per-group
+                # issue order, V9 no-lost-successors) stay ALWAYS-ON: they are
+                # cheap and are the actual last line against silent AstraSim
+                # deadlocks. Every deadlock-shaped runtime error names the
+                # switch. build()'s own default stays True, so unit tests and
+                # direct library callers keep full validation.
+                validate=bool(getattr(self.time_calc, "validate_graph", True)),
             )
 
     def _emission_program(
@@ -580,7 +591,7 @@ class LLMExecutionDispatcher:
             rank_layout=self._pipeline_rank_layout or None,
         )
         if max_sec <= 0:
-            raise RuntimeError("AstraSim pipeline execution returned non-positive duration")
+            raise RuntimeError("AstraSim pipeline execution returned non-positive duration Re-run with sw_param.validate_graph: true (or RAPID_VALIDATE_GRAPH=1) for build-time graph diagnostics.")
         max_sec *= self._interleave_scale()
         return ExecutionResult(total_time=max_sec)
 
@@ -630,7 +641,7 @@ class LLMExecutionDispatcher:
         )
 
         if not per_rank_sec:
-            raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
+            raise RuntimeError("AstraSim flattened execution returned no per-rank timings Re-run with sw_param.validate_graph: true (or RAPID_VALIDATE_GRAPH=1) for build-time graph diagnostics.")
 
         effective_dp = self.workload.run.effective_dp(self.workload.degrees)
         expected_rank_count = effective_dp * len(program.compute_devices())
@@ -652,7 +663,7 @@ class LLMExecutionDispatcher:
             )
 
         if max_sec <= 0:
-            raise RuntimeError("AstraSim flattened execution returned non-positive duration")
+            raise RuntimeError("AstraSim flattened execution returned non-positive duration Re-run with sw_param.validate_graph: true (or RAPID_VALIDATE_GRAPH=1) for build-time graph diagnostics.")
 
         return ExecutionResult(total_time=max_sec * self._interleave_scale())
 

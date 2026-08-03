@@ -409,3 +409,44 @@ def test_estimate_memory_is_declared_in_sw_param():
     assert SWConfig.from_dict({**base, "estimate_memory": False}).estimate_memory is False
     assert SWConfig.from_dict({**base, "estimate_memory": "false"}).estimate_memory is False
     assert SWConfig.from_dict({**base, "estimate_memory": True}).estimate_memory is True
+
+
+def test_validate_graph_is_declared_in_sw_param():
+    """Opt-in build-time validation (2026-08-02): OFF by default in production
+    — it re-proves invariants build() holds by construction — and switchable
+    via sw_param.validate_graph or RAPID_VALIDATE_GRAPH. The wire-level
+    emission postconditions are unaffected and always on."""
+    import yaml
+    from pathlib import Path
+    from config import SWConfig
+
+    hw_path = (
+        Path(__file__).resolve().parents[1]
+        / "validation_scripts"
+        / "validation_configs"
+        / "hardware-config"
+        / "A100_SXM4_80GB_base.yaml"
+    )
+    base = yaml.safe_load(hw_path.read_text())["sw_param"]
+    assert SWConfig.from_dict(dict(base)).validate_graph is False
+    assert SWConfig.from_dict({**base, "validate_graph": True}).validate_graph is True
+    assert SWConfig.from_dict({**base, "validate_graph": "true"}).validate_graph is True
+    assert SWConfig.from_dict({**base, "validate_graph": "false"}).validate_graph is False
+
+
+def test_deadlock_errors_name_the_validation_switch():
+    """The failure a user actually sees must tell them how to diagnose it."""
+    from pathlib import Path
+
+    import llm_execution
+
+    src = Path(llm_execution.__file__).read_text()
+    for needle in (
+        "returned non-positive duration",
+        "returned no per-rank timings",
+    ):
+        idx = src.find(needle)
+        assert idx != -1, needle
+        assert "RAPID_VALIDATE_GRAPH" in src[idx : idx + 400], (
+            f"error {needle!r} does not name the validation switch"
+        )

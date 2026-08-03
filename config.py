@@ -1920,6 +1920,12 @@ class SWConfig:
     #: (sw_param.estimate_memory: false) and an analytical/hierarchical run
     #: skips its dominant wall-clock phase.
     estimate_memory: bool = True
+    #: Whether build() runs the V1-V8/V6/V7 graph validation on production
+    #: runs. OFF by default: it re-proves invariants the builder holds by
+    #: construction; the wire-level emission postconditions (the actual
+    #: deadlock guards) are always on. Deadlock-shaped runtime errors name
+    #: this switch (sw_param.validate_graph / RAPID_VALIDATE_GRAPH).
+    validate_graph: bool = False
     # Interleaved 1F1B (virtual pipeline) stages per rank. 1 = GPipe-style
     # schedule (the graph's native shape). v > 1 analytically rescales the
     # pipeline time by (mb + (pp-1)/v) / (mb + pp - 1), which is exact under
@@ -1972,6 +1978,11 @@ class SWConfig:
             estimate_memory = estimate_memory_raw.strip().lower() not in {"false", "0", "no", "off"}
         else:
             estimate_memory = bool(estimate_memory_raw)
+        validate_graph_raw = sw_block.get("validate_graph", False)
+        if isinstance(validate_graph_raw, str):
+            validate_graph = validate_graph_raw.strip().lower() in {"true", "1", "yes", "on"}
+        else:
+            validate_graph = bool(validate_graph_raw)
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
@@ -1982,6 +1993,7 @@ class SWConfig:
             const_mem_offset=const_mem_offset,
             grad_acc_overhead=grad_acc_overhead,
             estimate_memory=estimate_memory,
+            validate_graph=validate_graph,
             pipeline_interleave=pipeline_interleave,
         )
 

@@ -461,9 +461,16 @@ class _Builder:
         self._cross_slots_fwd: List[int] = []
         self._cross_slots_bwd: List[int] = []
         self._cross_slots_other: List[int] = []
-        #: ``(u, v) -> the DepClasses that justify the edge``. An edge exists
+        #: Edge EXISTENCE as a plain set, with the class annotation SPARSE
+        #: (perf pass 5, 2026-08-02): ~all edges carry exactly {DATA_FLOW}, and
+        #: a per-edge one-element set costs 216 B and an allocation — 13M of
+        #: them (~2.8 GB) at GPT-1T scale. ``_edge_classes`` holds ONLY the
+        #: edges whose class set is not the pure-DATA_FLOW default; ``_classes``
+        #: answers the default for the rest, which reproduces the old
+        #: ``edges.get(key) or {DATA_FLOW}`` semantics exactly. An edge exists
         #: once; a second rule adding it contributes its class, not a duplicate.
-        self._edges: Dict[Tuple[int, int], Set[DepClass]] = {}
+        self._edges: Set[Tuple[int, int]] = set()
+        self._edge_classes: Dict[Tuple[int, int], Set[DepClass]] = {}
         #: ``work -> chains``, and ``(work, device) -> the chain's node ids``.
         self._chains: Dict[WorkItem, Tuple[ExpandedChain, ...]] = {}
         self._chain_nodes: Dict[Tuple[WorkItem, int], List[int]] = {}
@@ -592,19 +599,29 @@ class _Builder:
         if dep == node:
             raise BuildError(f"self-dependency on node {dep}")
         key = (dep, node)
-        classes = self._edges.get(key)
-        if classes is None:
-            self._edges[key] = {dep_class}
+        if key not in self._edges:
+            self._edges.add(key)
+            if dep_class is not DepClass.DATA_FLOW:
+                self._edge_classes[key] = {dep_class}
             self._nodes[node].deps.append(dep)
             self._succs[dep].append(node)
             if self._edge_recorder is not None:
                 self._edge_recorder.append(key)
         else:
-            classes.add(dep_class)
+            classes = self._edge_classes.get(key)
+            if classes is not None:
+                classes.add(dep_class)
+            elif dep_class is not DepClass.DATA_FLOW:
+                # promote: the implicit pure-DATA_FLOW default gains a class
+                self._edge_classes[key] = {DepClass.DATA_FLOW, dep_class}
 
     def _classes(self, dep: int, node: int) -> Set[DepClass]:
         """The classes carried by ``dep -> node``; ``{DATA_FLOW}`` if absent."""
-        return set(self._edges.get((dep, node)) or {DepClass.DATA_FLOW})
+        key = (dep, node)
+        classes = self._edge_classes.get(key)
+        if classes is not None:
+            return set(classes)
+        return {DepClass.DATA_FLOW}
 
     def _reparent_dep(self, dep: int, node: int, *, like: Tuple[int, int]) -> None:
         """Add ``dep -> node`` carrying the classes of the edge ``like``.
@@ -624,7 +641,8 @@ class _Builder:
         key = (dep, node)
         if key not in self._edges:
             return
-        del self._edges[key]
+        self._edges.discard(key)
+        self._edge_classes.pop(key, None)
         self._nodes[node].deps.remove(dep)
         self._succs[dep].remove(node)
 
@@ -761,39 +779,47 @@ class _Builder:
         # PREFIX; the per-instance tail lives on the chain (perf pass 3).
         suffix = chain.name_suffix
         nodes = self._nodes
+        orders = self._orders
+        succs = self._succs
+        entry_names = self._entry_names
+        microbatch = work.microbatch
+        layer = work.layer
+        compute_new = ComputeOp.__new__
         nids: List[int] = []
         for step in chain.steps:
             order = (slot, position, _PHASE_CHAIN, step.index, 0)
             if isinstance(step, ComputeStep):
+                entry_name = step.entry_name
                 role = (
                     OpRole.JOIN
                     if step.kind is StepKind.JOIN
-                    else (OpRole.GEMM if step.entry_name is not None else kind_role)
+                    else (OpRole.GEMM if entry_name is not None else kind_role)
                 )
                 nid = len(nodes)
-                nodes.append(
-                    ComputeOp(
-                        uid=nid,
-                        name=step.name + suffix
-                        if step.entry_name is not None
-                        else step.name,
-                        device=device,
-                        duration=(step.duration,),
-                        deps=[],  # LIST during the build; _finish retypes
-                        role=role,
-                        direction=direction,
-                        mem_kind=step.mem_kind,
-                        recompute=step.recompute,
-                        param_gather=step.param_gather,
-                        micro_batch=work.microbatch,
-                        layer=work.layer,
-                        is_moe_layer=is_moe,
-                        work=work,
-                    )
-                )
-                self._orders.append(order)
-                self._succs.append([])
-                self._entry_names.append(step.entry_name)
+                # ``__new__`` + attribute sets: the dataclass kwargs ``__init__``
+                # measures 0.62 us against 0.21 us for this form (perf pass 5),
+                # and this is the single hottest allocation site of a FLAT
+                # build. Field-for-field identical to the ComputeOp(...) call
+                # it replaces.
+                op = compute_new(ComputeOp)
+                op.uid = nid
+                op.name = step.name + suffix if entry_name is not None else step.name
+                op.device = device
+                op.duration = (step.duration,)
+                op.deps = []  # LIST during the build; _finish retypes
+                op.role = role
+                op.direction = direction
+                op.mem_kind = step.mem_kind
+                op.recompute = step.recompute
+                op.param_gather = step.param_gather
+                op.micro_batch = microbatch
+                op.layer = layer
+                op.is_moe_layer = is_moe
+                op.work = work
+                nodes.append(op)
+                orders.append(order)
+                succs.append([])
+                entry_names.append(entry_name)
                 nids.append(nid)
             elif isinstance(step, CommStep):
                 # ``nids`` is the IN-PROGRESS prefix of this chain: a comm step's
@@ -802,17 +828,29 @@ class _Builder:
                 nids.append(self._add_comm_step(work, chain, step, order, nids))
             else:  # pragma: no cover - ChainStep is a closed union
                 raise BuildError(f"Unsupported chain step {step!r}")
-        # R1: local dep indices -> node ids.
+        # R1: local dep indices -> node ids. ``_add_dep`` is inlined here
+        # (same idempotence via the edge set; R1 edges are DATA_FLOW so the
+        # sparse class dict is untouched) — this loop runs once per chain-step
+        # dependency of the whole build.
+        edges = self._edges
+        recorder = self._edge_recorder
         for step, nid in zip(chain.steps, nids):
+            node_deps = nodes[nid].deps
             for local in step.deps:
                 dep_nid = nids[local]
-                self._add_dep(dep_nid, nid, DepClass.DATA_FLOW)
+                key = (dep_nid, nid)
+                if key not in edges:
+                    edges.add(key)
+                    node_deps.append(dep_nid)
+                    succs[dep_nid].append(nid)
+                    if recorder is not None:  # pragma: no cover - R4-only
+                        recorder.append(key)
                 # A chain step that depends on a block-template p2p is a
                 # CONSUMER of it: the emitter has no ET node for the transfer
                 # itself, it wires the SEND id (src side) or RECV id (dst side)
                 # into the consumers. Without this the MoE cold-rank JOIN would
                 # lose its ordering against its own residual send.
-                dep_node = self._nodes[dep_nid]
+                dep_node = nodes[dep_nid]
                 if isinstance(dep_node, TransferOp) and nid not in dep_node.consumers:
                     dep_node.consumers.append(nid)
         # The MoE hot/cold join: a step of a SIBLING chain that additionally
@@ -1493,7 +1531,7 @@ class _Builder:
                     for succ in list(self._succs[exit_nid]):
                         if succ == nid:
                             continue
-                        if self._edges[(exit_nid, succ)] & req.via:
+                        if self._classes(exit_nid, succ) & req.via:
                             self._add_dep(nid, succ, DepClass.SYNC)
             elif mode is AttachMode.OVERLAP_WITH:  # pragma: no cover - unused
                 raise BuildError(
@@ -1848,7 +1886,7 @@ class _Builder:
         )
         node.duration = (tail_duration,)
         for dep in list(node.deps):
-            for dep_class in set(self._edges[(dep, compute)]):
+            for dep_class in self._classes(dep, compute):
                 self._add_dep(dep, head, dep_class)
             # A transfer whose CONSUMER was this compute now feeds the head:
             # the deps move, so the consumer wiring must move with them or the
@@ -2017,10 +2055,12 @@ class _Builder:
                 # edge cannot go stale, and it is what makes D1 checkable on the
                 # artifact instead of on a log line. Re-parenting preserves the
                 # class (``_reparent_dep``), which is what makes this exact.
+                # SCHEDULE-classed edges are never pure-DATA_FLOW, so the
+                # sparse class dict is exhaustive for this query.
                 "schedule_edges": tuple(
                     sorted(
                         (uid_of[source], uid_of[target])
-                        for (source, target), classes in self._edges.items()
+                        for (source, target), classes in self._edge_classes.items()
                         if DepClass.SCHEDULE in classes
                     )
                 ),
