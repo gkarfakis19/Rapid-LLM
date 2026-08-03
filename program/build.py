@@ -230,72 +230,6 @@ _PHASE_XFER = 1  #: R2 transfers (``a`` = R2 emission sequence)
 _PHASE_SYNC = 2  #: R4 sync ops (``a`` = SyncOrder rank, ``b`` = instance index)
 
 
-@dataclass(slots=True)
-class _ProtoCompute:
-    nid: int
-    order: _OrderKey
-    device: int
-    name: str
-    duration: float
-    work: Optional[WorkItem]
-    role: OpRole
-    direction: IRDirection
-    mem_kind: Any = None
-    recompute: bool = False
-    param_gather: bool = False
-    micro_batch: Optional[int] = None
-    layer: Optional[int] = None
-    is_moe_layer: bool = False
-    #: the ``BlockTemplate`` entry this compute came from (``None`` for a
-    #: single-op expansion). A TYPED template field, which is what
-    #: ``OverlapDecl.blocking_consumer`` is matched against — never the op name.
-    entry_name: Optional[str] = None
-    deps: List[int] = field(default_factory=list)
-    succs: List[int] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class _ProtoCollective:
-    nid: int
-    order: _OrderKey
-    device: int
-    name: str
-    coll: CollectiveType
-    size_bytes: float
-    participants: int
-    axes: Tuple[str, ...]
-    is_dp: bool
-    group: Optional[GroupKey]
-    work: Optional[WorkItem]
-    comm_key: Optional[CommKey] = None
-    deps: List[int] = field(default_factory=list)
-    succs: List[int] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class _ProtoTransfer:
-    nid: int
-    order: _OrderKey
-    device: int  #: the SRC device — a transfer is ordered where it is issued
-    name: str
-    src_device: int
-    dst_device: int
-    size_bytes: float
-    comm_type: Optional[CollectiveType]
-    producer: int
-    consumers: List[int] = field(default_factory=list)
-    moe_component: Optional[str] = None
-    #: the declaring spec's ANALYTICAL timing surface (INTERFACES §4.7
-    #: amendment 2026-07-28): participant count + interconnect axis key.
-    participants: int = 0
-    interconnect: Optional[str] = None
-    deps: List[int] = field(default_factory=list)
-    succs: List[int] = field(default_factory=list)
-
-
-_ProtoOp = Union[_ProtoCompute, _ProtoCollective, _ProtoTransfer]
-
-
 #: The WorkKinds a BLOCK build can express. BLOCK's device space is
 #: ``layout.subset(("tp","cp","ep"))`` — it carries NO ``pp`` and no ``dp`` axis —
 #: so pipeline work is not representable there at all: INTERFACES §3.1 defines
@@ -508,7 +442,19 @@ class _Builder:
         self._sync_order = sync_order
         self._directions = directions
 
-        self._nodes: List[_ProtoOp] = []
+        #: THE ops — real IR instances, built ONCE (perf pass 3, 2026-08-02;
+        #: the former ``_Proto*`` mirror classes and the second construction in
+        #: ``_finish`` are deleted). During the build: ``uid`` holds the dense
+        #: construction NID, ``deps`` (and a transfer's ``consumers``) are
+        #: mutable LISTS, and a collective's ``label`` is None; ``_finish``
+        #: renumbers uids/deps in place, retypes the lists to tuples and
+        #: assigns labels in uid order. Builder-only per-node facts that the IR
+        #: deliberately does NOT carry (P5 deleted ordering metadata from ops)
+        #: live in the side arrays below, indexed by nid.
+        self._nodes: List[Op] = []
+        self._orders: List[_OrderKey] = []
+        self._succs: List[List[int]] = []
+        self._entry_names: List[Optional[str]] = []
         #: ``(u, v) -> the DepClasses that justify the edge``. An edge exists
         #: once; a second rule adding it contributes its class, not a duplicate.
         self._edges: Dict[Tuple[int, int], Set[DepClass]] = {}
@@ -616,9 +562,16 @@ class _Builder:
             )
         return (slot, position, phase, a, b)
 
-    def _add(self, node: _ProtoOp) -> int:
-        self._nodes.append(node)
-        return node.nid
+    def _add_op(
+        self, op: Op, order: _OrderKey, entry_name: Optional[str] = None
+    ) -> int:
+        """Register ``op`` (whose ``uid`` must equal the next nid) with its
+        builder-side order key."""
+        self._nodes.append(op)
+        self._orders.append(order)
+        self._succs.append([])
+        self._entry_names.append(entry_name)
+        return op.uid
 
     def _next_nid(self) -> int:
         return len(self._nodes)
@@ -637,7 +590,7 @@ class _Builder:
         if classes is None:
             self._edges[key] = {dep_class}
             self._nodes[node].deps.append(dep)
-            self._nodes[dep].succs.append(node)
+            self._succs[dep].append(node)
             if self._edge_recorder is not None:
                 self._edge_recorder.append(key)
         else:
@@ -667,7 +620,7 @@ class _Builder:
             return
         del self._edges[key]
         self._nodes[node].deps.remove(dep)
-        self._nodes[dep].succs.remove(node)
+        self._succs[dep].remove(node)
 
     def _reaches(self, source: int, target: int, *, slot_floor: Optional[int] = None) -> bool:
         """Transitive reachability ``source -> target`` in the graph so far.
@@ -699,6 +652,7 @@ class _Builder:
         if source == target:
             return True
         nodes = self._nodes
+        orders = self._orders
         stack = [target]
         seen: Set[int] = set()
         while stack:
@@ -711,7 +665,7 @@ class _Builder:
                     return True
                 if dep in seen:
                     continue
-                if slot_floor is not None and nodes[dep].order[0] < slot_floor:
+                if slot_floor is not None and orders[dep][0] < slot_floor:
                     continue
                 stack.append(dep)
         return False
@@ -729,7 +683,7 @@ class _Builder:
         """
         if source == target:
             return True
-        nodes = self._nodes
+        succs = self._succs
         stack = [source]
         seen: Set[int] = set()
         while stack:
@@ -737,7 +691,7 @@ class _Builder:
             if current in seen:
                 continue
             seen.add(current)
-            for succ in nodes[current].succs:
+            for succ in succs[current]:
                 if succ == target:
                     return True
                 if succ not in seen:
@@ -797,6 +751,9 @@ class _Builder:
         is_moe = bool(
             work.layer is not None and self._fw.spec.is_moe_layer(work.layer)
         )
+        # GEMM steps are SHARED across microbatches and carry only the name
+        # PREFIX; the per-instance tail lives on the chain (perf pass 3).
+        suffix = chain.name_suffix
         nodes = self._nodes
         nids: List[int] = []
         for step in chain.steps:
@@ -809,13 +766,14 @@ class _Builder:
                 )
                 nid = len(nodes)
                 nodes.append(
-                    _ProtoCompute(
-                        nid=nid,
-                        order=order,
+                    ComputeOp(
+                        uid=nid,
+                        name=step.name + suffix
+                        if step.entry_name is not None
+                        else step.name,
                         device=device,
-                        name=step.name,
-                        duration=step.duration,
-                        work=work,
+                        duration=(step.duration,),
+                        deps=[],  # LIST during the build; _finish retypes
                         role=role,
                         direction=direction,
                         mem_kind=step.mem_kind,
@@ -824,9 +782,12 @@ class _Builder:
                         micro_batch=work.microbatch,
                         layer=work.layer,
                         is_moe_layer=is_moe,
-                        entry_name=step.entry_name,
+                        work=work,
                     )
                 )
+                self._orders.append(order)
+                self._succs.append([])
+                self._entry_names.append(step.entry_name)
                 nids.append(nid)
             elif isinstance(step, CommStep):
                 # ``nids`` is the IN-PROGRESS prefix of this chain: a comm step's
@@ -846,7 +807,7 @@ class _Builder:
                 # into the consumers. Without this the MoE cold-rank JOIN would
                 # lose its ordering against its own residual send.
                 dep_node = self._nodes[dep_nid]
-                if isinstance(dep_node, _ProtoTransfer) and nid not in dep_node.consumers:
+                if isinstance(dep_node, TransferOp) and nid not in dep_node.consumers:
                     dep_node.consumers.append(nid)
         # The MoE hot/cold join: a step of a SIBLING chain that additionally
         # depends on this one (``block_program.py:366-373``). The referenced
@@ -872,7 +833,7 @@ class _Builder:
 
     def _link_extra_consumer(self, nid: int, target: int) -> None:
         node = self._nodes[nid]
-        if isinstance(node, _ProtoTransfer):
+        if isinstance(node, TransferOp):
             node.consumers.append(target)
         self._add_dep(nid, target, DepClass.DATA_FLOW)
 
@@ -898,11 +859,9 @@ class _Builder:
                 raise BuildError(
                     f"block-template transfer {spec.key!r} has no producer step"
                 )
-            nid = self._add(
-                _ProtoTransfer(
-                    nid=self._next_nid(),
-                    order=order,
-                    device=device,
+            nid = self._add_op(
+                TransferOp(
+                    uid=self._next_nid(),
                     # Endpoints in the name: a block-template p2p key is
                     # instantiated once per (src, dst) pair, and the emitter
                     # derives the ET node name from this one. Diagnostics only —
@@ -911,13 +870,18 @@ class _Builder:
                     name=f"{spec.key}_rank{device}_to_rank{dst}",
                     src_device=device,
                     dst_device=dst,
-                    size_bytes=float(spec.size_bytes),
+                    # int() here is the truncation the old second construction
+                    # applied at _finish; TransferOp.size_bytes is an int.
+                    size_bytes=int(spec.size_bytes),
                     comm_type=spec.kind,
                     producer=producer,
+                    deps=[],  # LIST during the build; _finish retypes
+                    consumers=[],
                     moe_component=spec.moe_component,
                     participants=int(spec.participants),
                     interconnect=canonical_axis_label(spec.axes) if spec.axes else None,
-                )
+                ),
+                order,
             )
             self._add_dep(producer, nid, DepClass.DATA_FLOW)
             return nid
@@ -931,27 +895,31 @@ class _Builder:
             if is_dp
             else self._placement.communicators.group_for(spec.axes, DeviceId(device))
         )
-        nid = self._add(
-            _ProtoCollective(
-                nid=self._next_nid(),
-                order=order,
-                device=device,
+        axes = tuple(spec.axes)
+        nid = self._add_op(
+            CollectiveOp(
+                uid=self._next_nid(),
                 name=spec.key,
+                device=device,
                 coll=spec.kind,
                 size_bytes=float(spec.size_bytes),
                 participants=int(spec.participants),
-                axes=tuple(spec.axes),
+                interconnect=_pricing_axis(axes),
                 is_dp=is_dp,
+                label=None,  # assigned in uid order at _finish
                 group=group,
-                work=work,
+                deps=[],  # LIST during the build; _finish retypes
                 comm_key=spec.key,
-            )
+                axes=axes,
+                work=work,
+            ),
+            order,
         )
         if step.overlap is not None:
             producer = None
             for local in step.deps:
                 candidate = prefix[local]
-                if isinstance(self._nodes[candidate], _ProtoCompute):
+                if isinstance(self._nodes[candidate], ComputeOp):
                     producer = candidate
             self._overlap_sites.append((nid, step.overlap, producer))
         return nid
@@ -1134,21 +1102,21 @@ class _Builder:
         order = self._order(producer, src, _PHASE_XFER, self._xfer_seq)
         self._xfer_seq += 1
         spec = self._cross_layer_spec()
-        nid = self._add(
-            _ProtoTransfer(
-                nid=self._next_nid(),
-                order=order,
-                device=src,
+        nid = self._add_op(
+            TransferOp(
+                uid=self._next_nid(),
                 name=CROSS_LAYER_KEY,
                 src_device=src,
                 dst_device=dst,
-                size_bytes=size,
+                size_bytes=int(size),  # the truncation _finish used to apply
                 comm_type=CollectiveType.PIPELINE,
                 producer=producer_nid,
+                deps=[],  # LIST during the build; _finish retypes
                 consumers=[consumer_nid],
                 participants=int(spec.participants),
                 interconnect=canonical_axis_label(spec.axes) if spec.axes else None,
-            )
+            ),
+            order,
         )
         self._add_dep(producer_nid, nid, DepClass.DATA_FLOW)
         # The compute-anchor double-dep (``pipeline_fine.py:672-687``): the SEND
@@ -1159,11 +1127,11 @@ class _Builder:
         self._add_dep(nid, consumer_nid, DepClass.DATA_FLOW)
 
     def _nearest_compute(self, chain: ExpandedChain, exit_nid: int) -> Optional[int]:
-        if isinstance(self._nodes[exit_nid], _ProtoCompute):
+        if isinstance(self._nodes[exit_nid], ComputeOp):
             return None
         nids = self._chain_nodes[(chain.work, int(chain.device))]
         for index in range(chain.exit, -1, -1):
-            if isinstance(self._nodes[nids[index]], _ProtoCompute):
+            if isinstance(self._nodes[nids[index]], ComputeOp):
                 return nids[index]
         return None
 
@@ -1188,12 +1156,13 @@ class _Builder:
         DAG. Nothing downstream would catch it except a golden diff.
         """
         nodes = self._nodes
+        orders = self._orders
         for (dep_nid, node_nid) in self._edges:
-            if nodes[dep_nid].order[0] > nodes[node_nid].order[0]:
+            if orders[dep_nid][0] > orders[node_nid][0]:
                 raise BuildError(
                     "D2 violated before R3: edge "
-                    f"{nodes[dep_nid].name!r} (slot {nodes[dep_nid].order[0]}) -> "
-                    f"{nodes[node_nid].name!r} (slot {nodes[node_nid].order[0]}) "
+                    f"{nodes[dep_nid].name!r} (slot {orders[dep_nid][0]}) -> "
+                    f"{nodes[node_nid].name!r} (slot {orders[node_nid][0]}) "
                     "runs backwards in schedule slots. R3's reachability bound "
                     "assumes the R1+R2 graph is slot-monotone (see _reaches)."
                 )
@@ -1208,12 +1177,12 @@ class _Builder:
                 )
             source = before[self._chain_by_device[(dep.before, device)].exit]
             target = after[self._chain_by_device[(dep.after, device)].entry]
-            floor = nodes[source].order[0]
-            if nodes[target].order[0] < floor:  # pragma: no cover - see D2
+            floor = orders[source][0]
+            if orders[target][0] < floor:  # pragma: no cover - see D2
                 raise BuildError(
                     "D2 violated by an implied_deps pair: "
                     f"{dep.before!r} (slot {floor}) is scheduled AFTER "
-                    f"{dep.after!r} (slot {nodes[target].order[0]}) on device "
+                    f"{dep.after!r} (slot {orders[target][0]}) on device "
                     f"{device}; Schedule.implied_deps must return a monotone "
                     "slot sequence."
                 )
@@ -1241,6 +1210,7 @@ class _Builder:
           chain steps, not the window's every ancestor.
         """
         nodes = self._nodes
+        orders = self._orders
         if source in nodes[target].deps:
             return True
 
@@ -1266,13 +1236,14 @@ class _Builder:
                     return True
                 if dep in seen:
                     continue
-                if nodes[dep].order[0] < floor_slot:
+                if orders[dep][0] < floor_slot:
                     continue  # D2: a path from source cannot dip below its slot
                 stack.append(dep)
         if decisive:
             return False
 
-        ceiling = nodes[target].order[0]
+        ceiling = orders[target][0]
+        succs = self._succs
         stack = [source]
         fseen: Set[int] = set()
         while stack:
@@ -1280,12 +1251,12 @@ class _Builder:
             if current in fseen:
                 continue
             fseen.add(current)
-            for succ in nodes[current].succs:
+            for succ in succs[current]:
                 if succ == target:
                     return True
                 if succ in fseen:
                     continue
-                if nodes[succ].order[0] > ceiling:
+                if orders[succ][0] > ceiling:
                     continue  # D2: a path to target cannot pass above its slot
                 stack.append(succ)
         return False
@@ -1375,23 +1346,25 @@ class _Builder:
         if not anchors:
             return None
 
-        nid = self._add(
-            _ProtoCollective(
-                nid=self._next_nid(),
-                order=self._order(
-                    req.place_on, device, _PHASE_SYNC, rank, instance
-                ),
-                device=device,
+        axes = tuple(req.axes)
+        nid = self._add_op(
+            CollectiveOp(
+                uid=self._next_nid(),
                 name=self._sync_name(req, instance),
+                device=device,
                 coll=req.kind,
                 size_bytes=float(size),
                 participants=int(req.participants),
-                axes=tuple(req.axes),
+                interconnect=_pricing_axis(axes),
                 is_dp=bool(req.is_dp),
+                label=None,  # assigned in uid order at _finish
                 group=group,
-                work=req.place_on,
+                deps=[],  # LIST during the build; _finish retypes
                 comm_key=req.comm_key,
-            )
+                axes=axes,
+                work=req.place_on,
+            ),
+            self._order(req.place_on, device, _PHASE_SYNC, rank, instance),
         )
         mode = req.mode
         for entries, exits in anchors:
@@ -1403,7 +1376,7 @@ class _Builder:
                         self._add_dep(dep, nid, DepClass.SYNC)
                         dep_node = self._nodes[dep]
                         if (
-                            isinstance(dep_node, _ProtoTransfer)
+                            isinstance(dep_node, TransferOp)
                             and int(dep_node.dst_device) == int(device)
                             and nid not in dep_node.consumers
                         ):
@@ -1431,7 +1404,7 @@ class _Builder:
                         self._add_dep(dep, nid, DepClass.SYNC)
                         dep_node = self._nodes[dep]
                         if (
-                            isinstance(dep_node, _ProtoTransfer)
+                            isinstance(dep_node, TransferOp)
                             and int(dep_node.dst_device) == int(device)
                             and nid not in dep_node.consumers
                         ):
@@ -1439,7 +1412,7 @@ class _Builder:
                             # is wired there), not by a ctrl_dep
                             dep_node.consumers.append(nid)
                 for exit_nid in exits:
-                    for succ in list(self._nodes[exit_nid].succs):
+                    for succ in list(self._succs[exit_nid]):
                         if succ == nid:
                             continue
                         if self._edges[(exit_nid, succ)] & req.via:
@@ -1591,7 +1564,7 @@ class _Builder:
         # ``reduce-scatter -> update -> all-gather``. A phase says WHERE in the
         # schedule a requirement sits; it can never answer WHAT it is.
         #
-        # ``_ProtoCollective.work`` is the requirement's ``place_on``, so the
+        # ``CollectiveOp.work`` is the requirement's ``place_on``, so the
         # stage is read from the schedule exactly as it is for a work item —
         # nothing is inferred from the node's name or comm key.
         reducers: Dict[Tuple[int, int], List[int]] = {}
@@ -1644,7 +1617,7 @@ class _Builder:
                 # needs only slot-monotone R1/R2/R3 edges to EXIST (D2-checked
                 # before R3); R4's later, possibly non-monotone sync edges can
                 # only ADD paths, never remove the spine.
-                target_slot = self._nodes[target].order[0]
+                target_slot = self._orders[target][0]
                 r5_sources: List[Tuple[WorkItem, int]] = []
                 for item in producers_by_stage.get(stage, ()):
                     entry = self._chain_by_device.get((item, device))
@@ -1657,7 +1630,7 @@ class _Builder:
                 for _item, source in r5_sources:
                     if source == target:
                         continue
-                    if self._nodes[source].order[0] < target_slot:
+                    if self._orders[source][0] < target_slot:
                         continue  # implied via the R3 spine
                     if self._reaches_forward(source, target):
                         continue  # implied some other way (post-R4 edges)
@@ -1750,9 +1723,9 @@ class _Builder:
     ) -> None:
         """``OverlapAnchor.PRODUCER`` (verbatim ``_split_tp_node_fine``)."""
         node = self._nodes[compute]
-        if not isinstance(node, _ProtoCompute):  # pragma: no cover - defensive
+        if not isinstance(node, ComputeOp):  # pragma: no cover - defensive
             raise BuildError("PRODUCER overlap must split a ComputeOp")
-        duration = float(node.duration)
+        duration = float(node.duration[0])
         if duration <= 0.0:
             return
 
@@ -1763,7 +1736,7 @@ class _Builder:
                 for dep in list(self._nodes[compute].deps):
                     self._reparent_dep(dep, coll, like=(dep, compute))
                 self._drop_dep(compute, coll)
-                for succ in list(self._nodes[coll].succs):
+                for succ in list(self._succs[coll]):
                     self._reparent_dep(compute, succ, like=(coll, succ))
             return
 
@@ -1774,15 +1747,14 @@ class _Builder:
 
         # The ORIGINAL node stays the tail (legacy mutates it in place), so every
         # successor keeps pointing at it and only the deps move.
-        slot, device_index, _, a, _ = node.order
-        head = self._add(
-            _ProtoCompute(
-                nid=self._next_nid(),
-                order=(slot, device_index, _PHASE_CHAIN, a, -1),
-                device=node.device,
+        slot, device_index, _, a, _ = self._orders[compute]
+        head = self._add_op(
+            ComputeOp(
+                uid=self._next_nid(),
                 name=f"{node.name}_head",
-                duration=head_duration,
-                work=node.work,
+                device=node.device,
+                duration=(head_duration,),
+                deps=[],  # LIST during the build; _finish retypes
                 role=node.role,
                 direction=node.direction,
                 mem_kind=node.mem_kind,
@@ -1791,10 +1763,12 @@ class _Builder:
                 micro_batch=node.micro_batch,
                 layer=node.layer,
                 is_moe_layer=node.is_moe_layer,
-                entry_name=node.entry_name,
-            )
+                work=node.work,
+            ),
+            (slot, device_index, _PHASE_CHAIN, a, -1),
+            entry_name=self._entry_names[compute],
         )
-        node.duration = tail_duration
+        node.duration = (tail_duration,)
         for dep in list(node.deps):
             for dep_class in set(self._edges[(dep, compute)]):
                 self._add_dep(dep, head, dep_class)
@@ -1803,7 +1777,7 @@ class _Builder:
             # emitter would wire the RECV id into the tail while the dep graph
             # says head (legacy did the same rewrite, transforms.py:_split_tp).
             dep_node = self._nodes[dep]
-            if isinstance(dep_node, _ProtoTransfer):
+            if isinstance(dep_node, TransferOp):
                 dep_node.consumers = [
                     head if consumer == compute else consumer
                     for consumer in dep_node.consumers
@@ -1813,17 +1787,17 @@ class _Builder:
         for coll in collectives:
             self._reparent_dep(head, coll, like=(compute, coll))
             self._drop_dep(compute, coll)
-            for succ in list(self._nodes[coll].succs):
+            for succ in list(self._succs[coll]):
                 self._reparent_dep(compute, succ, like=(coll, succ))
 
     def _split_collective(self, coll: int, decl: OverlapDecl) -> None:
         """``OverlapAnchor.CONSUMER`` (verbatim ``_split_cp_edge_fine``)."""
         node = self._nodes[coll]
-        if not isinstance(node, _ProtoCollective):  # pragma: no cover - defensive
+        if not isinstance(node, CollectiveOp):  # pragma: no cover - defensive
             raise BuildError("CONSUMER overlap must split a CollectiveOp")
         blocking = [
             succ
-            for succ in self._nodes[coll].succs
+            for succ in self._succs[coll]
             if self._is_blocking_consumer(succ, decl)
         ]
         if not blocking:
@@ -1832,7 +1806,7 @@ class _Builder:
         block_bytes = math.ceil(total * (1.0 - decl.fraction))
         ovlp_bytes = max(0.0, total - block_bytes)
         preds = list(self._nodes[coll].deps)
-        succs = list(self._nodes[coll].succs)
+        succs = list(self._succs[coll])
 
         if decl.is_hoist or total <= 0 or block_bytes <= 0:
             # The blocking consumer is re-parented onto the collective's
@@ -1852,22 +1826,25 @@ class _Builder:
         node.name = f"{node.name}_block"
         ovlp: Optional[int] = None
         if ovlp_bytes > 0:
-            slot, device_index, _, a, _ = node.order
-            ovlp = self._add(
-                _ProtoCollective(
-                    nid=self._next_nid(),
-                    order=(slot, device_index, _PHASE_CHAIN, a, 1),
-                    device=node.device,
+            slot, device_index, _, a, _ = self._orders[coll]
+            ovlp = self._add_op(
+                CollectiveOp(
+                    uid=self._next_nid(),
                     name=f"{node.comm_key}_ovlp",
+                    device=node.device,
                     coll=node.coll,
                     size_bytes=float(ovlp_bytes),
                     participants=node.participants,
-                    axes=node.axes,
+                    interconnect=_pricing_axis(node.axes),
                     is_dp=node.is_dp,
+                    label=None,  # assigned in uid order at _finish
                     group=node.group,
-                    work=node.work,
+                    deps=[],  # LIST during the build; _finish retypes
                     comm_key=node.comm_key,
-                )
+                    axes=node.axes,
+                    work=node.work,
+                ),
+                (slot, device_index, _PHASE_CHAIN, a, 1),
             )
             self._add_dep(coll, ovlp, DepClass.DATA_FLOW)
         for succ in succs:
@@ -1883,7 +1860,7 @@ class _Builder:
 
     def _is_blocking_consumer(self, nid: int, decl: OverlapDecl) -> bool:
         node = self._nodes[nid]
-        if not isinstance(node, _ProtoCompute):
+        if not isinstance(node, ComputeOp):
             return False
         target = decl.blocking_consumer
         if target is None:  # pragma: no cover - OverlapDecl rejects it
@@ -1891,80 +1868,39 @@ class _Builder:
         # Matched against ``ComputeStep.entry_name`` — a TYPED BlockTemplate
         # field, not the op's display name (``transforms.py:224`` tests
         # ``"attention" in name.lower()``) — and the needle is DATA on the
-        # policy, never a literal here.
-        return target.lower() in str(node.entry_name or "").lower()
+        # policy, never a literal here. entry_name is builder-side (the IR
+        # deliberately does not carry it — P5 deleted ordering/template
+        # metadata from ops), hence the side array.
+        return target.lower() in str(self._entry_names[nid] or "").lower()
 
     # ------------------------------------------------------------------
     # phase 10 — program order, uids, Program
     # ------------------------------------------------------------------
     def _finish(self, *, validate: bool, check_group_membership: bool = False) -> Program:
         uid_of = self._kahn()
-        ops: List[Op] = [None] * len(self._nodes)  # type: ignore[list-item]
+        # IN-PLACE renumber (perf pass 3, 2026-08-02): the ops ARE the final IR
+        # instances — there is no second construction. uids and dep/producer/
+        # consumer references go from build nids to program order, the
+        # build-time LISTS retype to the tuples the IR declares, and collective
+        # labels are interned in UID ORDER (the order the old loop assigned
+        # them in, so the ``name_N`` suffixes are unchanged).
+        nodes = self._nodes
+        ops: List[Op] = [None] * len(nodes)  # type: ignore[list-item]
+        for nid, op in enumerate(nodes):
+            uid = uid_of[nid]
+            op.uid = uid
+            op.deps = tuple([uid_of[dep] for dep in op.deps])
+            if isinstance(op, TransferOp):
+                op.producer = uid_of[op.producer]
+                op.consumers = tuple([uid_of[c] for c in op.consumers])
+            ops[uid] = op
         groups: Dict[GroupKey, CommGroup] = {}
         labels = _LabelInterner()
-        # uid_of is a bijection on dense nids, so uid order is a direct
-        # placement, not a sort (perf pass, 2026-08-02).
-        by_uid: List[Optional[_ProtoOp]] = [None] * len(self._nodes)
-        for node in self._nodes:
-            by_uid[uid_of[node.nid]] = node
-        for node in by_uid:
-            uid = uid_of[node.nid]
-            deps = tuple([uid_of[dep] for dep in node.deps])
-            if isinstance(node, _ProtoCompute):
-                ops[uid] = ComputeOp(
-                    uid=uid,
-                    name=node.name,
-                    device=node.device,
-                    duration=(node.duration,),  # _ProtoCompute.duration is float
-                    deps=deps,
-                    role=node.role,
-                    direction=node.direction,
-                    mem_kind=node.mem_kind,
-                    recompute=node.recompute,
-                    param_gather=node.param_gather,
-                    micro_batch=node.micro_batch,
-                    layer=node.layer,
-                    is_moe_layer=node.is_moe_layer,
-                    work=node.work,
-                )
-            elif isinstance(node, _ProtoCollective):
-                label = None
-                if node.group is not None:
-                    label = labels.label_for(node.comm_key or node.name, node.group)
-                    groups.setdefault(
-                        node.group, CommGroup(key=node.group, label=label)
-                    )
-                ops[uid] = CollectiveOp(
-                    uid=uid,
-                    name=node.name,
-                    device=node.device,
-                    coll=node.coll,
-                    size_bytes=node.size_bytes,
-                    participants=node.participants,
-                    interconnect=_pricing_axis(node.axes),
-                    is_dp=node.is_dp,
-                    label=label,
-                    group=node.group,
-                    deps=deps,
-                    comm_key=node.comm_key,
-                    axes=node.axes,
-                    work=node.work,
-                )
-            else:
-                ops[uid] = TransferOp(
-                    uid=uid,
-                    name=node.name,
-                    src_device=node.src_device,
-                    dst_device=node.dst_device,
-                    size_bytes=int(node.size_bytes),
-                    comm_type=node.comm_type,
-                    producer=uid_of[node.producer],
-                    deps=deps,
-                    consumers=tuple(uid_of[c] for c in node.consumers),
-                    moe_component=node.moe_component,
-                    participants=node.participants,
-                    interconnect=node.interconnect,
-                )
+        for op in ops:
+            if isinstance(op, CollectiveOp) and op.group is not None:
+                label = labels.label_for(op.comm_key or op.name, op.group)
+                op.label = label
+                groups.setdefault(op.group, CommGroup(key=op.group, label=label))
 
         devices = tuple(int(device) for device in self._devices)
         dp_count = (
@@ -2071,8 +2007,10 @@ class _Builder:
         drops from ~6 s to ~2 s. Returns a list indexed by nid.
         """
         nodes = self._nodes
+        orders = self._orders
+        succs_arr = self._succs
         by_rank: List[int] = sorted(
-            range(len(nodes)), key=lambda nid: (nodes[nid].order, nid)
+            range(len(nodes)), key=lambda nid: (orders[nid], nid)
         )
         rank_of: List[int] = [0] * len(nodes)
         for rank, nid in enumerate(by_rank):
@@ -2088,7 +2026,7 @@ class _Builder:
             nid = by_rank[heapq.heappop(heap)]
             uid_of[nid] = assigned
             assigned += 1
-            for succ in nodes[nid].succs:
+            for succ in succs_arr[nid]:
                 indegree[succ] -= 1
                 if indegree[succ] == 0:
                     heapq.heappush(heap, rank_of[succ])

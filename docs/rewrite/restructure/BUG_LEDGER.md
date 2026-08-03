@@ -18,6 +18,21 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 
 
+## Perf pass 3, 2026-08-02 ("as much as you can")
+
+Output-preserving throughout (gate 221/221 bit-identical per item; suite 1311).
+
+| item | what |
+|---|---|
+| **proto→IR fusion** | The `_Proto*` mirror classes and `_finish`'s second construction are DELETED — the ops the builder makes ARE the final IR instances. During the build, `uid` holds the dense construction nid, `deps` (and a transfer's `consumers`) are mutable lists, and a collective's `label` is None; `_finish` renumbers uids/deps/producers in place, retypes the lists to tuples and interns labels in uid order (so the `name_N` suffixes are byte-identical). Builder-only facts the IR deliberately does not carry (P5 deleted ordering metadata from ops) live in side arrays indexed by nid: `_orders`, `_succs`, `_entry_names`. The `int()` truncation of transfer sizes moved from `_finish` to construction (same value). Also halves peak build memory — no 13M dead protos at GPT 1T. |
+| **shared chain steps** | The GEMM `ComputeStep`s of a memo-instantiated chain are shared BY REFERENCE across microbatches: they carry the `f"{entry}_{direction}"` name PREFIX and the per-instance `_{work_name}_rank{r}` tail lives on the chain (`ExpandedChain.name_suffix`), composed at materialization for exactly the steps with `entry_name` set. Zero per-instance step construction. |
+| **V6 device-restricted probe** | `has_path` first walks only nodes on the pair's own device (a found path is real, so True is SOUND — and the path that makes a V6 pair safe is almost always the device's own serialization spine); only a probe miss falls back to the exact unrestricted walk (MoE cold→hot joins, turnaround windows). |
+
+Measured, GPT 175B analytical: build(FLAT) 29.3 → **24.3 s**, whole run 41.9 →
+**37.8 s** — **parity with the pre-branch tree (36.1 s), while running V1-V9
+validation the legacy flattener never did**, and 5x faster (6.9 s) when
+`estimate_memory: false`. GPT 1T in the commit message.
+
 ## Perf pass 2, 2026-08-02 ("this work is procedural")
 
 Output-preserving throughout (gate 221/221 bit-identical per item; suite 1311).

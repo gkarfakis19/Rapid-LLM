@@ -2214,12 +2214,13 @@ def test_r3_rejects_a_graph_whose_edges_run_backwards_in_schedule_slots():
 
     def sabotaged(self):
         # Flip one existing edge's endpoints in slot space by rewriting the
-        # dep's order key to something later than its consumer's.
+        # dep's order key (a builder-side array since the proto->IR fusion,
+        # 2026-08-02) to something later than its consumer's.
         for (dep_nid, node_nid) in self._edges:
-            dep_node = self._nodes[dep_nid]
-            node = self._nodes[node_nid]
-            if dep_node.order[0] < node.order[0]:
-                dep_node.order = (node.order[0] + 1,) + tuple(dep_node.order[1:])
+            dep_order = self._orders[dep_nid]
+            node_order = self._orders[node_nid]
+            if dep_order[0] < node_order[0]:
+                self._orders[dep_nid] = (node_order[0] + 1,) + tuple(dep_order[1:])
                 break
         else:  # pragma: no cover - the matrix always has such an edge
             pytest.skip("no strictly increasing edge to sabotage")

@@ -674,6 +674,15 @@ class ExpandedChain:
     steps: Tuple[ChainStep, ...]
     entry: int  #: index into ``steps``
     exit: int  #: index into ``steps``
+    #: Per-instance name suffix for the GEMM steps (perf pass 3, 2026-08-02).
+    #: A memo-instantiated chain SHARES its steps with every other microbatch
+    #: of the same ``(kind, direction, layer)``; the ONLY per-instance datum is
+    #: the ``work_name`` embedded in the GEMM step names, so the shared steps
+    #: carry the name PREFIX (``f"{entry}_{direction}"``) and the full name is
+    #: composed at materialization as ``step.name + chain.name_suffix`` for
+    #: exactly the steps with ``entry_name`` set (JOIN steps and single-op
+    #: expansions carry complete names and an empty suffix).
+    name_suffix: str = ""
 
     def __post_init__(self) -> None:
         if not self.steps:
@@ -931,40 +940,27 @@ class BlockExpander:
         ``(parallel_group, device)``).
         """
         wname = work_name(work)
-        dname = "forward" if work.direction is Direction.FORWARD else "backward"
-        recompute = work.kind is WorkKind.RECOMPUTE
         chain_new = ExpandedChain.__new__
         chain_set = object.__setattr__
         out: List[ExpandedChain] = []
         for chain in cached:
-            suffix = f"_{dname}_{wname}_rank{chain.cluster_rank}"
-            steps = tuple(
-                step
-                if not isinstance(step, ComputeStep) or step.kind is StepKind.JOIN
-                else ComputeStep(
-                    index=step.index,
-                    name=f"{step.entry_name}{suffix}",
-                    duration=step.duration,
-                    deps=step.deps,
-                    entry_name=step.entry_name,
-                    mem_kind=step.mem_kind,
-                    param_gather=step.param_gather,
-                    recompute=recompute,
-                )
-                for step in chain.steps
-            )
-            # Bypasses ``__init__``/``__post_init__``: the cached chain passed
-            # the step-index/dep-range validation when it was FIRST built, and
-            # indices and deps are copied verbatim here — re-validating every
-            # instantiation re-walked all 1.2M steps of a GPT 175B build to
-            # re-prove an invariant of the memoized structure.
+            # STEPS ARE SHARED OUTRIGHT (perf pass 3): the GEMM names carry the
+            # ``f"{entry}_{direction}"`` prefix only, and the per-instance part
+            # lives on the chain (``name_suffix``), composed at materialization.
+            # ``recompute`` is constant per memo key (kind is in the key), so
+            # nothing on any step varies per microbatch any more.
+            #
+            # ``__init__``/``__post_init__`` are bypassed: the cached chain
+            # passed the step-index/dep-range validation when it was FIRST
+            # built, and steps are the same objects.
             replica = chain_new(ExpandedChain)
             chain_set(replica, "work", work)
             chain_set(replica, "device", chain.device)
             chain_set(replica, "cluster_rank", chain.cluster_rank)
-            chain_set(replica, "steps", steps)
+            chain_set(replica, "steps", chain.steps)
             chain_set(replica, "entry", chain.entry)
             chain_set(replica, "exit", chain.exit)
+            chain_set(replica, "name_suffix", f"_{wname}_rank{chain.cluster_rank}")
             out.append(replica)
         return tuple(out)
 
@@ -998,6 +994,7 @@ class BlockExpander:
                     steps=steps,
                     entry=0,
                     exit=len(steps) - 1,
+                    name_suffix=f"_{work_name(work)}_rank{cluster_rank}",
                 )
             )
         return tuple(chains)
@@ -1034,7 +1031,11 @@ class BlockExpander:
             steps.append(
                 ComputeStep(
                     index=compute_index,
-                    name=f"{entry.name}_{direction_name}_{work_name(work)}_rank{cluster_rank}",
+                    # PREFIX only; the per-instance ``_{work_name}_rank{r}``
+                    # tail is the chain's ``name_suffix`` (composed at
+                    # materialization), which is what lets microbatches share
+                    # these step objects outright.
+                    name=f"{entry.name}_{direction_name}",
                     duration=float(cfg.duration),
                     deps=() if previous is None else (previous,),
                     entry_name=entry.name,

@@ -318,10 +318,42 @@ def _warn_group_races(program: Program) -> None:
         entry.extend(int(t.producer) for t in consumer_transfers.get(uid, ()))
         pred_list.append(entry)
 
+    # Device of each node for the probe below. A transfer walks as its SOURCE
+    # device (that is where it is issued; a same-device R2 link has src == dst).
+    device_of: List[int] = [
+        int(op.src_device) if isinstance(op, TransferOp) else int(op.device)
+        for op in ops
+    ]
+
     def has_path(src: int, dst: int) -> bool:
-        """Is there a dependency path src -> dst (src < dst)?"""
+        """Is there a dependency path src -> dst (src < dst)?
+
+        Two phases (perf pass 3, 2026-08-02). The DEVICE-RESTRICTED probe
+        walks only nodes on ``dst``'s own device: both endpoints of a V6 pair
+        are on one device by construction, and the path that makes the pair
+        safe is almost always the device's own serialization spine (R1 chain
+        -> R3/R2 same-device links), so the probe finds it in a handful of
+        pops without ever touching the other devices' nodes in the uid window
+        — which is what the old walk drowned in (~most of a GPT 1T validate).
+        A path the probe finds is a real path, so True is SOUND; only a probe
+        MISS falls back to the exact unrestricted walk (cross-device routes:
+        MoE cold->hot joins, turnaround windows).
+        """
+        device = device_of[dst]
         stack = [dst]
         seen: Set[int] = set()
+        while stack:
+            cur = stack.pop()
+            if cur == src:
+                return True
+            if cur in seen or cur < src:
+                continue
+            seen.add(cur)
+            for pred in pred_list[cur]:
+                if device_of[pred] == device or pred == src:
+                    stack.append(pred)
+        stack = [dst]
+        seen = set()
         while stack:
             cur = stack.pop()
             if cur == src:
