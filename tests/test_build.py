@@ -2131,45 +2131,48 @@ _R3_BOUND_CFGS = [
 
 
 @pytest.mark.parametrize("granularity", [Granularity.PIPELINE, Granularity.FLAT])
-def test_r3_slot_floor_answers_exactly_what_the_unbounded_walk_answers(granularity):
-    """The ``slot_floor`` prune in ``_reaches`` is an EXACT optimization.
+def test_r3_implied_answers_exactly_what_the_unbounded_walk_answers(granularity):
+    """``_r3_implied`` — the slot-bounded FORWARD-cone verdict — is EXACT.
 
-    It is what keeps R3 linear in the schedule length instead of quadratic (see
-    ``_reaches``), and its soundness rests on D2. If the bound ever disagreed
-    with the unbounded walk, R3 would add a redundant SCHEDULE edge and the only
-    thing that would notice is a golden diff — so the agreement is asserted here
-    directly, on every R3 query the matrix generates.
+    It is what keeps R3 linear in the schedule length instead of quadratic,
+    and its soundness rests on D2: paths in the R1+R2+R3-so-far graph are
+    slot-monotone, so bounding the forward walk above by ``slot(target)`` and
+    the old backward walk below by ``slot(source)`` prune the SAME window. If
+    the verdict ever disagreed with the unbounded backward walk, R3 would add
+    or drop a SCHEDULE edge and the only thing that would notice is a golden
+    diff — so the agreement is asserted here directly, on every R3 query the
+    matrix generates.
     """
     import program.build as build_mod
 
     seen_queries = 0
     disagreements = []
-    original = build_mod._Builder._reaches
+    original = build_mod._Builder._r3_implied
+    unbounded_walk = build_mod._Builder._reaches
 
-    def checking(self, source, target, *, slot_floor=None):
-        bounded = original(self, source, target, slot_floor=slot_floor)
-        if slot_floor is not None:
-            nonlocal seen_queries
-            seen_queries += 1
-            unbounded = original(self, source, target)
-            if bounded != unbounded:
-                disagreements.append(
-                    (self._nodes[source].name, self._nodes[target].name,
-                     slot_floor, bounded, unbounded)
-                )
-        return bounded
+    def checking(self, source, target, floor):
+        fast = original(self, source, target, floor)
+        nonlocal seen_queries
+        seen_queries += 1
+        unbounded = unbounded_walk(self, source, target)
+        if fast != unbounded:
+            disagreements.append(
+                (self._nodes[source].name, self._nodes[target].name,
+                 floor, fast, unbounded)
+            )
+        return fast
 
-    build_mod._Builder._reaches = checking
+    build_mod._Builder._r3_implied = checking
     try:
         for cfg in _R3_BOUND_CFGS:
             _program(replace(cfg, flattened=granularity is Granularity.FLAT),
                      granularity=granularity)
     finally:
-        build_mod._Builder._reaches = original
+        build_mod._Builder._r3_implied = original
 
-    assert seen_queries, "no bounded R3 queries were exercised"
+    assert seen_queries, "no R3 implication queries were exercised"
     assert not disagreements, (
-        "slot_floor changed a reachability answer (D2 broken):\n"
+        "_r3_implied changed a reachability answer (D2 broken):\n"
         + "\n".join(str(d) for d in disagreements[:8])
     )
 

@@ -98,120 +98,134 @@ def validate_program(
         _fail("V1", "Program.devices contains duplicate device ids")
     dp_count = max(int(program.dp_count), 1)
 
-    # ---------------- V1: dense uids, topological deps ----------------
+    # ---- V1-V5 + V8, fused into ONE pass (perf pass 2, 2026-08-02) --------
+    # The checks are verbatim; only the loop structure changed (five full-ops
+    # sweeps -> one, ~150 s of a GPT 1T validate). Per-GROUP facts (registered,
+    # members within devices, members sorted-set) are verified once per interned
+    # GroupKey, on the FIRST op that references it — same failure, same op
+    # attribution — instead of per collective instance.
+    checked_groups: Dict[GroupKey, Set[int]] = {}
     for idx, op in enumerate(ops):
-        if op.uid != idx:
-            _fail("V1", f"ops[{idx}].uid == {op.uid}; uids must be dense list indices")
+        uid = op.uid
+        if uid != idx:
+            _fail("V1", f"ops[{idx}].uid == {uid}; uids must be dense list indices")
         for dep in op.deps:
-            if not (0 <= int(dep) < op.uid):
+            if not (0 <= int(dep) < uid):
                 _fail(
                     "V1",
-                    f"op {op.uid} ('{op.name}') has dep {dep}; every dep uid must "
-                    f"be a valid uid < {op.uid}",
+                    f"op {uid} ('{op.name}') has dep {dep}; every dep uid must "
+                    f"be a valid uid < {uid}",
                 )
         if isinstance(op, TransferOp):
-            if not (0 <= op.producer < op.uid):
+            # V1 — producer/consumer discipline
+            if not (0 <= op.producer < uid):
                 _fail(
                     "V1",
-                    f"TransferOp {op.uid} ('{op.name}') producer {op.producer} must "
-                    f"be a valid uid < {op.uid}",
+                    f"TransferOp {uid} ('{op.name}') producer {op.producer} must "
+                    f"be a valid uid < {uid}",
                 )
             for consumer in op.consumers:
                 if not (0 <= int(consumer) < len(ops)):
-                    _fail("V1", f"TransferOp {op.uid} consumer {consumer} is not a valid uid")
+                    _fail("V1", f"TransferOp {uid} consumer {consumer} is not a valid uid")
                 if isinstance(ops[int(consumer)], TransferOp):
-                    _fail("V1", f"TransferOp {op.uid} consumer {consumer} is itself a TransferOp")
-
-    # ---------------- V2: groups registered, device in members ----------------
-    for op in ops:
-        if isinstance(op, CollectiveOp):
-            if op.coll == CollectiveType.PIPELINE:
-                _fail("V2", f"CollectiveOp {op.uid} ('{op.name}') has PIPELINE comm type")
-            if op.group is not None:
-                registered = program.groups.get(op.group)
-                if registered is None:
-                    _fail(
-                        "V2",
-                        f"CollectiveOp {op.uid} ('{op.name}') references unregistered "
-                        f"group {op.group}",
-                    )
-                if op.device not in op.group.members:
-                    _fail(
-                        "V2",
-                        f"CollectiveOp {op.uid} ('{op.name}') on device {op.device} is "
-                        f"not a member of its group {op.group.members}",
-                    )
-                if not set(op.group.members) <= devices:
-                    _fail(
-                        "V2",
-                        f"group {op.group} of op {op.uid} has members outside "
-                        f"Program.devices {sorted(devices)}",
-                    )
-    for key in program.groups:
-        if tuple(sorted(key.members)) != key.members:
-            _fail("V2", f"GroupKey members must be sorted: {key}")
-
-    # ---------------- V3: transfer endpoint discipline (relaxed) ----------------
-    for op in ops:
-        if not isinstance(op, TransferOp):
-            continue
-        if op.src_device not in devices or op.dst_device not in devices:
-            _fail(
-                "V3",
-                f"TransferOp {op.uid} ('{op.name}') endpoints "
-                f"({op.src_device} -> {op.dst_device}) must be in Program.devices",
-            )
-        producer = ops[op.producer]
-        if isinstance(producer, TransferOp):
-            _fail("V3", f"TransferOp {op.uid} producer {op.producer} is a TransferOp")
-        if producer.device != op.src_device:
-            _fail(
-                "V3",
-                f"TransferOp {op.uid} ('{op.name}') producer {op.producer} lives on "
-                f"device {producer.device}, not src_device {op.src_device}",
-            )
-        for consumer_uid in op.consumers:
-            consumer = ops[int(consumer_uid)]
-            if consumer.device not in (op.src_device, op.dst_device):
+                    _fail("V1", f"TransferOp {uid} consumer {consumer} is itself a TransferOp")
+            # V3 — endpoint discipline (relaxed)
+            if op.src_device not in devices or op.dst_device not in devices:
                 _fail(
                     "V3",
-                    f"TransferOp {op.uid} consumer {consumer_uid} on device "
-                    f"{consumer.device} is on neither endpoint "
-                    f"({op.src_device} -> {op.dst_device})",
+                    f"TransferOp {uid} ('{op.name}') endpoints "
+                    f"({op.src_device} -> {op.dst_device}) must be in Program.devices",
                 )
-
-    # ---------------- V4: per-DP duration profile length ----------------
-    for op in ops:
-        if isinstance(op, ComputeOp):
+            producer = ops[op.producer]
+            if isinstance(producer, TransferOp):
+                _fail("V3", f"TransferOp {uid} producer {op.producer} is a TransferOp")
+            if producer.device != op.src_device:
+                _fail(
+                    "V3",
+                    f"TransferOp {uid} ('{op.name}') producer {op.producer} lives on "
+                    f"device {producer.device}, not src_device {op.src_device}",
+                )
+            for consumer_uid in op.consumers:
+                consumer = ops[int(consumer_uid)]
+                if consumer.device not in (op.src_device, op.dst_device):
+                    _fail(
+                        "V3",
+                        f"TransferOp {uid} consumer {consumer_uid} on device "
+                        f"{consumer.device} is on neither endpoint "
+                        f"({op.src_device} -> {op.dst_device})",
+                    )
+            # V8 — same-device MoE p2p with bytes
+            if (
+                op.src_device == op.dst_device
+                and int(op.size_bytes) > 0
+                and getattr(op, "moe_component", None)
+            ):
+                _fail(
+                    "V8",
+                    f"TransferOp {uid} ('{op.name}') is a same-device p2p carrying "
+                    f"{op.size_bytes} bytes for MoE component "
+                    f"{op.moe_component!r}; same-device transfers are elided at "
+                    "emission, so this silently DROPS the payload "
+                    "(ext_moe_flat.md blocker 4)",
+                )
+        elif isinstance(op, CollectiveOp):
+            # V2 — groups registered, device in members
+            if op.coll == CollectiveType.PIPELINE:
+                _fail("V2", f"CollectiveOp {uid} ('{op.name}') has PIPELINE comm type")
+            if op.group is not None:
+                members = checked_groups.get(op.group)
+                if members is None:
+                    registered = program.groups.get(op.group)
+                    if registered is None:
+                        _fail(
+                            "V2",
+                            f"CollectiveOp {uid} ('{op.name}') references unregistered "
+                            f"group {op.group}",
+                        )
+                    members = set(op.group.members)
+                    if not members <= devices:
+                        _fail(
+                            "V2",
+                            f"group {op.group} of op {uid} has members outside "
+                            f"Program.devices {sorted(devices)}",
+                        )
+                    checked_groups[op.group] = members
+                if op.device not in members:
+                    _fail(
+                        "V2",
+                        f"CollectiveOp {uid} ('{op.name}') on device {op.device} is "
+                        f"not a member of its group {op.group.members}",
+                    )
+            # V5 — emitter dispatch consistency
+            if (op.label is None) != bool(op.is_dp):
+                _fail(
+                    "V5",
+                    f"CollectiveOp {uid} ('{op.name}'): is_dp={op.is_dp} but "
+                    f"label={op.label!r} (is_dp must hold exactly when unlabeled)",
+                )
+            if op.group is not None and op.label is None:
+                _fail(
+                    "V5",
+                    f"CollectiveOp {uid} ('{op.name}') has a group but no label; "
+                    "wire gid interning is label-driven",
+                )
+            if op.label is not None and op.group is None:
+                _fail(
+                    "V5",
+                    f"CollectiveOp {uid} ('{op.name}') has label {op.label!r} but "
+                    "no group",
+                )
+        elif isinstance(op, ComputeOp):
+            # V4 — per-DP duration profile length
             if len(op.duration) not in (1, dp_count):
                 _fail(
                     "V4",
-                    f"ComputeOp {op.uid} ('{op.name}') duration has length "
+                    f"ComputeOp {uid} ('{op.name}') duration has length "
                     f"{len(op.duration)} but dp_count={dp_count} (must be 1 or dp_count)",
                 )
-
-    # ---------------- V5: emitter dispatch consistency ----------------
-    for op in ops:
-        if not isinstance(op, CollectiveOp):
-            continue
-        if (op.label is None) != bool(op.is_dp):
-            _fail(
-                "V5",
-                f"CollectiveOp {op.uid} ('{op.name}'): is_dp={op.is_dp} but "
-                f"label={op.label!r} (is_dp must hold exactly when unlabeled)",
-            )
-        if op.group is not None and op.label is None:
-            _fail(
-                "V5",
-                f"CollectiveOp {op.uid} ('{op.name}') has a group but no label; "
-                "wire gid interning is label-driven",
-            )
-        if op.label is not None and op.group is None:
-            _fail(
-                "V5",
-                f"CollectiveOp {op.uid} ('{op.name}') has label {op.label!r} but "
-                "no group",
-            )
+    for key in program.groups:
+        if tuple(sorted(key.members)) != key.members:
+            _fail("V2", f"GroupKey members must be sorted: {key}")
 
     # ---------------- V7: a grouped collective spans its group ----------
     if check_group_membership:

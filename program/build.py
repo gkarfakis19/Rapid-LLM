@@ -716,94 +716,33 @@ class _Builder:
                 stack.append(dep)
         return False
 
-    def _ancestors_of(self, target: int) -> Set[int]:
-        """Every node that transitively reaches ``target`` (excluding it).
+    def _reaches_forward(self, source: int, target: int) -> bool:
+        """Transitive reachability ``source -> target``, walking SUCCESSORS.
 
-        The set form of :meth:`_reaches`, for callers that ask the SAME question
-        about one target many times. ``source in self._ancestors_of(target)`` is
-        by construction identical to ``self._reaches(source, target)``.
-
-        The membership test is done BEFORE pushing, not after popping. Both are
-        correct; the difference is that the pop-side form pushes one stack entry
-        per EDGE (``O(E)`` pops for a walk that visits ``O(V)`` nodes), and this
-        DAG's average in-degree is ~6.6, so the pop-side form did ~6.6x the list
-        churn. Measured on GPT 175B (pp=8 L=96 mb=64), where R5 walks 72 targets:
-        47.4M list pushes -> 7.4M.
+        The mirror of :meth:`_reaches`, for callers whose SOURCE has the small
+        cone: "does this gradient reducer already reach the optimizer" walks
+        the reducer's descendants (a sink's cone is empty; a ZeRO-2 reducer's
+        is its gather chain) instead of the optimizer's ancestors (essentially
+        the device's whole history — the 152 s of GPT 1T's R5). Exact over
+        every edge class, no slot bound: successors are maintained by
+        ``_add_dep``/``_drop_dep`` for all of R1-R5.
         """
-        nodes = self._nodes
-        ancestors: Set[int] = set()
-        stack = [dep for dep in nodes[target].deps]
-        while stack:
-            current = stack.pop()
-            if current in ancestors:
-                continue
-            ancestors.add(current)
-            for dep in nodes[current].deps:
-                if dep not in ancestors:
-                    stack.append(dep)
-        return ancestors
-
-    def _ancestors_covering(
-        self, target: int, wanted: Set[int]
-    ) -> Tuple[Set[int], bool]:
-        """:meth:`_ancestors_of`, stopping as soon as all of ``wanted`` is seen.
-
-        Returns ``(ancestors, complete)``. ``complete`` is False ONLY when every
-        node in ``wanted`` was already found, so a caller whose entire question
-        is "are these particular nodes ancestors of ``target``" gets the same
-        answers either way — and in the ``complete is False`` case it gets them
-        without walking the rest of the graph.
-
-        This is R5's hot path and it is a REDUNDANCY PROOF: under GPipe every
-        source it considers is already an ancestor (R5 adds zero edges), so the
-        full set was computed only to conclude "nothing to do". The optimizer is
-        the last op of its stage, so its ancestor set is essentially the whole
-        upstream program — ``O(V+E)`` per optimizer INSTANCE, i.e. once per
-        device. On GPT 175B FLAT (64 devices) that was 16.4 s of a 53.8 s build.
-        The wanted set lives on the target's own device and its own stage, so
-        the bounded walk reaches all of it in a small neighborhood.
-
-        When some source is genuinely missing the walk runs to exhaustion and
-        the caller gets an exact, complete set — the slow path is the CORRECT
-        path, and it is the one that adds edges.
-        """
-        if not wanted:
-            return set(), False
-        nodes = self._nodes
-        ancestors: Set[int] = set()
-        remaining = set(wanted)
-        stack = [dep for dep in nodes[target].deps]
-        while stack:
-            current = stack.pop()
-            if current in ancestors:
-                continue
-            ancestors.add(current)
-            remaining.discard(current)
-            if not remaining:
-                return ancestors, False
-            for dep in nodes[current].deps:
-                if dep not in ancestors:
-                    stack.append(dep)
-        return ancestors, True
-
-    def _grow_ancestors(self, ancestors: Set[int], source: int) -> None:
-        """Fold ``source`` and its ancestors into an existing ancestor set.
-
-        Called right after ``source -> target`` is materialized, so ``ancestors``
-        keeps describing ``target`` exactly. Nodes already present are not
-        re-expanded, so a loop that adds many sources to one target visits each
-        node at most once in total.
-        """
+        if source == target:
+            return True
         nodes = self._nodes
         stack = [source]
+        seen: Set[int] = set()
         while stack:
             current = stack.pop()
-            if current in ancestors:
+            if current in seen:
                 continue
-            ancestors.add(current)
-            for dep in nodes[current].deps:  # test before push (see _ancestors_of)
-                if dep not in ancestors:
-                    stack.append(dep)
+            seen.add(current)
+            for succ in nodes[current].succs:
+                if succ == target:
+                    return True
+                if succ not in seen:
+                    stack.append(succ)
+        return False
 
     # ------------------------------------------------------------------
     # phase 4/5 — expansion (R1)
@@ -1278,9 +1217,78 @@ class _Builder:
                     f"{device}; Schedule.implied_deps must return a monotone "
                     "slot sequence."
                 )
-            if self._reaches(source, target, slot_floor=floor):
+            if self._r3_implied(source, target, floor):
                 continue
             self._add_dep(source, target, DepClass.SCHEDULE)
+
+    def _r3_implied(self, source: int, target: int, floor: int) -> bool:
+        """Is ``source -> target`` already implied, for R3's boundary query?
+
+        Answered in the direction whose cone is SMALL for the verdict being
+        proved (perf pass 2, 2026-08-02; identical truth value — both walks
+        decide reachability over the same R1+R2+R3-so-far edge set, which is
+        slot-monotone by D2, so bounding below by ``slot(source)`` and above by
+        ``slot(target)`` are the SAME window):
+
+        * the IMPLIED verdict is usually a direct R2 edge (consecutive layers
+          of one microbatch, chained same-device), which the one-hop scan of
+          ``target.deps`` finds immediately;
+        * the NOT-implied verdict — the microbatch boundary R3 exists to wire,
+          and the expensive case (the old backward walk exhausted the whole
+          slot window: 116 s of GPT 1T's 748 s) — is proved by exhausting the
+          FORWARD cone of ``source`` below ``slot(target)``, which is tiny: a
+          chain exit's descendants within the window are the next stage's few
+          chain steps, not the window's every ancestor.
+        """
+        nodes = self._nodes
+        if source in nodes[target].deps:
+            return True
+
+        # Budgeted backward probe: when the backward window is small — the
+        # common IMPLIED-via-short-path case at moderate scale — it decides in
+        # a few pops either way. Only when it exceeds the budget (the huge
+        # windows of a GPT-1T-scale build) does the forward cone take over.
+        floor_slot = floor
+        budget = 96
+        stack = [target]
+        seen: Set[int] = set()
+        decisive = True
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if len(seen) > budget:
+                decisive = False
+                break
+            for dep in nodes[current].deps:
+                if dep == source:
+                    return True
+                if dep in seen:
+                    continue
+                if nodes[dep].order[0] < floor_slot:
+                    continue  # D2: a path from source cannot dip below its slot
+                stack.append(dep)
+        if decisive:
+            return False
+
+        ceiling = nodes[target].order[0]
+        stack = [source]
+        fseen: Set[int] = set()
+        while stack:
+            current = stack.pop()
+            if current in fseen:
+                continue
+            fseen.add(current)
+            for succ in nodes[current].succs:
+                if succ == target:
+                    return True
+                if succ in fseen:
+                    continue
+                if nodes[succ].order[0] > ceiling:
+                    continue  # D2: a path to target cannot pass above its slot
+                stack.append(succ)
+        return False
 
     # ------------------------------------------------------------------
     # phase 7 — requirements
@@ -1604,29 +1612,41 @@ class _Builder:
                     (int(self._schedule.stage_of(work)), int(node.device)), []
                 ).append(nid)
 
+        # ONE sort and ONE stage-partition of the producers, outside the loop.
+        # The body used to re-sort the FULL producer list once per optimizer
+        # CHAIN — at GPT 1T that is 512 chains x sorted(~131k items), 50 of the
+        # 51 s this rule still cost after the spine fix. Same iteration order:
+        # the stage filter commutes with the sort.
+        producers_by_stage: Dict[int, List[WorkItem]] = {}
+        for item in sorted(producers, key=WorkItem.sort_key):
+            producers_by_stage.setdefault(
+                int(self._schedule.stage_of(item)), []
+            ).append(item)
         for optimizer in sorted(optimizers, key=WorkItem.sort_key):
             stage = int(self._schedule.stage_of(optimizer))
             for chain in self._chains.get(optimizer, ()):
                 device = int(chain.device)
                 target = self._chain_nodes[(optimizer, device)][chain.entry]
-                # ONE ancestor set per target, grown in place, instead of one
-                # ancestor walk PER SOURCE. Every question this loop asks is
-                # "does <source> already reach <target>", and the answer is
-                # exactly ``source in ancestors``; re-deriving that set for each
-                # of a stage's gradient producers is what made R5 quadratic
-                # (measured on GPT 1T, ``pp=64 L=128 mb=512``: 64 optimizers x
-                # ~1024 backward items = ~65k full-graph walks, 427 s of a 441 s
-                # build). ``_grow_ancestors`` stops at nodes already in the set,
-                # so each node is visited at most once per target and the whole
-                # loop is O(V+E) — and it is EXACT, with no reliance on D2 or on
-                # any slot ordering, which matters here because R5 runs after R4
-                # and the sync lattice may carry edges D2 does not constrain.
-                # The sources are known BEFORE the walk, so the walk can stop as
-                # soon as it has seen all of them — see _ancestors_covering.
+                # NO ancestor walk for the producers (perf pass 2, 2026-08-02;
+                # the earlier "one grown set per target" version was measured at
+                # 152 s of GPT 1T's 748 s). "Does <producer exit> already reach
+                # <optimizer entry>" is answered by R3's OWN POSTCONDITION: R3
+                # processed EVERY adjacent pair of this device's projection
+                # (``Schedule.implied_deps``' contract) and either found the
+                # pair implied or added the SCHEDULE edge — so after R3 the
+                # device's slots form a connected serialization spine, and any
+                # same-device node at an EARLIER slot reaches any later one
+                # through it. A producer therefore needs an R5 edge only when
+                # its slot is AFTER the optimizer's — a schedule that runs the
+                # update before some backward item — and for that rare shape
+                # (no production schedule; zero cases under GPipe) the exact
+                # ``_reaches`` query is kept as the fallback. The spine argument
+                # needs only slot-monotone R1/R2/R3 edges to EXIST (D2-checked
+                # before R3); R4's later, possibly non-monotone sync edges can
+                # only ADD paths, never remove the spine.
+                target_slot = self._nodes[target].order[0]
                 r5_sources: List[Tuple[WorkItem, int]] = []
-                for item in sorted(producers, key=WorkItem.sort_key):
-                    if int(self._schedule.stage_of(item)) != stage:
-                        continue
+                for item in producers_by_stage.get(stage, ()):
                     entry = self._chain_by_device.get((item, device))
                     if entry is None:
                         continue
@@ -1634,32 +1654,33 @@ class _Builder:
                         (item, self._chain_nodes[(item, device)][entry.exit])
                     )
                 r5b_sources = sorted(reducers.get((stage, device), ()))
-                ancestors, _complete = self._ancestors_covering(
-                    target,
-                    # ``target`` is excluded: a node is never its own ancestor,
-                    # so leaving it in would make the walk run to exhaustion
-                    # every time looking for something it cannot find.
-                    ({source for _item, source in r5_sources} | set(r5b_sources))
-                    - {target},
-                )
                 for _item, source in r5_sources:
-                    if source == target or source in ancestors:
+                    if source == target:
                         continue
+                    if self._nodes[source].order[0] < target_slot:
+                        continue  # implied via the R3 spine
+                    if self._reaches_forward(source, target):
+                        continue  # implied some other way (post-R4 edges)
                     self._add_dep(source, target, DepClass.DATA_FLOW)
                     self._r5_edges.append((source, target))
-                    self._grow_ancestors(ancestors, source)
                 # R5b — the gradient the optimizer applies is the REDUCED one.
+                # A reducer hangs OFF the spine (a sync node, usually a sink),
+                # so its implication is genuinely unknown: the exact query, in
+                # the direction whose cone is small (the reducer's descendants,
+                # not the optimizer's ancestors). Sources per (stage, device)
+                # are few.
                 for source in r5b_sources:
-                    if source == target or source in ancestors:
+                    if source == target:
                         continue
-                    if self._reaches(target, source):
+                    if self._reaches_forward(source, target):
+                        continue
+                    if self._reaches_forward(target, source):
                         raise BuildError(
                             f"R5b would close a cycle: OPTIMIZER node {target} "
                             f"already reaches its own gradient reducer {source} "
                             f"(stage {stage}, device {device})"
                         )
                     self._add_dep(source, target, DepClass.DATA_FLOW)
-                    self._grow_ancestors(ancestors, source)
                     self._r5_edges.append((source, target))
                 # R5c — and anything that broadcasts the UPDATED parameters runs
                 # after it. Must land WITH R5b, never alone: excluding ZeRO-2's

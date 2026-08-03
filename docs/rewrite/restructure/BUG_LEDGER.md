@@ -18,6 +18,17 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 
 
+## Perf pass 2, 2026-08-02 ("this work is procedural")
+
+Output-preserving throughout (gate 221/221 bit-identical per item; suite 1311).
+
+| item | what |
+|---|---|
+| **R5 producers: no walk** | "Does a producer's exit reach the optimizer's entry" is **R3's own postcondition**: R3 processed every adjacent pair of the device's projection (`Schedule.implied_deps`' contract) and either found it implied or added the SCHEDULE edge, so the device's slots form a connected serialization spine and any same-device node at an earlier slot reaches any later one through it. A producer needs an R5 edge only when its slot is AFTER the optimizer's (zero cases under GPipe; exact forward-cone fallback kept). R5b keeps the exact per-reducer query in the small-cone direction (the reducer's descendants — a sink's cone is empty). The three ancestor-set helpers are deleted. Also: the producer list was re-SORTED per optimizer chain (512 × sorted(131k) at 1T = ~50 s); one sort + one stage-partition now. GPT 1T `_apply_r5`: **151.7 s → ~1 s**; 175B: 2.6 s → 0.11 s. |
+| **R3 boundary verdict** | `_r3_implied`: budgeted backward probe (decides implied-via-short-path in a few pops), then the source's forward cone bounded by `slot(target)`. Both prune the same D2 window, so the truth value is identical — asserted by `test_r3_implied_answers_exactly_what_the_unbounded_walk_answers`, which replays every matrix query against the unbounded walk. **At 1T this bought little (116 → 110 s): both cones are window-sized there.** The next design is on record: within one boundary window a path `exit(m,d) → entry(m+1,d)` arguably cannot round-trip through another device (forward transfers leave d, backward transfers re-enter it only far outside the window), which would make a SAME-DEVICE-restricted walk exact and O(chain) — needs the round-trip impossibility argued precisely (small-pp turnaround is the suspect case) before it can land, with the oracle test as the harness. |
+| **validation fused** | V1-V5 + V8 are ONE pass over ops; per-GROUP facts verified once per interned GroupKey on the first referencing op. **V6 (group races) is now ~all of validation's cost** (~2.5 s of 175B's 5.5, ~most of 1T's 149) — per consecutive same-group pair `has_path` over the uid window. Next lever, same shape as R3's. |
+| **remaining 1T shape** | 641 s pre-sort-hoist: `_finish` 214 (proto→IR double construction — the fusion design is inventoried: 7 construction sites, side arrays for order/succs/entry_name, in-place renumber), `validate` 149 (V6), `_apply_r3` 110 (window walks), `_expand_all` 104 (1.6M chain materializations), replay 55, overlap 44. |
+
 ## Optimal-perf pass, 2026-08-02 (second session — "fix all of this")
 
 All output-preserving: **44/44 goldens bit-identical after every step** (gate run
