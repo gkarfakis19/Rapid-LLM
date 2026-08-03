@@ -1,5 +1,8 @@
 # INTERFACES.md — the authoritative L0–L4 interface contract
 
+> **2026-08-02:** every mention of `pipeline_style_recompute` below is HISTORICAL — the flag was hardwired to `full_recomputation` (train_timing.py:297, no config path), so the recompute predicate is now `include_backward AND full_recomputation` and the flag, its RunPolicy field and its misc_metadata key are deleted.
+
+
 > **Status: normative.** This document is the contract the restructure phases P2–P6 implement
 > against. Later agents implement one level each, in parallel, and **must not need to negotiate**:
 > anything not fixed here is fixed by the signatures below, and anything that contradicts them is a

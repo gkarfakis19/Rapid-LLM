@@ -674,12 +674,16 @@ class RunPolicy:
     """One home for the rules currently copied verbatim three times each
     (llm_execution.py:392-395 / :606-612 / :742-746 — audit A10).
 
-    AMENDMENT to INTERFACES §1.7 (dated 2026-07-26): ``full_recomputation`` and
-    ``pipeline_style_recompute`` are carried here. The §1.7 producer table omits
-    them, but ``recompute_policy_for`` (§2.7) needs both — they are
-    ``misc_metadata["full_recomputation"]`` / ``["pipeline_style_recompute"]``
-    (train_timing.py:5068-5072). ``misc["flattened_mode"]`` is deliberately NOT
-    carried: it becomes the dispatcher's granularity selection (§2.7).
+    AMENDMENT to INTERFACES §1.7 (dated 2026-07-26): ``full_recomputation``
+    is carried here for ``recompute_policy_for`` (§2.7). ``misc["flattened_mode"]``
+    is deliberately NOT carried: it became the dispatcher's granularity
+    selection, and then (2026-08-02) not even that — see recompute.py.
+
+    ``pipeline_style_recompute`` was DELETED 2026-08-02: train_timing.py:297
+    hardwired it to ``bool(full_recomputation)`` with no config path, so the
+    legacy predicate ``full_recomputation AND (flattened_mode OR
+    pipeline_style_recompute)`` was ``full_recomputation`` in every reachable
+    state, and the granularity coupling it appeared to carry never existed.
     """
 
     run_type: RunType
@@ -688,7 +692,6 @@ class RunPolicy:
     zero_stage: int
     pipeline_interleave: int = 1  #: v; the closed-form bubble correction (Class B item 8)
     full_recomputation: bool = False
-    pipeline_style_recompute: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_type, RunType):
@@ -900,7 +903,6 @@ REQUIRED_MISC_KEYS: Tuple[str, ...] = (
     "model_type",
     "num_batch",
     "num_layer",
-    "pipeline_style_recompute",
 )
 
 
@@ -1096,9 +1098,6 @@ class WorkloadSpec:
             zero_stage=int(_require_misc(misc_metadata, "dp_zero_stage") or 0),
             pipeline_interleave=max(1, int(pipeline_interleave or 1)),
             full_recomputation=bool(_require_misc(misc_metadata, "full_recomputation")),
-            pipeline_style_recompute=bool(
-                _require_misc(misc_metadata, "pipeline_style_recompute")
-            ),
         )
         declared = max(1, int(dp or 1))
         degrees = ParallelDegrees(

@@ -261,7 +261,6 @@ def _workload(
         dp_microbatch_mode=DpMicrobatchMode.EVERY_MB,
         zero_stage=0,
         full_recomputation=grid.recompute,
-        pipeline_style_recompute=grid.recompute,
     )
     dense = _template(gemms, comm)
     moe = (

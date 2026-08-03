@@ -149,13 +149,20 @@ def _pricing_axis(axes: Sequence[str]) -> Optional[str]:
     (``analytic_sim``: ``Invalid interconnect type``).
 
     Rule: a communicator that spans dp prices as dp; otherwise the canonical
-    label, unchanged.
+    label, unchanged. Memoized per axes tuple — one call per collective
+    INSTANCE, a handful of distinct answers.
     """
     if not axes:
         return None
-    if DP_AXIS in tuple(axes):
-        return DP_AXIS
-    return canonical_axis_label(axes)
+    axes = tuple(axes)
+    cached = _PRICING_MEMO.get(axes)
+    if cached is None:
+        cached = DP_AXIS if DP_AXIS in axes else canonical_axis_label(axes)
+        _PRICING_MEMO[axes] = cached
+    return cached
+
+
+_PRICING_MEMO: Dict[Tuple[str, ...], str] = {}
 
 
 class BuildError(ValueError):
@@ -223,7 +230,7 @@ _PHASE_XFER = 1  #: R2 transfers (``a`` = R2 emission sequence)
 _PHASE_SYNC = 2  #: R4 sync ops (``a`` = SyncOrder rank, ``b`` = instance index)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProtoCompute:
     nid: int
     order: _OrderKey
@@ -247,7 +254,7 @@ class _ProtoCompute:
     succs: List[int] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProtoCollective:
     nid: int
     order: _OrderKey
@@ -265,7 +272,7 @@ class _ProtoCollective:
     succs: List[int] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class _ProtoTransfer:
     nid: int
     order: _OrderKey
@@ -824,12 +831,64 @@ class _Builder:
                 self._chain_nodes[(work, device)] = self._materialize_chain(work, chain)
 
     def _materialize_chain(self, work: WorkItem, chain: ExpandedChain) -> List[int]:
+        """One proto node per chain step.
+
+        This is the hottest loop of a FLAT build (1.2M steps on GPT 175B), so
+        the per-WORK invariants — the schedule slot, the device position, the
+        IR direction, the MoE flag, the kind role — are resolved ONCE here
+        instead of per step (perf pass, 2026-08-02; this loop reproduces the
+        former ``_add_compute_step`` and per-step ``_order`` exactly —
+        ``ComputeStep.duration``/``recompute``/``param_gather`` are already
+        their declared types, so the ``float()``/``bool()`` re-wraps were
+        identity).
+        """
         device = int(chain.device)
+        slot = self._schedule.index_of(work)
+        position = self._device_pos.get(device)
+        if position is None:
+            raise BuildError(
+                f"device {device} is not one of placement.devices() {self._devices}"
+            )
+        direction = (
+            IRDirection.FORWARD
+            if work.direction is Direction.FORWARD
+            else IRDirection.BACKWARD
+        )
+        kind_role = _ROLE_BY_KIND[work.kind]
+        is_moe = bool(
+            work.layer is not None and self._fw.spec.is_moe_layer(work.layer)
+        )
+        nodes = self._nodes
         nids: List[int] = []
         for step in chain.steps:
-            order = self._order(work, device, _PHASE_CHAIN, step.index)
+            order = (slot, position, _PHASE_CHAIN, step.index, 0)
             if isinstance(step, ComputeStep):
-                nids.append(self._add_compute_step(work, chain, step, order))
+                role = (
+                    OpRole.JOIN
+                    if step.kind is StepKind.JOIN
+                    else (OpRole.GEMM if step.entry_name is not None else kind_role)
+                )
+                nid = len(nodes)
+                nodes.append(
+                    _ProtoCompute(
+                        nid=nid,
+                        order=order,
+                        device=device,
+                        name=step.name,
+                        duration=step.duration,
+                        work=work,
+                        role=role,
+                        direction=direction,
+                        mem_kind=step.mem_kind,
+                        recompute=step.recompute,
+                        param_gather=step.param_gather,
+                        micro_batch=work.microbatch,
+                        layer=work.layer,
+                        is_moe_layer=is_moe,
+                        entry_name=step.entry_name,
+                    )
+                )
+                nids.append(nid)
             elif isinstance(step, CommStep):
                 # ``nids`` is the IN-PROGRESS prefix of this chain: a comm step's
                 # local dep indices always point BEHIND it, so the prefix is
@@ -877,44 +936,6 @@ class _Builder:
         if isinstance(node, _ProtoTransfer):
             node.consumers.append(target)
         self._add_dep(nid, target, DepClass.DATA_FLOW)
-
-    def _add_compute_step(
-        self, work: WorkItem, chain: ExpandedChain, step: ComputeStep, order: _OrderKey
-    ) -> int:
-        role = (
-            OpRole.JOIN
-            if step.kind is StepKind.JOIN
-            else (
-                OpRole.GEMM
-                if step.entry_name is not None
-                else _ROLE_BY_KIND[work.kind]
-            )
-        )
-        return self._add(
-            _ProtoCompute(
-                nid=self._next_nid(),
-                order=order,
-                device=int(chain.device),
-                name=step.name,
-                duration=float(step.duration),
-                work=work,
-                role=role,
-                direction=(
-                    IRDirection.FORWARD
-                    if work.direction is Direction.FORWARD
-                    else IRDirection.BACKWARD
-                ),
-                mem_kind=step.mem_kind,
-                recompute=bool(step.recompute),
-                param_gather=bool(step.param_gather),
-                micro_batch=work.microbatch,
-                layer=work.layer,
-                is_moe_layer=bool(
-                    work.layer is not None and self._fw.spec.is_moe_layer(work.layer)
-                ),
-                entry_name=step.entry_name,
-            )
-        )
 
     def _add_comm_step(
         self,
@@ -1860,15 +1881,20 @@ class _Builder:
         ops: List[Op] = [None] * len(self._nodes)  # type: ignore[list-item]
         groups: Dict[GroupKey, CommGroup] = {}
         labels = _LabelInterner()
-        for node in sorted(self._nodes, key=lambda n: uid_of[n.nid]):
+        # uid_of is a bijection on dense nids, so uid order is a direct
+        # placement, not a sort (perf pass, 2026-08-02).
+        by_uid: List[Optional[_ProtoOp]] = [None] * len(self._nodes)
+        for node in self._nodes:
+            by_uid[uid_of[node.nid]] = node
+        for node in by_uid:
             uid = uid_of[node.nid]
-            deps = tuple(uid_of[dep] for dep in node.deps)
+            deps = tuple([uid_of[dep] for dep in node.deps])
             if isinstance(node, _ProtoCompute):
                 ops[uid] = ComputeOp(
                     uid=uid,
                     name=node.name,
                     device=node.device,
-                    duration=(float(node.duration),),
+                    duration=(node.duration,),  # _ProtoCompute.duration is float
                     deps=deps,
                     role=node.role,
                     direction=node.direction,
@@ -2007,30 +2033,49 @@ class _Builder:
             )
         return program
 
-    def _kahn(self) -> Dict[int, int]:
+    def _kahn(self) -> List[int]:
         """Uids by Kahn's algorithm with a min-heap keyed on :meth:`_order`.
 
         Total (keys are unique by construction), respects ``dep < uid`` (**V1**,
         **O2**), schedule-major, and a pure function of the inputs (**O1**).
+
+        The heap carries a precomputed INTEGER RANK per node, not the
+        ``_OrderKey`` itself (perf pass, 2026-08-02): the keys are static and
+        unique, so ``rank(a) < rank(b) <=> order(a) < order(b)`` and the
+        popped sequence is IDENTICAL — but each of the O(V log V) heap
+        comparisons is an int compare instead of a nested-tuple compare, and
+        the one-time ranking is a single Timsort. ``nid`` is dense
+        (``_next_nid`` is ``len(self._nodes)``), so indegree/uid live in
+        lists. GPT 175B FLAT (~1.2M nodes): the ordering half of ``_finish``
+        drops from ~6 s to ~2 s. Returns a list indexed by nid.
         """
-        indegree = {node.nid: len(node.deps) for node in self._nodes}
-        heap: List[Tuple[_OrderKey, int]] = [
-            (node.order, node.nid) for node in self._nodes if indegree[node.nid] == 0
+        nodes = self._nodes
+        by_rank: List[int] = sorted(
+            range(len(nodes)), key=lambda nid: (nodes[nid].order, nid)
+        )
+        rank_of: List[int] = [0] * len(nodes)
+        for rank, nid in enumerate(by_rank):
+            rank_of[nid] = rank
+        indegree: List[int] = [len(node.deps) for node in nodes]
+        heap: List[int] = [
+            rank_of[nid] for nid in range(len(nodes)) if indegree[nid] == 0
         ]
         heapq.heapify(heap)
-        uid_of: Dict[int, int] = {}
+        uid_of: List[int] = [-1] * len(nodes)
+        assigned = 0
         while heap:
-            _, nid = heapq.heappop(heap)
-            uid_of[nid] = len(uid_of)
-            for succ in self._nodes[nid].succs:
+            nid = by_rank[heapq.heappop(heap)]
+            uid_of[nid] = assigned
+            assigned += 1
+            for succ in nodes[nid].succs:
                 indegree[succ] -= 1
                 if indegree[succ] == 0:
-                    heapq.heappush(heap, (self._nodes[succ].order, succ))
-        if len(uid_of) != len(self._nodes):
-            stuck = [nid for nid in indegree if nid not in uid_of][:8]
+                    heapq.heappush(heap, rank_of[succ])
+        if assigned != len(nodes):
+            stuck = [nid for nid in range(len(nodes)) if uid_of[nid] < 0][:8]
             raise BuildError(
-                f"dependency cycle: {len(self._nodes) - len(uid_of)} ops never "
-                f"became ready (e.g. {[self._nodes[n].name for n in stuck]})"
+                f"dependency cycle: {len(nodes) - assigned} ops never "
+                f"became ready (e.g. {[nodes[n].name for n in stuck]})"
             )
         return uid_of
 

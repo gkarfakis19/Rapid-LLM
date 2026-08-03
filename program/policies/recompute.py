@@ -66,51 +66,32 @@ class FullRecompute(RecomputePolicy):
         return True
 
 
-def _granularity_expands_blocks(granularity: Any) -> bool:
-    """``granularity is not Granularity.PIPELINE`` — the legacy ``flattened_mode``.
-
-    L2's ``Granularity`` (``program/placement.py``) lands in P3; until then
-    callers pass ``block_expanded=`` explicitly and this import is never
-    reached. Deliberately an identity comparison against the enum, not a name
-    or string test (INTERFACES §8 rule 2).
-    """
-    from program.placement import Granularity  # lazy; lands in P3
-
-    return granularity is not Granularity.PIPELINE
-
-
 def recompute_policy_for(
     fw: FrozenWorkload,
     granularity: Any = None,
     *,
     block_expanded: Optional[bool] = None,
 ) -> RecomputePolicy:
-    """PRESERVES the existing predicate (schedule.py:270-278)::
+    """``FullRecompute`` iff the run trains with full recomputation.
+
+    The legacy predicate (schedule.py:270-278) was::
 
         include_backward AND full_recomputation
                          AND (flattened_mode OR pipeline_style_recompute)
 
-    but as an EXPLICIT dispatcher-time SELECTION rather than a
-    ``misc["flattened_mode"]`` read inside the builder. Audit **C3** ("the
-    enumerated schedule's structure depends on which backend consumes it") is
-    thereby made visible: the coupling is now one documented line in a factory,
-    and a caller may override it by passing a policy directly.
+    and audit **C3** flagged the third conjunct as a granularity coupling
+    ("the enumerated schedule's structure depends on which backend consumes
+    it"). It never was one (established 2026-08-02): ``train_timing.py:297``
+    hardwired ``pipeline_style_recompute = bool(full_recomputation)`` with no
+    config path, so whenever the outer ``full_recomputation`` conjunct held,
+    the disjunct held too, and the predicate reduced to the first two terms
+    in every reachable state. The flag and the disjunct are deleted; RECOMPUTE
+    work items exist per (run, model) — never per backend.
 
-    ``block_expanded`` IS legacy ``misc["flattened_mode"]`` — the dispatcher
-    knows it as ``granularity is not Granularity.PIPELINE`` and passes it here.
+    ``granularity`` / ``block_expanded`` are ACCEPTED AND IGNORED so the
+    dispatcher call sites did not all have to change in the same commit; both
+    are deprecated.
     """
-    if block_expanded is None:
-        if granularity is None:
-            raise RecomputeError(
-                "recompute_policy_for needs either a granularity or block_expanded=; "
-                "the flattened_mode coupling is now an explicit dispatcher decision"
-            )
-        block_expanded = _granularity_expands_blocks(granularity)
-
     run = fw.spec.run
-    enabled = (
-        run.include_backward
-        and run.full_recomputation
-        and (bool(block_expanded) or run.pipeline_style_recompute)
-    )
+    enabled = run.include_backward and run.full_recomputation
     return FullRecompute() if enabled else NoRecompute()

@@ -1914,6 +1914,12 @@ class SWConfig:
     dp_microbatch: str
     const_mem_offset: float
     grad_acc_overhead: float
+    #: Whether calc_time also runs the memory-estimation pass (the FLAT
+    #: program build + replay). It is a separate OUTPUT, not a step of the
+    #: timing computation; a caller that only wants a time can turn it off
+    #: (sw_param.estimate_memory: false) and an analytical/hierarchical run
+    #: skips its dominant wall-clock phase.
+    estimate_memory: bool = True
     # Interleaved 1F1B (virtual pipeline) stages per rank. 1 = GPipe-style
     # schedule (the graph's native shape). v > 1 analytically rescales the
     # pipeline time by (mb + (pp-1)/v) / (mb + pp - 1), which is exact under
@@ -1961,6 +1967,11 @@ class SWConfig:
             "sw_param.pipeline_interleave",
             min_value=1,
         )
+        estimate_memory_raw = sw_block.get("estimate_memory", True)
+        if isinstance(estimate_memory_raw, str):
+            estimate_memory = estimate_memory_raw.strip().lower() not in {"false", "0", "no", "off"}
+        else:
+            estimate_memory = bool(estimate_memory_raw)
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
@@ -1970,6 +1981,7 @@ class SWConfig:
             dp_microbatch=dp_microbatch,
             const_mem_offset=const_mem_offset,
             grad_acc_overhead=grad_acc_overhead,
+            estimate_memory=estimate_memory,
             pipeline_interleave=pipeline_interleave,
         )
 

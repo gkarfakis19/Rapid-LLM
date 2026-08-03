@@ -294,7 +294,6 @@ class TimeCalculationLLM(TimeCalculation):
         self._debug_memory = _env_flag("RAPID_DEBUG_MEMORY")
         self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
-        self.pipeline_style_recompute = bool(self.full_recomputation)
 
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
@@ -312,8 +311,14 @@ class TimeCalculationLLM(TimeCalculation):
         #: today's behavior. It is a separate OUTPUT, not a step of the timing
         #: computation, and in the PIPELINE-emitting modes it dominates wall clock
         #: because the replay needs a FLAT program nothing else built.
+        #:
+        #: Declared in the hardware YAML: ``sw_param.estimate_memory: false``.
+        #: (The first wiring read ``self.sw_config``, an attribute that does
+        #: not exist on this object — the config lives on ``hw_config`` — so
+        #: the getattr chain ALWAYS answered the default and the lever was
+        #: API-only. Fixed 2026-08-02.)
         self.estimate_memory = bool(
-            getattr(getattr(self, "sw_config", None), "estimate_memory", True)
+            getattr(hw_config.sw_config, "estimate_memory", True)
         )
         self.memory_capacity_exceeded = False
         self.memory_capacity_violation_gb = 0.0
@@ -5294,15 +5299,11 @@ class TimeCalculationLLM(TimeCalculation):
                     seq_len=seq_len,
                     hidden_dim=hidden_dim,
                 )
-        flattened_mode = self.execution_mode == ExecutionMode.FULL_ASTRASIM_FLATTENED
-        pipeline_style_recompute_flag = bool(getattr(self, "full_recomputation", False))
         misc_metadata = {
             "num_batch": self.mb,
             "num_layer": self.num_layers,
             "dp_zero_stage": self.zero_stage,
             "full_recomputation": self.full_recomputation,
-            "flattened_mode": flattened_mode,
-            "pipeline_style_recompute": pipeline_style_recompute_flag,
             "dp_microbatch_mode": getattr(self, "dp_microbatch", "every_mb"),
             "moe_layer_mask": moe_layer_mask,
             "model_type": self.model_type,

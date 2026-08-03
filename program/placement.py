@@ -127,7 +127,7 @@ class Granularity(Enum):
     BLOCK        ``layout.subset(("tp","cp","ep"))`` 1 chain per cluster rank
     ===========  ==================================  ==========================
 
-    Named ``PIPELINE``/``FLAT`` until 2026-08-02. The names now say what the
+    Named ``COARSE``/``FINE`` until 2026-08-02. The names now say what the
     granularity IS rather than how much of it there is: ``PIPELINE`` is the
     pipeline-stage view the hierarchical and analytical modes evaluate, and
     ``FLAT`` is the every-GPU view the flattened mode emits.
@@ -612,7 +612,7 @@ class StepKind(Enum):
     JOIN = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepRef:
     """A step of a sibling chain of the SAME expansion.
 
@@ -624,7 +624,7 @@ class StepRef:
     index: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ComputeStep:
     """One compute op of an expanded chain."""
 
@@ -639,7 +639,7 @@ class ComputeStep:
     recompute: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CommStep:
     """One block-template collective of an expanded chain."""
 
@@ -824,6 +824,22 @@ class BlockExpander:
         self._placement = placement
         self._overlap = overlap
         self._routing = routing
+        #: Template-expansion memo (perf pass, 2026-08-02). A LAYER/RECOMPUTE
+        #: expansion is a pure function of ``(kind, direction, layer)``: the
+        #: devices come from the layer's stage, durations/specs/overlap decls
+        #: from the direction tables, and the MoE join wiring from the layer's
+        #: template — the MICROBATCH appears nowhere but in the GEMM step
+        #: names (via :func:`work_name`). So the structure is computed once per
+        #: key and re-instantiated per microbatch: ``CommStep``s and JOIN
+        #: ``ComputeStep``s (both name-stable) are SHARED BY REFERENCE — they
+        #: are frozen, materialization never mutates them, and
+        #: ``extra_consumers`` StepRefs are resolved against the CURRENT work's
+        #: chains (``build._chain_step_nid(work, ...)``) — while the GEMM steps
+        #: are rebuilt with the instance's name. At GPT 175B this turns 36,864
+        #: template expansions into 384.
+        self._template_memo: Dict[
+            Tuple[WorkKind, Direction, LayerId], Tuple[ExpandedChain, ...]
+        ] = {}
 
     # -- comm resolution ---------------------------------------------------
     def _specs_for(self, work: WorkItem) -> CommSpecTable:
@@ -895,6 +911,64 @@ class BlockExpander:
     def _expand_template(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
         if work.layer is None:
             raise PlacementError(f"{work.kind.name} WorkItem carries no layer: {work!r}")
+        memo_key = (work.kind, work.direction, work.layer)
+        cached = self._template_memo.get(memo_key)
+        if cached is not None:
+            return self._instantiate_template(cached, work)
+        result = self._expand_template_uncached(work)
+        self._template_memo[memo_key] = result
+        return result
+
+    def _instantiate_template(
+        self, cached: Tuple[ExpandedChain, ...], work: WorkItem
+    ) -> Tuple[ExpandedChain, ...]:
+        """Re-instantiate a memoized expansion for another microbatch.
+
+        Rebuilds exactly what differs — the GEMM ``ComputeStep`` names, which
+        are ``f"{entry}_{direction}_{work_name(work)}_rank{r}"`` at their one
+        construction site in :meth:`_expand_chain` — and shares everything
+        name-stable: ``CommStep``s (no name field) and JOIN steps (named by
+        ``(parallel_group, device)``).
+        """
+        wname = work_name(work)
+        dname = "forward" if work.direction is Direction.FORWARD else "backward"
+        recompute = work.kind is WorkKind.RECOMPUTE
+        chain_new = ExpandedChain.__new__
+        chain_set = object.__setattr__
+        out: List[ExpandedChain] = []
+        for chain in cached:
+            suffix = f"_{dname}_{wname}_rank{chain.cluster_rank}"
+            steps = tuple(
+                step
+                if not isinstance(step, ComputeStep) or step.kind is StepKind.JOIN
+                else ComputeStep(
+                    index=step.index,
+                    name=f"{step.entry_name}{suffix}",
+                    duration=step.duration,
+                    deps=step.deps,
+                    entry_name=step.entry_name,
+                    mem_kind=step.mem_kind,
+                    param_gather=step.param_gather,
+                    recompute=recompute,
+                )
+                for step in chain.steps
+            )
+            # Bypasses ``__init__``/``__post_init__``: the cached chain passed
+            # the step-index/dep-range validation when it was FIRST built, and
+            # indices and deps are copied verbatim here — re-validating every
+            # instantiation re-walked all 1.2M steps of a GPT 175B build to
+            # re-prove an invariant of the memoized structure.
+            replica = chain_new(ExpandedChain)
+            chain_set(replica, "work", work)
+            chain_set(replica, "device", chain.device)
+            chain_set(replica, "cluster_rank", chain.cluster_rank)
+            chain_set(replica, "steps", steps)
+            chain_set(replica, "entry", chain.entry)
+            chain_set(replica, "exit", chain.exit)
+            out.append(replica)
+        return tuple(out)
+
+    def _expand_template_uncached(self, work: WorkItem) -> Tuple[ExpandedChain, ...]:
         template = self._fw.spec.block_template(work.layer)
         if not template.entries:
             raise PlacementError(

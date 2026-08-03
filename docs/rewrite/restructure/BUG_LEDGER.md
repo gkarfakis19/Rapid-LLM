@@ -18,6 +18,29 @@ clock via node-id priority) · **D** unclear, needs an experiment or an owner ca
 
 
 
+## Optimal-perf pass, 2026-08-02 (second session — "fix all of this")
+
+All output-preserving: **44/44 goldens bit-identical after every step** (gate run
+between each item). Measured on GPT 175B analytical (pp=8 L=96 mb=64 tp=8).
+
+| item | what |
+|---|---|
+| **template-expansion memo** | A LAYER/RECOMPUTE expansion is a pure function of `(kind, direction, layer)` — the microbatch appears nowhere but in the GEMM step names. `BlockExpander` computes the structure once per key and re-instantiates per microbatch: `CommStep`s and JOIN steps (name-stable) are shared BY REFERENCE, GEMM `ComputeStep`s are rebuilt with the instance's name, and the `ExpandedChain` replica bypasses `__post_init__` (the cached chain already passed index/dep validation; indices are copied verbatim). 36,864 template expansions → 384. |
+| **integer-rank Kahn** | `_kahn`'s heap carries a precomputed integer rank (one Timsort over the static, unique `_OrderKey`s) instead of the nested-tuple key, and indegree/uid live in dense lists. Popped sequence provably identical (`rank(a)<rank(b) ⟺ order(a)<order(b)`). |
+| **slots=True** | `_Proto*`, `ComputeOp`/`CollectiveOp`/`TransferOp`, `ComputeStep`/`CommStep`/`StepRef`. |
+| **WorkItem cached `__hash__`** | The dataclass-generated hash re-hashed the five-field tuple (two Python-level enum hashes) on every call — 4.35M hashes / ~13M enum hashes per build. Cached value is `hash()` of the SAME tuple, so dict iteration orders are unchanged. |
+| **`_materialize_chain` fused** | Per-WORK invariants (schedule slot, device position, IR direction, MoE flag, kind role) hoisted out of the 1.2M-step loop; `_add_compute_step` deleted into it. |
+| **`group_for` / `_pricing_axis` memos** | One call per collective instance, a few hundred distinct answers; interned `GroupKey`s also make every downstream dict hash the same object. |
+| **memory replay** | Dependency countdown instead of `all(dep in done)` re-scans, per-op byte/kind/direction tables instead of closure chains per event, ready-list rebuild instead of copy+O(n) removes. Fires at the same times in the same sorted-successor order — peak bit-identical. |
+| **`pipeline_style_recompute` DELETED** | `train_timing.py:297` hardwired it to `bool(full_recomputation)` with no config path, so the predicate's `(flattened_mode OR pipeline_style_recompute)` disjunct was true whenever the outer conjunct was, in every reachable state. The flag, the `RunPolicy` field, the `REQUIRED_MISC_KEYS` entry and the granularity coupling in `recompute_policy_for` are gone; RECOMPUTE items exist per (run, model), never per backend. Audit C3 is thereby closed as "never was a coupling". |
+| **`sw_param.estimate_memory` wired** | The lever existed but read `self.sw_config` — an attribute that does not exist on the TimeCalculation object (the config lives on `hw_config`) — so it ALWAYS answered the default. Now a real `SWConfig` field with YAML parsing and a contract test. |
+
+**Measured**: `build(FLAT)` 53.8 s → **31.9 s**; whole 175B analytical run 68.9 s
+→ **44.6 s** (pre-branch flattener tree: 36.1 s); time-only (`estimate_memory:
+false`) **6.9 s**. GPT 1T time-only **34.5 s**; full-with-memory run completes
+(it previously did not finish in 50 min under contention) — numbers in the
+commit message.
+
 ## Owner-directed fix pass, 2026-08-02
 
 Owner: *"fix any OBVIOUS and clearly solvable issues."* Three landed, each cleared

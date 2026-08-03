@@ -157,9 +157,10 @@ def policies_for(
 
     ``spec`` may be a :class:`~program.workload.WorkloadSpec` or an already
     frozen :class:`~program.workload.FrozenWorkload`. ``granularity`` /
-    ``block_expanded`` select the recompute policy (INTERFACES §2.7); the
-    coupling is one documented argument, not a ``misc["flattened_mode"]`` read
-    inside a builder.
+    ``block_expanded`` no longer influence the RECOMPUTE selection (the
+    ``flattened_mode`` coupling audit C3 flagged turned out to be vacuous —
+    see ``recompute_policy_for``, 2026-08-02); ``granularity`` still selects
+    BLOCK's explicit ``NullSharding``.
 
     **BLOCK selects :class:`NullSharding` EXPLICITLY.** A BLOCK program is one
     layer expanded over the ``(tp, cp, ep)`` sublayout to MEASURE that layer for

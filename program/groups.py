@@ -112,7 +112,9 @@ class CommunicatorFactory:
     #: collective INSTANCE while the distinct questions number
     #: ``axes x devices`` — 294,912 calls resolving to a few hundred answers on
     #: GPT 175B.
-    _memo: Dict[Tuple[Tuple[AxisName, ...], int], Tuple[DeviceId, ...]] = field(
+    #: keys: ``(axes, anchor)`` -> members, ``("group_for", axes, anchor)`` ->
+    #: the interned GroupKey.
+    _memo: Dict[Tuple, object] = field(
         default_factory=dict, compare=False, repr=False, hash=False
     )
 
@@ -151,11 +153,22 @@ class CommunicatorFactory:
         return result
 
     def group_for(self, axes: Sequence[AxisName], anchor: DeviceId) -> GroupKey:
-        """``GroupKey(axis=canonical label, members=members(axes, anchor))``."""
-        return GroupKey(
-            axis=canonical_axis_label(axes),
-            members=self.members(axes, anchor),
-        )
+        """``GroupKey(axis=canonical label, members=members(axes, anchor))``.
+
+        Memoized like :meth:`members` (one collective INSTANCE per chain step
+        asks it — 294,912 calls for a few hundred distinct groups on GPT 175B
+        FLAT), and interning the ``GroupKey`` also makes every downstream
+        ``Dict[GroupKey, ...]`` hash the same object.
+        """
+        memo_key = ("group_for", tuple(axes), int(anchor))
+        cached = self._memo.get(memo_key)
+        if cached is None:
+            cached = GroupKey(
+                axis=canonical_axis_label(axes),
+                members=self.members(axes, anchor),
+            )
+            self._memo[memo_key] = cached
+        return cached  # type: ignore[return-value]
 
     def groups_for(
         self, req: "SyncRequirement", placement: "Placement"  # noqa: F821

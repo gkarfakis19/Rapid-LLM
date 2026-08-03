@@ -381,3 +381,31 @@ def test_ceil_div_matches_the_legacy_guard() -> None:
     assert ceil_div(4096, 4) == 1024.0
     assert ceil_div(4097, 4) == 1025.0
     assert ceil_div(10, 0) == 10.0  # max(1, divisor), pipeline_fine.py:645
+
+
+# ---------------------------------------------------------------------------
+# sw_param.estimate_memory (2026-08-02)
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_memory_is_declared_in_sw_param():
+    """``sw_param.estimate_memory: false`` must reach ``SWConfig`` — the first
+    wiring read ``self.sw_config`` on the TimeCalculation object, an attribute
+    that does not exist there (the config lives on ``hw_config``), so the
+    getattr chain always answered the default and the lever was API-only."""
+    import yaml
+    from pathlib import Path
+    from config import SWConfig
+
+    hw_path = (
+        Path(__file__).resolve().parents[1]
+        / "validation_scripts"
+        / "validation_configs"
+        / "hardware-config"
+        / "A100_SXM4_80GB_base.yaml"
+    )
+    base = yaml.safe_load(hw_path.read_text())["sw_param"]
+    assert SWConfig.from_dict(dict(base)).estimate_memory is True
+    assert SWConfig.from_dict({**base, "estimate_memory": False}).estimate_memory is False
+    assert SWConfig.from_dict({**base, "estimate_memory": "false"}).estimate_memory is False
+    assert SWConfig.from_dict({**base, "estimate_memory": True}).estimate_memory is True

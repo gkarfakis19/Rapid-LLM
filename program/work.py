@@ -201,6 +201,29 @@ class WorkItem:
         return "W(" + ",".join(parts) + ")"
 
 
+def _workitem_hash(self: WorkItem) -> int:
+    """Cached ``__hash__`` (perf pass, 2026-08-02).
+
+    A WorkItem keys every hot dict of the builder — ``_chain_nodes``,
+    ``_chain_by_device``, ``Schedule._by_work`` — and the dataclass-generated
+    ``__hash__`` re-hashes the five-field tuple on EVERY call, two of the
+    fields being Enums whose ``__hash__`` is a Python-level function. GPT 175B
+    FLAT: 4.35M WorkItem hashes triggering ~13M enum hashes. The value cached
+    here is ``hash()`` of the SAME tuple the generated method used, so hash
+    values — and therefore dict iteration orders and every downstream
+    artifact — are bit-identical; only the recomputation is gone.
+    """
+    cached = self.__dict__.get("_cached_hash")
+    if cached is None:
+        cached = hash(
+            (self.kind, self.direction, self.microbatch, self.layer, self.stage)
+        )
+        object.__setattr__(self, "_cached_hash", cached)
+    return cached
+
+
+WorkItem.__hash__ = _workitem_hash  # type: ignore[method-assign]
+
 WorkRef = WorkItem
 
 

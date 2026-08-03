@@ -413,44 +413,65 @@ def simulate_memory(
     for entry in succs:
         entry.sort()
 
+    # ---- per-op precomputation (perf pass, 2026-08-02) --------------------
+    # The replay used to re-derive "is this a transformer compute / which
+    # MemKind / how many bytes / is it forward" through closure chains on
+    # EVERY event, scan `ready` (a list) for membership per child, and copy
+    # the whole ready list per event. All of it is a pure function of the op,
+    # so it is tabulated once here; readiness is a dependency COUNTDOWN, which
+    # fires exactly when the old `all(dep in done)` scan did and appends
+    # children in the same sorted-successor order, so the FIFO order — and the
+    # peak — are bit-identical. GPT 175B FLAT (~1.2M ops): 8.5 s -> ~3 s.
+    is_compute_arr: List[bool] = [isinstance(op, ComputeOp) for op in ops]
+    persistent_arr: List[float] = [0.0] * len(ops)
+    transient_arr: List[float] = [0.0] * len(ops)
+    forward_arr: List[bool] = [False] * len(ops)
+    gather_arr: List[bool] = [False] * len(ops)
+    device_arr: List[int] = [0] * len(ops)
+    for op in ops:
+        if isinstance(op, ComputeOp):
+            uid = int(op.uid)
+            persistent_arr[uid] = _persistent_bytes_for_op(op)
+            transient_arr[uid] = _transient_bytes_for_op(op)
+            forward_arr[uid] = _is_forward(op)
+            gather_arr[uid] = bool(op.param_gather)
+            device_arr[uid] = int(op.device)
+    pending: List[int] = [len(op.deps) for op in ops]
+
     time: float = 0
     counter = 0
     heap: List[Tuple[float, int, int]] = []
     ready: List[int] = []
-    done: Set[int] = set()
-    scheduled: Set[int] = set()
 
     for op in ops:
         if not op.deps:
             heappush(heap, (durations[op.uid], counter, op.uid))
-            scheduled.add(op.uid)
             counter += 1
             if debug:
                 print("{} enqueued at time 0".format(op.name))
 
+    training = mode == "training"
+    inference = mode == "inference"
     while heap:
         time, _, uid = heappop(heap)
-        event = ops[uid]
-        done.add(uid)
-        scheduled.discard(uid)
         if debug:
-            print("Event {} finished at time {}".format(event.name, time))
+            print("Event {} finished at time {}".format(ops[uid].name, time))
 
         for child in succs[uid]:
-            if child in done or child in scheduled or child in ready:
-                continue
-            if all(dep in done for dep in ops[child].deps):
+            pending[child] -= 1
+            if pending[child] == 0:
                 ready.append(child)
                 if debug:
                     print("child {}  ready at time {} ".format(ops[child].name, time))
 
-        if isinstance(event, ComputeOp):
-            device = int(event.device)
+        if is_compute_arr[uid]:
+            event = ops[uid]
+            device = device_arr[uid]
             gpu_free[device] = True
-            forward = _is_forward(event)
-            persistent_bytes = _persistent_bytes_for_op(event)
-            transient_bytes = _transient_bytes_for_op(event)
-            if mode == "training":
+            forward = forward_arr[uid]
+            persistent_bytes = persistent_arr[uid]
+            transient_bytes = transient_arr[uid]
+            if training:
                 if forward and persistent_bytes:
                     memory_snapshot.allocate_activation(device, event, time, persistent_bytes)
                 if forward and transient_bytes:
@@ -458,42 +479,46 @@ def simulate_memory(
                     memory_snapshot.release_activation(device, event, time, transient_bytes)
                 if not forward and persistent_bytes:
                     memory_snapshot.release_activation(device, event, time, persistent_bytes)
-            elif mode == "inference":
+            elif inference:
                 if forward and transient_bytes:
                     memory_snapshot.allocate_activation(device, event, time, transient_bytes)
                     memory_snapshot.release_activation(device, event, time, transient_bytes)
-            if mode == "training" and param_gather_bytes is not None and event.param_gather:
+            if training and param_gather_bytes is not None and gather_arr[uid]:
                 memory_snapshot.release_ephemeral(device, event, time, param_gather_bytes)
 
-        # FIFO ready scan (legacy order).
-        for candidate in ready[:]:
-            op = ops[candidate]
-            if isinstance(op, ComputeOp):
-                device = int(op.device)
-                if gpu_free[device]:
-                    new_time = time + durations[candidate]
-                    if mode == "training" and param_gather_bytes and op.param_gather:
-                        memory_snapshot.allocate_ephemeral(
-                            device, op, time, param_gather_bytes
-                        )
-                    heappush(heap, (new_time, counter, candidate))
-                    scheduled.add(candidate)
+        # FIFO ready scan (legacy order). Rebuild-in-place: same scan order,
+        # same decisions, without the per-event list copy + O(n) removes.
+        if ready:
+            still_waiting: List[int] = []
+            for candidate in ready:
+                if is_compute_arr[candidate]:
+                    device = device_arr[candidate]
+                    if gpu_free[device]:
+                        if training and param_gather_bytes and gather_arr[candidate]:
+                            memory_snapshot.allocate_ephemeral(
+                                device, ops[candidate], time, param_gather_bytes
+                            )
+                        heappush(heap, (time + durations[candidate], counter, candidate))
+                        if debug:
+                            print(
+                                "{}.{} enqueued at time {} at device {}".format(
+                                    ops[candidate].name, candidate, time, device
+                                )
+                            )
+                        counter = counter + 1
+                        gpu_free[device] = False
+                    else:
+                        still_waiting.append(candidate)
+                else:
+                    heappush(heap, (time + durations[candidate], counter, candidate))
                     if debug:
                         print(
-                            "{}.{} enqueued at time {} at device {}".format(
-                                op.name, op.uid, time, device
+                            "{}.{} enqueued at time {}".format(
+                                ops[candidate].name, candidate, time
                             )
                         )
                     counter = counter + 1
-                    gpu_free[device] = False
-                    ready.remove(candidate)
-            else:
-                heappush(heap, (time + durations[candidate], counter, candidate))
-                scheduled.add(candidate)
-                if debug:
-                    print("{}.{} enqueued at time {}".format(op.name, op.uid, time))
-                counter = counter + 1
-                ready.remove(candidate)
+            ready = still_waiting
 
     summary = memory_snapshot.summary()
     memory_snapshot.close()

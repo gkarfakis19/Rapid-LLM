@@ -111,7 +111,7 @@ class CommGroup:
     label: str
 
 
-@dataclass
+@dataclass(slots=True)
 class ComputeOp:
     uid: OpUid
     name: str
@@ -132,7 +132,7 @@ class ComputeOp:
     work: Optional[Any] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class CollectiveOp:
     uid: OpUid
     name: str
@@ -167,7 +167,7 @@ class CollectiveOp:
     work: Optional[Any] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferOp:
     """One logical p2p transfer: both endpoints, one identity (= one tag).
 

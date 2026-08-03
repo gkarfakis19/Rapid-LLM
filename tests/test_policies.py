@@ -173,7 +173,6 @@ class Cfg:
     moe: bool = False
     run_type: str = "training"
     full_recomputation: bool = False
-    pipeline_style_recompute: bool = False
     flattened: bool = False
 
     @property
@@ -359,7 +358,6 @@ def make_workload(cfg: Cfg) -> WorkloadSpec:
             dp_microbatch_mode=DpMicrobatchMode.parse(cfg.dp_microbatch),
             zero_stage=cfg.zero_stage,
             full_recomputation=cfg.full_recomputation,
-            pipeline_style_recompute=cfg.pipeline_style_recompute,
         ),
         comm=CommSpecTable.from_legacy(raw),
         blocks=templates,
@@ -431,9 +429,7 @@ def _matrix() -> List[Cfg]:
         cfgs.append(
             Cfg(dp=2, zero_stage=zero, full_recomputation=True, flattened=True)
         )
-        cfgs.append(
-            Cfg(dp=2, zero_stage=zero, full_recomputation=True, pipeline_style_recompute=True)
-        )
+        cfgs.append(Cfg(dp=2, zero_stage=zero, full_recomputation=True))
     # inference (no backward -> no lattice at all, even at dp>1)
     for dp in (1, 2):
         cfgs.append(Cfg(dp=dp, run_type="inference", zero_stage=3))
@@ -840,7 +836,6 @@ def test_missing_misc_metadata_key_raises_and_names_the_key() -> None:
         "num_layer": 4,
         "dp_zero_stage": 0,
         "full_recomputation": False,
-        "pipeline_style_recompute": False,
         "dp_microbatch_mode": "every_mb",
         "moe_layer_mask": [],
         "model_type": "gpt",
@@ -1076,33 +1071,48 @@ def test_last_microbatch_is_a_named_attribute_not_a_literal() -> None:
 
 
 @pytest.mark.parametrize(
-    "run_type,full,pipeline_style,block_expanded,expected",
+    "run_type,full,block_expanded,expected",
     [
-        ("training", False, False, False, "none"),
-        ("training", True, False, False, "none"),
-        ("training", True, False, True, "full"),
-        ("training", True, True, False, "full"),
-        ("training", False, True, True, "none"),
-        ("inference", True, True, True, "none"),
+        # ``block_expanded`` is accepted-and-ignored: pipeline_style_recompute
+        # was hardwired to full_recomputation (train_timing.py:297, no config
+        # path), so the legacy three-conjunct predicate was
+        # ``include_backward AND full_recomputation`` in every reachable state
+        # and the granularity coupling audit C3 flagged never existed.
+        ("training", False, False, "none"),
+        ("training", False, True, "none"),
+        ("training", True, False, "full"),
+        ("training", True, True, "full"),
+        ("inference", True, True, "none"),
+        ("inference", False, False, "none"),
     ],
 )
 def test_recompute_predicate(
-    run_type: str, full: bool, pipeline_style: bool, block_expanded: bool, expected: str
+    run_type: str, full: bool, block_expanded: bool, expected: str
 ) -> None:
-    """Verbatim schedule.py:270-278, now an explicit dispatcher-time selection."""
-    cfg = Cfg(
-        run_type=run_type,
-        full_recomputation=full,
-        pipeline_style_recompute=pipeline_style,
-    )
+    """The predicate is per (run, model), never per backend (2026-08-02)."""
+    cfg = Cfg(run_type=run_type, full_recomputation=full)
     fw = make_workload(cfg).freeze()
     assert recompute_policy_for(fw, block_expanded=block_expanded).name == expected
 
 
-def test_recompute_requires_an_explicit_selection() -> None:
-    fw = make_workload(Cfg()).freeze()
-    with pytest.raises(RecomputeError):
-        recompute_policy_for(fw)
+def test_recompute_selection_is_granularity_free() -> None:
+    """Since 2026-08-02 the predicate is per (run, model): the same policy
+    comes back with no granularity, either granularity, or either
+    ``block_expanded`` value. (This test used to assert the OPPOSITE — that
+    omitting the granularity raised — back when the predicate carried the
+    ``flattened_mode OR pipeline_style_recompute`` disjunct.)"""
+    from program.placement import Granularity
+
+    fw = make_workload(Cfg(full_recomputation=True)).freeze()
+    names = {
+        recompute_policy_for(fw).name,
+        recompute_policy_for(fw, Granularity.PIPELINE).name,
+        recompute_policy_for(fw, Granularity.FLAT).name,
+        recompute_policy_for(fw, block_expanded=False).name,
+        recompute_policy_for(fw, block_expanded=True).name,
+    }
+    assert names == {"full"}
+    assert recompute_policy_for(make_workload(Cfg()).freeze()).name == "none"
 
 
 def test_recompute_materializes_work_items() -> None:
