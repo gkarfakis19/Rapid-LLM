@@ -29,6 +29,8 @@ tools/parallelism_results/
 !MOE_ONE_HOT_EXPERT_MODEL.md
 !MLA_CODE_VALIDATION.md
 !docs/fws_cim/*.md
+!docs/qif/*.md
+!docs/qif/plans/*.md
 !webui/
 !webui/*.md
 !webui/**/*.md
