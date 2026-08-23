@@ -1,0 +1,42 @@
+{
+ "plan": "P2",
+ "title": "The Macro Resource Model",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P2.1",
+   "title": "Device-card schema: CTT card, shared-digital-chiplet card, named empty ReRAM/MRAM slots",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P2.2",
+   "title": "Tile object, enumerator, capacity/validity checks, banking allocation config",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P2.3",
+   "title": "Active-column-set pricing law + full-occupancy identity test (ADJ-4); parity suites stay green",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P2.4",
+   "title": "Bit-slice composition (column-set + chained) with priced shift-add reduction descriptors",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P2.5",
+   "title": "Per-macro digital pool sizing, derived and reported",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

@@ -79,8 +79,8 @@ Macro and platform:
   chiplet, not the per-macro pools.
 - **D14** Device cards, not CTT hardcoding: a macro card = parameter set
   plus structural knobs (bits-per-cell, slicing, bank/mux depth, 3D
-  height). ReRAM/MRAM are cards, not rewrites. Accuracy stays imported
-  from the arch side, never simulated here.
+  height). ReRAM/MRAM are cards, not rewrites. Accuracy is never a
+  factor anywhere (D23).
 
 Serving and system:
 
@@ -135,3 +135,38 @@ Process and scope:
 - OPTIMA itself (read-only, bounded reads):
   `/app/nanocad/projects/cim_ctt_big_optima/perf_model/`.
 - QIF proposal: `/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/Rapid-LLM/QIF_Proposal_final.docx`.
+
+## Adjudications (2026-08-23, evening — George delegated best-guess authority; only non-trivial items go back to him)
+
+- **D23 (GEORGE, HARD): Accuracy is NEVER a factor.** This is a performance
+  model only. No accuracy measurement, import, or reporting anywhere.
+  This voids D14's accuracy-import clause, P2's card accuracy field, and
+  P6's accuracy row.
+- **ADJ-1 (P1):** headline model = Granite-4.0-H-Tiny; Qwen3.5-4B second P0.
+- **ADJ-2 (P1):** D2 counts RAW params → Gemma 4 E4B out, E2B in. Hard 7B
+  cutoff: RWKV-7 7.2B and LFM2.5-8B are reference rows, not supported.
+  LLaDA-class diffusion LMs out (D7 spirit). MLA carrier = MiniCPM3-4B.
+- **ADJ-3 (P1):** short depthwise conv runs on the per-macro digital pool.
+  Depth-shared weights (Zamba2) are expressed in the model config (P1 owns).
+- **ADJ-4 (P2):** active-column-set pricing ADOPTED (full-occupancy identity
+  must hold; parity gates unmoved). Slicing is per-card opt-in (present iff
+  bits_per_cell < weight_bits). Mux slot = smallest allocatable unit. Pool
+  revisit threshold = 1/5 of served macro footprint (disclosure only).
+  Second card: schema slots only, no invented numbers. The shared digital
+  chiplet card is a P2 card (audit resolution stands).
+- **ADJ-5 (P3):** a chip hosts many macros; chip = chiplet = package unit.
+  pp is an independent annotation (chip index is not implicitly pp).
+  Shared-chiplet count is a config input, with a derived suggestion
+  reported. PD = two separate inventories. New `mapping:` config block.
+  Unowned columns are legal and reported.
+- **ADJ-6 (P4):** headline = tokens/s at the decode terminal (requests/s
+  also printed); the ceiling/sustained pair retires from the DAG report
+  (legacy only). Per-step decode series up to a bound, then window +
+  disclosed extrapolation. Energy: per-component coverage labels. Legacy
+  closed-form report reachable via the validation script only.
+- **ADJ-7 (P5):** separate atlas.json; fixture = Llama2-7B tp=2 decode;
+  P3 emits primary_group; embedded-blob single file is first-class.
+- **ADJ-8 (P6):** bridge = ViT tiers + Llama7b + MoE smoke at 1e-3
+  (discrete quantities exact); on disagreement the DAG wins and the closed
+  form is annotated; the closed-form path stays in tree, frozen, to hold
+  the bridge.

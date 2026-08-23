@@ -1,0 +1,49 @@
+{
+ "plan": "P3",
+ "title": "Mapping",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P3.1",
+   "title": "Mapping object + new mapping: config block + validation with named violations",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P3.2",
+   "title": "Heterogeneous op-to-device placement on the program IR (DeviceCoord widening)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P3.3",
+   "title": "tp/ep/pp shard-group annotations end to end",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P3.4",
+   "title": "PD system pair + priced handoff (D16)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P3.5",
+   "title": "Per-boundary byte-rate table with disclosures",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P3.6",
+   "title": "atlas.json export (fws_atlas/1)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

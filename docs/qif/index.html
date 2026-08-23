@@ -19,6 +19,15 @@ code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code)
 a{color:var(--accent)}
 .tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
 .tag.future{color:var(--muted)}
+.st{display:inline-block;font:600 10.5px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;padding:.28em .55em;border-radius:999px}
+.st-todo{background:var(--code);color:var(--muted)}
+.st-building{background:#f6ead2;color:#8a6210}
+.st-done{background:#ddeee2;color:#1d6b3c}
+.dtable{width:100%;border-collapse:collapse;font:13.5px/1.5 "Segoe UI",system-ui,sans-serif;margin:.3rem 0 1.2rem}
+.dtable td{border-bottom:1px solid var(--line);padding:.4rem .5rem;vertical-align:top}
+.dtable .q{color:#8a3a10;font-weight:600}
+.dtable .rep{color:var(--muted)}
+#status-note{font:12.5px/1.5 "Segoe UI",system-ui,sans-serif;color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:.9rem;margin:.5rem 0}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.45rem}
 .card h3{font:600 1rem/1.3 "Segoe UI",system-ui,sans-serif;margin:0}
@@ -53,7 +62,7 @@ macro, per-macro digital pool, shared digital chiplet, link.<br>
 unit.</b> One macro can host tiles of many layers, experts, or models.
 Mapping is the assignment.
 </div>
-<p class="small">Full register: <a href="DECISIONS.md">DECISIONS.md</a> (D1&ndash;D22, raw markdown).</p>
+<p class="small">Full register: <a href="DECISIONS.md">DECISIONS.md</a> (D1&ndash;D23 + ADJ-1&ndash;8, raw markdown).</p>
 
 <h2>Superplans</h2>
 <div class="grid">
@@ -88,6 +97,12 @@ check, per-plan obligations, honesty invariants, the silicon calibration seam.</
 <div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
 </div>
 
+<h2>Live status</h2>
+<p id="status-note">Deliverables per plan, updated by implementation agents as they land work.
+Reports are concise; <span class="q" style="color:#8a3a10;font-weight:600">Q:</span> marks non-trivial
+questions/assumptions awaiting George.</p>
+<div id="live-status">loading&hellip;</div>
+
 <h2>Named extensions (empty by design, D8)</h2>
 <div class="grid">
 <div class="card"><h3>VLM chaining</h3><p>Vision tower &rarr; language backbone as one run. Pairings named in P1's
@@ -103,18 +118,12 @@ Qualitatively different; rethought when its time comes. DiT excluded from phase 
 <p class="small">PD disaggregation is not an extension &mdash; it landed inside P3 (&sect;7), per D16.</p>
 
 <h2>Decision queue for George</h2>
-<ul class="qs">
-<li><b>P1 &mdash; first end-to-end model:</b> Qwen3.5-4B (newest, linear attention + native vision) or Granite-4.0-H-Tiny (cleanest Mamba2 hybrid, sits exactly on the 7B corner)?</li>
-<li><b>P1 &mdash; boundary rulings:</b> Gemma 4 E4B raw-8B vs effective-4.5B under D2 (draft says raw &rArr; out); honorary status for RWKV-7 7.2B / LFM2.5-8B; diffusion LM LLaDA-7B in or out; the MLA carrier (MiniCPM3-4B + a TransMLA synthetic is the draft's lean).</li>
-<li><b>P2 &mdash; the one law change:</b> ops pay for ACTIVE column sets rather than full mux depth (reduces exactly to pass-1 at full occupancy; required for co-residency). Sign off.</li>
-<li><b>P2 &mdash; slicing default-or-exception</b> for CTT, and the pool revisit threshold (draft proposes a fifth of macro footprint).</li>
-<li><b>P2/P3/P4 &mdash; confirm the audit resolution:</b> the shared digital chiplet is a P2 device card; P3 places, P4 prices.</li>
-<li><b>P3 &mdash; what is a chip</b> (one macro per chip vs many, chiplet as package unit), and pp semantics (chip chain = pp axis, or independent annotation).</li>
-<li><b>P3 &mdash; shared chiplet count:</b> config input or derived-and-reported.</li>
-<li><b>P4 &mdash; headline throughput</b> (tokens/s vs requests/s) and whether the fabric-ceiling/sustained pair retires with the closed form.</li>
-<li><b>P5 &mdash; the fixture mapping</b> (Llama2-7B tp=2 decode vs a PD pair) that becomes the schema anchor and the demo.</li>
-<li><b>P6 &mdash; bridge breadth and bar</b> (ViT tiers + Llama7b at 1e-3?), and whether the closed-form path stays in-tree to hold the bridge.</li>
-</ul>
+<p class="small">The 2026-08-23 draft questions were adjudicated same evening under delegated
+best-guess authority &mdash; see the <a href="DECISIONS.md">Adjudications section of DECISIONS.md</a>
+(D23 accuracy-never, ADJ-1&ndash;8: Granite-4.0-H-Tiny headline, raw-param cutoff, active-column-set
+law adopted, chip = chiplet hosting many macros, tokens/s headline, Llama7b tp=2 atlas fixture,
+1e-3 bridge). <b>New non-trivial questions surface in Live status above as agents land work</b> &mdash;
+that is the queue now.</p>
 
 <h2>Audit trail &amp; references</h2>
 <ul class="small">
@@ -132,4 +141,38 @@ all declared divergences reviewed and legitimate, each flagged on its page.</li>
 <p class="small">Each plan carries its own Status &amp; notes box &mdash; agents append dated notes there
 (what was done, what remains) and update the status tag here. The repo is canonical; this page is
 served from <code>docs/qif/</code>. Statuses: Drafted &rarr; Reviewed (George) &rarr; Building &rarr; Done.</p>
+<script>
+(function(){
+  var PLANS=['P1','P2','P3','P4','P5','P6'];
+  var PAGES={P1:'plans/P1_model_matrix.html',P2:'plans/P2_macro_resource_model.html',P3:'plans/P3_mapping.html',P4:'plans/P4_evaluation.html',P5:'plans/P5_system_atlas.html',P6:'plans/P6_validation.html'};
+  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+  function render(data){
+    var el=document.getElementById('live-status');var html='';var done=0,total=0;
+    PLANS.forEach(function(p){var s=data[p];if(!s)return;
+      s.deliverables.forEach(function(x){total++;if(x.status==='done')done++;});});
+    html+='<p style="font:600 14px/1.4 \'Segoe UI\',system-ui,sans-serif">'+done+' / '+total+' deliverables done</p>';
+    PLANS.forEach(function(p){var s=data[p];
+      if(!s){html+='<p class="rep">'+p+': status file unavailable</p>';return;}
+      html+='<h3 style="font:600 15px/1.3 \'Segoe UI\',system-ui,sans-serif;margin:1.1rem 0 .2rem"><a href="'+PAGES[p]+'" style="text-decoration:none">'+p+' &middot; '+esc(s.title)+'</a> <span style="font-weight:400;color:var(--muted)">(updated '+esc(s.updated)+')</span></h3>';
+      html+='<table class="dtable">';
+      s.deliverables.forEach(function(d){
+        html+='<tr><td style="white-space:nowrap"><code>'+esc(d.id)+'</code></td>'
+            +'<td>'+esc(d.title)
+            +(d.report?'<br><span class="rep">'+esc(d.report)+'</span>':'')
+            +(d.questions&&d.questions.length?d.questions.map(function(q){return '<br><span class="q">Q: '+esc(q)+'</span>';}).join(''):'')
+            +'</td><td style="white-space:nowrap"><span class="st st-'+esc(d.status)+'">'+esc(d.status)+'</span></td></tr>';
+      });
+      html+='</table>';
+    });
+    el.innerHTML=html;
+  }
+  if(window.STATUS_DATA){render(window.STATUS_DATA);return;}
+  var out={},left=PLANS.length;
+  PLANS.forEach(function(p){
+    fetch('status/'+p+'.json',{cache:'no-store'}).then(function(r){return r.json();})
+      .then(function(j){out[p]=j;}).catch(function(){out[p]=null;})
+      .then(function(){left--;if(left===0)render(out);});
+  });
+})();
+</script>
 </main></body></html>
