@@ -749,6 +749,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         # Capacity is a hard error before any report output.
         cim.validate_capacity()
 
+        # D12: the derived per-macro digital-pool sizing is REPORTED. On stdout
+        # only — the report file and the results txt are the frozen closed-form
+        # accounting (ADJ-8) and the pool moves no number in them.
+        print(cim.report_digital_pool())
+
         tp = max(1, int(self.tp))
         seq_len = int(seq_len)
         batch_size = int(batch_size)

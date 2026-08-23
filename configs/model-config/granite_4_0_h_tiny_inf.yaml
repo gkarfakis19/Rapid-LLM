@@ -1,0 +1,56 @@
+# Granite-4.0-H-Tiny inference config — the QIF P1 HEADLINE model (ADJ-1).
+# Dims verified 2026-08-23 against the published HuggingFace config.json:
+#   https://huggingface.co/ibm-granite/granite-4.0-h-tiny/blob/main/config.json
+# 40 layers, 36 Mamba2 : 4 attention (attention at 5/15/25/35), NoPE, MoE on
+# every layer (64 experts, top-6, expert ffn 512) plus a 1024-wide shared MLP.
+# Not runnable yet: the ssm blocks are rejected by validate_model_config until
+# the P2-P4 pricing laws land.
+provenance:
+  source: "https://huggingface.co/ibm-granite/granite-4.0-h-tiny/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 6939037248  # HF safetensors total (bf16)
+  d2_status: supported  # 6.94B raw <= 7B (D2, ADJ-2)
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true  # HF tie_word_embeddings: true
+  model_type: "llama"  # SwiGLU gated MLP; the hybrid structure lives in layer_plan
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 1536  # HF hidden_size
+  layer_plan:
+    # HF layer_types: 5 mamba, 1 attention, 4 mamba — repeated 4x over 40 layers.
+    pattern: ["mamba", "mamba", "mamba", "mamba", "mamba", "attention", "mamba", "mamba", "mamba", "mamba"]
+  attention:
+    attention_type: "gqa"
+    num_heads: 12  # HF num_attention_heads
+    kv_heads: 4  # HF num_key_value_heads
+    use_flashattention: false
+  ssm:
+    variant: "mamba2"  # chunked SSD
+    d_state: 128  # HF mamba_d_state
+    n_groups: 1  # HF mamba_n_groups
+    n_heads: 48  # HF mamba_n_heads
+    d_head: 64  # HF mamba_d_head
+    expand: 2  # HF mamba_expand -> d_inner = 3072
+    d_conv: 4  # HF mamba_d_conv
+    chunk_size: 256  # HF mamba_chunk_size
+  moe:
+    num_experts: 64  # HF num_local_experts
+    top_k: 6  # HF num_experts_per_tok
+    moe_intermediate_size: 512  # HF intermediate_size (per routed expert)
+    n_shared_experts: 1  # the always-on shared MLP
+    expert_imbalance_factor: 1.0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0  # every layer is MoE
+  ffn_dims:
+    shared_expert: 1024  # HF shared_intermediate_size
+  intermediate_size: 512  # dense-layer width; unused here (every layer is MoE)
+  vocab_size: 100352
+  num_layers: 40
+
+inference_param:
+  sample_every: -1

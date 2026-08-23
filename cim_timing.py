@@ -152,6 +152,60 @@ Digital-helper absorption (assumption, not a computation)
     pointwise pricing (roofline against the stub hierarchy) stays untouched —
     it only feeds the sequential (non-FWS) total.
 
+Macro resource model (QIF P2: cards, tiles, slicing, the per-macro pool)
+    DEVICE CARDS. ``cim.analog`` and ``cim.fabric`` are the parameter halves
+    of two cards: an ANALOG MACRO card and a SHARED DIGITAL CHIPLET card. The
+    card adds the structural knobs — ``bits_per_cell`` / ``weight_bits``,
+    the slicing arrangement, ``bank_depth`` (allocation granularity in mux
+    slots), ``stack_3d_height`` (a FOOTPRINT divisor only), and a validity
+    menu of admitted (bits_per_cell, weight_bits, mux) points that the tool
+    REFUSES to leave rather than interpolate. A config with no ``cim.cards``
+    block synthesizes cards that wrap these very objects with every knob
+    inert, so shipped YAMLs price identically. The SA-attention and
+    softmax-lane laws above are the digital chiplet card's laws (D13).
+
+    TILES. A tile is one weight sub-matrix resident in one macro, carrying an
+    owner (model, layer, op, expert, shard), a K/N range, a bit-slice index,
+    and a site (macro id, row range, column-set ids). A column set is one mux
+    slot — ``cols_adc`` stored columns, one ADC pass — and is the smallest
+    allocatable unit. The array census IS the tile enumerator: at the shipped
+    defaults (no slicing, one whole-macro bank) the enumerator returns exactly
+    ``arrays(K, N)`` tiles on ``arrays(K, N)`` macros. Resident tiles must fit
+    their macro's stored column sets; overflow, an out-of-range set, and a
+    doubly-claimed set are :class:`MacroCapacityError`.
+
+    ACTIVE-COLUMN-SET PRICING (ADJ-4). An op pays
+    ``M_tokens * active_column_sets * slice_cycles / f_analog``, with
+    ``active_column_sets`` the WORST macro's set count (macros holding one
+    op's tiles convert concurrently). One owner filling every mux slot
+    activates ``mux`` sets and reproduces ``M * vec_latency`` bit-identically
+    — the pass-1 charge is the full-occupancy special case, and every OPTIMA
+    parity configuration is full-occupancy (tested, not assumed). Analog
+    energy reads the same way: ``energy_per_vec_pj`` is a whole macro's
+    per-vector energy, so an op pays the fraction of stored columns it holds,
+    and full occupancy returns ``M * E_vec * shots * macros``.
+
+    BIT SLICING (D11). ``n_s = ceil(weight_bits / bits_per_cell)``; 1 unless a
+    card opts in. The column-set arrangement multiplies stored-column demand
+    by ``n_s`` and keeps one slice group's reduction local to a macro; the
+    chained-macro arrangement gives each slice its own macros and sends
+    ``n_s - 1`` partial words per output over the p2p law to a sink. Either
+    way P2 emits plain-data :class:`ReductionOpDescriptor` records for the DAG
+    builder and prices them with the shift-add law: ``(n_s - 1)`` adds per
+    output, tree depth ``ceil(log2(n_s))``, pipelined at
+    ``cycles = depth + ceil(results / lanes) - 1``.
+
+    PER-MACRO DIGITAL POOL (D12). Sized so it never blocks: enough lanes to
+    consume the macro's peak result rate ``cols_adc * f_analog /
+    slice_cycles``, holding ``lanes * (n_s - 1)`` adders. The number is
+    DERIVED and REPORTED, never a constraint. Area and energy come from card
+    knobs that default to 0 — an undeclared cost reports zero rather than an
+    invented number. Crossing ``POOL_DISCLOSURE_AREA_SHARE`` (1/5 of the
+    served macro footprint, ADJ-4) prints a loud note and changes nothing.
+
+    None of this is wired into the closed-form spatial report, which is
+    legacy-frozen (A1, ADJ-8).
+
 Attention outer-multiplier compensation (N_mult)
     Callers price ONE head-shape then multiply outside: SINGLE (tp=1)
     multiplies by ``B * kv_heads``; TENSOR / TENSOR_SEQUENCE (tp >= 2)
@@ -416,6 +470,201 @@ class DecodeSustainedThroughput:
     limiting_factor: str    # "fabric" | "kv_capacity" | "infeasible"
 
 
+# ---------------------------------------------------------------------------
+# The macro resource model (QIF P2): cards, tiles, sites, sliced reductions
+#
+# A3: the macro is the atomic resource and the TILE is the allocation unit.
+# The pass-1 array census counts the same units; a tile adds the identity the
+# census never had — a named owner (D21) and a site.
+# ---------------------------------------------------------------------------
+
+
+class MacroCapacityError(ValueError):
+    """Resident tiles claim more (or overlapping) column sets than a macro stores.
+
+    The named hard error of the capacity check: a macro's stored columns are
+    finite, so an allocation that overflows one is refused, never absorbed.
+    """
+
+
+class CardValidityError(ValueError):
+    """An unlisted (bits_per_cell, weight_bits, mux) point was requested.
+
+    The card's validity menu says what the device admits. The tool refuses an
+    unlisted point instead of interpolating between listed ones.
+    """
+
+
+@dataclass(frozen=True)
+class TileOwner:
+    """Who owns a tile: model, layer, op, expert, shard (D21)."""
+
+    model: str = ""
+    layer: int = 0
+    op: str = ""
+    expert: int = -1        # -1 = not an expert tile
+    shard: int = 0
+
+    @property
+    def label(self) -> str:
+        expert = "" if self.expert < 0 else f".e{self.expert}"
+        return f"{self.model}.L{self.layer}.{self.op}{expert}.s{self.shard}"
+
+
+@dataclass(frozen=True)
+class TileSite:
+    """Where a tile sits: macro id, row range, column-set (mux-slot) ids."""
+
+    macro_id: int
+    row_start: int
+    row_end: int                      # exclusive
+    column_sets: Tuple[int, ...]
+
+    @property
+    def num_column_sets(self) -> int:
+        return len(self.column_sets)
+
+
+@dataclass(frozen=True)
+class Tile:
+    """One weight sub-matrix resident in one macro, with a name and a site.
+
+    ``k_start``/``k_end`` and ``n_start``/``n_end`` are half-open ranges of
+    the owner's weight matrix; ``slice_index`` names the bit slice (0 when the
+    card declares no slicing).
+    """
+
+    owner: TileOwner
+    k_start: int
+    k_end: int
+    n_start: int
+    n_end: int
+    slice_index: int
+    site: TileSite
+
+    @property
+    def rows_used(self) -> int:
+        return self.k_end - self.k_start
+
+    @property
+    def logical_columns(self) -> int:
+        return self.n_end - self.n_start
+
+    @property
+    def group_key(self) -> Tuple[object, int, int]:
+        """Slice-group key: the tiles that reduce into one output block."""
+        return (self.owner, self.k_start, self.n_start)
+
+
+@dataclass(frozen=True)
+class TiledOpCost:
+    """What one op on one owner's tiles costs (P2.3).
+
+    ``active_column_sets`` is the charge: the ADC/mux path serializes, one
+    stored column set converts at a time, and macros fire in parallel — so the
+    op pays the WORST macro's active-set count, not the full mux depth.
+    """
+
+    time_s: float
+    active_column_sets: int
+    macros: int
+    total_active_column_sets: int
+    energy_pj: float
+
+
+@dataclass(frozen=True)
+class ReductionOpDescriptor:
+    """Plain data for one shift-and-add reduction the DAG builder will consume.
+
+    Emitted, never executed here: P2 says what the op is and what it costs;
+    the DAG builder (P3/P4) turns it into a node. ``transport_partials`` is
+    the number of partial words that must cross a link before the tree runs
+    (0 for the column-set arrangement, n_slices-1 for chained macros).
+    """
+
+    kind: str                          # "shift_add_tree"
+    arrangement: str                   # "column_sets" | "chained_macros"
+    owner: TileOwner
+    operand_tiles: Tuple[Tile, ...]
+    output_lanes: int                  # logical output columns the tree produces
+    n_slices: int
+    adds_per_output: int               # n_slices - 1
+    depth: int                         # ceil(log2(n_slices))
+    site_macro_id: int                 # the pool that hosts the tree (sink when chained)
+    local: bool                        # every operand slice sits in site_macro_id
+    transport_partials: int            # partial words per output that cross a link
+
+
+@dataclass(frozen=True)
+class ReductionCost:
+    """Priced shift-and-add tree: pipelined, one result per cycle after fill."""
+
+    adds: float
+    cycles: int
+    time_s: float
+    energy_pj: float
+    transport_bytes: float
+
+
+@dataclass(frozen=True)
+class DigitalPoolSizing:
+    """Derived per-macro digital pool (D12, P2.5) — REPORTED, never a constraint.
+
+    Sized so it never blocks: the pool consumes the macro's peak result rate
+    (``cols_adc * f_analog / slice_cycles`` results per second). ``disclose``
+    fires at the ADJ-4 threshold — a pool whose derived area reaches 1/5 of
+    the macro footprint it serves gets a loud note and nothing else.
+    """
+
+    result_rate_per_s: float
+    pool_clock_hz: float
+    lanes: int
+    adders: int
+    area_mm2: float
+    macro_footprint_mm2: float
+    area_share: float
+    disclose: bool
+    note: Optional[str]
+
+
+#: ADJ-4: a per-macro pool this large stops being absorbed silently. It is a
+#: DISCLOSURE threshold — crossing it prints a note and changes no number.
+POOL_DISCLOSURE_AREA_SHARE = 0.2
+
+
+def check_allocation_capacity(column_sets_per_macro: int, assignments) -> None:
+    """Capacity-check user-written tile assignments (D10).
+
+    A macro stores ``mux`` column sets, so range plus uniqueness IS the
+    capacity: no set outside 0..mux-1, and no set claimed twice. Lives at
+    module scope because `config` runs it while parsing `cim.allocation`,
+    before any device model exists.
+    """
+    mux = int(column_sets_per_macro)
+    claimed = {}
+    for entry in assignments:
+        label = TileOwner(
+            model=getattr(entry, "model", ""),
+            layer=getattr(entry, "layer", 0),
+            op=getattr(entry, "op", ""),
+            expert=getattr(entry, "expert", -1),
+            shard=getattr(entry, "shard", 0),
+        ).label
+        for column_set in entry.column_sets:
+            if column_set < 0 or column_set >= mux:
+                raise MacroCapacityError(
+                    f"macro {entry.macro}: {label} claims column set {column_set}, but the "
+                    f"card stores {mux} column sets (mux slots) per macro."
+                )
+            key = (entry.macro, column_set)
+            if key in claimed:
+                raise MacroCapacityError(
+                    f"macro {entry.macro}: column set {column_set} is claimed by both "
+                    f"{claimed[key]} and {label}. One column set holds one tile."
+                )
+            claimed[key] = label
+
+
 class CimDeviceModel:
     """Closed-form FWS-CIM device laws (see module docstring for each law)."""
 
@@ -427,8 +676,12 @@ class CimDeviceModel:
                 "got None. Set device_class: fws_cim with a cim block."
             )
         self.cim = cim
-        self.analog = cim.analog
-        self.fabric = cim.fabric
+        # The active device cards own the parameter halves the laws read
+        # (P2.1). A config with no `cim.cards` block synthesizes cards that
+        # wrap these very objects, so this binding moves no number.
+        cards = getattr(cim, "cards", None)
+        self.analog = cim.analog if cards is None else cards.analog_card.params
+        self.fabric = cim.fabric if cards is None else cards.digital_card.fabric
         self.chip = cim.chip
         if isinstance(model_params, CimModelParams):
             self.params = model_params
@@ -698,14 +951,25 @@ class CimDeviceModel:
         pass-1 validation geometry (none is gated at an I that straddles a
         column boundary).
         """
+        return OrderedDict(
+            (stage, self.arrays(k, n)) for stage, (k, n) in self.per_layer_stage_shapes().items()
+        )
+
+    def per_layer_stage_shapes(self) -> "OrderedDict[str, Tuple[int, int]]":
+        """The (K, N) weight-matrix shape each dense stage occupies.
+
+        The shapes the census counts and the tile enumerator tiles (P2.2);
+        exported so a mapper can name a tile's owner op without restating a
+        model shape.
+        """
         p = self.params
         qkv_n = (p.num_heads + 2 * p.kv_heads) * p.head_dim  # 3H for MHA
         return OrderedDict(
             (
-                ("qkv", self.arrays(p.hidden_dim, qkv_n)),
-                ("o_proj", self.arrays(p.num_heads * p.head_dim, p.hidden_dim)),
-                ("ffn1", self.arrays(p.hidden_dim, p.ffn1_fold * p.intermediate_size)),
-                ("ffn2", self.arrays(p.intermediate_size, p.hidden_dim)),
+                ("qkv", (p.hidden_dim, qkv_n)),
+                ("o_proj", (p.num_heads * p.head_dim, p.hidden_dim)),
+                ("ffn1", (p.hidden_dim, p.ffn1_fold * p.intermediate_size)),
+                ("ffn2", (p.intermediate_size, p.hidden_dim)),
             )
         )
 
@@ -1413,8 +1677,22 @@ class CimDeviceModel:
         return self.transformer_stack_arrays() * float(self.analog.area_mm2_per_array)
 
     def total_area_mm2(self) -> float:
-        """Stack + endpoint analog area; 0 when area reporting is disabled."""
+        """Stack + endpoint ANALOG area; 0 when area reporting is disabled.
+
+        This is the OPTIMA parity accounting (its recorded "CTT area") and
+        counts analog macro silicon only. The shared digital chiplet is a
+        separate accounting — see :meth:`system_area_mm2` (D21: one accounting
+        per metric, and never two totals under one name).
+        """
         return self.total_arrays() * float(self.analog.area_mm2_per_array)
+
+    def shared_digital_area_mm2(self) -> float:
+        """Declared silicon of the shared digital chiplet card (D13); 0 by default."""
+        return float(self.digital_card.area_mm2)
+
+    def system_area_mm2(self) -> float:
+        """Analog macro area plus the shared digital chiplet's declared area."""
+        return self.total_area_mm2() + self.shared_digital_area_mm2()
 
     def layer_stage_energy_pj(
         self, seq_len: Optional[int] = None
@@ -1633,3 +1911,506 @@ class CimDeviceModel:
                 f"{capacity}. Raise cim.chip.moe_expert_parallel or "
                 "arrays_per_chip."
             )
+
+    # ------------------------------------------------------------------
+    # Device cards (P2.1, D14 / ADJ-4)
+    # ------------------------------------------------------------------
+
+    @property
+    def card(self):
+        """The active analog-macro card (`cim.analog` promoted, plus knobs)."""
+        cards = getattr(self.cim, "cards", None)
+        if cards is None:
+            import config as _config
+
+            return _config.CIMAnalogCardConfig.synthesized(self.analog)
+        return cards.analog_card
+
+    @property
+    def digital_card(self):
+        """The active shared-digital-chiplet card.
+
+        The SA-attention and softmax-lane laws above ARE this card's laws
+        (D13); the card wraps the very ``cim.fabric`` object they read, so
+        promoting the block to a card moves no number.
+        """
+        cards = getattr(self.cim, "cards", None)
+        if cards is None:
+            import config as _config
+
+            return _config.CIMDigitalChipletCardConfig.synthesized(self.fabric)
+        return cards.digital_card
+
+    @property
+    def n_slices(self) -> int:
+        """Bit slices per weight word: ceil(weight_bits / bits_per_cell) (D11).
+
+        1 unless the card declares ``bits_per_cell < weight_bits`` — slicing
+        is per-card opt-in (ADJ-4), so every shipped card returns 1.
+        """
+        return int(self.card.n_slices)
+
+    def check_card_point(
+        self,
+        bits_per_cell: Optional[int] = None,
+        weight_bits: Optional[int] = None,
+        mux: Optional[int] = None,
+    ) -> None:
+        """Refuse an operating point the card's validity menu does not list.
+
+        A card with an empty menu declares none, so nothing is refused.
+        """
+        card = self.card
+        bpc = card.bits_per_cell if bits_per_cell is None else int(bits_per_cell)
+        wbits = card.weight_bits if weight_bits is None else int(weight_bits)
+        mux_pt = card.column_sets_per_macro if mux is None else int(mux)
+        if not card.admits(bpc, wbits, mux_pt):
+            raise CardValidityError(
+                f"card '{card.name}' ({card.device}) does not admit "
+                f"(bits_per_cell={bpc}, weight_bits={wbits}, mux={mux_pt}). "
+                f"Admitted points: {[p.as_tuple() for p in card.validity]}. "
+                "The menu is the card's own statement of what the device supports; "
+                "the tool refuses an unlisted point instead of interpolating one."
+            )
+
+    def macro_footprint_mm2(self) -> float:
+        """Package footprint of one macro: silicon area / 3D stack height.
+
+        Stack height divides the FOOTPRINT only — never silicon area, never
+        energy.
+        """
+        return float(self.analog.area_mm2_per_array) / int(self.card.stack_3d_height)
+
+    # ------------------------------------------------------------------
+    # Tiles: the allocation unit (P2.2, A3 / D10)
+    # ------------------------------------------------------------------
+
+    @property
+    def allocation(self):
+        """The parsed `cim.allocation` block, or None (dedicated per matrix)."""
+        return getattr(self.cim, "allocation", None)
+
+    @property
+    def column_sets_per_tile(self) -> int:
+        """Mux slots one tile claims: `cim.allocation` wins, else the card's bank.
+
+        The default is the whole macro, which is today's dedicated-per-matrix
+        behavior — one owner, every mux slot.
+        """
+        allocation = self.allocation
+        if allocation is not None and allocation.column_sets_per_tile is not None:
+            return int(allocation.column_sets_per_tile)
+        return int(self.card.allocation_granularity)
+
+    def enumerate_tiles(
+        self,
+        k: int,
+        n: int,
+        owner: TileOwner,
+        *,
+        n_slices: Optional[int] = None,
+        column_sets_per_tile: Optional[int] = None,
+        first_macro_id: int = 0,
+        arrangement: Optional[str] = None,
+    ) -> Tuple[Tile, ...]:
+        """The array census, promoted: tiles with owners and sites.
+
+        Row blocks are ``ceil(K / rows)``; each row block needs
+        ``ceil(N / cols_adc) * n_slices`` column sets, packed ``bank`` sets to
+        a tile and ``mux`` sets to a macro. At the defaults (no slicing, whole
+        -macro banks) the tile count and the macro count are both exactly
+        ``arrays(K, N) = ceil(K/rows) * ceil(N/(cols_adc*mux))``.
+
+        Ordering follows the arrangement: ``column_sets`` walks the slices of
+        one output block back to back so their reduction stays local to a
+        macro; ``chained_macros`` walks one whole slice before the next, so a
+        slice owns its macros and the partials travel (D11).
+        """
+        card = self.card
+        rows = int(card.params.rows)
+        cols_adc = int(card.stored_columns_per_set)
+        mux = int(card.column_sets_per_macro)
+        n_s = self.n_slices if n_slices is None else max(1, int(n_slices))
+        bank = self.column_sets_per_tile if column_sets_per_tile is None else int(column_sets_per_tile)
+        if bank < 1 or mux % bank != 0:
+            raise ValueError(
+                f"column_sets_per_tile = {bank} must be >= 1 and divide the card's mux "
+                f"= {mux}: the mux slot is the smallest allocatable unit (ADJ-4)."
+            )
+        arrangement = (arrangement or card.slicing).strip().lower()
+        cols_per_tile = cols_adc * bank
+        tiles_per_macro = mux // bank
+        n_row_blocks = _ceil_div(k, rows)
+        n_col_blocks = _ceil_div(n, cols_per_tile)
+        if arrangement == "chained_macros":
+            order = [
+                (rb, cb, s)
+                for rb in range(n_row_blocks)
+                for s in range(n_s)
+                for cb in range(n_col_blocks)
+            ]
+            # Linear packing: a slice owns its own macros and the partials
+            # travel, which is what the arrangement means.
+            placement = [(index // tiles_per_macro, index % tiles_per_macro) for index in range(len(order))]
+        else:
+            order = [
+                (rb, cb, s)
+                for rb in range(n_row_blocks)
+                for cb in range(n_col_blocks)
+                for s in range(n_s)
+            ]
+            # Locality is the whole point of the column-set arrangement (D11),
+            # so a slice group is placed as a unit: whole groups per macro,
+            # never straddling one. Padding the tail of a macro is the price.
+            groups_per_macro = tiles_per_macro // n_s
+            if groups_per_macro < 1:
+                raise ValueError(
+                    f"the column_sets arrangement cannot keep a slice group local: "
+                    f"n_slices = {n_s} needs {n_s} of the macro's {tiles_per_macro} tile "
+                    f"slots (mux {mux} / column_sets_per_tile {bank}). Use a smaller "
+                    "column_sets_per_tile, or the chained_macros arrangement, which "
+                    "prices the partial transport instead (D11)."
+                )
+            placement = []
+            for index in range(len(order)):
+                group, slice_in_group = divmod(index, n_s)
+                macro_offset, group_in_macro = divmod(group, groups_per_macro)
+                placement.append((macro_offset, group_in_macro * n_s + slice_in_group))
+        tiles = []
+        for (rb, cb, s), (macro_offset, slot) in zip(order, placement):
+            tiles.append(
+                Tile(
+                    owner=owner,
+                    k_start=rb * rows,
+                    k_end=min(int(k), (rb + 1) * rows),
+                    n_start=cb * cols_per_tile,
+                    n_end=min(int(n), (cb + 1) * cols_per_tile),
+                    slice_index=s,
+                    site=TileSite(
+                        macro_id=first_macro_id + macro_offset,
+                        row_start=rb * rows,
+                        row_end=min(int(k), (rb + 1) * rows),
+                        column_sets=tuple(range(slot * bank, (slot + 1) * bank)),
+                    ),
+                )
+            )
+        return tuple(tiles)
+
+    def tile_macro_count(
+        self,
+        k: int,
+        n: int,
+        *,
+        n_slices: Optional[int] = None,
+        column_sets_per_tile: Optional[int] = None,
+    ) -> int:
+        """Macros a K x N weight matrix occupies once tiled.
+
+        Equals :meth:`arrays` exactly at the defaults (no slicing, whole-macro
+        banks) — the degenerate identity the census law becomes.
+        """
+        tiles = self.enumerate_tiles(
+            k,
+            n,
+            TileOwner(),
+            n_slices=n_slices,
+            column_sets_per_tile=column_sets_per_tile,
+        )
+        return len({tile.site.macro_id for tile in tiles})
+
+    @staticmethod
+    def macro_occupancy(tiles) -> "OrderedDict[int, Tuple[Tile, ...]]":
+        """Resident tiles grouped by macro id, in first-seen order."""
+        by_macro: "OrderedDict[int, list]" = OrderedDict()
+        for tile in tiles:
+            by_macro.setdefault(tile.site.macro_id, []).append(tile)
+        return OrderedDict((macro, tuple(items)) for macro, items in by_macro.items())
+
+    def _check_sites(self, pairs) -> None:
+        """Capacity check over (owner, site) pairs — the named hard error.
+
+        A macro stores ``mux`` column sets, so range plus uniqueness IS the
+        capacity: no set outside 0..mux-1, and no set claimed twice.
+        """
+        mux = int(self.card.column_sets_per_macro)
+        claimed = {}
+        for owner, site in pairs:
+            for column_set in site.column_sets:
+                if column_set < 0 or column_set >= mux:
+                    raise MacroCapacityError(
+                        f"macro {site.macro_id}: {owner.label} claims column set "
+                        f"{column_set}, but the card stores {mux} column sets (mux slots) "
+                        "per macro."
+                    )
+                key = (site.macro_id, column_set)
+                if key in claimed:
+                    raise MacroCapacityError(
+                        f"macro {site.macro_id}: column set {column_set} is claimed by both "
+                        f"{claimed[key]} and {owner.label}. One column set holds one tile."
+                    )
+                claimed[key] = owner.label
+
+    def validate_macro_capacity(self, tiles) -> None:
+        """Resident tiles must fit their macros' stored columns (A3).
+
+        Raises :class:`MacroCapacityError` on an out-of-range column set, a
+        column set claimed twice, or a macro over its stored-column count.
+        """
+        self._check_sites((tile.owner, tile.site) for tile in tiles)
+
+    def allocation_sites(self) -> Tuple[Tuple[TileOwner, TileSite], ...]:
+        """(owner, site) pairs the user wrote in `cim.allocation.assignments`."""
+        allocation = self.allocation
+        if allocation is None:
+            return ()
+        card = self.card
+        rows = int(card.params.rows)
+        return tuple(
+            (
+                TileOwner(
+                    model=entry.model,
+                    layer=entry.layer,
+                    op=entry.op,
+                    expert=entry.expert,
+                    shard=entry.shard,
+                ),
+                TileSite(
+                    macro_id=entry.macro,
+                    row_start=0,
+                    row_end=rows,
+                    column_sets=entry.column_sets,
+                ),
+            )
+            for entry in allocation.assignments
+        )
+
+    def validate_allocation(self) -> None:
+        """Capacity-check the user's `cim.allocation` block (a no-op when absent)."""
+        self._check_sites(self.allocation_sites())
+
+    # ------------------------------------------------------------------
+    # Active-column-set pricing (P2.3, ADJ-4)
+    # ------------------------------------------------------------------
+
+    def analog_op_time(self, m_tokens: float, active_column_sets: int) -> float:
+        """T = M_tokens * (active_column_sets * slice_cycles + switches) / f_analog.
+
+        The op pays for the column sets it ACTIVATES, not the full mux depth.
+        One owner filling every mux slot activates ``mux`` sets and pays
+        ``mux * slice_cycles`` — the pass-1 charge, exactly.
+
+        ``switches`` is ``(active_column_sets - 1) * card.bank_switch_cycles``.
+        Every shipped card declares 0, so no shipped number moves and the
+        full-occupancy identity is untouched — but the zero is now a DECLARED
+        card figure rather than the silent omission AUDIT finding 3 records.
+        """
+        # Grouped exactly as vec_cycles / vec_latency_s are, so the
+        # full-occupancy case is bit-identical to analog_gemm_time, not
+        # merely close: floating-point association is part of the identity.
+        cycles = int(active_column_sets) * int(self.analog.slice_cycles)
+        switch_cycles = int(self.card.bank_switch_cycles)
+        if switch_cycles:
+            cycles += max(0, int(active_column_sets) - 1) * switch_cycles
+        return float(m_tokens) * (cycles / (float(self.analog.analog_clock_mhz) * 1e6))
+
+    @staticmethod
+    def active_column_sets(tiles) -> int:
+        """The op's charge: the worst macro's active column sets.
+
+        Every macro holding the op's tiles fires concurrently (the K/N-free
+        law), so the op waits on the macro that must convert the most sets.
+        """
+        by_macro = CimDeviceModel.macro_occupancy(tiles)
+        if not by_macro:
+            return 0
+        return max(
+            sum(tile.site.num_column_sets for tile in items) for items in by_macro.values()
+        )
+
+    def price_tiled_op(self, m_tokens: float, tiles) -> TiledOpCost:
+        """Duration and analog energy of one op over its resident tiles.
+
+        Energy is the pass-1 law read per column set: ``energy_per_vec_pj`` is
+        a whole macro's per-vector energy (it already includes the mux), so an
+        op that activates a fraction of the stored columns pays that fraction.
+        A full-occupancy op pays ``M * E_vec * shots * macros`` — pass 1.
+        """
+        by_macro = self.macro_occupancy(tiles)
+        charge = self.active_column_sets(tiles)
+        total_sets = sum(tile.site.num_column_sets for tile in tiles)
+        mux = int(self.card.column_sets_per_macro)
+        energy = (
+            float(m_tokens)
+            * float(self.analog.energy_per_vec_pj)
+            * int(self.analog.shots_per_output)
+            * total_sets
+            / mux
+        )
+        return TiledOpCost(
+            time_s=self.analog_op_time(m_tokens, charge),
+            active_column_sets=charge,
+            macros=len(by_macro),
+            total_active_column_sets=total_sets,
+            energy_pj=energy,
+        )
+
+    # ------------------------------------------------------------------
+    # Bit slicing, priced (P2.4, D11)
+    # ------------------------------------------------------------------
+
+    def reduction_descriptors(
+        self, tiles, *, arrangement: Optional[str] = None
+    ) -> Tuple[ReductionOpDescriptor, ...]:
+        """Shift-and-add descriptors the DAG builder consumes (plain data).
+
+        One descriptor per slice group — the tiles that hold the slices of one
+        output block. Returns () when the card declares no slicing, which is
+        the degenerate identity: no slices, no reduction ops, no cost.
+        """
+        arrangement = (arrangement or self.card.slicing).strip().lower()
+        groups: "OrderedDict[object, list]" = OrderedDict()
+        for tile in tiles:
+            groups.setdefault(tile.group_key, []).append(tile)
+        descriptors = []
+        for members in groups.values():
+            members = sorted(members, key=lambda t: t.slice_index)
+            n_s = len({tile.slice_index for tile in members})
+            if n_s <= 1:
+                continue
+            macros = {tile.site.macro_id for tile in members}
+            sink = members[0].site.macro_id
+            local = len(macros) == 1
+            descriptors.append(
+                ReductionOpDescriptor(
+                    kind="shift_add_tree",
+                    arrangement=arrangement,
+                    owner=members[0].owner,
+                    operand_tiles=tuple(members),
+                    output_lanes=members[0].logical_columns,
+                    n_slices=n_s,
+                    adds_per_output=n_s - 1,
+                    depth=(n_s - 1).bit_length(),
+                    site_macro_id=sink,
+                    local=local,
+                    transport_partials=0 if local else n_s - 1,
+                )
+            )
+        return tuple(descriptors)
+
+    def price_reduction(
+        self,
+        descriptor: ReductionOpDescriptor,
+        m_tokens: float,
+        *,
+        act_bytes: float = 0.0,
+        pool: Optional[DigitalPoolSizing] = None,
+    ) -> ReductionCost:
+        """Cost of one shift-and-add tree: ~(n_s-1) adds per output, depth ~log2(n_s).
+
+        Pipelined, the tree returns one result per lane per cycle after fill:
+        ``cycles = depth + ceil(results / lanes) - 1`` (the softmax-lanes
+        shape). Energy and area come from the card's pool knobs, which are 0
+        until a card declares them — the term then reports zero rather than an
+        invented number. Chained partials ride the p2p law: the returned
+        ``transport_bytes`` is what the caller hands :meth:`p2p_time_s`.
+        """
+        pool = self.digital_pool_sizing(n_slices=descriptor.n_slices) if pool is None else pool
+        results = float(m_tokens) * int(descriptor.output_lanes)
+        adds = results * int(descriptor.adds_per_output)
+        cycles = int(descriptor.depth) + _ceil_div(math.ceil(results), pool.lanes) - 1
+        return ReductionCost(
+            adds=adds,
+            cycles=cycles,
+            time_s=cycles / pool.pool_clock_hz,
+            energy_pj=adds * float(self.card.pool_energy_per_add_pj),
+            transport_bytes=results * int(descriptor.transport_partials) * float(act_bytes),
+        )
+
+    # ------------------------------------------------------------------
+    # Per-macro digital pool sizing (P2.5, D12)
+    # ------------------------------------------------------------------
+
+    def macro_result_rate_per_s(self) -> float:
+        """Peak ADC results one macro emits: cols_adc * f_analog / slice_cycles."""
+        return (
+            int(self.card.stored_columns_per_set)
+            * float(self.analog.analog_clock_mhz)
+            * 1e6
+            / int(self.analog.slice_cycles)
+        )
+
+    def digital_pool_sizing(
+        self, n_slices: Optional[int] = None
+    ) -> DigitalPoolSizing:
+        """Derive the per-macro pool from the card and its resident tiles.
+
+        Sized never to block: enough lanes to consume the macro's peak result
+        rate. The number is REPORTED, never a constraint (D12). Crossing the
+        ADJ-4 disclosure share prints a note and changes nothing.
+        """
+        card = self.card
+        n_s = self.n_slices if n_slices is None else max(1, int(n_slices))
+        pool_clock_hz = (
+            float(card.pool_clock_ghz) * 1e9 if card.pool_clock_ghz > 0 else self.f_fabric_hz
+        )
+        rate = self.macro_result_rate_per_s()
+        lanes = max(1, math.ceil(rate / pool_clock_hz))
+        adders = lanes * (n_s - 1)
+        area = adders * float(card.pool_area_mm2_per_adder)
+        footprint = self.macro_footprint_mm2()
+        share = area / footprint if footprint > 0 else 0.0
+        disclose = share >= POOL_DISCLOSURE_AREA_SHARE
+        note = None
+        if disclose:
+            note = (
+                f"per-macro digital pool: derived area {area:.6g} mm2 is "
+                f"{share * 100:.1f}% of the {footprint:.6g} mm2 macro footprint it serves "
+                f"(disclosure threshold {POOL_DISCLOSURE_AREA_SHARE * 100:.0f}%). "
+                "The pool is still absorbed and still costs no time here (D12); this note "
+                "is the disclosure, not a constraint."
+            )
+        return DigitalPoolSizing(
+            result_rate_per_s=rate,
+            pool_clock_hz=pool_clock_hz,
+            lanes=lanes,
+            adders=adders,
+            area_mm2=area,
+            macro_footprint_mm2=footprint,
+            area_share=share,
+            disclose=disclose,
+            note=note,
+        )
+
+    def report_digital_pool(self, sizing: Optional[DigitalPoolSizing] = None) -> str:
+        """The one-line derived pool report D12 requires (P2.5).
+
+        D12 says the pool is SIZED so it never blocks the pipeline and the
+        derived sizing is REPORTED. It is reported on stdout and nowhere else:
+        the closed-form report file is frozen (ADJ-8), and the pool constrains
+        no number in it, so a report FIELD would claim an accounting the
+        legacy path does not have.
+        """
+        sizing = self.digital_pool_sizing() if sizing is None else sizing
+        line = (
+            f"[FWS-CIM] per-macro digital pool (derived, D12): {sizing.lanes} shift-add "
+            f"lanes, {sizing.adders} adders at {sizing.pool_clock_hz / 1e9:.4g} GHz, "
+            f"consuming {sizing.result_rate_per_s:.6g} ADC results/s; area "
+            f"{sizing.area_mm2:.6g} mm2 = {sizing.area_share * 100:.1f}% of the "
+            f"{sizing.macro_footprint_mm2:.6g} mm2 macro footprint it serves. "
+            "The pool constrains nothing (D12); this is the derived sizing, reported."
+        )
+        digital_area = self.shared_digital_area_mm2()
+        if digital_area > 0:
+            line += (
+                f" Shared digital chiplet card '{self.digital_card.name}' declares "
+                f"{digital_area:.6g} mm2, counted in system_area_mm2 and never in the "
+                "analog area total."
+            )
+        return line
+
+    def disclose_digital_pool(self, sizing: Optional[DigitalPoolSizing] = None) -> Optional[str]:
+        """Print the pool note when the ADJ-4 share is crossed; return it either way."""
+        sizing = self.digital_pool_sizing() if sizing is None else sizing
+        if sizing.disclose:
+            print(f"[NOTE]: {sizing.note}")
+        return sizing.note

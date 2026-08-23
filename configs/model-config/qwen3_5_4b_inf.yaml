@@ -1,0 +1,60 @@
+# Qwen3.5-4B inference config — the gated-DeltaNet LINEAR-ATTENTION carrier
+# and the second P0 model (ADJ-1). Dims verified 2026-08-23 against the
+# published HuggingFace config.json (the text_config sub-block):
+#   https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/config.json
+# 32 layers, 3 linear-attention : 1 gated attention. The native 24-layer
+# vision tower and the MTP head are NOT modeled here (D8, address-only).
+# Rejected until the P2-P4 delta-rule pricing laws land.
+provenance:
+  source: "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 4000000000  # model card: "Number of Parameters: 4B"
+  # DISCLOSED RELAXATION: the card rounds the language model to one significant
+  # figure. The exact checkpoint is 4,659,868,928 params (model.safetensors.index
+  # total_size 9,319,737,856 B / 2, bf16) and includes the vision tower and the
+  # MTP head, neither of which this YAML models — so the text backbone cannot be
+  # read off either figure exactly. The P6.1 tolerance is widened for this row.
+  published_total_params_tolerance: 0.06
+  d2_status: supported
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true
+  model_type: "llama"
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 2560
+  layer_plan:
+    # HF layer_types: 3 linear_attention then 1 full_attention, 8 times.
+    pattern: ["linear_attention", "linear_attention", "linear_attention", "full_attention"]
+  attention:
+    attention_type: "gqa"
+    num_heads: 16
+    kv_heads: 4
+    head_dim: 256  # HF head_dim; NOT hidden_dim/num_heads (2560/16 = 160)
+    output_gate: true  # HF attn_output_gate: true
+    use_flashattention: false
+  linear_attention:
+    num_key_heads: 16  # HF linear_num_key_heads
+    key_head_dim: 128  # HF linear_key_head_dim
+    num_value_heads: 32  # HF linear_num_value_heads
+    value_head_dim: 128  # HF linear_value_head_dim
+    conv_kernel: 4  # HF linear_conv_kernel_dim
+    output_gate: true
+    decay_gate: true
+  moe:
+    num_experts: 1  # HF mlp_only_layers: [] — dense FFN on every layer
+    top_k: 1
+    moe_intermediate_size: 9216
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 32
+  intermediate_size: 9216
+  vocab_size: 248320
+  num_layers: 32
+
+inference_param:
+  sample_every: -1

@@ -129,6 +129,188 @@ def mla_dim_sizes(num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim):
     return qk_head_dim, q_size, v_size, kv_up_size
 
 
+# ---------------------------------------------------------------------------
+# Raw parameter census (QIF P6.1)
+#
+# D2 counts TOTAL parameters and ADJ-2 makes that count RAW: every weight that
+# has to occupy cells, active or not. The census below is block-aware so a
+# hybrid layer plan (SSM / linear-attention / short-conv mixers) can be checked
+# against its published parameter total.
+# ---------------------------------------------------------------------------
+
+
+def attention_block_param_count(*, hidden_dim: int, attention) -> int:
+    """Weights of one attention block (MHA / GQA / MLA), biases excluded."""
+    hidden_dim = int(hidden_dim)
+    attn_type = str(getattr(attention, "attention_type", "mha")).lower()
+    num_heads = int(attention.num_heads)
+    if attn_type == "mla":
+        qk_head_dim, q_size, v_size, kv_up_size = mla_dim_sizes(
+            num_heads,
+            attention.qk_nope_head_dim,
+            attention.qk_rope_head_dim,
+            attention.v_head_dim,
+        )
+        q_lora_rank = int(attention.q_lora_rank)
+        kv_lora_rank = int(attention.kv_lora_rank)
+        return (
+            hidden_dim * q_lora_rank
+            + q_lora_rank * q_size
+            + hidden_dim * (kv_lora_rank + int(attention.qk_rope_head_dim))
+            + kv_lora_rank * kv_up_size
+            + v_size * hidden_dim
+        )
+    head_dim, q_size, kv_size = attention_dim_sizes(
+        hidden_dim, num_heads, getattr(attention, "kv_heads", None), head_dim=attention.head_dim
+    )
+    # Gated attention (Qwen3.5) emits a per-head output gate alongside q.
+    q_out = q_size * (2 if bool(getattr(attention, "output_gate", False)) else 1)
+    return hidden_dim * q_out + 2 * hidden_dim * kv_size + q_size * hidden_dim
+
+
+def ssm_block_param_count(*, hidden_dim: int, ssm) -> int:
+    """Weights of one state-space mixer block (Mamba-1 scan or Mamba-2 SSD)."""
+    hidden_dim = int(hidden_dim)
+    d_inner = int(ssm.resolve_d_inner(hidden_dim))
+    d_state = int(ssm.d_state)
+    d_conv = int(ssm.d_conv)
+    if str(ssm.variant).lower() == "mamba2":
+        n_groups = int(ssm.n_groups)
+        n_heads = int(ssm.n_heads)
+        conv_channels = d_inner + 2 * n_groups * d_state
+        return (
+            hidden_dim * (2 * d_inner + 2 * n_groups * d_state + n_heads)
+            + conv_channels * d_conv
+            + d_inner * hidden_dim
+            + 3 * n_heads  # A_log, D, dt_bias
+        )
+    dt_rank = int(ssm.dt_rank)
+    return (
+        hidden_dim * 2 * d_inner
+        + d_inner * d_conv
+        + d_inner * (dt_rank + 2 * d_state)
+        + dt_rank * d_inner
+        + d_inner * d_state  # A
+        + d_inner  # D
+        + d_inner * hidden_dim
+    )
+
+
+def linear_attention_block_param_count(*, hidden_dim: int, linear_attention) -> int:
+    """Weights of one linear-attention (gated delta rule) block."""
+    hidden_dim = int(hidden_dim)
+    key_dim = int(linear_attention.key_dim)
+    value_dim = int(linear_attention.value_dim)
+    num_value_heads = int(linear_attention.num_value_heads)
+    qkv_out = 2 * key_dim + value_dim
+    if bool(linear_attention.output_gate):
+        qkv_out += value_dim
+    gate_out = num_value_heads * (2 if bool(linear_attention.decay_gate) else 1)
+    return (
+        hidden_dim * qkv_out
+        + hidden_dim * gate_out
+        + (2 * key_dim + value_dim) * int(linear_attention.conv_kernel)
+        + value_dim * hidden_dim
+        + 2 * num_value_heads  # A_log, dt_bias
+    )
+
+
+def short_conv_block_param_count(*, hidden_dim: int, short_conv) -> int:
+    """Weights of one short causal depthwise-conv mixer block."""
+    hidden_dim = int(hidden_dim)
+    conv_dim = int(short_conv.conv_dim)
+    return (
+        hidden_dim * int(short_conv.in_proj_streams) * conv_dim
+        + conv_dim * int(short_conv.kernel_size)
+        + conv_dim * hidden_dim
+    )
+
+
+def ffn_param_count(*, hidden_dim: int, intermediate_size: int, gated: bool) -> int:
+    """Weights of one FFN: gate+up+down when gated, up+down otherwise."""
+    return (3 if gated else 2) * int(hidden_dim) * int(intermediate_size)
+
+
+def _layer_ffn_param_count(model, layer_idx: int, block_kind: str, *, gated: bool) -> int:
+    hidden_dim = int(model.hidden_dim)
+    if model.moe_layer_mask[layer_idx]:
+        moe = model.moe
+        shared_dim = int(model.ffn_dims.get("shared_expert", moe.moe_intermediate_size))
+        params = int(moe.num_experts) * ffn_param_count(
+            hidden_dim=hidden_dim, intermediate_size=moe.moe_intermediate_size, gated=gated
+        )
+        params += hidden_dim * int(moe.num_experts)  # router
+        params += int(moe.n_shared_experts) * ffn_param_count(
+            hidden_dim=hidden_dim, intermediate_size=shared_dim, gated=gated
+        )
+        return params
+    return ffn_param_count(
+        hidden_dim=hidden_dim,
+        intermediate_size=model.ffn_dim_for(block_kind),
+        gated=gated,
+    )
+
+
+def model_raw_param_count(model) -> int:
+    """Total RAW parameters of an LLM config (D2 total, ADJ-2 raw).
+
+    Counts weight matrices only: embeddings (twice when untied), the mixer
+    block of every layer the layer plan names, and the FFN / MoE block that
+    layer carries. Depth-shared groups (ADJ-3) store their tensors once and
+    pay only the per-invocation LoRA on every later layer of the group.
+
+    Norms, biases and rotary tables are omitted: they are under 0.1% of every
+    model in the matrix, and the P6.1 gate that consumes this runs at 3%.
+    """
+    if is_vit_style(model.model_type):
+        raise ValueError(
+            "model_raw_param_count counts LLM configs; a ViT encoder's census "
+            "lives in vit_patch_embed_param_count / vit_head_param_count."
+        )
+    hidden_dim = int(model.hidden_dim)
+    gated = uses_gated_mlp(model.model_type, getattr(model, "swiglu_mlp", False))
+
+    total = int(model.vocab_size) * hidden_dim
+    if not bool(model.tied_embeddings):
+        total += int(model.vocab_size) * hidden_dim
+
+    shared_repeats = {}
+    for group in getattr(model, "shared_weight_groups", ()) or ():
+        for layer_idx in group.layers[1:]:
+            shared_repeats[int(layer_idx)] = group
+
+    for layer_idx, block_kinds in enumerate(model.layer_mixers):
+        group = shared_repeats.get(layer_idx)
+        if group is not None:
+            if group.lora_rank:
+                # Per-invocation LoRA projectors: one down, one up.
+                total += 2 * hidden_dim * int(group.lora_rank)
+            continue
+        for block_kind in block_kinds:
+            if block_kind == "attention":
+                total += attention_block_param_count(
+                    hidden_dim=hidden_dim, attention=model.attention
+                )
+            elif block_kind == "ssm":
+                total += ssm_block_param_count(hidden_dim=hidden_dim, ssm=model.ssm)
+            elif block_kind == "linear_attn":
+                total += linear_attention_block_param_count(
+                    hidden_dim=hidden_dim, linear_attention=model.linear_attention
+                )
+            elif block_kind == "short_conv":
+                total += short_conv_block_param_count(
+                    hidden_dim=hidden_dim, short_conv=model.short_conv
+                )
+            elif block_kind in ("ffn", "moe"):
+                total += _layer_ffn_param_count(model, layer_idx, block_kind, gated=gated)
+            else:
+                raise ValueError(f"unknown block kind {block_kind!r} in the layer plan")
+        if model.ffn_per_layer:
+            total += _layer_ffn_param_count(model, layer_idx, block_kinds[0], gated=gated)
+
+    return int(total)
+
+
 def mla_attention_param_sizes(
     hidden_dim,
     num_heads,

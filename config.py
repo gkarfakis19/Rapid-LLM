@@ -1235,6 +1235,11 @@ class LLMAttentionConfig:
     v_head_dim: Optional[int] = None
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
+    #: Qwen3.5-style gated attention: the query projection also emits a
+    #: per-head output gate, doubling its output width.
+    output_gate: bool = False
+    #: Sliding-window pattern (Gemma 3/4, Phi-4-mini-flash); None = full.
+    window: Optional["AttentionWindowConfig"] = None
 
     @classmethod
     def from_dict(cls, attention_dict: Dict[str, object]) -> "LLMAttentionConfig":
@@ -1365,6 +1370,13 @@ class LLMAttentionConfig:
         else:
             attention_tile_size = None
 
+        output_gate = _coerce_bool(
+            attention_dict.get("output_gate", False),
+            "model_param.attention.output_gate",
+        )
+        window_raw = attention_dict.get("window", None)
+        window = None if window_raw is None else AttentionWindowConfig.from_dict(window_raw)
+
         return cls(
             attention_type=attn_type,
             num_heads=num_heads,
@@ -1377,6 +1389,8 @@ class LLMAttentionConfig:
             v_head_dim=v_head_dim,
             use_flashattention=use_flashattention,
             attention_tile_size=attention_tile_size,
+            output_gate=output_gate,
+            window=window,
         )
 
 
@@ -1536,6 +1550,599 @@ class ViTConfig:
         )
 
 
+# ---------------------------------------------------------------------------
+# Block-typed layer plans (QIF P1.1)
+#
+# Hybrid models (Mamba2 / gated-DeltaNet / short-conv backbones) break the
+# "one uniform layer repeated num_layers times" assumption the rest of this
+# schema is built on. These classes DESCRIBE such a model; nothing prices it
+# yet, so validate_model_config rejects a hybrid layer plan on every device
+# class until the P2-P4 pricing laws land.
+# ---------------------------------------------------------------------------
+
+_BLOCK_KINDS = ("attention", "ssm", "linear_attn", "short_conv", "ffn", "moe")
+_MIXER_BLOCK_KINDS = ("attention", "ssm", "linear_attn", "short_conv")
+#: Block kinds with no device law yet (P2-P4 owns their pricing).
+_HYBRID_BLOCK_KINDS = ("ssm", "linear_attn", "short_conv")
+_FFN_DIM_KEYS = _BLOCK_KINDS + ("shared_expert", "default")
+_LAYER_PLAN_STRUCTURES = ("sequential", "parallel_branch")
+_SSM_VARIANTS = ("mamba1", "mamba2")
+
+#: HuggingFace `layer_types` spellings -> RAPID block kinds. hf_to_config.py
+#: ingests the HF field verbatim, so both spellings must parse here.
+_HF_BLOCK_KIND_ALIASES = {
+    "attention": "attention",
+    "full_attention": "attention",
+    "sliding_attention": "attention",
+    "mamba": "ssm",
+    "mamba2": "ssm",
+    "ssm": "ssm",
+    "linear_attention": "linear_attn",
+    "linear_attn": "linear_attn",
+    "conv": "short_conv",
+    "short_conv": "short_conv",
+    "ffn": "ffn",
+    "mlp": "ffn",
+    "moe": "moe",
+}
+
+
+def _reject_unknown_keys(context: str, data: Dict[str, object], allowed: Sequence[str]) -> None:
+    extra_keys = sorted(set(data.keys()) - set(allowed))
+    if extra_keys:
+        raise ValueError(
+            f"{context} does not support the keys: {', '.join(extra_keys)}. "
+            f"Supported keys: {', '.join(sorted(allowed))}"
+        )
+
+
+def _parse_block_kind(value: object, context: str) -> str:
+    key = str(value).strip().lower()
+    if key not in _HF_BLOCK_KIND_ALIASES:
+        raise ValueError(
+            f"{context} must name a block kind ({', '.join(_BLOCK_KINDS)}) or a "
+            f"HuggingFace layer_types spelling ({', '.join(sorted(_HF_BLOCK_KIND_ALIASES))}); "
+            f"got {value!r}"
+        )
+    return _HF_BLOCK_KIND_ALIASES[key]
+
+
+def _parse_block_kind_list(value: object, context: str) -> Tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{context} must be a non-empty list of block kinds")
+    return tuple(_parse_block_kind(item, f"{context} entries") for item in value)
+
+
+@dataclass(frozen=True)
+class AttentionWindowConfig:
+    """Sliding-window attention pattern (model_param.attention.window).
+
+    ``local_global_interval`` = N means one global layer every N attention
+    layers (Gemma 3 uses 6 -> 5 local : 1 global); 1 makes every layer
+    global and the window inert.
+    """
+
+    window_size: int
+    local_global_interval: int
+    last_layer_global: bool
+
+    @classmethod
+    def from_dict(cls, window_dict: Dict[str, object]) -> "AttentionWindowConfig":
+        window_dict = _require_mapping("model_param.attention.window", window_dict)
+        _reject_unknown_keys(
+            "model_param.attention.window",
+            window_dict,
+            ("window_size", "local_global_interval", "last_layer_global"),
+        )
+        window_size = _parse_int_field("model_param.attention.window", window_dict, "window_size")
+        local_global_interval = _coerce_int(
+            window_dict.get("local_global_interval", 1),
+            "model_param.attention.window.local_global_interval",
+            min_value=1,
+        )
+        last_layer_global = _coerce_bool(
+            window_dict.get("last_layer_global", False),
+            "model_param.attention.window.last_layer_global",
+        )
+        return cls(
+            window_size=window_size,
+            local_global_interval=local_global_interval,
+            last_layer_global=last_layer_global,
+        )
+
+
+@dataclass(frozen=True)
+class SSMBlockConfig:
+    """State-space (Mamba) mixer block parameters (model_param.ssm).
+
+    ``variant: mamba2`` is the chunked SSD form (head-structured, needs
+    n_heads / d_head / n_groups / chunk_size); ``mamba1`` is the per-token
+    selective scan (needs dt_rank, has no head structure).
+    """
+
+    variant: str
+    d_state: int
+    d_conv: int
+    d_inner: Optional[int] = None
+    expand: Optional[int] = None
+    n_groups: Optional[int] = None
+    n_heads: Optional[int] = None
+    d_head: Optional[int] = None
+    chunk_size: Optional[int] = None
+    dt_rank: Optional[int] = None
+
+    def resolve_d_inner(self, hidden_dim: int) -> int:
+        """Mixer width: the explicit d_inner when given, else expand * hidden."""
+        if self.d_inner is not None:
+            return int(self.d_inner)
+        return int(self.expand) * int(hidden_dim)
+
+    @classmethod
+    def from_dict(cls, ssm_dict: Dict[str, object]) -> "SSMBlockConfig":
+        ssm_dict = _require_mapping("model_param.ssm", ssm_dict)
+        allowed = (
+            "variant", "d_state", "d_conv", "d_inner", "expand",
+            "n_groups", "n_heads", "d_head", "chunk_size", "dt_rank",
+        )
+        _reject_unknown_keys("model_param.ssm", ssm_dict, allowed)
+
+        variant = str(ssm_dict.get("variant", "mamba2")).strip().lower()
+        if variant not in _SSM_VARIANTS:
+            raise ValueError(
+                "model_param.ssm.variant must be one of "
+                f"{', '.join(_SSM_VARIANTS)} (got {ssm_dict.get('variant')!r})"
+            )
+
+        d_state = _parse_int_field("model_param.ssm", ssm_dict, "d_state")
+        d_conv = _parse_int_field("model_param.ssm", ssm_dict, "d_conv")
+        d_inner = None
+        if ssm_dict.get("d_inner") is not None:
+            d_inner = _coerce_int(ssm_dict["d_inner"], "model_param.ssm.d_inner", min_value=1)
+        expand = None
+        if ssm_dict.get("expand") is not None:
+            expand = _coerce_int(ssm_dict["expand"], "model_param.ssm.expand", min_value=1)
+        if d_inner is None and expand is None:
+            raise ValueError(
+                "model_param.ssm requires d_inner or expand: the mixer width is "
+                "d_inner when given, else expand * hidden_dim."
+            )
+        if d_inner is not None and expand is not None:
+            raise ValueError(
+                "model_param.ssm accepts d_inner OR expand, not both. Published "
+                "configs that carry both disagree (Falcon-H1 sets mamba_d_ssm 3072 "
+                "next to expand 2 at hidden 3072; Falcon-Mamba sets expand 16 next "
+                "to a d_inner of 8192), so the width must be stated once."
+            )
+
+        def _optional(field: str) -> Optional[int]:
+            if ssm_dict.get(field) is None:
+                return None
+            return _coerce_int(ssm_dict[field], f"model_param.ssm.{field}", min_value=1)
+
+        n_groups = _optional("n_groups")
+        n_heads = _optional("n_heads")
+        d_head = _optional("d_head")
+        chunk_size = _optional("chunk_size")
+        dt_rank = _optional("dt_rank")
+
+        if variant == "mamba2":
+            missing = [
+                name
+                for name, value in (
+                    ("n_groups", n_groups),
+                    ("n_heads", n_heads),
+                    ("d_head", d_head),
+                    ("chunk_size", chunk_size),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "model_param.ssm.variant: mamba2 (chunked SSD) requires "
+                    f"{', '.join('model_param.ssm.' + name for name in missing)}"
+                )
+        else:
+            if dt_rank is None:
+                raise ValueError(
+                    "model_param.ssm.variant: mamba1 (selective scan) requires "
+                    "model_param.ssm.dt_rank"
+                )
+            head_fields = [
+                name
+                for name, value in (
+                    ("n_groups", n_groups),
+                    ("n_heads", n_heads),
+                    ("d_head", d_head),
+                    ("chunk_size", chunk_size),
+                )
+                if value is not None
+            ]
+            if head_fields:
+                raise ValueError(
+                    "model_param.ssm.variant: mamba1 has no head structure and no "
+                    "chunking; remove "
+                    f"{', '.join('model_param.ssm.' + name for name in head_fields)} "
+                    "or set variant: mamba2."
+                )
+
+        return cls(
+            variant=variant,
+            d_state=d_state,
+            d_conv=d_conv,
+            d_inner=d_inner,
+            expand=expand,
+            n_groups=n_groups,
+            n_heads=n_heads,
+            d_head=d_head,
+            chunk_size=chunk_size,
+            dt_rank=dt_rank,
+        )
+
+
+@dataclass(frozen=True)
+class LinearAttentionBlockConfig:
+    """Linear-attention (gated DeltaNet / WKV) block (model_param.linear_attention).
+
+    Key and value head counts and dims are independent: Qwen3.5 carries 16
+    key heads x 128 next to 32 value heads x 128.
+    """
+
+    num_key_heads: int
+    key_head_dim: int
+    num_value_heads: int
+    value_head_dim: int
+    conv_kernel: int
+    output_gate: bool = True
+    decay_gate: bool = True
+
+    @property
+    def key_dim(self) -> int:
+        return int(self.num_key_heads) * int(self.key_head_dim)
+
+    @property
+    def value_dim(self) -> int:
+        return int(self.num_value_heads) * int(self.value_head_dim)
+
+    @classmethod
+    def from_dict(cls, la_dict: Dict[str, object]) -> "LinearAttentionBlockConfig":
+        context = "model_param.linear_attention"
+        la_dict = _require_mapping(context, la_dict)
+        allowed = (
+            "num_key_heads", "key_head_dim", "num_value_heads", "value_head_dim",
+            "conv_kernel", "output_gate", "decay_gate",
+        )
+        _reject_unknown_keys(context, la_dict, allowed)
+
+        num_key_heads = _parse_int_field(context, la_dict, "num_key_heads")
+        key_head_dim = _parse_int_field(context, la_dict, "key_head_dim")
+        num_value_heads = _parse_int_field(context, la_dict, "num_value_heads")
+        value_head_dim = _parse_int_field(context, la_dict, "value_head_dim")
+        conv_kernel = _parse_int_field(context, la_dict, "conv_kernel")
+        if num_value_heads % num_key_heads != 0:
+            raise ValueError(
+                f"{context}.num_key_heads={num_key_heads} must divide "
+                f"{context}.num_value_heads={num_value_heads}"
+            )
+        output_gate = _coerce_bool(la_dict.get("output_gate", True), f"{context}.output_gate")
+        decay_gate = _coerce_bool(la_dict.get("decay_gate", True), f"{context}.decay_gate")
+        return cls(
+            num_key_heads=num_key_heads,
+            key_head_dim=key_head_dim,
+            num_value_heads=num_value_heads,
+            value_head_dim=value_head_dim,
+            conv_kernel=conv_kernel,
+            output_gate=output_gate,
+            decay_gate=decay_gate,
+        )
+
+
+@dataclass(frozen=True)
+class ShortConvBlockConfig:
+    """Short causal depthwise-conv mixer (model_param.short_conv).
+
+    ``double_gated`` is the LFM2 form: the input projection emits three
+    conv_dim-wide streams (two gates plus the convolved stream).
+    """
+
+    kernel_size: int
+    conv_dim: int
+    double_gated: bool = True
+
+    @property
+    def in_proj_streams(self) -> int:
+        return 3 if self.double_gated else 1
+
+    @classmethod
+    def from_dict(cls, conv_dict: Dict[str, object]) -> "ShortConvBlockConfig":
+        context = "model_param.short_conv"
+        conv_dict = _require_mapping(context, conv_dict)
+        _reject_unknown_keys(context, conv_dict, ("kernel_size", "conv_dim", "double_gated"))
+        return cls(
+            kernel_size=_parse_int_field(context, conv_dict, "kernel_size"),
+            conv_dim=_parse_int_field(context, conv_dict, "conv_dim"),
+            double_gated=_coerce_bool(
+                conv_dict.get("double_gated", True), f"{context}.double_gated"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class SharedWeightGroup:
+    """Depth-shared weights (ADJ-3): one stored tensor set, fired by many layers.
+
+    Zamba2 reuses two attention blocks across depth with a per-invocation
+    LoRA projector. Under FWS the shared block is stored once, so the group
+    is a real area statement, not an accounting note.
+    """
+
+    name: str
+    layers: Tuple[int, ...]
+    lora_rank: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, group_dict: Dict[str, object], *, index: int, num_layers: int) -> "SharedWeightGroup":
+        context = f"model_param.shared_weight_groups[{index}]"
+        group_dict = _require_mapping(context, group_dict)
+        _reject_unknown_keys(context, group_dict, ("name", "layers", "lora_rank"))
+        name = _parse_str_field(context, group_dict, "name")
+        if not name:
+            raise ValueError(f"{context}.name must be a non-empty string")
+        layers_raw = _require_field(context, group_dict, "layers")
+        if not isinstance(layers_raw, (list, tuple)) or len(layers_raw) < 2:
+            raise ValueError(
+                f"{context}.layers must be a list of at least two layer indices "
+                "(a group of one shares nothing)"
+            )
+        layers = tuple(
+            _coerce_int(item, f"{context}.layers entries", min_value=0) for item in layers_raw
+        )
+        if len(set(layers)) != len(layers):
+            raise ValueError(f"{context}.layers must not repeat a layer index")
+        for layer_idx in layers:
+            if layer_idx >= num_layers:
+                raise ValueError(
+                    f"{context}.layers entry {layer_idx} is out of range for "
+                    f"model_param.num_layers={num_layers}"
+                )
+        lora_rank = None
+        if group_dict.get("lora_rank") is not None:
+            lora_rank = _coerce_int(group_dict["lora_rank"], f"{context}.lora_rank", min_value=1)
+        return cls(name=name, layers=tuple(sorted(layers)), lora_rank=lora_rank)
+
+
+@dataclass(frozen=True)
+class LayerPlanConfig:
+    """Per-layer block structure (model_param.layer_plan).
+
+    ``structure: sequential`` names one mixer kind per layer, either as an
+    explicit ``layer_types`` list of length num_layers or as a ``pattern``
+    repeated over the depth. ``structure: parallel_branch`` is the Falcon-H1
+    template: every layer runs all of ``branches`` side by side.
+
+    ``ffn_per_layer`` says each mixer layer carries its own FFN / MoE block,
+    which is true of every hybrid except the pure-SSM stacks (Falcon-Mamba
+    has no MLP at all).
+    """
+
+    structure: str
+    layer_types: Tuple[str, ...]
+    branches: Tuple[str, ...]
+    pattern: Optional[Tuple[str, ...]]
+    ffn_per_layer: bool
+
+    @property
+    def layer_mixers(self) -> Tuple[Tuple[str, ...], ...]:
+        """Block kinds each layer runs, in layer order."""
+        if self.structure == "parallel_branch":
+            return tuple(self.branches for _ in range(len(self.layer_types)))
+        return tuple((kind,) for kind in self.layer_types)
+
+    @property
+    def block_kinds(self) -> Tuple[str, ...]:
+        present = set()
+        for kinds in self.layer_mixers:
+            present.update(kinds)
+        return tuple(kind for kind in _BLOCK_KINDS if kind in present)
+
+    @property
+    def hybrid_block_kinds(self) -> Tuple[str, ...]:
+        present = set(self.block_kinds)
+        return tuple(kind for kind in _HYBRID_BLOCK_KINDS if kind in present)
+
+    def count(self, kind: str) -> int:
+        return sum(1 for kinds in self.layer_mixers if kind in kinds)
+
+    @classmethod
+    def from_dict(cls, plan_dict: Dict[str, object], *, num_layers: int) -> "LayerPlanConfig":
+        context = "model_param.layer_plan"
+        plan_dict = _require_mapping(context, plan_dict)
+        _reject_unknown_keys(
+            context, plan_dict, ("structure", "layer_types", "pattern", "branches", "ffn_per_layer")
+        )
+        structure = str(plan_dict.get("structure", "sequential")).strip().lower()
+        if structure not in _LAYER_PLAN_STRUCTURES:
+            raise ValueError(
+                f"{context}.structure must be one of {', '.join(_LAYER_PLAN_STRUCTURES)} "
+                f"(got {plan_dict.get('structure')!r})"
+            )
+
+        has_types = plan_dict.get("layer_types") is not None
+        has_pattern = plan_dict.get("pattern") is not None
+        has_branches = plan_dict.get("branches") is not None
+        has_ffn_flag = plan_dict.get("ffn_per_layer") is not None
+
+        if structure == "parallel_branch":
+            if has_types or has_pattern:
+                raise ValueError(
+                    f"{context}.structure: parallel_branch describes ONE layer template; "
+                    f"remove {context}.layer_types / {context}.pattern and list the "
+                    f"concurrent blocks in {context}.branches."
+                )
+            if not has_branches:
+                raise ValueError(
+                    f"{context}.branches must be specified when "
+                    f"{context}.structure is 'parallel_branch'"
+                )
+            if has_ffn_flag:
+                raise ValueError(
+                    f"{context}.ffn_per_layer is not allowed with "
+                    f"structure: parallel_branch — {context}.branches already names "
+                    "every block the layer runs."
+                )
+            branches = _parse_block_kind_list(plan_dict["branches"], f"{context}.branches")
+            if len(set(branches)) != len(branches):
+                raise ValueError(f"{context}.branches must not repeat a block kind")
+            return cls(
+                structure=structure,
+                layer_types=tuple("parallel" for _ in range(num_layers)),
+                branches=branches,
+                pattern=None,
+                ffn_per_layer=False,
+            )
+
+        if has_branches:
+            raise ValueError(
+                f"{context}.branches is only valid with structure: parallel_branch"
+            )
+        if has_types == has_pattern:
+            raise ValueError(
+                f"{context} requires exactly one of {context}.layer_types "
+                f"(an explicit list of length num_layers) or {context}.pattern "
+                "(a block sequence repeated over the depth)."
+            )
+        pattern = None
+        if has_pattern:
+            pattern = _parse_block_kind_list(plan_dict["pattern"], f"{context}.pattern")
+            if num_layers % len(pattern) != 0:
+                raise ValueError(
+                    f"{context}.pattern of length {len(pattern)} does not tile "
+                    f"model_param.num_layers={num_layers}; use {context}.layer_types "
+                    "for an irregular plan."
+                )
+            layer_types = tuple(pattern[idx % len(pattern)] for idx in range(num_layers))
+        else:
+            layer_types = _parse_block_kind_list(plan_dict["layer_types"], f"{context}.layer_types")
+            if len(layer_types) != num_layers:
+                raise ValueError(
+                    f"{context}.layer_types has {len(layer_types)} entries but "
+                    f"model_param.num_layers={num_layers}; the explicit list must "
+                    "name every layer."
+                )
+        ffn_per_layer = _coerce_bool(
+            plan_dict.get("ffn_per_layer", True), f"{context}.ffn_per_layer"
+        )
+        if ffn_per_layer and any(kind in ("ffn", "moe") for kind in layer_types):
+            raise ValueError(
+                f"{context} names a dedicated 'ffn'/'moe' layer while "
+                f"{context}.ffn_per_layer is true, which would count the FFN twice. "
+                f"Set {context}.ffn_per_layer: false for a plan with standalone FFN layers."
+            )
+        return cls(
+            structure=structure,
+            layer_types=layer_types,
+            branches=(),
+            pattern=pattern,
+            ffn_per_layer=ffn_per_layer,
+        )
+
+
+def _parse_ffn_dims(ffn_dims_raw: object) -> Dict[str, int]:
+    """model_param.ffn_dims: per-block-kind FFN widths.
+
+    Keys are block kinds plus 'shared_expert' (the always-on shared MLP of a
+    Granite-style MoE layer) and 'default'; anything unnamed falls back to
+    model_param.intermediate_size.
+    """
+    context = "model_param.ffn_dims"
+    ffn_dims = _require_mapping(context, ffn_dims_raw)
+    _reject_unknown_keys(context, ffn_dims, _FFN_DIM_KEYS)
+    if not ffn_dims:
+        raise ValueError(f"{context} must not be empty; omit it to use model_param.intermediate_size")
+    return {
+        str(key): _coerce_int(value, f"{context}.{key}", min_value=1)
+        for key, value in ffn_dims.items()
+    }
+
+
+def _validate_block_schema(
+    *,
+    model_type: str,
+    layer_plan: Optional[LayerPlanConfig],
+    attention: Optional[LLMAttentionConfig],
+    ssm: Optional[SSMBlockConfig],
+    linear_attention: Optional[LinearAttentionBlockConfig],
+    short_conv: Optional[ShortConvBlockConfig],
+    hidden_dim: int,
+) -> None:
+    """Cross-validate the block-typed schema (QIF P1.1).
+
+    Every block kind the layer plan names must carry its parameter block, and
+    every parameter block present must be reachable from the layer plan — a
+    dead block group is a silent modeling error, not a harmless extra.
+    """
+    block_groups = (
+        ("ssm", "model_param.ssm", ssm),
+        ("linear_attn", "model_param.linear_attention", linear_attention),
+        ("short_conv", "model_param.short_conv", short_conv),
+    )
+
+    if _is_vit_model_type(model_type):
+        named = [name for _, name, value in block_groups if value is not None]
+        if layer_plan is not None:
+            named.append("model_param.layer_plan")
+        if named:
+            raise ValueError(
+                "ViT configs are uniform encoders and do not support the "
+                f"block-typed schema; remove {', '.join(sorted(named))}."
+            )
+
+    if layer_plan is None:
+        if attention is None:
+            raise ValueError("model_param.attention must be specified")
+        dead = [name for _, name, value in block_groups if value is not None]
+        if dead:
+            raise ValueError(
+                f"{', '.join(sorted(dead))} requires model_param.layer_plan to say "
+                "which layers run the block; without a layer plan every layer is a "
+                "plain attention layer and the block group is dead config."
+            )
+        return
+
+    kinds = set(layer_plan.block_kinds)
+    if "attention" in kinds and attention is None:
+        raise ValueError(
+            "model_param.attention must be specified: model_param.layer_plan "
+            "declares attention blocks."
+        )
+    if "attention" not in kinds and attention is not None:
+        raise ValueError(
+            "model_param.attention is set but model_param.layer_plan declares no "
+            "attention block; remove the attention block or add attention layers."
+        )
+    for kind, name, value in block_groups:
+        if kind in kinds and value is None:
+            raise ValueError(
+                f"{name} must be specified: model_param.layer_plan declares "
+                f"{kind!r} blocks."
+            )
+        if kind not in kinds and value is not None:
+            raise ValueError(
+                f"{name} is set but model_param.layer_plan declares no {kind!r} "
+                "block; remove it or add those layers."
+            )
+
+    if ssm is not None:
+        d_inner = ssm.resolve_d_inner(hidden_dim)
+        if ssm.variant == "mamba2":
+            heads_width = int(ssm.n_heads) * int(ssm.d_head)
+            if heads_width != d_inner:
+                raise ValueError(
+                    "model_param.ssm: n_heads * d_head must equal the mixer width "
+                    f"(n_heads={ssm.n_heads} * d_head={ssm.d_head} = {heads_width}, "
+                    f"d_inner = {d_inner})"
+                )
+
+
 @dataclass
 class LLMConfig:
     mode: str
@@ -1552,13 +2159,58 @@ class LLMConfig:
     intermediate_size: Optional[int]
     vocab_size: int
     n_tokens: int
-    attention: LLMAttentionConfig
+    attention: Optional[LLMAttentionConfig]
     moe: MoEConfig
     vision: Optional[ViTConfig] = None
+    #: Block-typed layer structure (QIF P1.1). None = the uniform transformer
+    #: layer the rest of this schema assumes.
+    layer_plan: Optional[LayerPlanConfig] = None
+    ssm: Optional[SSMBlockConfig] = None
+    linear_attention: Optional[LinearAttentionBlockConfig] = None
+    short_conv: Optional[ShortConvBlockConfig] = None
+    ffn_dims: Dict[str, int] = field(default_factory=dict)
+    shared_weight_groups: Tuple[SharedWeightGroup, ...] = ()
 
     @property
     def num_heads(self) -> int:
         return self.attention.num_heads
+
+    @property
+    def layer_mixers(self) -> Tuple[Tuple[str, ...], ...]:
+        """Block kinds each layer runs. A plain transformer is all-attention."""
+        if self.layer_plan is not None:
+            return self.layer_plan.layer_mixers
+        return tuple(("attention",) for _ in range(self.num_layers))
+
+    @property
+    def block_kinds(self) -> Tuple[str, ...]:
+        if self.layer_plan is not None:
+            return self.layer_plan.block_kinds
+        return ("attention",)
+
+    @property
+    def hybrid_block_kinds(self) -> Tuple[str, ...]:
+        """Block kinds present that no device law prices yet (P2-P4 owns them)."""
+        if self.layer_plan is None:
+            return ()
+        return self.layer_plan.hybrid_block_kinds
+
+    @property
+    def has_hybrid_blocks(self) -> bool:
+        return bool(self.hybrid_block_kinds)
+
+    @property
+    def ffn_per_layer(self) -> bool:
+        if self.layer_plan is None:
+            return True
+        return bool(self.layer_plan.ffn_per_layer)
+
+    def ffn_dim_for(self, block_kind: str) -> int:
+        """FFN width for one block kind, falling back to intermediate_size."""
+        for key in (str(block_kind), "default"):
+            if key in self.ffn_dims:
+                return int(self.ffn_dims[key])
+        return int(self.intermediate_size)
 
     @property
     def head_dim(self) -> int:
@@ -1720,10 +2372,62 @@ class LLMConfig:
                 f"(got {model_type_raw!r})"
             )
 
-        attention = LLMAttentionConfig.from_dict(_require_field("model_param", model_dict, "attention"))
+        attention_raw = model_dict.get("attention", None)
+        attention = None if attention_raw is None else LLMAttentionConfig.from_dict(attention_raw)
 
         num_layers = _parse_int_field("model_param", model_dict, "num_layers")
         hidden_dim = _parse_int_field("model_param", model_dict, "hidden_dim")
+
+        layer_plan = None
+        if model_dict.get("layer_plan") is not None:
+            layer_plan = LayerPlanConfig.from_dict(
+                model_dict["layer_plan"], num_layers=num_layers
+            )
+        ssm = None
+        if model_dict.get("ssm") is not None:
+            ssm = SSMBlockConfig.from_dict(model_dict["ssm"])
+        linear_attention = None
+        if model_dict.get("linear_attention") is not None:
+            linear_attention = LinearAttentionBlockConfig.from_dict(model_dict["linear_attention"])
+        short_conv = None
+        if model_dict.get("short_conv") is not None:
+            short_conv = ShortConvBlockConfig.from_dict(model_dict["short_conv"])
+        ffn_dims: Dict[str, int] = {}
+        if model_dict.get("ffn_dims") is not None:
+            ffn_dims = _parse_ffn_dims(model_dict["ffn_dims"])
+        shared_weight_groups: Tuple[SharedWeightGroup, ...] = ()
+        if model_dict.get("shared_weight_groups") is not None:
+            groups_raw = model_dict["shared_weight_groups"]
+            if not isinstance(groups_raw, (list, tuple)) or not groups_raw:
+                raise ValueError(
+                    "model_param.shared_weight_groups must be a non-empty list of "
+                    "{name, layers[, lora_rank]} mappings"
+                )
+            shared_weight_groups = tuple(
+                SharedWeightGroup.from_dict(entry, index=idx, num_layers=num_layers)
+                for idx, entry in enumerate(groups_raw)
+            )
+            seen_layers: Dict[int, str] = {}
+            for group in shared_weight_groups:
+                for layer_idx in group.layers:
+                    if layer_idx in seen_layers:
+                        raise ValueError(
+                            f"model_param.shared_weight_groups: layer {layer_idx} appears in "
+                            f"both {seen_layers[layer_idx]!r} and {group.name!r}; a layer may "
+                            "belong to at most one share group."
+                        )
+                    seen_layers[layer_idx] = group.name
+
+        _validate_block_schema(
+            model_type=model_type,
+            layer_plan=layer_plan,
+            attention=attention,
+            ssm=ssm,
+            linear_attention=linear_attention,
+            short_conv=short_conv,
+            hidden_dim=hidden_dim,
+        )
+
         global_batch_size = _parse_int_field("model_param", model_dict, "global_batch_size")
         grad_accum_raw = model_dict.get("gradient_accumulation_steps", None)
         if grad_accum_raw is None:
@@ -1791,11 +2495,23 @@ class LLMConfig:
             if intermediate_size <= 0:
                 raise ValueError("model_param.intermediate_size must be >= 1")
 
-        if model_type == "glm4_moe":
+        if attention is None:
+            pass
+        elif model_type == "glm4_moe":
             if attention.head_dim is None:
                 raise ValueError(
                     "model_param.attention.head_dim must be specified when model_type is 'glm4_moe'"
                 )
+        elif (
+            layer_plan is not None
+            and layer_plan.hybrid_block_kinds
+            and attention.head_dim is not None
+        ):
+            # A HYBRID model may decouple head_dim from hidden_dim/num_heads
+            # (Qwen3.5 gated attention: 2560/16 != 256; Falcon-H1: 3072/12 != 128).
+            # An attention-only plan is a plain transformer that still runs, so
+            # it keeps the guard: plan presence is not the reason to relax it.
+            pass
         elif attention.head_dim is not None:
             if hidden_dim % attention.num_heads != 0:
                 raise ValueError(
@@ -1901,6 +2617,12 @@ class LLMConfig:
             attention=attention,
             moe=moe,
             vision=vision,
+            layer_plan=layer_plan,
+            ssm=ssm,
+            linear_attention=linear_attention,
+            short_conv=short_conv,
+            ffn_dims=ffn_dims,
+            shared_weight_groups=shared_weight_groups,
         )
 
 
@@ -2495,6 +3217,474 @@ class CIMDseConfig:
         )
 
 
+# ---------------------------------------------------------------------------
+# Device cards (QIF P2.1 — D14, ADJ-4)
+#
+# A card is a parameter set plus STRUCTURAL KNOBS: the parameters set the
+# numbers, the knobs change the shape of a law. `cim.analog` and `cim.fabric`
+# already carry the shipped cards' parameter halves, so the card block
+# PROMOTES them instead of replacing them: when `cim.cards` is absent the
+# library is synthesized from those two blocks with inert knob defaults, and
+# every shipped YAML parses unchanged and prices identically.
+# ---------------------------------------------------------------------------
+
+#: Device families the analog-macro card admits. `ctt` is the populated card;
+#: `reram` / `mram` are NAMED EMPTY SLOTS (ADJ-4) — the schema exists and no
+#: parameters are shipped, so a card on those families must supply its own
+#: `params` block in full. Nothing is ever inherited into an empty slot.
+CIM_DEVICE_FAMILIES = ("ctt", "reram", "mram")
+CIM_EMPTY_CARD_SLOTS = ("reram", "mram")
+#: Where the bit slices of one weight word live (P2.4).
+CIM_SLICING_ARRANGEMENTS = ("column_sets", "chained_macros")
+CIM_CARD_KINDS = ("analog_macro", "digital_chiplet")
+
+
+@dataclass(frozen=True)
+class CIMCardValidityPoint:
+    """One admitted (bits_per_cell, weight_bits, mux) point of a card menu.
+
+    The menu is the honesty device: a device does not support every
+    bits-per-cell, so the tool REFUSES an unlisted point instead of
+    interpolating one.
+    """
+
+    bits_per_cell: int
+    weight_bits: int
+    mux: int
+
+    @classmethod
+    def from_dict(cls, point_dict: object, context: str) -> "CIMCardValidityPoint":
+        point_dict = _require_mapping(context, point_dict)
+        return cls(
+            bits_per_cell=_parse_int_field(context, point_dict, "bits_per_cell"),
+            weight_bits=_parse_int_field(context, point_dict, "weight_bits"),
+            mux=_parse_int_field(context, point_dict, "mux"),
+        )
+
+    def as_tuple(self) -> Tuple[int, int, int]:
+        return (self.bits_per_cell, self.weight_bits, self.mux)
+
+
+@dataclass
+class CIMAnalogCardConfig:
+    """A named analog-macro device card: `cim.analog` plus structural knobs.
+
+    Knob semantics (each one changes a law, not just a constant):
+      * bits_per_cell / weight_bits — bit slicing is present IFF
+        ``bits_per_cell < weight_bits`` (ADJ-4). Both 0 means the card
+        declares no cell width and slicing is off (``n_slices == 1``).
+      * slicing — where the slices of one weight word live.
+      * bank_depth — mux slots per allocatable bank, i.e. the allocation
+        granularity the card admits. Default ``adc_mux`` = the whole macro,
+        which is today's dedicated-per-matrix behavior.
+      * stack_3d_height — divides the FOOTPRINT a macro occupies on the
+        package. It never divides silicon area or energy.
+      * validity — the admitted (bits_per_cell, weight_bits, mux) menu. An
+        empty menu means the card declares none, and nothing is refused.
+      * pool_* — per-macro digital pool cost knobs (D12, P2.5). 0 means the
+        card declares no number and the pool term reports zero, exactly as
+        ``area_mm2_per_array: 0`` disables area reporting.
+    """
+
+    name: str
+    device: str
+    params: CIMAnalogConfig
+    bits_per_cell: int = 0
+    weight_bits: int = 0
+    slicing: str = "column_sets"
+    bank_depth: int = 0          # 0 -> params.adc_mux (the whole macro)
+    stack_3d_height: int = 1
+    validity: Tuple[CIMCardValidityPoint, ...] = ()
+    pool_clock_ghz: float = 0.0        # 0 -> inherit the digital card's clock
+    pool_energy_per_add_pj: float = 0.0
+    pool_area_mm2_per_adder: float = 0.0
+    #: Analog cycles lost switching from one active column set to the next.
+    #: DEFAULT 0 — no bank-switch cost is shipped for any device, which is a
+    #: DISCLOSED relaxation (AUDIT finding 3: OPTIMA priced switching at zero
+    #: silently; this states it). A card that knows its number declares it.
+    bank_switch_cycles: int = 0
+
+    @property
+    def n_slices(self) -> int:
+        """Bit slices per weight word: ceil(weight_bits / bits_per_cell)."""
+        if self.bits_per_cell <= 0 or self.weight_bits <= 0:
+            return 1
+        if self.bits_per_cell >= self.weight_bits:
+            return 1
+        return -(-int(self.weight_bits) // int(self.bits_per_cell))
+
+    @property
+    def slicing_enabled(self) -> bool:
+        """Slicing is present iff bits_per_cell < weight_bits (ADJ-4)."""
+        return self.n_slices > 1
+
+    @property
+    def column_sets_per_macro(self) -> int:
+        """Column sets (mux slots) one macro carries — the ADC passes it owns."""
+        return int(self.params.adc_mux)
+
+    @property
+    def stored_columns_per_set(self) -> int:
+        """Stored weight columns in one column set."""
+        return int(self.params.cols_adc)
+
+    @property
+    def allocation_granularity(self) -> int:
+        """Mux slots in one allocatable bank (bank_depth, or the whole macro)."""
+        return self.bank_depth if self.bank_depth > 0 else self.column_sets_per_macro
+
+    def admits(self, bits_per_cell: int, weight_bits: int, mux: int) -> bool:
+        """True when the point is on the card's menu (or no menu is declared)."""
+        if not self.validity:
+            return True
+        return (int(bits_per_cell), int(weight_bits), int(mux)) in {
+            point.as_tuple() for point in self.validity
+        }
+
+    @classmethod
+    def synthesized(cls, analog: CIMAnalogConfig) -> "CIMAnalogCardConfig":
+        """The card implied by a `cim.analog` block with no `cim.cards`.
+
+        Every knob is inert: no slicing, whole-macro allocation, no stacking,
+        no menu, no declared pool costs.
+        """
+        return cls(name="default", device="ctt", params=analog)
+
+    @classmethod
+    def from_dict(
+        cls,
+        card_dict: Dict[str, object],
+        name: str,
+        analog_default: Optional[CIMAnalogConfig],
+    ) -> "CIMAnalogCardConfig":
+        context = f"cim.cards.{name}"
+        device = str(card_dict.get("device", "ctt")).strip().lower()
+        if device not in CIM_DEVICE_FAMILIES:
+            raise ValueError(
+                f"{context}.device must be one of {list(CIM_DEVICE_FAMILIES)} "
+                f"(got {card_dict.get('device')!r})"
+            )
+        params_dict = card_dict.get("params")
+        if params_dict is None:
+            if device in CIM_EMPTY_CARD_SLOTS:
+                raise ValueError(
+                    f"{context}: device '{device}' is a NAMED EMPTY CARD SLOT — the schema "
+                    "exists but no parameters are shipped for it, so the card must supply a "
+                    "complete 'params' block of its own. Nothing is inherited into an empty slot."
+                )
+            if analog_default is None:
+                raise ValueError(
+                    f"{context}: no 'params' block and no cim.analog block to inherit from."
+                )
+            params = analog_default
+        else:
+            params = CIMAnalogConfig.from_dict(_require_mapping(f"{context}.params", params_dict))
+        bits_per_cell = _coerce_int(
+            card_dict.get("bits_per_cell", 0), f"{context}.bits_per_cell", min_value=0
+        )
+        weight_bits = _coerce_int(
+            card_dict.get("weight_bits", 0), f"{context}.weight_bits", min_value=0
+        )
+        if (bits_per_cell > 0) != (weight_bits > 0):
+            raise ValueError(
+                f"{context}: bits_per_cell and weight_bits must be declared together "
+                f"(got bits_per_cell={bits_per_cell}, weight_bits={weight_bits}); slicing is "
+                "present iff bits_per_cell < weight_bits."
+            )
+        slicing = str(card_dict.get("slicing", "column_sets")).strip().lower()
+        if slicing not in CIM_SLICING_ARRANGEMENTS:
+            raise ValueError(
+                f"{context}.slicing must be one of {list(CIM_SLICING_ARRANGEMENTS)} "
+                f"(got {card_dict.get('slicing')!r})"
+            )
+        bank_depth = _coerce_int(
+            card_dict.get("bank_depth", 0), f"{context}.bank_depth", min_value=0
+        )
+        if bank_depth > 0 and int(params.adc_mux) % bank_depth != 0:
+            raise ValueError(
+                f"{context}.bank_depth = {bank_depth} must divide the card's adc_mux "
+                f"= {params.adc_mux}: a bank is a whole number of mux slots and the mux "
+                "slot is the smallest allocatable unit."
+            )
+        stack_3d_height = _coerce_int(
+            card_dict.get("stack_3d_height", 1), f"{context}.stack_3d_height", min_value=1
+        )
+        validity_raw = card_dict.get("validity", ())
+        if not isinstance(validity_raw, (list, tuple)):
+            raise ValueError(
+                f"{context}.validity must be a list of "
+                f"(bits_per_cell, weight_bits, mux) mappings (got {validity_raw!r})"
+            )
+        validity = tuple(
+            CIMCardValidityPoint.from_dict(item, f"{context}.validity[{index}]")
+            for index, item in enumerate(validity_raw)
+        )
+        card = cls(
+            name=name,
+            device=device,
+            params=params,
+            bits_per_cell=bits_per_cell,
+            weight_bits=weight_bits,
+            slicing=slicing,
+            bank_depth=bank_depth,
+            stack_3d_height=stack_3d_height,
+            validity=validity,
+            pool_clock_ghz=_parse_cim_float(
+                card_dict, context, "pool_clock_ghz", default=0.0
+            ),
+            pool_energy_per_add_pj=_parse_cim_float(
+                card_dict, context, "pool_energy_per_add_pj", default=0.0
+            ),
+            pool_area_mm2_per_adder=_parse_cim_float(
+                card_dict, context, "pool_area_mm2_per_adder", default=0.0
+            ),
+            bank_switch_cycles=_coerce_int(
+                card_dict.get("bank_switch_cycles", 0),
+                f"{context}.bank_switch_cycles",
+                min_value=0,
+            ),
+        )
+        if validity and not card.admits(bits_per_cell, weight_bits, int(params.adc_mux)):
+            raise ValueError(
+                f"{context}: the card's own point (bits_per_cell={bits_per_cell}, "
+                f"weight_bits={weight_bits}, mux={params.adc_mux}) is not on its validity "
+                "menu. The menu lists what the device admits; the tool refuses an unlisted "
+                "point instead of interpolating one."
+            )
+        return card
+
+
+@dataclass
+class CIMDigitalChipletCardConfig:
+    """A named SHARED DIGITAL CHIPLET card: `cim.fabric` plus its cost knobs.
+
+    The attention (systolic-array) and softmax-lane laws are this card's laws
+    (D13); `cim_timing.CimDeviceModel` reads them from the same
+    :class:`CIMFabricConfig` object the card wraps, so promoting the block to
+    a card changes no number. `area_mm2` is the chiplet's own silicon, reported
+    by `CimDeviceModel.shared_digital_area_mm2` and added to
+    `CimDeviceModel.system_area_mm2`; it defaults to 0, which reports zero
+    exactly as `area_mm2_per_array: 0` does. There is no energy knob: no law
+    prices a fabric op's energy yet, and a cost knob nothing reads is worse
+    than a missing one.
+    """
+
+    name: str
+    fabric: CIMFabricConfig
+    area_mm2: float = 0.0
+
+    @classmethod
+    def synthesized(cls, fabric: CIMFabricConfig) -> "CIMDigitalChipletCardConfig":
+        return cls(name="default", fabric=fabric)
+
+    @classmethod
+    def from_dict(
+        cls,
+        card_dict: Dict[str, object],
+        name: str,
+        fabric_default: Optional[CIMFabricConfig],
+    ) -> "CIMDigitalChipletCardConfig":
+        context = f"cim.cards.{name}"
+        if "energy_per_op_pj" in card_dict:
+            raise ValueError(
+                f"{context}.energy_per_op_pj is not a card field: no law prices a shared "
+                "digital chiplet op's energy yet, and the schema does not carry a cost knob "
+                "nothing reads. Fabric energy lands with P4 (evaluation)."
+            )
+        params_dict = card_dict.get("params")
+        if params_dict is None:
+            if fabric_default is None:
+                raise ValueError(
+                    f"{context}: no 'params' block and no cim.fabric block to inherit from."
+                )
+            fabric = fabric_default
+        else:
+            fabric = CIMFabricConfig.from_dict(_require_mapping(f"{context}.params", params_dict))
+        return cls(
+            name=name,
+            fabric=fabric,
+            area_mm2=_parse_cim_float(card_dict, context, "area_mm2", default=0.0),
+        )
+
+
+@dataclass
+class CIMCardLibrary:
+    """The parsed `cim.cards` block, or the library `cim.analog`/`cim.fabric` imply.
+
+    `default_analog` / `default_digital` name the cards the device model uses;
+    a synthesized library names both "default".
+    """
+
+    analog: Dict[str, CIMAnalogCardConfig]
+    digital: Dict[str, CIMDigitalChipletCardConfig]
+    default_analog: str
+    default_digital: str
+
+    @property
+    def analog_card(self) -> CIMAnalogCardConfig:
+        return self.analog[self.default_analog]
+
+    @property
+    def digital_card(self) -> CIMDigitalChipletCardConfig:
+        return self.digital[self.default_digital]
+
+    @classmethod
+    def synthesized(
+        cls, analog: CIMAnalogConfig, fabric: CIMFabricConfig
+    ) -> "CIMCardLibrary":
+        return cls(
+            analog={"default": CIMAnalogCardConfig.synthesized(analog)},
+            digital={"default": CIMDigitalChipletCardConfig.synthesized(fabric)},
+            default_analog="default",
+            default_digital="default",
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        cards_dict: Optional[Dict[str, object]],
+        analog_default: Optional[CIMAnalogConfig],
+        fabric_default: Optional[CIMFabricConfig],
+    ) -> "CIMCardLibrary":
+        cards_dict = _require_mapping("cim.cards", cards_dict)
+        analog_cards: Dict[str, CIMAnalogCardConfig] = {}
+        digital_cards: Dict[str, CIMDigitalChipletCardConfig] = {}
+        default_analog = None
+        default_digital = None
+        for name, entry in cards_dict.items():
+            if name in ("default_analog", "default_digital"):
+                continue
+            entry = _require_mapping(f"cim.cards.{name}", entry)
+            kind = str(entry.get("kind", "analog_macro")).strip().lower()
+            if kind == "analog_macro":
+                analog_cards[str(name)] = CIMAnalogCardConfig.from_dict(
+                    entry, str(name), analog_default
+                )
+            elif kind == "digital_chiplet":
+                digital_cards[str(name)] = CIMDigitalChipletCardConfig.from_dict(
+                    entry, str(name), fabric_default
+                )
+            else:
+                raise ValueError(
+                    f"cim.cards.{name}.kind must be one of {list(CIM_CARD_KINDS)} "
+                    f"(got {entry.get('kind')!r})"
+                )
+        if not analog_cards:
+            if analog_default is None:
+                raise ValueError(
+                    "cim.cards declares no analog_macro card and there is no cim.analog "
+                    "block to synthesize one from."
+                )
+            analog_cards["default"] = CIMAnalogCardConfig.synthesized(analog_default)
+        if not digital_cards:
+            if fabric_default is None:
+                raise ValueError(
+                    "cim.cards declares no digital_chiplet card and there is no cim.fabric "
+                    "block to synthesize one from."
+                )
+            digital_cards["default"] = CIMDigitalChipletCardConfig.synthesized(fabric_default)
+        default_analog = str(cards_dict.get("default_analog", next(iter(analog_cards))))
+        default_digital = str(cards_dict.get("default_digital", next(iter(digital_cards))))
+        if default_analog not in analog_cards:
+            raise ValueError(
+                f"cim.cards.default_analog = {default_analog!r} names no analog_macro card "
+                f"(have {list(analog_cards)})"
+            )
+        if default_digital not in digital_cards:
+            raise ValueError(
+                f"cim.cards.default_digital = {default_digital!r} names no digital_chiplet "
+                f"card (have {list(digital_cards)})"
+            )
+        return cls(
+            analog=analog_cards,
+            digital=digital_cards,
+            default_analog=default_analog,
+            default_digital=default_digital,
+        )
+
+
+@dataclass(frozen=True)
+class CIMTileAssignment:
+    """One user-written tile placement (a `cim.allocation.assignments` entry).
+
+    The owner half names the tile (D21: every tile has a named owner); the
+    site half places it. `column_sets` are mux-slot ids inside `macro`.
+    """
+
+    model: str
+    layer: int
+    op: str
+    expert: int
+    shard: int
+    slice_index: int
+    macro: int
+    column_sets: Tuple[int, ...]
+
+    @classmethod
+    def from_dict(cls, entry: object, index: int) -> "CIMTileAssignment":
+        context = f"cim.allocation.assignments[{index}]"
+        entry = _require_mapping(context, entry)
+        sets_raw = _require_field(context, entry, "column_sets")
+        if not isinstance(sets_raw, (list, tuple)) or not sets_raw:
+            raise ValueError(
+                f"{context}.column_sets must be a non-empty list of mux-slot ids "
+                f"(got {sets_raw!r})"
+            )
+        column_sets = tuple(
+            _coerce_int(item, f"{context}.column_sets entries", min_value=0) for item in sets_raw
+        )
+        if len(set(column_sets)) != len(column_sets):
+            raise ValueError(f"{context}.column_sets repeats a mux-slot id: {list(column_sets)}")
+        return cls(
+            model=str(entry.get("model", "")),
+            layer=_coerce_int(entry.get("layer", 0), f"{context}.layer", min_value=0),
+            op=str(_require_field(context, entry, "op")),
+            expert=_coerce_int(entry.get("expert", -1), f"{context}.expert", min_value=-1),
+            shard=_coerce_int(entry.get("shard", 0), f"{context}.shard", min_value=0),
+            slice_index=_coerce_int(
+                entry.get("slice_index", 0), f"{context}.slice_index", min_value=0
+            ),
+            macro=_coerce_int(_require_field(context, entry, "macro"), f"{context}.macro", min_value=0),
+            column_sets=tuple(sorted(column_sets)),
+        )
+
+
+@dataclass
+class CIMAllocationConfig:
+    """The optional `cim.allocation` block: user-specified tile allocation (D10).
+
+    ABSENT means today's dedicated-per-matrix behavior, bit-identically: one
+    owner per macro, every mux slot of the macro activated by that owner.
+    """
+
+    #: Mux slots per tile; None inherits the card's bank_depth.
+    column_sets_per_tile: Optional[int] = None
+    assignments: Tuple[CIMTileAssignment, ...] = ()
+
+    @classmethod
+    def from_dict(cls, alloc_dict: Optional[Dict[str, object]]) -> "CIMAllocationConfig":
+        alloc_dict = _require_mapping("cim.allocation", alloc_dict)
+        raw = alloc_dict.get("column_sets_per_tile")
+        column_sets_per_tile = (
+            None
+            if raw is None
+            else _coerce_int(raw, "cim.allocation.column_sets_per_tile", min_value=1)
+        )
+        assignments_raw = alloc_dict.get("assignments", ())
+        if not isinstance(assignments_raw, (list, tuple)):
+            raise ValueError(
+                "cim.allocation.assignments must be a list of tile placements "
+                f"(got {assignments_raw!r})"
+            )
+        return cls(
+            column_sets_per_tile=column_sets_per_tile,
+            assignments=tuple(
+                CIMTileAssignment.from_dict(item, index)
+                for index, item in enumerate(assignments_raw)
+            ),
+        )
+
+
 @dataclass
 class CIMConfig:
     """Top-level `cim:` block for device_class: fws_cim hardware configs."""
@@ -2506,18 +3696,64 @@ class CIMConfig:
     kv_dram: Optional[CIMKvDramConfig] = None
     #: Optional DSE candidate space; parse-only (tools/fws_cim_dse.py).
     dse: Optional[CIMDseConfig] = None
+    #: Device-card library (P2.1). Always present: synthesized from analog +
+    #: fabric when `cim.cards` is absent, so shipped YAMLs price identically.
+    cards: Optional[CIMCardLibrary] = None
+    #: User-specified tile allocation (P2.2, D10). None = dedicated per matrix.
+    allocation: Optional[CIMAllocationConfig] = None
+
+    @property
+    def analog_card(self) -> CIMAnalogCardConfig:
+        """The active analog-macro card (the synthesized one when none is named)."""
+        return self.cards.analog_card
+
+    @property
+    def digital_card(self) -> CIMDigitalChipletCardConfig:
+        """The active shared-digital-chiplet card."""
+        return self.cards.digital_card
 
     @classmethod
     def from_dict(cls, cim_dict: Optional[Dict[str, object]]) -> "CIMConfig":
         cim_dict = _require_mapping("cim", cim_dict)
         kv_dram_dict = cim_dict.get("kv_dram")
         dse_dict = cim_dict.get("dse")
+        cards_dict = cim_dict.get("cards")
+        allocation_dict = cim_dict.get("allocation")
+        analog = CIMAnalogConfig.from_dict(_require_field("cim", cim_dict, "analog"))
+        fabric = CIMFabricConfig.from_dict(_require_field("cim", cim_dict, "fabric"))
+        cards = (
+            CIMCardLibrary.synthesized(analog, fabric)
+            if cards_dict is None
+            else CIMCardLibrary.from_dict(cards_dict, analog, fabric)
+        )
+        allocation = (
+            None if allocation_dict is None else CIMAllocationConfig.from_dict(allocation_dict)
+        )
+        if allocation is not None and allocation.column_sets_per_tile is not None:
+            mux = int(cards.analog_card.params.adc_mux)
+            if mux % allocation.column_sets_per_tile != 0:
+                raise ValueError(
+                    f"cim.allocation.column_sets_per_tile = {allocation.column_sets_per_tile} "
+                    f"must divide the active card's adc_mux = {mux}: the mux slot is the "
+                    "smallest allocatable unit."
+                )
+        if allocation is not None and allocation.assignments:
+            # A user-written allocation is priced AND validated by the tool
+            # (D10), so the capacity check runs where the block is parsed —
+            # not only when a test reaches for the device model.
+            import cim_timing as _cim_timing
+
+            _cim_timing.check_allocation_capacity(
+                int(cards.analog_card.column_sets_per_macro), allocation.assignments
+            )
         return cls(
-            analog=CIMAnalogConfig.from_dict(_require_field("cim", cim_dict, "analog")),
-            fabric=CIMFabricConfig.from_dict(_require_field("cim", cim_dict, "fabric")),
+            analog=analog,
+            fabric=fabric,
             chip=CIMChipConfig.from_dict(_require_field("cim", cim_dict, "chip")),
             kv_dram=None if kv_dram_dict is None else CIMKvDramConfig.from_dict(kv_dram_dict),
             dse=None if dse_dict is None else CIMDseConfig.from_dict(dse_dict),
+            cards=cards,
+            allocation=allocation,
         )
 
 
@@ -2868,6 +4104,16 @@ def _validate_fws_cim_model(model: object) -> None:
             "device_class: fws_cim does not support model_param.run_type: training — "
             "fixed-weight-stationary arrays admit no weight writes. Set run_type: inference."
         )
+    hybrid_kinds = tuple(getattr(model, "hybrid_block_kinds", ()) or ())
+    if hybrid_kinds:
+        raise ValueError(
+            "device_class: fws_cim does not support model_param.layer_plan block kinds "
+            f"{', '.join(hybrid_kinds)} — the analog macro laws price weight GEMMs and "
+            "the digital fabric prices attention, and neither covers a recurrence, a "
+            "delta-rule state, or a depthwise short convolution. Pricing for these "
+            "blocks lands with P2 (macro resource model), P3 (mapping) and P4 "
+            "(evaluation); until then use a model whose layer plan is attention-only."
+        )
     attention_type = str(
         getattr(getattr(model, "attention", None), "attention_type", "mha")
     ).lower()
@@ -2899,6 +4145,38 @@ def _validate_fws_cim_model(model: object) -> None:
         )
 
 
+def _unpriced_model_inputs(model: "LLMConfig") -> Tuple[str, ...]:
+    """Modeling inputs that parse but that no timing path prices yet (P1.4).
+
+    Same rule as the hybrid block-kind gate: pricing a declared input as if it
+    were absent is a wrong number rather than a missing one. Only the parameter
+    census (`llm_util`) reads these; the pricing seam lands with P2-P4.
+    """
+    unpriced: List[str] = []
+    attention = getattr(model, "attention", None)
+    window = getattr(attention, "window", None)
+    if window is not None and int(window.local_global_interval) != 1:
+        unpriced.append(
+            "model_param.attention.window (every attention op is priced against "
+            "the full KV context, so a local layer would be charged as global)"
+        )
+    if bool(getattr(attention, "output_gate", False)):
+        unpriced.append(
+            "model_param.attention.output_gate (no stage prices the gate projection)"
+        )
+    if tuple(getattr(model, "shared_weight_groups", ()) or ()):
+        unpriced.append(
+            "model_param.shared_weight_groups (depth-shared weights are stored once "
+            "but every path prices one weight set per layer)"
+        )
+    if dict(getattr(model, "ffn_dims", {}) or {}):
+        unpriced.append(
+            "model_param.ffn_dims (every FFN stage is priced at "
+            "model_param.intermediate_size)"
+        )
+    return tuple(unpriced)
+
+
 def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> None:
     sch = getattr(hw_config, "sch_config", None)
     if sch is None:
@@ -2926,6 +4204,33 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     if not isinstance(model, LLMConfig):
         raise ValueError("Unsupported model config type for validation")
+
+    # Every timing path in this repo prices ONE uniform transformer layer
+    # repeated num_layers times. A hybrid layer plan would be priced as if its
+    # SSM / linear-attention / short-conv blocks were attention layers, which
+    # is a wrong number rather than a missing one — so refuse it outright on
+    # every device class. Pricing lands with P2-P4.
+    if model.has_hybrid_blocks:
+        raise ValueError(
+            "model_param.layer_plan declares block kinds "
+            f"{', '.join(model.hybrid_block_kinds)}, which no device path prices yet: "
+            f"device_class {str(getattr(hw_config, 'device_class', 'gpu')).lower()!r} would "
+            "price them as plain attention layers. Pricing for these blocks lands with "
+            "P2 (macro resource model), P3 (mapping) and P4 (evaluation); until then only "
+            "attention-only layer plans run."
+        )
+
+    unpriced = _unpriced_model_inputs(model)
+    if unpriced:
+        raise ValueError(
+            "model_param declares modeling inputs no device path prices yet: "
+            + "; ".join(unpriced)
+            + ". device_class "
+            + repr(str(getattr(hw_config, "device_class", "gpu")).lower())
+            + " would price the model as if they were absent, which is a wrong number "
+            "rather than a missing one. Pricing lands with P2 (macro resource model), "
+            "P3 (mapping) and P4 (evaluation); until then remove the field."
+        )
 
     if model.use_moe and model.top_k > model.num_experts:
         raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")

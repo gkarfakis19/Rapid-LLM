@@ -1,0 +1,43 @@
+# SmolLM3-3B inference config — a RUNS-NOW row. It carries an attention-only
+# layer_plan on purpose: a block-typed plan with no SSM / linear-attention /
+# short-conv block is NOT a hybrid, so it still runs on the existing paths.
+# Dims verified 2026-08-23 against the published HuggingFace config.json:
+#   https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/main/config.json
+# NoPE on every 4th layer is not priced (position encoding is free here).
+provenance:
+  source: "https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 3075098624  # model.safetensors.index total_size
+  # 6,150,197,248 B / 2 (bf16).
+  d2_status: supported
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true
+  model_type: "llama"
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 512
+  decode_len: 32
+  hidden_dim: 2048
+  layer_plan:
+    pattern: ["full_attention"]  # HF layer_types is full_attention on all 36
+  attention:
+    attention_type: "gqa"
+    num_heads: 16
+    kv_heads: 4
+    use_flashattention: false
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 11008
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 36
+  intermediate_size: 11008
+  vocab_size: 128256
+  num_layers: 36
+
+inference_param:
+  sample_every: -1
