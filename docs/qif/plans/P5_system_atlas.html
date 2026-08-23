@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P5 · The System Atlas</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P5</div>
+<h1>The System Atlas</h1>
+<p class="mission">One self-contained page that draws a real mapping &mdash; package to chip to macro to tile, colored by parallelism group.</p>
+
+<h2>Mission context</h2>
+<p>The atlas is a deliverable, not a debug aid. It is the page George opens in front of people. It answers, in five seconds and without a caption, what the machine looks like and how the model sits on it.</p>
+<p>It is also the mapper&#39;s honesty enforcer. The atlas draws objects, never quotients. A chip exists because it has an id and holds macros. A macro is drawn because it names its owners (D21). A mapping that cannot be drawn is not a mapping &mdash; OPTIMA&#39;s &ldquo;layers/chip: 3&rdquo; has no picture, because it is a division and not a placement (AUDIT finding 1).</p>
+<p>The atlas computes nothing. Every number on screen arrives in the input file. That is deliberate: it is how the project avoids growing a second, disagreeing accounting inside a viewer (AUDIT finding 4, D21).</p>
+
+<h2>Scope &amp; exclusions</h2>
+<div class="overflow">
+<table>
+<tr><th>In</th><th>Out</th></tr>
+<tr><td>Logical containment: package &rarr; chip &rarr; macro &rarr; tile (D20)</td><td>Geometric floorplanning, area-to-scale layout, wirelengths (D20)</td></tr>
+<tr><td>Color by parallelism group tp / ep / pp (D20)</td><td>Routing, congestion, topology drawing (A1, D17)</td></tr>
+<tr><td>Per-macro occupancy and duty cycle; pool membership (analog vs shared digital)</td><td>Recomputing any law. The atlas never calls <code>cim_timing.py</code></td></tr>
+<tr><td>Tile detail: model, layer, expert, bit-slice role (D11)</td><td>Editing or what-if. Read-only viewer, not a mapper UI</td></tr>
+<tr><td>PD-disagg as two systems side by side with the handoff link (D16)</td><td>Schedule waveforms and DAG timelines &mdash; P4&#39;s report owns those</td></tr>
+<tr><td>One HTML file, inline JS + SVG, no external assets</td><td>Build steps, servers, CDNs, npm, fonts, frameworks</td></tr>
+</table>
+</div>
+
+<h2>Where we stand</h2>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>What it gives the atlas</th><th>Gap</th></tr>
+<tr><td><code>docs/fws_cim/README.md</code></td><td>The current report/JSON contract in prose</td><td>Describes an aggregate report, not a placement</td></tr>
+<tr><td><code>output/&lt;MODE&gt;/fws_cim_report.json</code></td><td>Per-chip occupancy, array census, area, stage tables, <code>derived_layers_per_chip</code></td><td>Layers per chip, not tiles per macro. No owners, no groups, no macro identity</td></tr>
+<tr><td><code>output/fws_cim_dse/&hellip;/dse_report.json</code></td><td>Candidate table, Pareto front, selected point, tagged infeasibilities</td><td>Selection metadata only; no placement detail. Feeds a later sweep view</td></tr>
+<tr><td><code>tools/fws_cim_dse.py</code></td><td><code>layers_per_chip: auto</code> greedy packing &mdash; today&#39;s only real placement</td><td>Coarse: a layer split, not a tile assignment</td></tr>
+<tr><td><code>cim_timing.py</code></td><td>The laws behind every number the atlas prints</td><td>Called by producers only. Never by the atlas</td></tr>
+<tr><td><code>/app/nanocad/projects/cim_ctt_big_optima/perf_model/output/</code></td><td>Static Pareto PNGs</td><td>No placement figure exists anywhere to port</td></tr>
+<tr><td>QIF proposal figure</td><td>The visual reference: package outline, a field of analog macro chiplets, a few digital chiplets</td><td>A drawing, not a renderer</td></tr>
+</table>
+</div>
+<p>Nothing to port. The atlas becomes possible the moment P3 emits named placements, and impossible before that. Its schedule is therefore P3&#39;s schedule.</p>
+
+<h2>The investigation</h2>
+
+<h3>The views</h3>
+<div class="overflow">
+<table>
+<tr><th>View</th><th>Draws</th><th>Encodes</th><th>Descends to</th></tr>
+<tr><td>Package</td><td>Every chip as a cell, clustered by pool; traffic-bearing links as lines</td><td>Hue = dominant group; outline = analog vs shared digital; line weight = bytes per inference</td><td>Chip</td></tr>
+<tr><td>Chip</td><td>The chip&#39;s macros as a deterministic grid</td><td>Hue = resident group; fill = occupancy (stored columns used / available); empty macros drawn as explicitly reserved</td><td>Macro</td></tr>
+<tr><td>Macro</td><td>The column map: stored columns as bands, one band per resident tile</td><td>Band width = columns held; hue = group; slice bands of one weight matrix share a bracket (D11)</td><td>Tile card</td></tr>
+<tr><td>Tile card</td><td>Text detail on hover, pinned on click</td><td>Owner tuple (model / layer / block / expert), shape, slice role, group indices, duty cycle, host macro and chip</td><td>&mdash;</td></tr>
+<tr><td>PD overlay</td><td>Prefill system and decode system side by side, one handoff link between them (D16)</td><td>Same encodings twice; the handoff carries its priced bytes</td><td>Either system</td></tr>
+</table>
+</div>
+
+<h3>The encoding law</h3>
+<p>One fact, one channel. This is D21&#39;s &ldquo;one accounting per metric&rdquo; applied to pixels.</p>
+<ul>
+<li><strong>Hue is the parallelism group and nothing else</strong> (D20). Fixed hue order, assigned by group id, never cycled and never re-assigned when a filter changes what is visible.</li>
+<li><strong>Occupancy is a single-hue fill ramp</strong>, light to dark. Duty cycle is a separate small bar in the tile card. Neither ever becomes a hue, and no rainbow appears anywhere.</li>
+<li><strong>Outline is pool membership.</strong> Analog macro chiplet or shared digital chiplet (D13) &mdash; a border style, not a color.</li>
+<li><strong>Position is containment only.</strong> Grid order comes from ids, so the same file always draws the same picture and screenshots diff meaningfully.</li>
+<li><strong>Identity is never color alone.</strong> A legend is always on screen, and group membership is also printed in the card, so the figure survives grayscale print and color-vision deficiency.</li>
+<li><strong>Unknown is drawn, not inferred.</strong> A field the input omits renders as a hatch labeled unknown. The atlas never fills a gap with a guess.</li>
+<li>The palette is checked with a CVD/contrast validator before the atlas ships; hue count stays small because the group axis is small.</li>
+</ul>
+
+<h3>The input contract</h3>
+<p>The atlas consumes one file, <code>atlas.json</code>, schema id <code>fws_atlas/1</code>. This is an exported requirement on P3 (placement) and P4 (time). It is the minimum that lets a renderer draw a real machine.</p>
+<div class="overflow">
+<table>
+<tr><th>Object</th><th>Fields</th><th>Why</th><th>Producer</th></tr>
+<tr><td><code>systems[]</code></td><td><code>id</code>, <code>role</code> (<code>unified</code>&nbsp;|&nbsp;<code>prefill</code>&nbsp;|&nbsp;<code>decode</code>), <code>models[]</code></td><td>PD disagg renders as two systems (D16)</td><td>P3</td></tr>
+<tr><td><code>chips[]</code></td><td><code>id</code>, <code>system</code>, <code>pool</code> (<code>analog</code>&nbsp;|&nbsp;<code>digital</code>), <code>macros[]</code></td><td>Chips are enumerated objects, so chip counts are integers by construction (D21)</td><td>P3</td></tr>
+<tr><td><code>links[]</code></td><td><code>from</code>, <code>to</code>, <code>role</code> (<code>tp</code>&nbsp;|&nbsp;<code>ep</code>&nbsp;|&nbsp;<code>pp</code>&nbsp;|&nbsp;<code>pd</code>), <code>bytes</code></td><td>Package adjacency. On a fully-connected p2p fabric (D17) the drawn links are the ones that carry traffic</td><td>P3</td></tr>
+<tr><td><code>macros[]</code></td><td><code>id</code>, <code>chip</code>, <code>card</code>, <code>capacity{rows, cols_adc, mux, stored_cols}</code>, <code>tiles[]</code>, <code>occupancy</code>, <code>duty_cycle</code>, <code>digital_pool</code></td><td>The atomic resource (A3). <code>card</code> is the device card id (D14); <code>digital_pool</code> is the derived per-macro sizing D12 requires be reported</td><td>P2 shape, P3 fill, P4 duty cycle</td></tr>
+<tr><td><code>tiles[]</code></td><td><code>id</code>, <code>macro</code>, <code>owner{model, layer, block, expert?}</code>, <code>shape{K,N}</code>, <code>slice{index, of, bits}|null</code>, <code>groups{tp, ep, pp}</code>, <code>columns{start, count}</code></td><td>The allocation unit (A3). <code>owner</code> is the named-owner invariant (D21); <code>slice</code> is bit-slicing (D11); <code>groups</code> is the color axis (D20)</td><td>P3</td></tr>
+<tr><td><code>metrics</code></td><td>Headline throughput / latency / period, chips by pool, macro count, each with a label</td><td>The header strip. Labels come from the producer; the atlas never picks which figure is the headline</td><td>P4</td></tr>
+<tr><td><code>relaxations[]</code></td><td><code>constraint</code>, <code>value</code>, <code>reason</code></td><td>Any disabled constraint is disclosed in the artifact (D21, AUDIT finding 5)</td><td>P3 / P4</td></tr>
+</table>
+</div>
+
+<h3>What the loader refuses to draw</h3>
+<p>Renderer behavior, not process (D18). The atlas simply has nothing to put on screen when these fail, and says so in a validation panel.</p>
+<ul>
+<li>A macro with no named owner set, or a tile whose <code>macro</code> or <code>chip</code> does not exist. Referential integrity is checked on load.</li>
+<li>A fractional or derived chip count. If a producer emits chips as a quotient instead of a list, the loader names the field and stops.</li>
+<li>Tile columns that exceed the macro&#39;s stored columns, or that overlap another tile&#39;s span.</li>
+<li>Two unlabeled figures for one metric. Both are drawn only when both carry their own label and meaning (fabric ceiling vs sustained is the live example).</li>
+<li>A non-empty <code>relaxations[]</code> renders as a persistent banner, never a footnote.</li>
+</ul>
+
+<h3>Build phases</h3>
+<div class="overflow">
+<table>
+<tr><th>Phase</th><th>Ships</th><th>Needs</th></tr>
+<tr><td>0 &mdash; the fixture</td><td><code>fws_atlas/1</code> schema plus one hand-written <code>atlas.json</code> for a small real mapping. Written before any renderer; it is what P3/P4 code against</td><td>P3 view of tiles and groups</td></tr>
+<tr><td>1 &mdash; the demo</td><td>Package and chip views, group color, occupancy fill, hover cards, file-drop input, legend, validation panel</td><td>Phase 0</td></tr>
+<tr><td>2 &mdash; drill and filter</td><td>Click to descend with breadcrumbs, macro column map with slice brackets, filter by model / layer / group / pool, owner search</td><td>Phase 1</td></tr>
+<tr><td>3 &mdash; time and pairs</td><td>Duty cycle from the priced DAG, two mappings side by side, the PD two-system view with its handoff</td><td>P4 duty cycle; P3 PD output</td></tr>
+</table>
+</div>
+
+<h3>Machinery</h3>
+<ul>
+<li>One file. Inline JS, inline SVG, inline styles. It opens from a laptop with no network, from an email attachment, from a USB stick.</li>
+<li>Data arrives two ways: a file input, or an embedded <code>&lt;script type=&quot;application/json&quot;&gt;</code> blob so one file can be handed over with its mapping already inside.</li>
+<li>SVG, not canvas. Nodes are countable, hit-testing is free, and the DOM is the debugger.</li>
+<li>A stated draw budget for phase 1 (order 10k rects). Above it, only the opened chip is drawn. Say the limit out loud so the design does not quietly die on a large mapping.</li>
+<li>Deterministic layout from ids. Same input, same picture, every time.</li>
+</ul>
+
+<h3>What a viewer learns in five seconds</h3>
+<ul>
+<li>Which macros are idle, and how much stored column the mapping wastes.</li>
+<li>Where tp cuts, and whether an ep group straddles a chip boundary.</li>
+<li>How much of the machine is analog and how much is shared digital &mdash; the finding D5 predicts for pure transformer LLMs.</li>
+<li>Whether a bit-sliced weight composes inside one macro or chains across several (D11).</li>
+<li>Whether the prefill system looks anything like the decode system (D16).</li>
+</ul>
+
+<h2>Seams</h2>
+<h3>Imports</h3>
+<ul>
+<li><strong>P3</strong> &mdash; the mapping itself: tiles to macros, macros to chips, group indices, pool membership, PD systems, handoff and traffic-bearing links. The atlas renders it and derives none of it.</li>
+<li><strong>P4</strong> &mdash; per-macro duty cycle, the labeled headline metrics, and the disclosed relaxations.</li>
+<li><strong>P2</strong> &mdash; macro capacity semantics (stored columns = cols &times; mux), device-card identity, slice roles, the reported per-macro digital pool sizing (D12).</li>
+<li><strong>P1</strong> &mdash; the owner vocabulary: model ids and layer / block / expert names the cards print.</li>
+<li><strong>P6</strong> &mdash; the honesty invariants and their names, so the loader&#39;s refusals use the project&#39;s wording.</li>
+</ul>
+<h3>Exports</h3>
+<ul>
+<li><strong><code>fws_atlas/1</code></strong> &mdash; the mapping export contract. Frozen at phase 0, before renderer work, so P3 and P4 have one target.</li>
+<li><strong>A conformance check for free</strong> &mdash; any producer can run its output through the loader and learn whether its placement is real: integer chips, named owners, closed references, single accounting, disclosed relaxations.</li>
+<li><strong>The demo artifact</strong> &mdash; the atlas file itself, linked from the board.</li>
+<li><strong>A shared visual vocabulary</strong> &mdash; the tp / ep / pp hue order and legend, so every other figure in the project agrees with this one.</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow">
+<table>
+<tr><th>Implement now</th><th>Address only</th></tr>
+<tr><td>Schema <code>fws_atlas/1</code> and the fixture file</td><td>Sweep browser over <code>dse_report.json</code> (Pareto to atlas)</td></tr>
+<tr><td>Package and chip views, group color, occupancy, hover, legend</td><td>Schedule waveform and DAG timeline</td></tr>
+<tr><td>Loader validation panel and the relaxation banner</td><td>Multi-tenant residency, several models on one macro over time</td></tr>
+<tr><td>Drill-down, filters, macro column map with slice brackets</td><td>3D stack height rendering</td></tr>
+<tr><td>Duty cycle and the PD two-system view once P3/P4 emit them</td><td>Animation, editing, what-if mapping from the page</td></tr>
+<tr><td>&mdash;</td><td>Geometric floorplanning and wirelengths &mdash; excluded permanently by D20, not deferred</td></tr>
+</table>
+</div>
+
+<h2>Open questions for George</h2>
+<ol>
+<li>Separate <code>atlas.json</code> next to the mapping report, or an <code>atlas</code> block inside it? P5 proposes a separate file: one job, one schema, easy to hand someone.</li>
+<li>Which mapping is the fixture and therefore the demo? The Llama2-7B decode point at tp&nbsp;=&nbsp;2 is the obvious first customer; a PD pair would exercise more of the schema at once.</li>
+<li>When a tile belongs to more than one group, which hue wins? P5 proposes P3 emits an explicit <code>primary_group</code> rather than the atlas inventing a precedence rule.</li>
+<li>Do the shared digital chiplets show op residency (which ops ran there), or only pool membership? Op residency needs P4&#39;s DAG and turns the chip view into a schedule.</li>
+<li>Is a single file with the data baked in a first-class output, or is file-drop enough for the demo?</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+</div>
+</main></body></html>

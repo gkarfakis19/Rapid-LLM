@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P1 · The Model Matrix</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P1</div>
+<h1>The Model Matrix</h1>
+<p class="mission">Name every model the framework supports wholesale, record the architecture facts needed to price it, and expose the gaps that stand between the config schema and that list.</p>
+
+<h2>Mission context</h2>
+
+<p>The system runs &le;&nbsp;7B-total-parameter edge inference on analog FWS-CIM macro chiplets plus shared digital chiplets. Weights own cells, so the binding constraint is area and the binding number is TOTAL parameters (D2). This plan fixes the workload side of the contract: which models, what shape, what is missing.</p>
+
+<p>The window is the last ~15 months, May 2025 &ndash; Aug 2026 (D3). It has been the window in which small models stopped being small transformers. The interesting half of the matrix is now state-space, linear-attention, and hybrid. That is where this plan spends its bandwidth.</p>
+
+<p>Support is declared WHOLESALE, per model (D1). The op decomposition in the appendix is an implementation aid and never the support target.</p>
+
+<h2>Scope &amp; exclusions</h2>
+
+<ul>
+<li><strong>In:</strong> open-weights models at &le;&nbsp;7B total params &mdash; vision encoders, pure transformer LLMs (incl. GQA and MLA), SSM and hybrid models, small-TOTAL MoE.</li>
+<li><strong>Out by D2:</strong> big-total / small-active MoE. Nemotron&nbsp;3 Nano (31.6B-A3B), Qwen3.5-35B-A3B, Gemma&nbsp;4 26B-A4B, LFM2.5-8B-A1B (8.3B), Qwen3-Next-80B-A3B. These stay as architecture references only; they are exactly the wrong shape for FWS.</li>
+<li><strong>Out by D7:</strong> DiT / image diffusion, audio and speech. Gemma&nbsp;4's audio encoder is ignored; the vision tower is not.</li>
+<li><strong>Address only (D8):</strong> VLM chaining, VLA. Named below, empty by design.</li>
+<li><strong>Not in scope here:</strong> accuracy. Quantization and ADC-bit surfaces are imported from the arch side (D14), never derived from this matrix.</li>
+</ul>
+
+<h2>Where we stand</h2>
+
+<p><code>cim_timing.py</code> (<code>CimDeviceModel</code>) holds every analog and fabric law. It prices ViT-class models and dense / MoE transformer LLMs with <code>attention_type: mha</code> or <code>gqa</code>, prefill and decode, with two KV stories. It rejects <code>mla</code>, and it has never seen a recurrence of any kind. <code>docs/fws_cim/README.md</code> lists MLA as a known future seam.</p>
+
+<p><code>config.py</code> defines the schema: <code>LLMConfig</code>, <code>LLMAttentionConfig</code>, <code>MoEConfig</code>, <code>ViTConfig</code>. <code>model_type</code> is one of <code>gpt</code>, <code>llama</code>, <code>deepseek_v3</code>, <code>glm4_moe</code>, <code>vit</code>, <code>vit_dinov3</code>. Notably, the MLA dims (<code>kv_lora_rank</code>, <code>q_lora_rank</code>, <code>qk_nope_head_dim</code>, <code>qk_rope_head_dim</code>, <code>v_head_dim</code>) are ALREADY parsed &mdash; MLA is a pricing gap, not a schema gap.</p>
+
+<p><code>configs/model-config/</code> holds ~20 YAMLs: the ViT family (incl. <code>vit_7b_patch16_dinov3_lvd1689m_inf.yaml</code>), <code>llama2_7b_fws_inf.yaml</code>, <code>moe_small_fws_inf.yaml</code>, and the large MLA / MoE references <code>DeepSeekV3_inf.yaml</code> and <code>GLM_4.5_AIR_106B_inf.yaml</code>. Not one of them describes a recurrence. <code>configs/model-config/hf_to_config.py</code> converts a HuggingFace <code>config.json</code> into a Rapid-LLM YAML; it is the natural ingestion point for everything this plan adds.</p>
+
+<p>The only existing SSM law anywhere in reach is OPTIMA's five-stage Mamba2 model, <code>/app/nanocad/projects/cim_ctt_big_optima/perf_model/modeling/stages_mamba.py</code>, described in <code>docs/qif/plans/RECON_optima.md</code>. Per <code>docs/qif/plans/AUDIT_optima.md</code> (D21) its stage laws are a numeric reference; nothing above them is.</p>
+
+<h2>The investigation</h2>
+
+<h3>(a) Vision encoders &mdash; settled, one table (D4)</h3>
+
+<p>ViTs are BERT-class. Any attention flavor, no causality, no decode, no KV. The existing ViT path prices all of them and is already validated against recorded OPTIMA targets. Windowed attention, 2D-RoPE and register tokens change nothing in the cost model. This table exists so the matrix is complete; no further bandwidth goes here.</p>
+
+<div class="overflow">
+<table>
+<tr><th>Encoder</th><th>Released</th><th>Sizes</th><th>Status</th></tr>
+<tr><td>DINOv3 ViT-7B/16 + distilled S/B/L/H+</td><td>Aug 2025</td><td>21M &ndash; 6.7B</td><td>Runs now &mdash; <code>vit_7b_patch16_dinov3_lvd1689m_inf.yaml</code></td></tr>
+<tr><td>SigLIP&nbsp;2 (B/16, L/16, So400m/14, g/16)</td><td>Feb 2025</td><td>86M &ndash; 1B</td><td>Runs now (attention pooling head is an endpoint)</td></tr>
+<tr><td>Perception Encoder (PEcore-G)</td><td>Apr 2025</td><td>1.88B vision</td><td>Runs now</td></tr>
+<tr><td>Qwen3.5 vision tower</td><td>Mar 2026</td><td>24L, d=1024, patch 16, merge 2</td><td>Runs now as a standalone ViT</td></tr>
+<tr><td>Gemma&nbsp;4 E-series vision encoder</td><td>Apr 2026</td><td>~150M</td><td>Runs now</td></tr>
+<tr><td>EUPE distilled students (Meta)</td><td>2026</td><td>6M &ndash; 89M</td><td>Runs now</td></tr>
+</table>
+</div>
+
+<h3>(b)&ndash;(d) The matrix</h3>
+
+<p>One table. Status is <em>runs now</em> (the laws and schema already cover it), <em>schema gap</em> (the laws generalize but the config cannot say it), or <em>new op</em> (a device-level law does not exist). Priority is P0 build-first, P1, P2, or <em>ref</em> (out of scope by D2, kept as an architecture reference).</p>
+
+<div class="overflow">
+<table>
+<tr><th>Model</th><th>Family / released</th><th>Total</th><th>Architecture facts needed for modeling</th><th>Status</th><th>Pri</th></tr>
+
+<tr><td><strong>Qwen3.5</strong> 0.8B / 2B / 4B</td><td>Qwen3.5 dense, 2 Mar 2026</td><td>0.8&ndash;4B</td><td>3:1 gated-DeltaNet : gated attention. 4B verified: 32L, <code>layer_types</code> = 3&times;linear + 1&times;full repeated 8&times;; d=2560, ffn 9216; attn 16 q / 4 kv heads, head_dim 256, output gate, partial RoPE 0.25; linear block 32 value heads &times;128, 16 key heads &times;128, conv k=4; vocab 248320; native vision tower</td><td>New op (delta rule) + schema gap</td><td>P0</td></tr>
+
+<tr><td><strong>Granite 4.0-H-Tiny</strong></td><td>IBM Granite 4.0, Oct 2025</td><td>7B (1B active)</td><td>40L, 36 Mamba2 : 4 attention (9:1, attn at 5/15/25/35); d=1536; Mamba2 d_state 128, 48 heads &times; d_head 64, expand 2, groups 1, conv k=4, chunk 256; NoPE; GQA 12 q / 4 kv; MoE 64 experts top-6, expert ffn 512, shared ffn 1024</td><td>New op (SSD) + schema gap</td><td>P0</td></tr>
+
+<tr><td>Granite 4.0-H-1B / H-350M / H-Micro 3B</td><td>IBM Granite 4.0 Nano, Oct 2025</td><td>0.35&ndash;3B</td><td>Same 40L 9:1 backbone, dense (no experts), shared ffn 4096, d=1536 at 1B</td><td>New op + schema gap</td><td>P0</td></tr>
+
+<tr><td>Granite 4.0-Micro 3B</td><td>IBM Granite 4.0, Oct 2025</td><td>3B</td><td>Conventional dense transformer, GQA &mdash; the non-hybrid twin</td><td>Runs now</td><td>P1</td></tr>
+
+<tr><td><strong>Falcon-H1</strong> 0.5B / 1.5B / 1.5B-deep / 3B / 7B<br>Falcon-H1R 7B</td><td>TII, 21 May 2025 (H1R Jan 2026)</td><td>0.5&ndash;7B</td><td>PARALLEL hybrid: every layer runs attention &#8214; Mamba2 &#8214; MLP. 7B verified: 44L, d=3072, 12 q / 2 kv heads, head_dim 128; Mamba2 d_ssm 3072, d_state 256, 24 heads &times;128, groups 1, conv k=4, chunk 128; ffn 12288</td><td>New op + schema gap (branch structure, not a layer list)</td><td>P0</td></tr>
+
+<tr><td><strong>LFM2</strong> 350M / 700M / 1.2B / 2.6B<br><strong>LFM2.5</strong> 230M / 350M / 1.2B / 2.6B</td><td>Liquid AI, Jul 2025; LFM2.5 through Aug 2026</td><td>0.23&ndash;2.6B</td><td>Double-gated short-conv blocks + GQA. 2.6B verified: 30L, 20 conv : 10 full attention, d=2048, ffn 10752 (SwiGLU), 32 q / 8 kv heads, conv cache L=3. Small sizes: 16 blocks = 10 conv + 6 GQA</td><td>New op (short conv) + schema gap</td><td>P0</td></tr>
+
+<tr><td><strong>RWKV-7 "Goose"</strong> 0.1 / 0.4 / 1.5 / 2.9B (G0/G1 data revisions)</td><td>BlinkDL, Mar 2025 &rarr; 2026</td><td>0.1&ndash;2.9B<br>(7.2B just over)</td><td>Pure linear-attention RNN, no attention layers, ZERO KV cache. Generalized delta rule with vector-valued gating and in-context learning rates. 2.9B = L32-D2560; 7.2B = L32-D4096; head size 64, vocab 65536</td><td>New op (delta rule)</td><td>P1</td></tr>
+
+<tr><td>Zamba2 1.2B / 2.7B / 7B<br>Zamba2-VL 1.2B / 2.7B / 7B</td><td>Zyphra, 2024&ndash;2025; VL Jun 2026</td><td>1.2&ndash;7B</td><td>Mamba2 backbone + TWO SHARED attention blocks interleaved ABAB, weights reused across depth, per-invocation LoRA projectors. VL variant adds a vision tower</td><td>New op + schema gap (depth-shared weights)</td><td>P1</td></tr>
+
+<tr><td>Phi-4-mini-flash-reasoning</td><td>Microsoft SambaY, Jul 2025</td><td>3.8B</td><td>Decoder-hybrid-decoder: self-decoder = Mamba + sliding-window attention + one full-attention layer; cross-decoder interleaves cross-attention with Gated Memory Units that reuse one layer's KV across depth</td><td>New op (GMU, cross-attn) + schema gap</td><td>P2</td></tr>
+
+<tr><td>SmallThinker 4B-A0.6B</td><td>PowerInfer, Jul 2025</td><td>4B (0.6B active)</td><td>Fine-grained MoE + sparse FFN, pre-attention router, NoPE-RoPE hybrid sparse attention</td><td>Schema gap (sparse FFN, hybrid RoPE pattern)</td><td>P2</td></tr>
+
+<tr><td>Nemotron-H 4B</td><td>NVIDIA, Apr 2025 (honorary)</td><td>4B</td><td>Sequential hybrid: ~8% attention layers evenly dispersed, remainder alternating Mamba2 and FFN</td><td>New op + schema gap</td><td>P1</td></tr>
+
+<tr><td>Nemotron Nano 2 (9B / 12B)</td><td>NVIDIA, Aug 2025</td><td>8.9 / 12B</td><td>62L = 6 attention + 28 FFN + 28 Mamba2; d=5120, ffn 20480, GQA 40 q / 8 kv; Mamba2 groups 8, d_state 128, d_head 64, expand 2, conv k=4</td><td>Over D2 &mdash; reference for the layer plan</td><td>ref</td></tr>
+
+<tr><td>Hunyuan 0.5B / 1.8B / 4B / 7B</td><td>Tencent, 30 Jul 2025</td><td>0.5&ndash;7B</td><td>Dense transformer, GQA, 256K context, fast/slow thinking modes</td><td>Runs now</td><td>P1</td></tr>
+
+<tr><td>SmolLM3-3B</td><td>HuggingFace, 9 Jul 2025</td><td>3B</td><td>36L dense, GQA (4 groups), NoPE on every 4th layer (3:1). Position encoding is not priced, so NoPE is free</td><td>Runs now</td><td>P1</td></tr>
+
+<tr><td>Qwen3 0.6B / 1.7B / 4B</td><td>Alibaba, Apr 2025 (honorary)</td><td>0.6&ndash;4B</td><td>Dense transformer, GQA, QK-norm, SwiGLU. The pre-linear-attention baseline</td><td>Runs now</td><td>P1</td></tr>
+
+<tr><td>Gemma&nbsp;3 1B / 4B</td><td>Google, Mar 2025 (honorary)</td><td>1&ndash;4B</td><td>5:1 local sliding-window : global attention, GQA</td><td>Schema gap (window pattern)</td><td>P1</td></tr>
+
+<tr><td>Gemma&nbsp;4 E2B / E4B</td><td>Google, 3 Apr 2026</td><td>E4B: 8B raw / 4.5B effective</td><td>42L, interleaved SWA-512 : global with the last layer always global, unified K/V on global layers, p-RoPE, Per-Layer Embeddings, ~150M vision + ~300M audio encoders</td><td>Schema gap + D2 boundary call</td><td>P2</td></tr>
+
+<tr><td>MiniCPM4 0.5B (8B over)</td><td>OpenBMB, Jun 2025</td><td>0.5B</td><td>InfLLM-v2 trainable block-sparse attention: KV blocked, top-K blocks selected per query group, initial + local window always selected, ~81% sparsity</td><td>Schema gap (block-sparse attention)</td><td>P2</td></tr>
+
+<tr><td>MiniCPM3-4B</td><td>OpenBMB, Sep 2024 (honorary, D6 carrier)</td><td>4B</td><td>MLA at small scale: 62L, d=2560, 40 heads, <code>q_lora_rank</code> 768, <code>kv_lora_rank</code> 256, <code>qk_nope_head_dim</code> 64, <code>qk_rope_head_dim</code> 32, ffn 6400</td><td>Pricing seam (schema already has the dims)</td><td>P0</td></tr>
+
+<tr><td>Falcon-Mamba 7B / Codestral Mamba 7B</td><td>2024 (honorary)</td><td>7B</td><td>Pure SSM, zero attention layers. The all-recurrence corner case</td><td>New op (scan / SSD)</td><td>P2</td></tr>
+
+<tr><td>RecurrentGemma 2B</td><td>Google, 2024 (honorary)</td><td>2B</td><td>Griffin: gated linear recurrence (RG-LRU) + local sliding-window attention</td><td>New op (subset of the delta rule)</td><td>P2</td></tr>
+
+<tr><td>Mamba-3</td><td>Paper, ICLR'26 / Mar 2026</td><td>&mdash;</td><td>Trapezoidal discretization, complex-valued state, MIMO formulation; matches Mamba-2 perplexity at half the state size. No &le;7B open-weights flagship yet</td><td>Watch &mdash; MIMO raises arithmetic intensity per state read, which favours us</td><td>ref</td></tr>
+
+</table>
+</div>
+
+<h3>Three findings the matrix forces</h3>
+
+<p><strong>1. Pure transformer LLMs will lean on the shared digital chiplet, hard (D5).</strong> Attention and softmax are act&times;act and go to the shared digital chiplet (D13); only the weight GEMMs live in the macros. At &le;7B with long contexts the digital chiplet, not the macro array, sets the period. This is a finding to expose, never a blocker: every report carries the analog-vs-digital time and area split per model, so the shape of the answer is visible instead of hidden in a single number.</p>
+
+<p><strong>2. MLA is modelled, and it is ugly &mdash; show exactly how ugly (D6).</strong> Two things. First, no &le;7B open-weights MLA flagship exists in the window; MLA lives at 16B and above (Kimi K2.5, GLM-5, Ling 2.x, DeepSeek). The &le;7B carrier is MiniCPM3-4B, plus TransMLA-converted GQA models. Second, MLA is TP-hostile: the KV latent is a single shared rank, not a per-head slice, so a tp shard cannot split it. The up-projection weights are therefore REPLICATED on every shard, and under FWS weights are area. Since the array census already counts every shard at the full per-device figure, the cost lands directly on our weakest metric. P4 must print an explicit "area paid to KV replication" line rather than let it disappear into a total.</p>
+
+<p><strong>3. SSM state replaces the KV cache, and that moves the decode limiter.</strong> Today <code>decode_throughput_limit</code> on a dense LLM typically reports <code>kv_capacity</code>. An SSM layer carries a fixed state (d_inner &times; d_state) that does not grow with context; a 9:1 hybrid pays KV for four layers out of forty. Expect the limiter to move from <code>kv_capacity</code> to <code>fabric</code> on every hybrid row. That is the single strongest argument for the hybrids being the right workload for this machine, and it falls straight out of laws we already have.</p>
+
+<h3>Config-schema gap analysis</h3>
+
+<p>The current schema encodes ONE uniform layer repeated <code>num_layers</code> times, with <code>moe_layer_freq</code> / <code>first_k_dense_replace</code> as the only per-layer structure. Every hybrid in the matrix breaks that.</p>
+
+<div class="overflow">
+<table>
+<tr><th>Gap</th><th>Today</th><th>Needed</th><th>Forced by</th></tr>
+<tr><td>Per-layer block type</td><td>Uniform layer + MoE frequency</td><td><code>layer_types</code>: an explicit list or repeated pattern over {attention, ssm, linear_attn, short_conv, ffn, moe}, ingested from the HF config of the same name</td><td>Granite 4.0-H, Qwen3.5, LFM2, Nemotron-H, Zamba2</td></tr>
+<tr><td>SSM block params</td><td>None</td><td><code>d_state</code>, <code>n_groups</code>, <code>n_heads</code>, <code>d_head</code>, <code>expand</code>, <code>d_conv</code>, <code>chunk_size</code>, dt-projection width</td><td>Every Mamba2 hybrid</td></tr>
+<tr><td>Linear-attention block params</td><td>None</td><td>Separate key / value head counts and dims, conv kernel, gate projections (Qwen3.5: 16 key &times;128, 32 value &times;128)</td><td>Qwen3.5, RWKV-7</td></tr>
+<tr><td>Short-conv block</td><td>None</td><td>Kernel length, conv dim, double-gating flag</td><td>LFM2 / LFM2.5</td></tr>
+<tr><td>Attention window pattern</td><td>None</td><td>Window size, local:global interval, "last layer always global"</td><td>Gemma 3 / 4, Phi-4-mini-flash</td></tr>
+<tr><td>MLA dims</td><td><strong>Already parsed</strong> in <code>LLMAttentionConfig</code>; rejected by the device class</td><td>A pricing seam in <code>cim_timing.py</code>, not new config</td><td>MiniCPM3-4B, D6</td></tr>
+<tr><td>Parallel branch layers</td><td>Layers are sequential</td><td>A layer template that can hold parallel branches (attention &#8214; SSM &#8214; MLP)</td><td>Falcon-H1</td></tr>
+<tr><td>Per-block-kind FFN dims</td><td>One <code>intermediate_size</code></td><td>Distinct dims per block kind and per expert class (Granite H-Tiny: shared 1024 vs expert 512)</td><td>Granite 4.0-H, Falcon-H1</td></tr>
+<tr><td>Depth-shared weights</td><td>None</td><td>A share group: "these layers use the same tensor", plus per-invocation LoRA. In FWS this is stored once and re-fired &mdash; a real area win under A3</td><td>Zamba2</td></tr>
+<tr><td>Vision tower inside an LLM</td><td><code>vision</code> is ViT-mode only, mutually exclusive with LLM mode</td><td>An encoder sub-model plus a projector. Address-only for now (D8)</td><td>Qwen3.5, Gemma 4, Zamba2-VL</td></tr>
+<tr><td>Effective vs raw params</td><td>Not represented</td><td>D2 counts weights that must occupy cells. Per-Layer Embeddings are weights</td><td>Gemma 4 E-series &mdash; open question below</td></tr>
+</table>
+</div>
+
+<h3>Appendix &mdash; the new ops (implementation aid only, D1)</h3>
+
+<p>This decomposition exists so the build has a work list. It is never the support target and never appears in a report as "supported primitives". Weight GEMMs inside every block below (input projections, dt projection, gate projection, output projection, delta-rule q/k/v/gate projections) stay on the analog macros under the existing law, unchanged.</p>
+
+<div class="overflow">
+<table>
+<tr><th>Op</th><th>Where</th><th>Cost driver</th><th>Device (A2 / D13)</th></tr>
+<tr><td>Mamba-2 SSD / chunked scan</td><td>Granite 4.0-H, Falcon-H1, Nemotron-H, Zamba2</td><td>Chunk 128&ndash;256; state d_inner &times; d_state per layer; act&times;act</td><td>Shared digital &mdash; OPTIMA's <code>M3_Scan</code> is the reference law</td></tr>
+<tr><td>Selective scan (Mamba-1)</td><td>Falcon-Mamba, Codestral Mamba</td><td>Per-token recurrence, no chunking</td><td>Shared digital; superseded by SSD</td></tr>
+<tr><td>Delta rule (gated DeltaNet, RWKV-7 WKV)</td><td>Qwen3.5, RWKV-7</td><td>Fast-weight state k_heads &times; d_k &times; d_v; a rank-1 outer-product write per token plus two gates</td><td>Shared digital</td></tr>
+<tr><td>Gated linear recurrence (RG-LRU)</td><td>RecurrentGemma (Griffin)</td><td>Diagonal recurrence + gates</td><td>Shared digital; a strict subset of the delta-rule machinery</td></tr>
+<tr><td>Sliding-window attention</td><td>Gemma 3/4, Phi-4-mini-flash</td><td>The existing folded-K systolic law with n = window</td><td>Shared digital &mdash; law already exists, only the dims change</td></tr>
+<tr><td>Short causal depthwise conv</td><td>Mamba2 (k=4), LFM2 (L=3), Qwen3.5 linear block (k=4)</td><td>k &times; channels; tiny, weight-stationary, but depthwise</td><td>Open: per-macro pool or a narrow analog array &mdash; see open questions</td></tr>
+<tr><td>Gated Memory Unit + cross-attention</td><td>Phi-4-mini-flash (SambaY)</td><td>Reuses one layer's KV across depth</td><td>Shared digital</td></tr>
+<tr><td>Norms and gates (RMSNorm, per-head GroupNorm, SiLU, sigmoid)</td><td>Everywhere; denser in SSM blocks</td><td>Elementwise over d_inner</td><td>Per-macro pool, absorbed (D12) &mdash; but SSM raises the elementwise:GEMM ratio, so P2 must confirm the sizing still never binds</td></tr>
+</table>
+</div>
+
+<h2>Seams</h2>
+
+<h3>Imports</h3>
+<ul>
+<li><strong>P2</strong> &mdash; device cards and tile semantics; whether the per-macro digital pool (D12) still absorbs helpers at the SSM elementwise ratio; bit-slicing cost for the narrow arrays the dt-projection and delta-rule gate projections produce.</li>
+<li><strong>P3</strong> &mdash; op placement of scan / delta-rule / SWA onto the shared digital chiplet; tp / ep / pp shard-group legality per model shape; the PD-disagg prefill and decode spec pair (D16).</li>
+<li><strong>P4</strong> &mdash; the report surfaces that carry this plan's three findings: analog-vs-digital split, MLA KV-replication area, decode limiter.</li>
+<li><strong>P6</strong> &mdash; which matrix rows are validation targets. OPTIMA's Mamba2 stage laws are the only SSM reference that exists, and only at law level (D21).</li>
+</ul>
+
+<h3>Exports</h3>
+<ul>
+<li>The supported-model matrix: per-model architecture facts, support status, and priority.</li>
+<li>The model-config schema growth list &mdash; block-typed layers, SSM params, linear-attention params, short conv, window pattern, per-block FFN dims, depth-shared weights.</li>
+<li>The new-op inventory with a device assignment for each op (analog / per-macro pool / shared digital).</li>
+<li>Three named findings the tool must expose: the analog:digital split, MLA KV-replication area, and the SSM-state-vs-KV decode limiter.</li>
+<li>The D2 in/out boundary, including the borderline calls (Gemma 4 E4B raw 8B, RWKV-7 7.2B, LFM2.5-8B-A1B).</li>
+<li>Address-only pointers for VLM chaining, PD disagg and VLA.</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+
+<p><strong>Now.</strong> Block-typed layers with SSM, linear-attention and short-conv parameter groups in the schema and in <code>hf_to_config.py</code>. Mamba-2 SSD, the delta rule, sliding-window attention and short conv as priced ops on the heterogeneous device layer. The MLA pricing seam. The three findings as report lines. That covers every P0 row and most P1 rows.</p>
+
+<p><strong>Address only &mdash; VLM chaining (D8).</strong> The pairings the window actually produced are worth naming so the seam is not invented blind: Qwen3.5 with its own early-fusion 24-layer tower; Gemma 4 E-series with a ~150M vision encoder; Zamba2-VL 1.2B / 2.7B / 7B, which is a hybrid-SSM backbone on a vision tower; LFM2-VL; SmolVLM. Note that OPTIMA's "VLM" is weighted co-residency, not a chain (RECON &sect;3) &mdash; there is nothing to port. Named, empty, no bandwidth now.</p>
+
+<p><strong>Address only &mdash; PD disaggregation (D16).</strong> The interesting pairing is the same model with GPU prefill and FWS decode. There is a real asymmetry in the handoff: a transformer hands over a KV cache whose bytes grow with S, while an SSM hands over a fixed-size state independent of S. A 9:1 hybrid therefore hands over a small constant plus KV for four layers out of forty &mdash; which makes hybrids the best-shaped workload for disaggregation in the whole matrix. Under D16 this is priced as bytes over the p2p law and nothing more; no precision conversion. Worth one experiment when P3 lands, not before.</p>
+
+<p><strong>Address only &mdash; VLA.</strong> Excluded from phase 1 (D7 removes the diffusion policy head; D8 defers the flow). VLA is latency-first and closed-loop and gets rethought when its time comes. The only obligation this plan carries is to keep the model schema free of assumptions that would need a rewrite &mdash; block-typed layers and per-op device placement are exactly the right shape for it (D22).</p>
+
+<h2>Open questions for George</h2>
+
+<ol>
+<li><strong>Gemma 4 E-series.</strong> 8B raw weights, 4.5B "effective" via Per-Layer Embeddings. D2 says total, and PLE weights must live in cells &mdash; my reading is E4B is OUT and E2B is IN. Confirm, because the same call governs any future MatFormer-style model.</li>
+<li><strong>Hard cutoff or family exception?</strong> RWKV-7 7.2B and LFM2.5-8B-A1B are the flagships of in-scope families but sit just over 7B. List them as honorary, or exclude cleanly?</li>
+<li><strong>How do we satisfy D6?</strong> No &le;7B MLA flagship exists in the window. Options: MiniCPM3-4B as the honorary carrier, a TransMLA-converted Llama config as a synthetic, or price MLA on a &gt;7B model purely as an architecture study. I lean on the first two together.</li>
+<li><strong>Diffusion language models.</strong> D7 excludes DiT and image diffusion. LLaDA-MoE-7B-A1B is a diffusion LM at exactly 7B total &mdash; in or out?</li>
+<li><strong>Short depthwise conv placement.</strong> It is weight-stationary and tiny, which makes analog tempting, but depthwise wastes crossbar rows. Per-macro digital pool, or a narrow analog array priced honestly at bad utilization?</li>
+<li><strong>Depth-shared weights (Zamba2).</strong> Express the share group in the model config, or let the mapper discover it? It is a genuine FWS area win either way; the question is who owns it, P1 or P3.</li>
+<li><strong>The P0 headline model.</strong> Qwen3.5-4B (newest, in-window, edge-targeted, linear attention plus native vision) or Granite-4.0-H-Tiny (7B-A1B, sits exactly on the D2 corner and is the cleanest Mamba2 hybrid)? Both are P0; I want to know which one the first end-to-end run uses.</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+<p>All release dates, sizes and layer plans were verified against primary sources; the dimension figures marked "verified" come from the published <code>config.json</code> of Qwen3.5-4B, Granite-4.0-H-Tiny, Granite-4.0-H-1B, Falcon-H1-7B-Base, LFM2-2.6B and MiniCPM3-4B. Rows without dimensions are ones where only the layer plan was confirmed; those dims get filled at ingestion time by <code>hf_to_config.py</code>, not by hand.</p>
+</div>
+</main></body></html>

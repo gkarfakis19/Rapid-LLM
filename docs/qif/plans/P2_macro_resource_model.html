@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P2 · The Macro Resource Model</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P2</div>
+<h1>The Macro Resource Model</h1>
+<p class="mission">Make the analog macro a device-generic, tiled, bit-sliced resource that the DAG executor can price.</p>
+
+<h2>Mission context</h2>
+<p>The macro is the atomic resource (A3). Every claim the framework makes about
+time, energy, and area bottoms out in the laws on this page. The macro is also
+the binding constraint of the whole project: weights own cells, so area decides
+what fits (D2).</p>
+<p>Two shifts define the work. The macro stops being one model's array and
+becomes a shared surface that hosts tiles (A3, D10). The macro stops being CTT
+and becomes a card (D14). Everything else here follows from those two.</p>
+
+<h2>Scope &amp; exclusions</h2>
+<p><strong>In:</strong> the device card; the tile as allocation unit;
+banking and mux allocation, priced and validated; bit-slicing and its digital
+reduction (D11); the per-macro digital pool (D12); occupancy semantics for the
+DAG executor; analog energy and area law shapes.</p>
+<p><strong>Out:</strong></p>
+<ul>
+<li>Attention and every activation&times;activation op EXECUTION. Those ops run on
+the shared digital chiplet (D13), placed by P3 and priced by P4 &mdash; but the
+chiplet's DEVICE CARD and its laws (the relocated SA and softmax-lane laws, the
+scan laws to come) live here: one law module owns every device card
+<em>(audit resolution 2026-08-23; George may overrule)</em>.</li>
+<li>Which tile goes on which macro. P2 prices and validates an allocation; P3
+chooses it.</li>
+<li>DAG evaluation, metrics, and reports (P4).</li>
+<li>Accuracy. It is imported from the arch side, never simulated (D14).</li>
+<li>Partial weight stationarity (D9) and weight writes. Fixed weights admit no
+writes; this is permanent, not phased.</li>
+</ul>
+
+<h2>Where we stand</h2>
+<p>The physics already exists in validated form. What is missing is identity:
+today an array is a count, not a thing with an owner and a site.</p>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>What it gives P2</th></tr>
+<tr><td><code>cim_timing.py</code> (<code>CimDeviceModel</code>)</td><td>The single law module. Analog vector latency, the K/N-free GEMM law, the array census, energy and area. All of it is parity-checked against OPTIMA.</td></tr>
+<tr><td><code>docs/fws_cim/README.md</code>, <code>docs/fws_cim/DESIGN2.md</code></td><td>The locked pass-1/2 contract plus the post-audit erratum. The erratum is the precedent for changing a law when the physics demands it.</td></tr>
+<tr><td><code>tools/fws_cim_dse.py</code> (<code>cim.dse.variants</code>)</td><td>A card without a name. Each variant is already a complete analog point that inherits from a base. The card schema is this, promoted and extended.</td></tr>
+<tr><td><code>configs/hardware-config/fws_cim_optima_t1.yaml</code></td><td>The <code>cim.analog</code> block: the CTT card's parameter half, in production use.</td></tr>
+<tr><td><code>validation_scripts/validate_fws_cim_vs_optima.py</code></td><td>The parity harness that must stay green through every generalization here.</td></tr>
+<tr><td><code>/app/nanocad/projects/cim_ctt_big_optima/perf_model/</code></td><td>Reference only. Stage laws, array censuses, the analog array library, <code>stack_3d_height</code>.</td></tr>
+<tr><td><code>/app/nanocad/projects/cim_ctt_big_arch/</code></td><td>The accuracy surfaces P2 imports and never recomputes.</td></tr>
+</table>
+</div>
+<p>OPTIMA's banking is the clearest statement of the gap. <code>_apply_partial_banking</code>
+smears an area and energy delta across layers, leaves per-stage numbers fully
+unbanked by its own comment, asserts that banking does not change vector timing,
+and prices bank switching at zero (AUDIT finding 3). D10 and D11 exist to
+replace that with real allocation, real timing, and a real switch cost.</p>
+
+<h2>The investigation</h2>
+
+<h3>1. Device cards</h3>
+<p>A card is a parameter set plus structural knobs. The parameters set the
+numbers. The knobs change the shape of the laws, so the tool must read them, not
+assume them. CTT is the first card. ReRAM and MRAM are cards, not rewrites (D14).</p>
+<div class="overflow">
+<table>
+<tr><th>Group</th><th>Fields</th><th>Role</th></tr>
+<tr><td>Geometry</td><td><code>rows</code>, <code>cols</code>, <code>mux</code></td><td>Stored columns = <code>cols &times; mux</code>. Sets tile capacity.</td></tr>
+<tr><td>Timing</td><td><code>slice_cycles</code>, <code>analog_clock</code>, ADC latency</td><td>Feeds the per-op vector latency.</td></tr>
+<tr><td>Energy</td><td><code>energy_per_vec_pj</code>, <code>shots_per_output</code>, shot kind</td><td>Per-vector analog energy. Shot kind decides whether shots also cost time.</td></tr>
+<tr><td>Area</td><td><code>area_mm2_per_array</code>, peripheral area (ADC and mux)</td><td>Macro footprint, split so one accounting stays one accounting (D21).</td></tr>
+<tr><td>Structural</td><td><code>bits_per_cell</code>, slicing arrangement, bank/mux depth, 3D stack height</td><td>The knobs. Each one changes a law, not just a constant.</td></tr>
+<tr><td>Accuracy</td><td>Imported surface id, keyed by bits-per-cell and ADC bits</td><td>Read from the arch side. Never simulated here (D14).</td></tr>
+<tr><td>Validity</td><td>Admitted (bits-per-cell, weight-bits, mux) points</td><td>The menu. The tool refuses an unlisted point instead of interpolating.</td></tr>
+</table>
+</div>
+<p>The validity menu is the honesty device. A device does not support every
+bits-per-cell; a card that pretends otherwise produces numbers nobody can
+defend.</p>
+
+<h3>2. The tile as allocation unit</h3>
+<p>A tile is one weight sub-matrix resident in one macro, with a name. A macro
+hosts tiles from the same layer, from other layers, from other experts, or from
+other models (A3). Co-residency is the normal case, not a multi-tenancy feature
+bolted on later.</p>
+<div class="overflow">
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td>Owner</td><td>Model, layer, op, expert, shard. Every tile has a named owner (D21).</td></tr>
+<tr><td>Shape</td><td>The K range and N range of the weight matrix it holds.</td></tr>
+<tr><td>Slice</td><td>Which bit slice of the weight word (see 3).</td></tr>
+<tr><td>Site</td><td>Macro id, row range, column-set (bank) ids.</td></tr>
+</table>
+</div>
+<p>The existing census law becomes the tile enumerator. <code>ceil(K/rows) &times;
+ceil(N/(cols &times; mux))</code> still counts the units; placement gives each unit an
+owner and a site. Capacity is then a real check: the column sets claimed by all
+resident tiles must fit the macro's stored columns.</p>
+<p>Allocation follows D10 in four steps: the user writes it in config, the tool
+prices and validates it, the DSE sweeps it, and the mapper automates it later.
+P2 owns the first two. P3 owns the fourth.</p>
+
+<h3>3. Bit-slicing, natively priced</h3>
+<p>When bits-per-cell is below the weight bit width, an active column set yields
+a partial result. The number of slices is <code>n_s = ceil(weight_bits /
+bits_per_cell)</code>. Full results compose through a digital shift-and-add tree
+that costs real area, real time, and real energy (D11). The composition point is
+a node in the DAG, never a hidden constant.</p>
+<div class="overflow">
+<table>
+<tr><th>Arrangement</th><th>Where partials live</th><th>What it costs</th></tr>
+<tr><td>Column sets, one macro</td><td><code>n_s</code> column sets per logical output column</td><td>Stored-column demand &times; <code>n_s</code>; one ADC pass per set; a local tree in the macro's digital pool.</td></tr>
+<tr><td>Chained macros</td><td>One slice per macro</td><td>Macro count &times; <code>n_s</code>; partial bytes on the p2p law (D17); the tree sits at the sink.</td></tr>
+<tr><td>Temporal (input bit-serial)</td><td>Successive shots</td><td>Time &times; input slices. Only if the card declares temporal shots.</td></tr>
+</table>
+</div>
+<p>Law shapes, not final equations:</p>
+<ul>
+<li>Tile and stored-column demand scale with <code>n_s</code>. Area follows directly.</li>
+<li>ADC work scales with <code>n_s</code>. Sharing one ADC across slices trades
+area for time. That trade is a Samyak question, not a guess.</li>
+<li>The reduction tree has depth about <code>log2(n_s)</code>, area about
+<code>(n_s - 1)</code> adders per output lane, and energy about <code>(n_s - 1)</code>
+adds per output. Pipelined, it returns one result per cycle after fill.</li>
+<li>The chained form adds a transport term and a longer critical path. It buys
+back stored columns in the source macro.</li>
+</ul>
+<p>The final equations get pinned when the card menus arrive. Committing to them
+now would fix numbers we do not have.</p>
+
+<h3>4. The per-macro digital pool</h3>
+<p>Each macro carries a small digital pool (D12). It holds the shift-and-add
+trees, the partial accumulators for chained slices, activations, elementwise
+work, and bias or scale application. It does not hold attention or any other
+activation&times;activation compute; that goes to the shared digital chiplet (D13).</p>
+<div class="overflow">
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>Sizing rule</td><td>The pool consumes at least the macro's peak result rate, so it never blocks.</td></tr>
+<tr><td>Where the size comes from</td><td>Derived from the card and the resident tiles, not configured.</td></tr>
+<tr><td>Status of the number</td><td>Derived and REPORTED. Not a DSE constraint for now (D12).</td></tr>
+<tr><td>Revisit trigger</td><td>The pool stops being absorbed when its derived area or energy passes a disclosed share of the macro it serves. At that point it becomes a priced, contended resource.</td></tr>
+</table>
+</div>
+<p>This is the direct heir of the pass-1 helper-absorption contract, with one
+change: absorption was an assumption, and the pool is a computed number that the
+report prints. The threshold is a proposal awaiting George (see open questions).</p>
+
+<h3>5. Occupancy semantics</h3>
+<p>The macro is a serializing resource. The DAG executor prices ops onto it.
+There is no period law (A1).</p>
+<div class="overflow">
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>What serializes</td><td>The ADC and mux path. One stored column set converts at a time.</td></tr>
+<tr><td>Op duration</td><td><code>M_tokens &times; active_column_sets &times; slice_cycles / f_analog</code>. Still free of K and N.</td></tr>
+<tr><td>Contention</td><td>Co-resident tiles queue on their macro. The stall appears in the DAG, not in a formula.</td></tr>
+<tr><td>Period</td><td>None. Throughput is a DAG result (A1, P4).</td></tr>
+<tr><td>Reduction identity</td><td>One owner filling every mux slot pays <code>mux &times; slice_cycles</code> &mdash; the pass-1 charge, exactly.</td></tr>
+</table>
+</div>
+<p>The change is that an op pays for the column sets it activates rather than the
+full mux depth. Pass 1 charged the full depth because the whole macro belonged to
+one matrix. Under A3 that is a special case, and it still reproduces itself.
+Co-residency then costs the right thing: capacity is shared spatially, and the
+ADC path is shared serially.</p>
+
+<h3>6. Energy and area laws</h3>
+<p>Energy per op is the analog term over the activated sets, plus the reduction
+tree, plus the pool, plus transport when slices cross macros. Area is the
+resident arrays, plus the peripheral (ADC and mux), plus the pool. 3D stack
+height divides the footprint that a macro occupies on the package; it does not
+divide silicon or energy, and it brings TSV and thermal limits the card must
+declare.</p>
+<p>One honesty rule governs both (D21): one accounting per metric. Every reported
+area and energy figure has exactly one definition and one place it comes from.
+Today's PARTIAL energy label stays until the pool and peripheral terms land.</p>
+
+<h3>7. What carries, what generalizes, what is superseded</h3>
+<div class="overflow">
+<table>
+<tr><th>Pass-1/2 law</th><th>Fate</th><th>Note</th></tr>
+<tr><td><code>T = M_tokens &times; vec_latency</code>, free of K and N</td><td>Carries</td><td>The core analog law. Untouched.</td></tr>
+<tr><td><code>vec_latency = adc_mux &times; slice_cycles / f</code></td><td>Generalizes</td><td>Charge the active column sets. Full occupancy by one owner reproduces pass 1 exactly.</td></tr>
+<tr><td><code>arrays(K,N) = ceil(K/rows) &times; ceil(N/(cols &times; mux))</code></td><td>Generalizes</td><td>Census becomes tile enumeration with owners and sites.</td></tr>
+<tr><td><code>E = M &times; energy_per_vec &times; shots &times; arrays</code></td><td>Carries, extended</td><td>Add the tree, pool, and transport terms.</td></tr>
+<tr><td><code>area = arrays &times; area_per_array</code></td><td>Generalizes</td><td>Add peripheral and pool. Stack height divides footprint only.</td></tr>
+<tr><td><code>shots_per_output</code> affects energy only</td><td>Generalizes</td><td>The card declares parallel or temporal shots. Temporal shots enter the timing law.</td></tr>
+<tr><td>Helper absorption (never bounds a stage)</td><td>Generalizes</td><td>Becomes the sized, reported per-macro pool (D12).</td></tr>
+<tr><td>SA attention law, softmax lanes</td><td>Relocates</td><td>Good laws, new owner: the shared digital chiplet (D13).</td></tr>
+<tr><td>MoE routed-FFN stage law</td><td>Generalizes</td><td>Experts are tiles. The one-hot imbalance factor becomes per-op token counts from the workload.</td></tr>
+<tr><td>5/6-stage pipeline, <code>period = max(stage)</code>, <code>fps = 1/period</code></td><td>Superseded</td><td>Validation reference only (A1, D21, P6).</td></tr>
+<tr><td><code>layers_per_chip</code> placement</td><td>Superseded</td><td>Tiles &rarr; macros &rarr; chips (P3).</td></tr>
+<tr><td>Decode fabric-ceiling and sustained composite</td><td>Superseded</td><td>Emerges from DAG occupancy plus the KV resource (P4).</td></tr>
+</table>
+</div>
+
+<h3>8. Questions for Samyak (device physics)</h3>
+<div class="overflow">
+<table>
+<tr><th>Topic</th><th>Question</th><th>What it decides</th></tr>
+<tr><td>ADC sharing</td><td>Under banking, how many stored column sets share one ADC?</td><td>The per-op active-set charge, and the true cost of co-residency.</td></tr>
+<tr><td>Bank switching</td><td>Time and energy to change the active column set.</td><td>D10 needs a real number. OPTIMA prices zero.</td></tr>
+<tr><td>Bits-per-cell</td><td>Which bits-per-cell and weight-bit points does each device admit?</td><td>The card menu, per device.</td></tr>
+<tr><td>Slicing layout</td><td>Column sets in one macro, chained macros, or both?</td><td>The default reduction topology.</td></tr>
+<tr><td>Reduction tree</td><td>Adder width, lane count, and clock available beside a macro.</td><td>The pool sizing law and its reported area.</td></tr>
+<tr><td>3D stacking</td><td>Height menu, per-layer area and energy deltas, TSV and thermal limits.</td><td>Whether stack height stays an area divisor or becomes a real knob.</td></tr>
+<tr><td>Shots</td><td>Parallel or temporal, per device?</td><td>Whether shots enter the timing law at all.</td></tr>
+<tr><td>Accuracy import</td><td>Format and keys of the arch-side accuracy surfaces.</td><td>The card's accuracy field (D14).</td></tr>
+</table>
+</div>
+
+<h2>Seams</h2>
+<p><strong>Imports</strong></p>
+<ul>
+<li><strong>P1</strong> &mdash; weight-matrix shapes per supported model, weight and
+activation bit widths, expert counts, and which ops are weight GEMMs rather than
+activation&times;activation.</li>
+<li><strong>P3</strong> &mdash; the tile-to-macro allocation to price and validate,
+including owner ids, slice groups, and chained-macro chains.</li>
+<li><strong>P4</strong> &mdash; the op set the DAG executor will hand to a macro, and
+the shape of the duration and energy values it expects back.</li>
+<li><strong>P6</strong> &mdash; the parity targets that constrain every law change, and
+the honesty invariants (one accounting per metric, disclosed relaxations).</li>
+</ul>
+<p><strong>Exports</strong></p>
+<ul>
+<li>The device card schema, the CTT card, and named empty slots for ReRAM and MRAM.</li>
+<li>The tile object: owner, shape, slice, site.</li>
+<li>The tile enumerator and the macro capacity and validity checks (for P3).</li>
+<li>Per-op pricing: given an op, its tiles, and its token count, return duration,
+energy, and the resource it serializes on (for P4).</li>
+<li>Bit-slice composition: slice groups plus the reduction ops the DAG must
+contain (for P3 and P4).</li>
+<li>Derived per-macro digital pool sizing, with its area and energy, reported.</li>
+<li>Macro occupancy semantics: serializing resource, active column sets, no period.</li>
+<li>Analog area and energy accounting, one definition per metric (for P4, P5, P6).</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow">
+<table>
+<tr><th>Implement now</th><th>Address only (named, empty)</th></tr>
+<tr><td>Card schema with structural knobs; the CTT card populated from the shipped <code>cim.analog</code> point.</td><td>ReRAM and MRAM cards. Slots and field names, no numbers.</td></tr>
+<tr><td>Tile object, enumerator, capacity and validity checks.</td><td>Automatic allocation inside the mapper (D10).</td></tr>
+<tr><td>Per-op active-column-set pricing, with the full-occupancy identity as a test.</td><td>Sub-slot tile granularity, if the mux slot proves too coarse.</td></tr>
+<tr><td>Bit-slicing: column-set and chained arrangements, priced; reduction ops emitted.</td><td>Temporal input bit-slicing, until a card declares temporal shots.</td></tr>
+<tr><td>Per-macro digital pool sizing, derived and reported.</td><td>The pool as a DSE constraint (D12).</td></tr>
+<tr><td>3D stack height as a footprint transform declared by the card.</td><td>TSV, thermal, and yield effects of stacking.</td></tr>
+<tr><td>Analog area and energy terms for tree, pool, and peripheral.</td><td>Accuracy-aware sweeps. Surfaces are imported, never simulated (D14).</td></tr>
+<tr><td>&mdash;</td><td>Weight writes and PWS. Permanently out (D9).</td></tr>
+</table>
+</div>
+
+<h2>Open questions for George</h2>
+<ol>
+<li><strong>Shared digital chiplet card &mdash; audit-resolved, confirm.</strong>
+The draft found no owner for the chiplet's device model (P2 said not-me, P3
+said P4, P4 said P2 &mdash; a circle). The audit resolved it by the one-law-module
+rule: P2 owns the card and its laws; P3 places, P4 prices. Confirm or overrule.</li>
+<li><strong>The pool revisit trigger.</strong> Proposal: the pool stops being
+absorbed when its derived area exceeds a fifth of the macro footprint it serves,
+or its energy exceeds the analog energy of the op it serves. Confirm or set your
+own share.</li>
+<li><strong>Is slicing the default or the exception?</strong> If CTT normally
+runs bits-per-cell below the weight width, slicing is the main path and the
+reduction tree is always present. If it is the exception, slicing stays opt-in.</li>
+<li><strong>Active-set charging vs the parity gates.</strong> The per-op charge
+changes a number only when a macro is under-occupied. Confirm that the OPTIMA
+parity points stay on full-occupancy configurations, so the gates hold unmoved.</li>
+<li><strong>Allocation granularity.</strong> Is the mux slot the smallest
+allocatable unit? A finer unit complicates the tile object, the validation, and
+the atlas (P5).</li>
+<li><strong>Second card now or later?</strong> One plausible ReRAM or MRAM card
+would prove the schema is genuinely device-generic. It also invites numbers we
+cannot defend yet.</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+</div>
+</main></body></html>

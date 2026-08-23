@@ -1,6 +1,7 @@
 # QIF FWS-CIM system — plan of plans
 
-Status: draft for George's review, 2026-08-23.
+Status: SUPERSEDED same-day (2026-08-23) by the board at `docs/qif/index.html`
+and the reorganized superplan set in `docs/qif/DECISIONS.md`. Kept for history.
 Branch: `fws_cim_dev` (based on main = the completed astra rewrite).
 
 ## 0. What this document is

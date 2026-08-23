@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P4 · Evaluation</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P4</div>
+<h1>Evaluation</h1>
+<p class="mission">Price a mapped DAG analytically, then read every published number off one timeline.</p>
+
+<h2>Mission context</h2>
+<p>A1 removes the period law. The system builds the op DAG, prices each op on
+its assigned device, and evaluates the DAG. Latency, throughput and occupancy
+stop being formulas and become properties of the result.</p>
+<p>That change buys one thing above all: honesty. AUDIT finding 4 caught OPTIMA
+carrying two TOPS accountings that disagreed by 10x inside one artifact. The
+defense is structural, not editorial. P4's rule is that every published number
+is a projection of a single simulated timeline. Two accountings of one metric
+cannot exist, because there is only one thing to read.</p>
+<p>The evaluator is also the place where the far future stays cheap (D22).
+Fill and drain are visible in a DAG without being modeled. A latency-first,
+one-request-in-flight VLA regime is a different request mix on the same
+machinery, not a second evaluator.</p>
+
+<h2>Scope &amp; exclusions</h2>
+<p>In scope: the pricing of a mapped DAG, the metric set, memory and energy
+accounting, the derived per-macro digital pool sizing, and the two reports
+(text section and machine-readable JSON).</p>
+<p>Out of scope, by decision:</p>
+<ul>
+<li>AstraSim. It is OFF for the QIF path (A1, D17). The Chakra emitter and the
+four AstraSim execution modes stay untouched and stay green for the GPU
+workloads; the FWS device layer is additive.</li>
+<li>Congestion, topology and routing. Fully-connected p2p, analytical, no
+queueing (D17). Transfers are priced, never contended.</li>
+<li>Mapping. P4 never chooses a placement. It prices the one it is given.</li>
+<li>Laws. Every duration, energy and area number comes from the law layer
+(P2). P4 duplicates none of them.</li>
+<li>Objectives, cost and area models (D19), accuracy (D14), thermal.</li>
+</ul>
+
+<h2>Where we stand</h2>
+<p>The evaluator exists and is validated; what it lacks is a heterogeneous
+device layer.</p>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>What it already gives P4</th></tr>
+<tr><td><code>program/analytic_sim.py</code></td><td>The analytical list scheduler over <code>Program.ops</code>. Per-op start/finish times, a documented tie discipline (ascending uid = program order), byte&rarr;time conversion for transfers, and a measured bit-identity record against the deleted evaluator. <code>evaluate_detailed</code> already returns the timeline P4 needs.</td></tr>
+<tr><td><code>program/ir.py</code>, <code>program/build.py</code></td><td>Ops with explicit deps, groups and transfers; one Program constructor; dependencies derived from numbered rules rather than walked.</td></tr>
+<tr><td><code>program/memory_sim.py</code></td><td>The replay shape for a per-device high-water mark: alloc at issue or completion, release at the matching event, per-device snapshots and peak tracking.</td></tr>
+<tr><td><code>cim_timing.py</code> (<code>CimDeviceModel</code>)</td><td>The analog vector law, the systolic-array law, softmax lanes, per-array energy and area. P2 owns and extends it; P4 calls it.</td></tr>
+<tr><td><code>inference_timing.calc_time</code></td><td>The pass-1/2 closed-form spatial report: period, fps, block latency, end-to-end latency, per-chip occupancy, KV and decode sections, PARTIAL energy. Demoted &mdash; see below.</td></tr>
+<tr><td><code>output/&lt;MODE&gt;/fws_cim_report.json</code></td><td>The machine-readable precedent: the field set, the disclosure notes, the PARTIAL energy label. The QIF report is its successor, not its sibling.</td></tr>
+<tr><td><code>tools/fws_cim_dse.py</code></td><td>The downstream consumer conventions: infeasibility carries a stage tag and a message; a sweep verifies against a run.</td></tr>
+</table>
+</div>
+<p>The gap is precise. <code>analytic_sim</code> models one device kind with one
+outstanding compute per device. The QIF machine has three device kinds with
+different concurrency (A2), and resources that must not assume exclusive
+ownership (D22).</p>
+
+<h2>The investigation</h2>
+
+<h3>1. The pricing contract</h3>
+<p>One op, one device, one duration, one law source. The mapper (P3) states the
+assignment; P4 asks P2 for the number.</p>
+<div class="overflow">
+<table>
+<tr><th>Op class</th><th>Device</th><th>Priced by</th><th>Notes</th></tr>
+<tr><td>Weight GEMM (tile)</td><td>Analog macro</td><td>P2 analog vector law at the tile's column set</td><td>Time depends on token count and the macro's mux/slice geometry, not on K or N.</td></tr>
+<tr><td>Bit-slice reduction (shift-and-add tree)</td><td>Per-macro digital pool</td><td>P2 priced reduction (D11)</td><td>A real op with real time and energy, never absorbed. Composition across column sets and chained macros is explicit in the DAG.</td></tr>
+<tr><td>Activation, norm, elementwise</td><td>Per-macro digital pool</td><td>P2 pool component costs (D12)</td><td>Sized never to block; the sizing is derived and reported, not assumed (&sect;4).</td></tr>
+<tr><td>act&times;act GEMM (QK<sup>T</sup>, PV), softmax, scan / state update</td><td>Shared digital chiplet</td><td>P2 fabric laws (D13)</td><td>Where real contention lives: several layers or several models can want the shared chiplet at once.</td></tr>
+<tr><td>Boundary activation transfer</td><td>p2p link</td><td>bytes / link law (D17)</td><td>No queueing. Bytes come from the mapping.</td></tr>
+<tr><td>PD handoff</td><td>p2p link</td><td>bytes / link law (D16)</td><td>Prefill system to decode system. No precision-conversion modeling.</td></tr>
+<tr><td>Shard-group collective (tp / ep / pp)</td><td>p2p links</td><td>Analytical collective over the p2p law</td><td>Group membership is constructed by the mapping, never re-inferred here.</td></tr>
+</table>
+</div>
+<p>One subtlety worth naming now. P2's attention law carries an op-internal
+fill/drain term. The DAG carries a system-level ramp. They are different
+quantities with different names and are never summed into one "penalty" &mdash;
+one accounting per metric applies inside the pricing too.</p>
+
+<h3>2. What the evaluator must grow</h3>
+<p>Four changes, each additive, each with a degenerate setting that reproduces
+today's behavior exactly.</p>
+<div class="overflow">
+<table>
+<tr><th>Today</th><th>QIF</th><th>Why</th></tr>
+<tr><td>One device kind</td><td>Device cards with a kind: analog macro, per-macro pool, shared digital chiplet, link</td><td>A2. The executor prices each op on its assigned device.</td></tr>
+<tr><td>One outstanding compute per device (boolean exclusivity)</td><td>A device is a resource with capacity and named owners; capacity 1 is the old semantics, bit-identically</td><td>D22 forbids exclusive-ownership assumptions in resource abstractions. A shared chiplet with lanes and a macro with independent column sets both need capacity &gt; 1.</td></tr>
+<tr><td>Comm never occupies a device slot</td><td>Unchanged</td><td>Transfers are priced, not scheduled against a resource (D17).</td></tr>
+<tr><td>Timeline consumed as a total</td><td>Timeline retained: per-op start/finish, per-device busy intervals, per-owner attribution</td><td>Every metric is a projection of it (&sect;3). Occupancy and duty cycle fall out for free and feed P5.</td></tr>
+</table>
+</div>
+<p>The tie discipline stays what it is: ascending program order, deterministic,
+already documented and measured. Determinism is not a new requirement here; it
+is inherited.</p>
+
+<h3>3. Metrics as DAG properties</h3>
+<p>Serving semantics stay simple (D15): a batch of same-length requests, each
+prefilling S tokens and decoding N. Every number below is read off the one
+timeline. None is computed from a separate formula.</p>
+<div class="overflow">
+<table>
+<tr><th>Metric</th><th>Read from the timeline as</th><th>Replaces</th></tr>
+<tr><td>Prefill latency</td><td>Finish of the last op of the prefill subgraph, minus release</td><td>The closed form's block-latency arithmetic</td></tr>
+<tr><td>Per-step decode time</td><td>Finish(step k terminal op) &minus; finish(step k&minus;1 terminal op); a series over k, reported with first / median / last</td><td>The pipeline period as a per-token proxy</td></tr>
+<tr><td>End-to-end request latency</td><td>Finish of the last decode op, minus release &mdash; measured once, not assembled</td><td><code>end_to_end_latency</code> = layers &times; block latency + endpoints + transfers</td></tr>
+<tr><td>Steady throughput</td><td>Generated tokens (or completed requests) divided by the observed span of the same timeline</td><td>fps = 1 / period; and the fabric-ceiling / sustained pair</td></tr>
+<tr><td>Per-device occupancy</td><td>Busy time / makespan per device, attributed to the named owner (tile, layer, expert, model)</td><td>Per-chip occupancy as an array-count ratio</td></tr>
+<tr><td>Macro duty cycle</td><td>The same projection restricted to analog macros &mdash; the P5 atlas colorant</td><td>&mdash; (new)</td></tr>
+</table>
+</div>
+<p>The ceiling-versus-sustained pair deserves an explicit word. It existed
+because the closed form had no schedule: it could not tell whether the pipeline
+was actually full, so it printed a cap and a correction and named the limiting
+factor. The DAG knows. One throughput number is therefore the honest output, and
+KV or state capacity becomes a feasibility verdict (&sect;5) rather than a term
+inside a throughput formula. This retires machinery; it adds none (D15). It also
+changes what the headline number means, so it is an open question below.</p>
+<p>Two composition rules keep the far future cheap (D22). No metric may be
+defined as a period times a count &mdash; that reintroduces the steady-state
+assumption the DAG exists to remove. And latency composition stays additive over
+the actual critical path, so a one-request-in-flight regime reports a smaller
+number rather than needing a different definition.</p>
+
+<h3>4. The derived per-macro digital pool (D12)</h3>
+<p>The pool is sized so it never blocks the pipeline. P4 derives that size
+instead of assuming it: from the timeline, take each macro's peak concurrent
+digital demand &mdash; reduction trees, activations, elementwise &mdash; and
+report the width and area that make it non-blocking.</p>
+<p>It is a reported diagnostic, not a constraint, and not a DSE axis for now.
+The honesty condition is that an absurd derived width is printed as an absurd
+derived width. Nothing is silently clamped, and no result is quietly relabeled
+feasible. If the sizing grows embarrassing, the report is where that becomes
+visible.</p>
+
+<h3>5. Memory accounting</h3>
+<p>Weights live in arrays, so weight bytes are not a memory question &mdash;
+they are an area and mapping question (P2, P3). What remains is feasibility:</p>
+<ul>
+<li>Per-device high-water mark for activations, recurrent state, and KV, replayed over the same DAG.</li>
+<li>Compared against the capacities declared by the device cards.</li>
+<li>An overflow is a named violation with the offending device, owner and quantity &mdash; the DSE convention &mdash; and it is disclosed in the artifact, never absorbed (D21).</li>
+</ul>
+
+<h3>6. Energy accounting</h3>
+<p>One total, built from named components, each carrying its own coverage
+label. No aggregate figure exists that is not the sum of the printed parts, and
+efficiency figures are projections of that one total and the one throughput.</p>
+<div class="overflow">
+<table>
+<tr><th>Component</th><th>Source</th><th>Coverage today</th></tr>
+<tr><td>Analog arrays</td><td>P2 per-vector energy &times; arrays &times; shots</td><td>Covered</td></tr>
+<tr><td>Boundary and link traffic</td><td>pJ/bit over the p2p law, including the PD handoff</td><td>Covered</td></tr>
+<tr><td>Priced digital reduction</td><td>P2 shift-and-add trees (D11)</td><td>Covered once P2 lands the reduction cost</td></tr>
+<tr><td>Per-macro pool helpers</td><td>P2 pool component costs</td><td>Partial until the component library lands</td></tr>
+<tr><td>Shared digital chiplet</td><td>P2 fabric and SRAM costs</td><td>Partial</td></tr>
+</table>
+</div>
+<p>The current report carries one blanket PARTIAL word. Per-component labels
+are more honest and cost nothing, since the components are already itemized.</p>
+
+<h3>7. What survives of the closed-form report</h3>
+<p>It becomes a validation and legacy reference (A1). It is not deleted, and it
+is not published beside the DAG result &mdash; two accountings of one metric must
+never share an artifact.</p>
+<div class="overflow">
+<table>
+<tr><th>Pass-1/2 quantity</th><th>Status</th></tr>
+<tr><td>Period, fps</td><td>Legacy. Reproduced only in the degenerate dedicated-macro case, as a reference.</td></tr>
+<tr><td>Block latency, end-to-end latency</td><td>Superseded by the DAG properties in &sect;3.</td></tr>
+<tr><td>Per-stage tables (S1..S5 / S1..S6)</td><td>Survive as op groups in the DAG; the stage table becomes a grouped view of real ops.</td></tr>
+<tr><td>Per-chip occupancy</td><td>Superseded by measured duty cycles.</td></tr>
+<tr><td>KV section</td><td>Becomes the memory feasibility verdict (&sect;5).</td></tr>
+<tr><td>Fabric-ceiling / sustained pair</td><td>Legacy only.</td></tr>
+<tr><td>Sequential per-op contrast total and its two disclosures</td><td>Retired &mdash; it existed to contrast with the spatial pipeline.</td></tr>
+<tr><td>PARTIAL energy</td><td>Carried forward and itemized (&sect;6).</td></tr>
+</table>
+</div>
+<p>The bridge is a real obligation: the degenerate case &mdash; one model, macros
+dedicated, no sharing, no contention &mdash; must reproduce the closed-form
+report. That comparison belongs to P6. P4's part is to export the DAG-side
+observables in the shape the comparison needs, and to keep the degenerate
+configuration expressible.</p>
+
+<h3>8. Reports</h3>
+<p>Two artifacts, one schema.</p>
+<div class="overflow">
+<table>
+<tr><th>JSON block</th><th>Written by</th><th>Read by</th></tr>
+<tr><td>Model and serving parameters</td><td>P1 / config</td><td>All</td></tr>
+<tr><td>Mapping: tiles, macros, chips, shard groups, owners, links</td><td>P3</td><td>P4, P5</td></tr>
+<tr><td>Evaluation: metrics, per-device occupancy and duty cycles, memory verdicts, energy components, derived pool sizing</td><td>P4</td><td>P5, P6, DSE</td></tr>
+<tr><td>Disclosures: relaxations, approximations, coverage labels</td><td>Whoever relaxed</td><td>P6</td></tr>
+</table>
+</div>
+<p>Schema rules: one version field; one producer per block; every metric names
+its accounting basis; no derived figure appears without the inputs it was
+derived from. The text results section is a rendering of the same blocks, never
+a second computation.</p>
+<p>One open engineering point sits here. Pricing every decode step makes the DAG
+grow linearly in N. At the shapes in D15 that is comfortable; at long N it is
+not. The fallback is a step window plus a disclosed extrapolation &mdash; and
+under D21 the disclosure is part of the artifact, not a footnote.</p>
+
+<h2>Seams</h2>
+<h3>Imports</h3>
+<ul>
+<li><strong>P1</strong> &mdash; the model set in scope and its serving parameters (S, N, B); the per-model op inventory the DAG must contain.</li>
+<li><strong>P2</strong> &mdash; per-op duration, energy and area laws per device card; priced bit-slice reduction; per-macro pool component costs; macro occupancy semantics; device capacities for the feasibility check.</li>
+<li><strong>P3</strong> &mdash; the mapped DAG itself: ops with device assignment and named owners, shard groups, transfer bytes, the PD handoff, and the device and link inventory.</li>
+<li><strong>P5</strong> &mdash; the atlas's field requirements: which occupancy and owner fields must be named in the evaluation block for the visualization to color by shard group.</li>
+<li><strong>P6</strong> &mdash; the validation stance (target vs provisional), the honesty invariants the reports must satisfy, and the definition of the closed-form bridge comparison.</li>
+</ul>
+<h3>Exports</h3>
+<ul>
+<li>The evaluator contract: a mapped DAG in, one timeline out (per-op start/finish, per-device busy intervals, owner attribution).</li>
+<li>The metric set as DAG properties: prefill latency, per-step decode time, end-to-end request latency, steady throughput, per-device occupancy.</li>
+<li>Per-macro duty cycles with named owners &mdash; the P5 atlas input.</li>
+<li>The derived per-macro digital pool sizing, reported (D12).</li>
+<li>Activation, state and KV feasibility verdicts with named violations &mdash; mapper feedback to P3.</li>
+<li>Energy totals with per-component coverage labels.</li>
+<li>The evaluation block of the shared report JSON, and the single-accounting report structure.</li>
+<li>The degenerate dedicated-macro observables that the P6 closed-form bridge compares against.</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow">
+<table>
+<tr><th>Now</th><th>Address only</th></tr>
+<tr><td>Heterogeneous device pricing in the analytical evaluator (A2)</td><td>Congestion, topology, routing and buffering (D17 fixes p2p)</td></tr>
+<tr><td>Device capacity with named owners, capacity 1 degenerate (D22)</td><td>Multi-tenant request mixes, admission, SLO tails</td></tr>
+<tr><td>The five metrics plus duty cycles, all as timeline projections</td><td>VLA's latency-first closed-loop regime &mdash; representable, deliberately empty (D8)</td></tr>
+<tr><td>Memory feasibility verdicts</td><td>DiT / diffusion and audio workloads (D7)</td></tr>
+<tr><td>Itemized energy with coverage labels</td><td>Precision conversion at the PD handoff (D16)</td></tr>
+<tr><td>Derived pool sizing, reported (D12)</td><td>Pool sizing as a DSE constraint (D12, revisit only if it grows embarrassing)</td></tr>
+<tr><td>The text section and the shared JSON block</td><td>Programmable-kernel cost model for the shared digital chiplet (fixed-function library for now)</td></tr>
+<tr><td>Keeping the degenerate closed-form case expressible</td><td>Thermal, cost and area objective models (D19)</td></tr>
+</table>
+</div>
+
+<h2>Open questions for George</h2>
+<ol>
+<li><strong>The headline throughput.</strong> Tokens/s at the decode terminal, or requests/s from the batch makespan? And does the fabric-ceiling / sustained pair retire with the closed form, as &sect;3 proposes, or must the DAG report keep printing both?</li>
+<li><strong>Decode reporting shape.</strong> Per-step decode time as a full series, or first / median / last samples? The systolic staircase means sampling is an approximation, and long-N runs may need a step window with a disclosed extrapolation.</li>
+<li><strong>Energy labels.</strong> Per-component coverage labels (the recommendation), or keep the single PARTIAL word the current report prints?</li>
+<li><strong>Where the legacy report lives.</strong> A flag on <code>run_perf</code>, or reachable only from the validation script? The second is safer against a reader quoting the wrong number.</li>
+<li><strong>Pool sizing threshold.</strong> Does the derived per-macro pool sizing get a loud warning above some fraction of macro area, or stay a pure report?</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+</div>
+</main></body></html>

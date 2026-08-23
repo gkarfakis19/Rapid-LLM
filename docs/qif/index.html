@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QIF Plan of Plans</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:60rem;margin:0 auto;padding:2.5rem 1.5rem 5rem}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2.2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.2rem;max-width:46rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .8rem;padding-top:1rem;border-top:1px solid var(--line)}
+p{margin:.55rem 0;max-width:46rem}
+ul{padding-left:1.3rem;max-width:46rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+a{color:var(--accent)}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+.tag.future{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:.9rem;margin:.5rem 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:.45rem}
+.card h3{font:600 1rem/1.3 "Segoe UI",system-ui,sans-serif;margin:0}
+.card h3 a{text-decoration:none;color:var(--ink)}
+.card h3 a:hover{color:var(--accent)}
+.card p{font:13.5px/1.55 "Segoe UI",system-ui,sans-serif;color:var(--muted);margin:0}
+.card .foot{margin-top:auto;font:12px/1.4 "Segoe UI",system-ui,sans-serif;color:var(--muted)}
+.stance{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin:.8rem 0;font:14.5px/1.6 "Segoe UI",system-ui,sans-serif;max-width:100%}
+.stance b{color:var(--accent)}
+.qs{font:14.5px/1.65 "Segoe UI",system-ui,sans-serif}
+.qs li{margin:.45rem 0}
+.small{font:13px/1.55 "Segoe UI",system-ui,sans-serif;color:var(--muted)}
+</style>
+</head>
+<body><main>
+<div class="pid">QIF FWS-CIM &middot; fws_cim_dev</div>
+<h1>Plan of Plans</h1>
+<p class="mission">The tracking board for building the QIF heterogeneous chiplet system on
+Rapid-LLM: analog FWS-CIM macro chiplets plus shared digital chiplets, running
+&le;7B-total-parameter edge inference. Six superplans, one decisions register,
+and the audit trail. Plans are documents George reads; nothing here enforces
+anything (D18).</p>
+
+<h2>The architecture stance</h2>
+<div class="stance">
+<b>A1 &mdash; DAG-first.</b> No period law anywhere. The op DAG is built on the
+program IR, priced per op, evaluated fully analytically. AstraSim OFF;
+fully-connected p2p; no congestion.<br>
+<b>A2 &mdash; heterogeneous device layer.</b> Ops sit on typed devices: analog
+macro, per-macro digital pool, shared digital chiplet, link.<br>
+<b>A3 &mdash; the macro is the atomic resource; the tile is the allocation
+unit.</b> One macro can host tiles of many layers, experts, or models.
+Mapping is the assignment.
+</div>
+<p class="small">Full register: <a href="DECISIONS.md">DECISIONS.md</a> (D1&ndash;D22, raw markdown).</p>
+
+<h2>Superplans</h2>
+<div class="grid">
+<div class="card"><h3><a href="plans/P1_model_matrix.html">P1 &middot; The Model Matrix</a></h3>
+<p>Every model we support wholesale (&le;7B total, May 2025&ndash;Aug 2026): ViTs, LLMs incl. MLA,
+the SSM/hybrid heart, small MoE &mdash; with per-model facts, schema gaps, and the new-op appendix.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+
+<div class="card"><h3><a href="plans/P2_macro_resource_model.html">P2 &middot; The Macro Resource Model</a></h3>
+<p>Device cards (CTT first, ReRAM/MRAM slots), the tile object, mux/banking allocation,
+natively priced bit-slicing with shift-add reduction, the per-macro digital pool, occupancy semantics.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+
+<div class="card"><h3><a href="plans/P3_mapping.html">P3 &middot; Mapping</a></h3>
+<p>The centerpiece: tiles&rarr;macros&rarr;chips&rarr;system, tp/ep/pp as first-class groups,
+heterogeneous op placement, PD disaggregation, honest boundary checks &mdash; output is a placed op DAG.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+
+<div class="card"><h3><a href="plans/P4_evaluation.html">P4 &middot; Evaluation</a></h3>
+<p>One simulated timeline; every published metric is a projection of it. Heterogeneous device
+pricing in the analytical evaluator, memory verdicts, itemized energy, the two reports.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+
+<div class="card"><h3><a href="plans/P5_system_atlas.html">P5 &middot; The System Atlas</a></h3>
+<p>The interactive mapping picture: package&rarr;chip&rarr;macro&rarr;tile, colored by tp/ep/pp,
+one self-contained HTML file. Also the mapper's honesty enforcer &mdash; it only draws real placements.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+
+<div class="card"><h3><a href="plans/P6_validation.html">P6 &middot; Validation</a></h3>
+<p>The stance table (target / reference / provisional / never), the closed-form&rarr;DAG bridge
+check, per-plan obligations, honesty invariants, the silicon calibration seam.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+</div>
+
+<h2>Named extensions (empty by design, D8)</h2>
+<div class="grid">
+<div class="card"><h3>VLM chaining</h3><p>Vision tower &rarr; language backbone as one run. Pairings named in P1's
+address-only section; nothing to port from OPTIMA (its VLM is weighted co-residency, not a chain).</p>
+<div class="foot"><span class="tag future">Future</span></div></div>
+<div class="card"><h3>VLA flow</h3><p>Latency-first, closed-loop, one microbatch in flight, aggressive sharing.
+Qualitatively different; rethought when its time comes. DiT excluded from phase 1 (D7).</p>
+<div class="foot"><span class="tag future">Future</span></div></div>
+<div class="card"><h3>Automatic mapping search</h3><p>A third implementation of P3's
+(workload set, platform) &rarr; mapping seam. Config-driven allocation and the greedy packer come first.</p>
+<div class="foot"><span class="tag future">Future</span></div></div>
+</div>
+<p class="small">PD disaggregation is not an extension &mdash; it landed inside P3 (&sect;7), per D16.</p>
+
+<h2>Decision queue for George</h2>
+<ul class="qs">
+<li><b>P1 &mdash; first end-to-end model:</b> Qwen3.5-4B (newest, linear attention + native vision) or Granite-4.0-H-Tiny (cleanest Mamba2 hybrid, sits exactly on the 7B corner)?</li>
+<li><b>P1 &mdash; boundary rulings:</b> Gemma 4 E4B raw-8B vs effective-4.5B under D2 (draft says raw &rArr; out); honorary status for RWKV-7 7.2B / LFM2.5-8B; diffusion LM LLaDA-7B in or out; the MLA carrier (MiniCPM3-4B + a TransMLA synthetic is the draft's lean).</li>
+<li><b>P2 &mdash; the one law change:</b> ops pay for ACTIVE column sets rather than full mux depth (reduces exactly to pass-1 at full occupancy; required for co-residency). Sign off.</li>
+<li><b>P2 &mdash; slicing default-or-exception</b> for CTT, and the pool revisit threshold (draft proposes a fifth of macro footprint).</li>
+<li><b>P2/P3/P4 &mdash; confirm the audit resolution:</b> the shared digital chiplet is a P2 device card; P3 places, P4 prices.</li>
+<li><b>P3 &mdash; what is a chip</b> (one macro per chip vs many, chiplet as package unit), and pp semantics (chip chain = pp axis, or independent annotation).</li>
+<li><b>P3 &mdash; shared chiplet count:</b> config input or derived-and-reported.</li>
+<li><b>P4 &mdash; headline throughput</b> (tokens/s vs requests/s) and whether the fabric-ceiling/sustained pair retires with the closed form.</li>
+<li><b>P5 &mdash; the fixture mapping</b> (Llama2-7B tp=2 decode vs a PD pair) that becomes the schema anchor and the demo.</li>
+<li><b>P6 &mdash; bridge breadth and bar</b> (ViT tiers + Llama7b at 1e-3?), and whether the closed-form path stays in-tree to hold the bridge.</li>
+</ul>
+
+<h2>Audit trail &amp; references</h2>
+<ul class="small">
+<li><a href="DECISIONS.md">DECISIONS.md</a> &mdash; the binding register (D1&ndash;D22, A1&ndash;A3). Raw markdown.</li>
+<li><a href="plans/RECON_optima.md">RECON_optima.md</a> &mdash; what OPTIMA is (Mamba2 stages, pools, the multi-tenant block). Raw markdown.</li>
+<li><a href="plans/AUDIT_optima.md">AUDIT_optima.md</a> &mdash; what to trust: laws yes, mapper and multi-tenant layer never. Raw markdown.</li>
+<li><a href="PLAN_OF_PLANS.md">PLAN_OF_PLANS.md</a> &mdash; the superseded v1 workstream draft, kept for history.</li>
+<li>QIF proposal: <code>deepflow_astra_dev/Rapid-LLM/QIF_Proposal_final.docx</code>.</li>
+<li>Cross-audit note (2026-08-23): six drafts checked against DECISIONS.md; one seam broken and fixed
+(shared-chiplet card ownership was circular across P2/P3/P4 &mdash; resolved to P2 by the one-law-module rule);
+all declared divergences reviewed and legitimate, each flagged on its page.</li>
+</ul>
+
+<h2>Conventions</h2>
+<p class="small">Each plan carries its own Status &amp; notes box &mdash; agents append dated notes there
+(what was done, what remains) and update the status tag here. The repo is canonical; this page is
+served from <code>docs/qif/</code>. Statuses: Drafted &rarr; Reviewed (George) &rarr; Building &rarr; Done.</p>
+</main></body></html>

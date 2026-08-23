@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P6 · Validation</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P6</div>
+<h1>Validation</h1>
+<p class="mission">Which numbers are targets, which are provisional, and what the DAG-first evaluator must reproduce before it replaces the closed forms.</p>
+
+<h2>Mission context</h2>
+<p>The repo already validates. One script holds 152 gated checks and exits non-zero
+if any fails. The QIF build changes what is being validated, not how. Mapping is
+greenfield, the evaluator becomes DAG-first (A1), and OPTIMA stops being a single
+undifferentiated reference.</p>
+<p>This page is a standing list, not a procedure (D18). It names what is gated, what
+is provisional, and what is never a target. It adds one new numeric check: the
+bridge from the closed forms to the DAG.</p>
+
+<h2>Scope &amp; exclusions</h2>
+<p>In scope: the reference stance (D21), the bridge gate, the per-plan obligations,
+the honesty invariants, and the silicon calibration seam.</p>
+<p>Out of scope:</p>
+<ul>
+<li>Accuracy. ADC-bit and QAT surfaces are imported from the arch side, never
+validated here (D14).</li>
+<li>Network validation. The network is fully-connected p2p with no congestion
+(A1, D17). AstraSim is off; nothing to compare against.</li>
+<li>Multi-tenant and VLM parity. OPTIMA has no model to match there (D8, and
+AUDIT findings 2 and 3).</li>
+<li>CI machinery, coverage targets, sign-off flow, schedules (D18).</li>
+</ul>
+
+<h2>Where we stand</h2>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>What it already gates</th></tr>
+<tr><td><code>validation_scripts/validate_fws_cim_vs_optima.py</code></td><td>152 checks in one <code>CheckTable</code>: <code>.exact()</code>, <code>.close(rel_tol=REL_TOL)</code> with <code>REL_TOL = 1e-3</code>, <code>.boolean()</code>. Exit 0 only if all pass.</td></tr>
+<tr><td><code>TIERS</code> in that script</td><td>The recorded ViT points T1/T2/T3. Cycles and array counts exact; period, area, fps within 0.1 %. Config inputs are read back from the shipped YAML, so a template edit cannot drift off the reference silently.</td></tr>
+<tr><td><code>tests/baselines/baseline_a100_vit_results.txt</code>, <code>baseline_a100_llama2_7b_results.txt</code></td><td>The two A100 regression gates. Timing lines match exactly and the whole results file stays bit-identical. No tolerance.</td></tr>
+<tr><td>Pass-2A rows</td><td>Dense-LLM, <code>cim_dram</code>, and MoE smokes, plus law spot-checks the script recomputes independently in-process from <code>cim_timing.py</code>.</td></tr>
+<tr><td>Pass-2B rows</td><td><code>tools/fws_cim_dse.py</code> driven as a subprocess: sweep selection, Pareto membership, and the <code>--emit-config</code>/<code>--verify</code> round trip within 0.1 %.</td></tr>
+<tr><td><code>docs/fws_cim/DESIGN2.md</code> §8</td><td>The physics-audit precedent. Six laws corrected because they were impossible or self-inconsistent, not because parity failed.</td></tr>
+<tr><td><code>docs/qif/plans/AUDIT_optima.md</code></td><td>The source of the stance below.</td></tr>
+</table>
+</div>
+
+<h2>The investigation</h2>
+
+<h3>1. The stance (D21)</h3>
+<p>OPTIMA is not one thing. Each artifact carries its own status, permanently.</p>
+<div class="overflow">
+<table>
+<tr><th>OPTIMA artifact</th><th>Status</th><th>Use</th></tr>
+<tr><td>Analog stage laws, per-stage byte flows, digital engine library</td><td>Reference</td><td>Parity target at law level. Spot-check against them; never port the surrounding machinery.</td></tr>
+<tr><td>Array censuses, area and energy inputs</td><td>Reference</td><td>Inputs to our own census. Cross-check on dimensions.</td></tr>
+<tr><td>Single-model recordings (ViT tiers; <code>output/compiler_mamba_giant_22nm.md</code>)</td><td>Target</td><td>Gated parity, single-model only.</td></tr>
+<tr><td><code>_chip_accounting</code> (fractional chips), the "mapper"</td><td>Never a target</td><td>Area division, not placement. Nothing to match.</td></tr>
+<tr><td><code>_apply_partial_banking</code></td><td>Never a target</td><td>An aggregate smear that its own comment disclaims. Our banking is spatial and priced (D10).</td></tr>
+<tr><td><code>_model_sequence_throughput</code>, the multi-tenant layer</td><td>Never a target</td><td>Serial time-sharing presented as concurrent throughput.</td></tr>
+<tr><td>The combined-TOPS line in the multi-tenant report</td><td>Never quotable</td><td>Contradicts the SPS on the same page by ~10x. It is the reason for the one-accounting rule.</td></tr>
+<tr><td>Proposal Table 1 VLM rows (<code>_5nm_2d3d8</code>, <code>_5nm_max_perf</code>)</td><td>Provisional</td><td>Ran with <code>max_link_bandwidth_GBs: 9999</code>. Expect our model to correct them, not to match them.</td></tr>
+<tr><td>A100 weight-streaming paths</td><td>Permanent gate</td><td>Bit-identical forever. Both baselines. No tolerance, no exceptions, no re-recording.</td></tr>
+</table>
+</div>
+<p>The asymmetry rule: when our number disagrees with a law-level reference, we are
+the suspect. When it disagrees with a provisional number, OPTIMA is.</p>
+
+<h3>2. The bridge gate</h3>
+<p>The DAG-first evaluator (P3 mapping, P4 pricing) replaces the closed-form
+pipeline report. It must first reproduce it. Run the evaluator on the degenerate
+case — one model, dedicated macros, one owner per macro, no column sharing, no
+bit-slicing, no PD split — and compare against the pass-1/2 closed-form
+<code>fws_cim</code> numbers on the configs both paths express.</p>
+<div class="overflow">
+<table>
+<tr><th>Quantity</th><th>Criterion</th><th>Why</th></tr>
+<tr><td>Stage set and op count per layer</td><td>Exact</td><td>Discrete structure. A mismatch is a mapping bug.</td></tr>
+<tr><td>QK and PV cycles</td><td>Exact</td><td>Integer cycle counts from the same folded law.</td></tr>
+<tr><td>Arrays per layer, chips, macro census</td><td>Exact</td><td>Integers by invariant (D21).</td></tr>
+<tr><td>Bottleneck stage identity</td><td>Exact</td><td>A name, not a number.</td></tr>
+<tr><td>Period, block latency, end-to-end latency</td><td>&le; 0.1 % relative</td><td>Continuous; the DAG sums per-op durations while the closed form takes a max, so float paths differ.</td></tr>
+<tr><td>fps, tok/s, sustained tok/s</td><td>&le; 0.1 % relative</td><td>Derived from the above.</td></tr>
+<tr><td>Area, energy per token, boundary transfer times</td><td>&le; 0.1 % relative</td><td>Same law, different summation order.</td></tr>
+</table>
+</div>
+<p>Tolerance philosophy, mirroring the existing validator: exact where the quantity
+is discrete, tight-relative at <code>REL_TOL = 1e-3</code> where it is continuous.
+Where a law can be restated in a few lines, recompute it independently inside the
+check rather than comparing the evaluator to itself. That is the pass-2A
+spot-check pattern.</p>
+<p>What the gate deliberately excludes: fill and drain, tails, contention, banking,
+bit-slicing, PD handoff, and heterogeneous placement. The closed form cannot
+express any of them (A1, D22). Disagreement there is the new content, not a
+failure. The gate covers the intersection only, and the closed-form report
+survives as a legacy reference precisely to hold it.</p>
+
+<h3>3. Per-plan obligations</h3>
+<div class="overflow">
+<table>
+<tr><th>Plan</th><th>What validation means there</th></tr>
+<tr><td>P1 — Model Matrix</td><td>New models have no hardware truth. Validation is internal consistency: parameter count derived from config dims matches the published total and sits under 7B (D2); census and dimension cross-checks hold (array counts follow from dims; mux divides heads where a law demands it). Published-throughput figures may be cited as sanity references and must be labeled non-binding on the page that shows them.</td></tr>
+<tr><td>P2 — Macro Resource Model</td><td>Law spot-checks against recorded OPTIMA points, including the analog-time digital-clock quantization with its +1 cycle. Physics audits in the arithmetic-peak style at every law change: a law that exceeds a declared peak is wrong even when parity passes (DESIGN2 §8 precedent). New pricing proves itself by degenerate reduction — slicing off and pool unbounded reproduce today's numbers bit-identically.</td></tr>
+<tr><td>P3 — Mapping</td><td>Placement validity invariants, checked on the mapping and not on a number: chips are integers; every macro has a named owner; capacity is respected (tiles never oversubscribe columns × mux slots); every constraint relaxation is disclosed in the artifact that used it.</td></tr>
+<tr><td>P4 — Evaluation</td><td>Metric honesty: one accounting per metric per report. No metric appears twice computed two ways. Any relaxed constraint is named in the report that benefits from it. P4 also owns the bridge gate above.</td></tr>
+<tr><td>P5 — System Atlas</td><td>The atlas renders exactly the mapping data. No geometry, count, or grouping is invented in the view. Owners, chip counts, and shard-group colors are read from the mapping record; a macro absent from the mapping is absent from the atlas.</td></tr>
+</table>
+</div>
+
+<h3>4. The silicon calibration seam</h3>
+<p>Samyak's measured macro data replaces card parameters — energy per vector, area
+per array, geometry, bits-per-cell, timing constants. It does not touch laws. The
+device card is the only surface that changes (D14).</p>
+<p>Three consequences. OPTIMA parity rows stay pinned to the OPTIMA card and stay
+frozen. Measured-silicon runs are a different card and a different set of numbers;
+the two never share a report. If measured data contradicts a law's shape rather
+than its constants, that is a law change: it takes a physics audit and a re-run of
+the bridge gate.</p>
+
+<h2>Seams</h2>
+<p><strong>Imports</strong></p>
+<ul>
+<li>P1 — model configs and their declared dimension and parameter facts, for the consistency cross-checks.</li>
+<li>P2 — the laws and device cards under spot-check, plus the degenerate-reduction switches (slicing off, pool unbounded).</li>
+<li>P3 — the mapping record: owners, integer chip counts, capacity usage, disclosed relaxations.</li>
+<li>P4 — the DAG evaluator's report and its metric list, for the bridge gate.</li>
+<li>P5 — the atlas input, which is the same mapping record, for the render-fidelity check.</li>
+</ul>
+<p><strong>Exports</strong></p>
+<ul>
+<li>The stance table: every OPTIMA artifact classified as target, reference, provisional, or never.</li>
+<li>The bridge gate: its degenerate case, its scope, and its exact-vs-relative tolerance rule.</li>
+<li>The honesty invariants (D21) as checkable statements, each with an owning plan.</li>
+<li>The frozen A100 bit-identity baselines and the frozen ViT tier targets.</li>
+<li>The calibration rule: cards change, laws do not.</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow">
+<table>
+<tr><th>Item</th><th>Stance</th></tr>
+<tr><td>The 152 existing checks stay green</td><td>Now. Unconditional.</td></tr>
+<tr><td>Bridge gate on the ViT tiers and the Llama7b point</td><td>Now, as soon as the evaluator prices a mapped DAG.</td></tr>
+<tr><td>Placement invariants and metric honesty</td><td>Now. They are cheap and they are the AUDIT's whole lesson.</td></tr>
+<tr><td>Card-vs-law separation</td><td>Now, as a structural rule, before measured data arrives.</td></tr>
+<tr><td>Mamba stage parity</td><td>Address only. Waits on P2 absorbing the Mamba stage laws.</td></tr>
+<tr><td>Measured-silicon calibration rows</td><td>Address only. Blocked on data.</td></tr>
+<tr><td>VLM and multi-tenant parity</td><td>Never. Our own corrected number is the output, not a match (D8).</td></tr>
+<tr><td>Accuracy validation</td><td>Never here. Imported (D14).</td></tr>
+</table>
+</div>
+
+<h2>Open questions for George</h2>
+<ol>
+<li>Bridge-gate breadth: are the three ViT tiers plus the Llama7b point enough, or must every shipped config be expressible in both paths?</li>
+<li>Is <code>1e-3</code> the right bar for the closed-form-to-DAG period comparison, or should the degenerate case be held tighter?</li>
+<li>When the two paths disagree outside fill and drain, which one is the erratum? Default proposed: the DAG wins and the closed form is annotated, since it is legacy (A1).</li>
+<li>Table 1's VLM rows: publish our corrected figures as a correction of record, or drop the comparison entirely?</li>
+<li>Does the closed-form path stay in the tree indefinitely to hold the bridge gate, or is it frozen to recorded artifacts once the gate passes?</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+<p>Divergence flag: the bridge check is called a gate. D18 bans invented process gates. This is a numeric parity check in the style of the existing validator rows, with no ceremony attached &mdash; but the naming is worth a nod from George.</p>
+</div>
+</main></body></html>

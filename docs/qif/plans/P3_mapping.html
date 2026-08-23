@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P3 · Mapping</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P3</div>
+<h1>Mapping</h1>
+<p class="mission">Assign tiles to macros, macros to chips, and ops to devices &mdash; then hand the executor a placed, annotated op DAG.</p>
+
+<h2>Mission context</h2>
+<p>Mapping is the centerpiece. The QIF proposal calls it a compile-time
+placement problem; the rewrite already made placement a first-class policy;
+OPTIMA never had one. P3 is where the workload meets the machine.</p>
+<p>Three stances bind this plan. <strong>A1</strong>: the output is a DAG, not a
+period law. <strong>A2</strong>: ops sit on typed devices &mdash; analog macro
+devices, per-macro digital pools, shared digital chiplets. <strong>A3</strong>:
+the macro is the atomic resource and the tile is the allocation unit, so
+mapping is the assignment of tiles to macros, macros to chips, and shards to
+groups.</p>
+
+<h2>Scope &amp; exclusions</h2>
+<p><strong>In:</strong> the mapping object and its relations; heterogeneous op
+placement; parallelism shard groups as annotations; config-declared allocation
+with validation and named violations; prefill/decode disaggregation (D16);
+per-boundary byte-rate checks.</p>
+<p><strong>Out:</strong> congestion, routing, buffering and topology &mdash; the
+network is fully-connected p2p with no congestion (D17, A1). Automatic mapping
+search &mdash; a later implementation behind a seam this plan fixes now (D10).
+Any bespoke area or cost objective (D19); P3 reports counts and rates, P4 owns
+metrics. Anything ported from OPTIMA's mapper or multi-tenant layer (D21).</p>
+
+<h2>Where we stand</h2>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>What it gives P3</th></tr>
+<tr><td><code>program/placement.py</code></td><td><code>PlacementPolicy</code>, <code>Placement</code>, <code>DeviceCoord</code>, <code>Granularity</code>. Placement is declared at L1 and resolved here &mdash; never back-propagated. This is the class P3 subclasses.</td></tr>
+<tr><td><code>program/layout.py</code>, <code>program/groups.py</code></td><td>Rank layout and communicator members <em>constructed</em> from (axis, coords). Shard groups need no re-inference downstream.</td></tr>
+<tr><td><code>program/ir.py</code>, <code>program/build.py</code></td><td>The typed placed-op IR and the only <code>Program</code> constructor. <code>build()</code> is mechanical and makes no policy decision &mdash; mapping supplies the policy.</td></tr>
+<tr><td><code>cim_timing.py</code></td><td><code>layers_per_chip</code> as int, list or <code>auto</code>; capacity checks; per-chip occupancy reporting. The seed of chip assignment.</td></tr>
+<tr><td><code>tools/fws_cim_dse.py</code></td><td>Greedy capacity-first packing, stage-tagged infeasibility messages, <code>--emit-config</code>/<code>--verify</code>. The first automatic allocator we own.</td></tr>
+<tr><td><code>docs/qif/plans/AUDIT_optima.md</code></td><td>Finding 1: there is no mapper to port.</td></tr>
+</table>
+</div>
+<p>One standing assumption is superseded here. <code>docs/fws_cim/README.md</code>
+requires <code>pp: 1</code> and calls chip placement &ldquo;a post-hoc report, not
+pipeline parallelism.&rdquo; In P3 chip placement <em>is</em> the pipeline.</p>
+
+<h2>The investigation</h2>
+
+<h3>1. The mapping object</h3>
+<p>Four relations and one annotation set. Everything else is derived.</p>
+<div class="overflow">
+<table>
+<tr><th>Relation</th><th>From &rarr; to</th><th>Rule</th><th>Invariant</th></tr>
+<tr><td>Residency</td><td>tile &rarr; macro column set</td><td>Spatial column allocation over <code>cols &times; mux</code> slots (A3, D10). Tiles from the same layer, other layers, other experts or other models may share a macro.</td><td>Every occupied column set names an owner; capacity is never exceeded.</td></tr>
+<tr><td>Assembly</td><td>macro &rarr; chip</td><td>Many macros per chip. Chip ids are integers.</td><td>No fractional chips (D21). Chip capacity checked, overflow is a hard error.</td></tr>
+<tr><td>Package</td><td>chip &rarr; package graph</td><td>Fully-connected p2p, analytical (D17).</td><td>Every cross-chip byte crosses exactly one link and is priced once.</td></tr>
+<tr><td>Execution</td><td>op &rarr; device</td><td>Exactly one device per op (A2).</td><td>The device exists in the inventory and the op is priceable on it.</td></tr>
+<tr><td><em>Annotation</em></td><td>entity &rarr; (tp, ep, pp)</td><td>Carried by every macro, chip and op.</td><td>Constructed from (axis, coords), never inferred downstream.</td></tr>
+</table>
+</div>
+<p>Placement is logical only (D20): macro &rarr; chip and chip &rarr; package
+graph. No floorplan, no coordinates, no adjacency beyond the graph.</p>
+<p>The owner of a macro is a tuple &mdash; tenant, model, layer, shard-group
+coordinate, tile index &mdash; and a macro carries a <em>set</em> of them. Named
+ownership is a D21 honesty invariant; ownership as a set rather than an
+exclusive claim is D22, and it is what makes multi-tenancy later a report
+rather than a rewrite.</p>
+
+<h3>2. Three device classes</h3>
+<div class="overflow">
+<table>
+<tr><th>Device class</th><th>Lives on</th><th>Runs</th><th>Count</th></tr>
+<tr><td>Analog macro device</td><td>one per macro</td><td>weight GEMM only</td><td>= macro count</td></tr>
+<tr><td>Macro digital pool</td><td>one per macro (D12)</td><td>bit-slice shift/add trees, activations, norms, elementwise</td><td>= macro count; sized so it never blocks, sizing derived and reported</td></tr>
+<tr><td>Shared digital chiplet</td><td>package level (D13)</td><td>attention, all act&times;act GEMMs, SSM scan and state update</td><td>declared integer</td></tr>
+</table>
+</div>
+
+<h3>3. Heterogeneous op placement (A2)</h3>
+<div class="overflow">
+<table>
+<tr><th>Op class</th><th>Device</th><th>Law owner</th></tr>
+<tr><td>Weight GEMM: QKV, O-proj, FFN1/2, router, routed and shared experts, patch embed, LM head, SSM in/out projections</td><td>analog macro device</td><td>P2</td></tr>
+<tr><td>Bit-slice, column-set and chained-macro reduction (shift-and-add trees)</td><td>that macro's digital pool</td><td>P2 (D11, D12) &mdash; priced, never absorbed</td></tr>
+<tr><td>Activation, norm, gating, elementwise, residual</td><td>that macro's digital pool</td><td>P2 (D12)</td></tr>
+<tr><td>Attention QK<sup>T</sup>, PV, softmax; every act&times;act GEMM; SSM scan and state update</td><td>shared digital chiplet</td><td>P2 (D13) &mdash; the chiplet is a P2 device card; P4 prices on it <em>(audit fix)</em></td></tr>
+<tr><td>Boundary activations, KV traffic, expert dispatch/combine, PD handoff</td><td>p2p link</td><td>P4 (D17)</td></tr>
+</table>
+</div>
+<p>The output of mapping is a <strong>placed, annotated op DAG</strong>: ops with
+explicit deps, explicit transfers, a device, a shard-group coordinate and an
+owner. It is never a closed-form period. Contention and occupancy emerge from
+the DAG plus resource assignment (A1). The closed-form spatial-pipeline report
+survives only as P6's validation reference.</p>
+
+<h3>4. How this rides the rewrite's five levels</h3>
+<p>Mapping is a placement policy plus device annotations. Nothing else in the
+pipeline moves.</p>
+<div class="overflow">
+<table>
+<tr><th>Level</th><th>Artifact</th><th>What mapping puts there</th></tr>
+<tr><td>L0</td><td><code>program/workload.py</code></td><td>a <code>WorkloadSpec</code> per system: model instance plus phase (prefill or decode), from P1</td></tr>
+<tr><td>L1</td><td><code>program/work.py</code></td><td>work items at tile granularity; what work exists, no order</td></tr>
+<tr><td>L2</td><td><code>program/placement.py</code>, <code>layout.py</code>, <code>groups.py</code></td><td><strong>the mapping</strong>: tile&rarr;macro, macro&rarr;chip, op&rarr;device, tp/ep/pp coordinates</td></tr>
+<tr><td>L3</td><td><code>program/schedule/</code></td><td>wavefront and microbatch order; fill and drain stay naturally representable (D22)</td></tr>
+<tr><td>L4</td><td><code>program/ir.py</code> via <code>build()</code></td><td>the placed annotated DAG handed to P4</td></tr>
+<tr><td>L5</td><td><code>analytic_sim.py</code>, <code>viz.py</code></td><td>P4 prices it; P5 draws it</td></tr>
+</table>
+</div>
+<p>One widening is needed and only one. <code>DeviceCoord</code> today addresses a
+homogeneous rank grid; here a device also has a class and a host macro. That is
+a wider coordinate, not a new IR.</p>
+
+<h3>5. The audit verdict: greenfield</h3>
+<p>AUDIT finding 1 is decisive. OPTIMA's <code>_chip_accounting</code> divides
+required area by usable chip area and in one mode reports non-integer chips. No
+layer is ever assigned to a chip; &ldquo;layers/chip: 3&rdquo; is division, not
+placement. There is nothing to port. OPTIMA contributes stage laws and
+single-model recordings to P2 and P6, and <em>nothing</em> to P3 (D21).</p>
+<p>Two rules follow into our own artifacts, forever: chips are integers, and a
+relaxed constraint is disclosed in the artifact. Finding 5 is the anti-pattern
+&mdash; the flagship rows ran with <code>max_link_bandwidth_GBs: 9999</code>.</p>
+
+<h3>6. Config-driven now, search behind a seam</h3>
+<div class="overflow">
+<table>
+<tr><th>Who</th><th>What</th></tr>
+<tr><td>User states</td><td>chip assignment (<code>layers_per_chip</code>-style: int, list, or an explicit per-layer map); per-macro tile and bank assignment; tp/ep/pp degrees and membership; shared-chiplet count; the prefill and decode specs</td></tr>
+<tr><td>Tool validates</td><td>macro and chip capacity; divisibility (mux, heads, experts, routing groups); ownership completeness; group membership; integer chips</td></tr>
+<tr><td>Tool prices</td><td>through P4, on the placed DAG</td></tr>
+<tr><td>Tool reports</td><td>the mapping itself, per-chip occupancy, derived pool sizing, per-boundary rates, and every violation with a stage tag and a message naming the offending setting</td></tr>
+</table>
+</div>
+<p><strong>The seam, named now:</strong> one interface,
+<code>(workload set, platform) &rarr; mapping</code>. Config-declared allocation
+is the first implementation. The existing <code>layers_per_chip: auto</code>
+greedy packer is the second, already written. Automatic search is a third
+implementation of the same interface and a later phase (D10). The interface
+takes a <em>set</em> of workloads from day one; the singleton is a degenerate
+case, never a separate path.</p>
+
+<h3>7. Prefill and decode are two systems (D16)</h3>
+<div class="overflow">
+<table>
+<tr><th>&nbsp;</th><th>Prefill system</th><th>Decode system</th></tr>
+<tr><td>Model instance</td><td>own</td><td>own</td></tr>
+<tr><td>Pool counts (macros, chips, shared chiplets)</td><td>own</td><td>own</td></tr>
+<tr><td>Mapping</td><td>own</td><td>own</td></tr>
+<tr><td>Coupling</td><td colspan="2">one handoff, priced as bytes over the p2p law</td></tr>
+</table>
+</div>
+<p>That is the whole of it. No precision conversion &mdash; a seventh-order
+effect, out of scope. The only shared quantity is the handoff byte count. The
+report carries two system sections and one link line. Setting both specs equal
+reproduces the non-disaggregated machine.</p>
+
+<h3>8. Boundary bandwidth, checked honestly (D17, D21)</h3>
+<p>For each boundary &mdash; chip-to-chip activations, expert dispatch and
+combine, KV traffic, the PD handoff &mdash; mapping reports the required bytes
+per period against the declared link rate. A violation is <em>named</em>:
+boundary id, required rate, available rate, ratio. It is never silently
+absorbed and never fixed by raising a cap.</p>
+<p>One honest limit, stated once and repeated in the artifact: with no
+congestion model, a violated boundary is <em>reported, not priced</em>. The DAG
+time in that case is optimistic and the report says so. If a run needs a
+relaxation to complete, the relaxation is disclosed.</p>
+
+<h2>Seams</h2>
+<h3>Imports</h3>
+<ul>
+<li><strong>P1</strong> &mdash; the model set and per-model architecture facts: layer inventory, weight-matrix shapes, expert counts and routing, attention flavor, prefill/decode parameters, and the config-schema fields mapping consumes.</li>
+<li><strong>P2</strong> &mdash; the macro resource model: device card, tile definition, stored-column capacity, bit-slice column sets, chained-macro reduction, per-macro pool sizing, occupancy semantics. Mapping asks P2 &ldquo;does this tile set fit&rdquo; and &ldquo;what devices does this macro expose&rdquo;.</li>
+<li><strong>P4</strong> &mdash; the per-op pricing contract: which annotations an op must carry to be priceable, and the p2p law used for every boundary and the PD handoff.</li>
+<li><strong>P6</strong> &mdash; the honesty invariants and the target-vs-provisional labelling every mapping report obeys.</li>
+</ul>
+<h3>Exports</h3>
+<ul>
+<li>The mapping object: tile&rarr;macro, macro&rarr;chip, chip&rarr;package, op&rarr;device, each with named owners.</li>
+<li>A placed, annotated op DAG (a <code>Program</code>) &mdash; to P4.</li>
+<li>tp/ep/pp shard-group coordinates on every macro, chip and op &mdash; to P5, which colors by them (D20).</li>
+<li>Per-chip and per-macro occupancy, plus derived digital-pool sizing &mdash; to P4 and P5.</li>
+<li>The per-boundary byte-rate table with named violations and disclosed relaxations &mdash; to P4 and P6.</li>
+<li>The prefill/decode system pair and the priced handoff &mdash; to P4.</li>
+<li>The <code>(workload set, platform) &rarr; mapping</code> policy seam &mdash; to future search work.</li>
+<li>Stage-tagged validation failures in the DSE convention &mdash; to P6.</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow">
+<table>
+<tr><th>Item</th><th>Verdict</th><th>Note</th></tr>
+<tr><td>The four relations plus owner tuples</td><td>now</td><td>the plan's core</td></tr>
+<tr><td>Three device classes and op placement</td><td>now</td><td>A2, D12, D13</td></tr>
+<tr><td>tp/ep/pp annotations</td><td>now</td><td>P5 cannot color what P3 does not emit (D20)</td></tr>
+<tr><td>Config-declared allocation, validation, named violations</td><td>now</td><td>D10</td></tr>
+<tr><td>PD pair and handoff</td><td>now</td><td>D16, deliberately thin</td></tr>
+<tr><td>Boundary byte-rate checks with disclosure</td><td>now</td><td>D17, D21</td></tr>
+<tr><td>Automatic mapping search</td><td>address only</td><td>a third implementation of a seam fixed now</td></tr>
+<tr><td>VLA mapping mode</td><td>address only</td><td>latency-first, one microbatch, aggressive sharing (D8). We owe it only fill/drain honesty in the DAG today (D22).</td></tr>
+<tr><td>Multi-tenant allocation</td><td>address only</td><td>the tile machinery already permits it; no exclusive-ownership assumption is written anywhere (D22)</td></tr>
+<tr><td>MLA placement fallout</td><td>address only</td><td>MLA places like any attention flavor; its TP hostility and KV replication surface as a report, not new machinery (D6)</td></tr>
+<tr><td>Congestion, routing, buffering, topology</td><td>out</td><td>D17</td></tr>
+<tr><td>Area or cost objectives inside mapping</td><td>out</td><td>D19</td></tr>
+</table>
+</div>
+
+<h2>Open questions for George</h2>
+<ol>
+<li><strong>What is a chip?</strong> One macro per chip, or many macros per chip with the chiplet as the package unit? The relations work either way; the reports and P5's hierarchy read very differently.</li>
+<li><strong>pp semantics.</strong> Is the chip chain the pp axis &mdash; chip index equals pipeline stage &mdash; or is pp an independent annotation over chips? This decides the schedule policy and P5's coloring.</li>
+<li><strong>Shared digital chiplet count:</strong> a config input the user must get right, or derived-and-reported like the per-macro pool (D12)? Deriving it is more useful and slightly less honest.</li>
+<li><strong>PD disaggregation:</strong> two physically separate inventories, or one inventory partitioned? The first is simpler and matches D16 literally; the second is what an edge box would actually do.</li>
+<li><strong>Config surface:</strong> extend <code>cim.chip</code>, or open a new <code>mapping:</code> block? Extending keeps one config; a new block is honest that the concept has widened.</li>
+<li><strong>Idle capacity:</strong> must every macro be fully owned, or are unowned columns legal and merely reported?</li>
+</ol>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+</div>
+</main></body></html>
