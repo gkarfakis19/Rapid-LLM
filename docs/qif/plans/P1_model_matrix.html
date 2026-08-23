@@ -50,7 +50,7 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 <li><strong>Out by D2:</strong> big-total / small-active MoE. Nemotron&nbsp;3 Nano (31.6B-A3B), Qwen3.5-35B-A3B, Gemma&nbsp;4 26B-A4B, LFM2.5-8B-A1B (8.3B), Qwen3-Next-80B-A3B. These stay as architecture references only; they are exactly the wrong shape for FWS.</li>
 <li><strong>Out by D7:</strong> DiT / image diffusion, audio and speech. Gemma&nbsp;4's audio encoder is ignored; the vision tower is not.</li>
 <li><strong>Address only (D8):</strong> VLM chaining, VLA. Named below, empty by design.</li>
-<li><strong>Not in scope here:</strong> accuracy. Quantization and ADC-bit surfaces are imported from the arch side (D14), never derived from this matrix.</li>
+<li><strong>Not in scope here:</strong> accuracy. It is NEVER a factor anywhere in this project &mdash; performance model only (D23).</li>
 </ul>
 
 <h2>Where we stand</h2>

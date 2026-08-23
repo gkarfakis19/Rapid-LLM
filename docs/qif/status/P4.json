@@ -1,0 +1,49 @@
+{
+ "plan": "P4",
+ "title": "Evaluation",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P4.1",
+   "title": "Heterogeneous device pricing in the analytic evaluator (capacity-1 degenerate bit-identical)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P4.2",
+   "title": "Metric set as timeline projections (ADJ-6 headline rules)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P4.3",
+   "title": "Memory feasibility verdicts with named violations",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P4.4",
+   "title": "Itemized energy with per-component coverage labels",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P4.5",
+   "title": "Derived per-macro pool sizing report",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P4.6",
+   "title": "Report JSON + text section (single-accounting structure)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

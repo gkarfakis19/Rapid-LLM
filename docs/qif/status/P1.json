@@ -1,0 +1,35 @@
+{
+ "plan": "P1",
+ "title": "The Model Matrix",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P1.1",
+   "title": "Config schema growth: block-typed layers, SSM / linear-attn / short-conv params, window patterns, per-block FFN dims, depth-shared groups",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P1.2",
+   "title": "hf_to_config.py ingestion of the new fields",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P1.3",
+   "title": "P0/P1 model YAMLs with param-total consistency checks (headline: Granite-4.0-H-Tiny per ADJ-1)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P1.4",
+   "title": "Clean named rejection of not-yet-priceable ops by fws_cim until P2-P4 land",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

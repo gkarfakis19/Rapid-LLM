@@ -49,8 +49,7 @@ bridge from the closed forms to the DAG.</p>
 the honesty invariants, and the silicon calibration seam.</p>
 <p>Out of scope:</p>
 <ul>
-<li>Accuracy. ADC-bit and QAT surfaces are imported from the arch side, never
-validated here (D14).</li>
+<li>Accuracy. NEVER a factor anywhere (D23).</li>
 <li>Network validation. The network is fully-connected p2p with no congestion
 (A1, D17). AstraSim is off; nothing to compare against.</li>
 <li>Multi-tenant and VLM parity. OPTIMA has no model to match there (D8, and
@@ -173,7 +172,7 @@ the bridge gate.</p>
 <tr><td>Mamba stage parity</td><td>Address only. Waits on P2 absorbing the Mamba stage laws.</td></tr>
 <tr><td>Measured-silicon calibration rows</td><td>Address only. Blocked on data.</td></tr>
 <tr><td>VLM and multi-tenant parity</td><td>Never. Our own corrected number is the output, not a match (D8).</td></tr>
-<tr><td>Accuracy validation</td><td>Never here. Imported (D14).</td></tr>
+<tr><td>Accuracy validation</td><td>Never. Not a factor (D23).</td></tr>
 </table>
 </div>
 

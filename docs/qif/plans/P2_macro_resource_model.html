@@ -59,7 +59,7 @@ scan laws to come) live here: one law module owns every device card
 <li>Which tile goes on which macro. P2 prices and validates an allocation; P3
 chooses it.</li>
 <li>DAG evaluation, metrics, and reports (P4).</li>
-<li>Accuracy. It is imported from the arch side, never simulated (D14).</li>
+<li>Accuracy. NEVER a factor anywhere &mdash; performance model only (D23).</li>
 <li>Partial weight stationarity (D9) and weight writes. Fixed weights admit no
 writes; this is permanent, not phased.</li>
 </ul>
@@ -76,7 +76,7 @@ today an array is a count, not a thing with an owner and a site.</p>
 <tr><td><code>configs/hardware-config/fws_cim_optima_t1.yaml</code></td><td>The <code>cim.analog</code> block: the CTT card's parameter half, in production use.</td></tr>
 <tr><td><code>validation_scripts/validate_fws_cim_vs_optima.py</code></td><td>The parity harness that must stay green through every generalization here.</td></tr>
 <tr><td><code>/app/nanocad/projects/cim_ctt_big_optima/perf_model/</code></td><td>Reference only. Stage laws, array censuses, the analog array library, <code>stack_3d_height</code>.</td></tr>
-<tr><td><code>/app/nanocad/projects/cim_ctt_big_arch/</code></td><td>The accuracy surfaces P2 imports and never recomputes.</td></tr>
+<tr><td><code>/app/nanocad/projects/cim_ctt_big_arch/</code></td><td>Not used &mdash; accuracy is never a factor (D23).</td></tr>
 </table>
 </div>
 <p>OPTIMA's banking is the clearest statement of the gap. <code>_apply_partial_banking</code>
@@ -99,7 +99,7 @@ assume them. CTT is the first card. ReRAM and MRAM are cards, not rewrites (D14)
 <tr><td>Energy</td><td><code>energy_per_vec_pj</code>, <code>shots_per_output</code>, shot kind</td><td>Per-vector analog energy. Shot kind decides whether shots also cost time.</td></tr>
 <tr><td>Area</td><td><code>area_mm2_per_array</code>, peripheral area (ADC and mux)</td><td>Macro footprint, split so one accounting stays one accounting (D21).</td></tr>
 <tr><td>Structural</td><td><code>bits_per_cell</code>, slicing arrangement, bank/mux depth, 3D stack height</td><td>The knobs. Each one changes a law, not just a constant.</td></tr>
-<tr><td>Accuracy</td><td>Imported surface id, keyed by bits-per-cell and ADC bits</td><td>Read from the arch side. Never simulated here (D14).</td></tr>
+<tr><td>Accuracy</td><td>Removed (D23)</td><td>Accuracy is never a factor; the card carries no accuracy field.</td></tr>
 <tr><td>Validity</td><td>Admitted (bits-per-cell, weight-bits, mux) points</td><td>The menu. The tool refuses an unlisted point instead of interpolating.</td></tr>
 </table>
 </div>
@@ -235,7 +235,7 @@ Today's PARTIAL energy label stays until the pool and peripheral terms land.</p>
 <tr><td>Reduction tree</td><td>Adder width, lane count, and clock available beside a macro.</td><td>The pool sizing law and its reported area.</td></tr>
 <tr><td>3D stacking</td><td>Height menu, per-layer area and energy deltas, TSV and thermal limits.</td><td>Whether stack height stays an area divisor or becomes a real knob.</td></tr>
 <tr><td>Shots</td><td>Parallel or temporal, per device?</td><td>Whether shots enter the timing law at all.</td></tr>
-<tr><td>Accuracy import</td><td>Format and keys of the arch-side accuracy surfaces.</td><td>The card's accuracy field (D14).</td></tr>
+
 </table>
 </div>
 
@@ -276,7 +276,7 @@ contain (for P3 and P4).</li>
 <tr><td>Bit-slicing: column-set and chained arrangements, priced; reduction ops emitted.</td><td>Temporal input bit-slicing, until a card declares temporal shots.</td></tr>
 <tr><td>Per-macro digital pool sizing, derived and reported.</td><td>The pool as a DSE constraint (D12).</td></tr>
 <tr><td>3D stack height as a footprint transform declared by the card.</td><td>TSV, thermal, and yield effects of stacking.</td></tr>
-<tr><td>Analog area and energy terms for tree, pool, and peripheral.</td><td>Accuracy-aware sweeps. Surfaces are imported, never simulated (D14).</td></tr>
+<tr><td>Analog area and energy terms for tree, pool, and peripheral.</td><td>Accuracy anything &mdash; removed entirely (D23).</td></tr>
 <tr><td>&mdash;</td><td>Weight writes and PWS. Permanently out (D9).</td></tr>
 </table>
 </div>

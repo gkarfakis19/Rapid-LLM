@@ -1,0 +1,35 @@
+{
+ "plan": "P5",
+ "title": "The System Atlas",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P5.1",
+   "title": "fws_atlas/1 schema + hand-written fixture (Llama2-7B tp=2 decode, ADJ-7)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P5.2",
+   "title": "Phase-1 renderer: package/chip views, group hues, occupancy, hover, file-drop + embedded blob",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P5.3",
+   "title": "Loader conformance refusals + validation panel",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P5.4",
+   "title": "Duty cycle + PD two-system view (needs P3/P4)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

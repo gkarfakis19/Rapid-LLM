@@ -1,0 +1,35 @@
+{
+ "plan": "P6",
+ "title": "Validation",
+ "updated": "2026-08-23",
+ "deliverables": [
+  {
+   "id": "P6.1",
+   "title": "P1 consistency rows: param totals from dims vs published, <= 7B (lands with P1)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P6.2",
+   "title": "P2 degenerate-reduction gates: slicing off / one owner reproduces today bit-identically (lands with P2)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P6.3",
+   "title": "Bridge gate: closed-form vs DAG on ViT tiers + Llama7b + MoE smoke at 1e-3 (ADJ-8; needs P4)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P6.4",
+   "title": "Standing suites stay green through every wave (123 fws_cim tests, 152-check validator, 221 goldens, A100 baselines)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}
