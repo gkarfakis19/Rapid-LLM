@@ -67,7 +67,23 @@ GEMM path (`base_timing.get_gemm_time`) and the spatial report
   Attention stage time is `max(T_sa, T_softmax)`.
 - Energy per stage per layer: `E = M_tokens * energy_per_vec_pj *
   shots_per_output * arrays`. `shots_per_output` affects energy only.
-- Area: `arrays * area_mm2_per_array`.
+- Macro resource model (QIF P2): an op pays
+  `M_tokens * active_column_sets * slice_cycles / f_analog`. A column set is
+  one mux slot (`cols_adc` stored columns, one ADC pass) and is the smallest
+  allocatable unit; the charge is the worst macro's active-set count because
+  the macros holding an op's tiles convert concurrently. One owner filling
+  every mux slot pays `mux * slice_cycles` — `M * vec_latency`, the pass-1
+  charge, bit-identically. Bit slicing: `n_s = ceil(weight_bits /
+  bits_per_cell)` (1 unless a card opts in), stored-column demand `x n_s`,
+  and a shift-add tree of `(n_s - 1)` adds per output at depth
+  `ceil(log2(n_s))`, pipelined as `cycles = depth + ceil(results/lanes) - 1`.
+  The per-macro digital pool carries `lanes = ceil(cols_adc * f_analog /
+  slice_cycles / f_pool)` lanes and `lanes * (n_s - 1)` adders — derived and
+  REPORTED (every `device_class: fws_cim` run prints a `[FWS-CIM] per-macro
+  digital pool (derived, D12)` line), never a constraint.
+- Area: `arrays * area_mm2_per_array` — analog only, the OPTIMA parity
+  accounting. A shared digital chiplet card's declared `area_mm2` is a
+  separate figure (`system_area_mm2`), never smeared into that total.
 - Report metrics: `period = max(stage times)`, `fps = 1/period`,
   `block_latency = sum(S1..S5)`, `end_to_end_latency = num_layers *
   block_latency + endpoint stages + boundary transfers`.
@@ -135,6 +151,13 @@ GEMM path (`base_timing.get_gemm_time`) and the spatial report
   — plus `cim.kv_dram` KV traffic when that story is
   configured. No fabric, SRAM, or helper energy; the report labels it
   PARTIAL.
+- **Macro resource model is law-only (QIF P2).** Cards, tiles, active-
+  column-set pricing, bit slicing with its reduction descriptors, and the
+  per-macro pool sizing are pure functions plus config plus tests. Nothing
+  is wired into the closed-form spatial report, which stays legacy-frozen:
+  the shipped configs produce byte-identical reports with or without an
+  explicit (inert) `cim.cards` / `cim.allocation` block, and a test gate
+  proves it.
 - **Folded-K attention.** Per-head fill/drain is not priced; a single
   configurable penalty (`fill_drain_penalty_cycles`, default `3*rows`)
   covers it.
@@ -378,6 +401,48 @@ cim:
     capacity_bytes: 8589934592           # 8 GiB (plain numbers, no unit strings)
     bandwidth_bytes_per_s: 100000000000  # 100 GB/s
     energy_per_bit_pj: 2.0               # feeds the PARTIAL energy; 0 disables
+  cards:                     # optional (QIF P2.1); absent -> a card is synthesized
+                             # from cim.analog + cim.fabric with every knob inert
+    ctt:                     # the analog macro card
+      kind: analog_macro     # analog_macro | digital_chiplet
+      device: ctt            # ctt | reram | mram (reram/mram are NAMED EMPTY
+                             # SLOTS: schema only, no shipped numbers, so a card
+                             # on them must supply its own complete params block)
+      # params: {...}        # a full cim.analog parameter set; omitted -> inherit
+      bits_per_cell: 2       # slicing is present IFF bits_per_cell < weight_bits
+      weight_bits: 8         # declare both or neither (absent -> no slicing)
+      slicing: column_sets   # column_sets | chained_macros
+      bank_depth: 1          # mux slots per allocatable bank; must divide adc_mux
+                             # (absent -> the whole macro = dedicated per matrix)
+      stack_3d_height: 1     # divides the package FOOTPRINT only, never silicon
+      validity:              # admitted points; empty -> the card declares no menu
+        - { bits_per_cell: 2, weight_bits: 8, mux: 4 }
+      pool_clock_ghz: 0.0    # per-macro digital pool; 0 -> inherit the fabric clock
+      pool_energy_per_add_pj: 0.0   # 0 reports zero (no invented numbers)
+      pool_area_mm2_per_adder: 0.0  # 0 reports zero
+      bank_switch_cycles: 0  # analog cycles lost between active column sets.
+                             # 0 is a DISCLOSED relaxation, not an omission:
+                             # no shipped device declares a switch cost, and
+                             # OPTIMA priced switching at zero silently
+                             # (AUDIT finding 3). A card that knows its number
+                             # declares it and every op pays (active - 1) x it.
+    shared_digital:          # the shared digital chiplet card (SA + softmax laws)
+      kind: digital_chiplet
+      # params: {...}        # a full cim.fabric parameter set; omitted -> inherit
+      area_mm2: 0.0          # chiplet silicon; reported in system_area_mm2 and
+                             # never folded into the analog (parity) area total.
+                             # There is no energy knob: no law prices a fabric
+                             # op's energy yet, so declaring one is refused.
+    # default_analog: ctt    # which card the laws use (default: the first one)
+    # default_digital: shared_digital
+  allocation:                # optional (QIF P2.2); ABSENT = dedicated per matrix
+    column_sets_per_tile: 4  # allocation granularity in mux slots (must divide it)
+    assignments:             # explicit tile placement, capacity-checked while
+                             # the hardware YAML is parsed: an out-of-range or
+                             # doubly-claimed column set is a hard error on the
+                             # run path, not only under the device model
+      - { model: vit, layer: 0, op: qkv, expert: -1, shard: 0,
+          slice_index: 0, macro: 0, column_sets: [0, 1] }
   dse:                       # optional; consumed only by tools/fws_cim_dse.py
     mux_candidates: [1, 2, 4, 8, 16]  # optional cross-check: every variant's adc_mux
                                       # must appear here; the sweep enumerates

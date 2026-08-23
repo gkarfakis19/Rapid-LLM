@@ -307,5 +307,16 @@ cannot defend yet.</li>
 
 <div class="status"><h2>Status &amp; notes</h2>
 <p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+<p><span class="tag">Built</span> 2026-08-23 &mdash; P2.1&ndash;P2.5 landed as the law layer (pure functions + config + tests):
+device cards in <code>config.py</code> (<code>cim.cards</code>, synthesized and inert when absent; reram/mram are named empty slots),
+tiles / enumerator / capacity checks and the optional <code>cim.allocation</code> block plus active-column-set pricing, bit-slice
+reduction descriptors and the derived per-macro pool in <code>cim_timing.py</code>. Open questions 1&ndash;6 are answered by ADJ-4 and the
+audit resolution; question 4 is now VERIFIED &mdash; a test asserts every stage of all six shipped fws_cim pairs is full-occupancy.
+Nothing is wired into the closed-form spatial report. Suites: <code>tests/test_fws_cim.py</code> 129&nbsp;&rarr;&nbsp;191 passing,
+validator 152/152, full suite 1844 passed / 1 failed vs a 1781-passed / 2-failed baseline &mdash; no regression. The one
+remaining failure, <code>test_webui_browser.py::test_webui_layout_and_visual_health</code>, is pre-existing and unrelated;
+the other baseline failure (<code>test_build.py::test_r3_is_linear_in_schedule_length_not_quadratic</code>, a wall-clock
+scaling test) passed on the final run.</p>
+<p><span class="tag">Audit fixes</span> 2026-08-23 &mdash; six majors closed. The column-set arrangement now places a slice group as a unit so it never straddles a macro (at <code>n_s = 3</code> into 4 tile slots the groups straddled and the descriptors charged p2p transport for an arrangement defined never to need any), and refuses by name when a group cannot fit one macro. A user-written <code>cim.allocation</code> is capacity-checked while the hardware YAML is parsed, not only from a test. Bank switching is a declared card figure (<code>bank_switch_cycles</code>, 0 on every shipped card &mdash; a disclosed relaxation rather than the silent zero of AUDIT finding 3). The derived per-macro pool sizing is genuinely REPORTED: every <code>fws_cim</code> run prints it (stdout only; the report file and results txt are the frozen closed-form accounting). The shared digital chiplet card lost its inert <code>energy_per_op_pj</code> and its <code>area_mm2</code> gained real consumers, kept separate from the analog parity area total. <strong>Correction:</strong> open question 4 was upgraded to VERIFIED on a test that could not fail &mdash; the dedicated default hands one owner a whole macro, so <code>active_column_sets == adc_mux</code> is a tautology. The test now asserts the physical statement and names the one shipped stage that under-fills: the MoE router (<code>N&nbsp;=&nbsp;16</code> against <code>cols_adc&nbsp;=&nbsp;256</code>). No parity number moves, but the parity configurations are not full-occupancy everywhere. Suites: <code>tests/test_fws_cim.py</code> 199 passing, validator 152/152, full suite 1872 passed / 0 failed (baseline 1845 / 0) (the earlier note's 1844/1 and its named survivor were stale &mdash; <code>test_webui_browser.py</code> passes on this tree).</p>
 </div>
 </main></body></html>

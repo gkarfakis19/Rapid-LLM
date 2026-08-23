@@ -1,0 +1,56 @@
+# Falcon-H1-7B-Base inference config — the PARALLEL-branch hybrid.
+# Dims verified 2026-08-23 against the published HuggingFace config.json:
+#   https://huggingface.co/tiiuae/Falcon-H1-7B-Base/blob/main/config.json
+# Every one of the 44 layers runs attention || Mamba2 || MLP side by side,
+# which is why layer_plan uses structure: parallel_branch instead of a list.
+# Rejected until the P2-P4 SSM pricing laws land.
+provenance:
+  source: "https://huggingface.co/tiiuae/Falcon-H1-7B-Base/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 7585648736  # HF safetensors total (bf16)
+  # 7.59B RAW parameters, so the nominal "7B" name is over the D2 cutoff.
+  # Kept as an architecture reference row (ADJ-2 precedent: RWKV-7 7.2B,
+  # LFM2.5-8B). Falcon-H1-3B is the in-scope sibling of this family.
+  d2_status: reference
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: false  # HF tie_word_embeddings: false
+  model_type: "llama"
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 3072
+  layer_plan:
+    structure: "parallel_branch"
+    branches: ["attention", "mamba", "ffn"]
+  attention:
+    attention_type: "gqa"
+    num_heads: 12
+    kv_heads: 2
+    head_dim: 128  # HF head_dim; NOT hidden_dim/num_heads (3072/12 = 256)
+    use_flashattention: false
+  ssm:
+    variant: "mamba2"
+    d_state: 256  # HF mamba_d_state
+    n_groups: 1
+    n_heads: 24  # HF mamba_n_heads
+    d_head: 128  # HF mamba_d_head
+    d_inner: 3072  # HF mamba_d_ssm wins over HF mamba_expand: 2
+    d_conv: 4
+    chunk_size: 128
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 12288
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 44
+  intermediate_size: 12288
+  vocab_size: 130048
+  num_layers: 44
+
+inference_param:
+  sample_every: -1

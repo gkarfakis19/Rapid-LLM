@@ -6,15 +6,15 @@
   {
    "id": "P6.1",
    "title": "P1 consistency rows: param totals from dims vs published, <= 7B (lands with P1)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "llm_util.model_raw_param_count() is a block-aware raw-parameter census (embeddings, attention/MLA, Mamba1/Mamba2, gated DeltaNet, short conv, FFN/MoE, depth-shared groups counted once plus their LoRA). tests/test_qif_model_matrix.py asserts every new YAML's census is within 3% of the published figure recorded in its provenance block (all nine land within 0.03% except minicpm3_4b at 1.84% and qwen3_5_4b at 5.14% under a disclosed 6% row tolerance) and that the census agrees with the row's d2_status against the 7B cutoff both ways. ASSUMPTION: three nominal-'7B' rows are over the D2 raw cutoff and are recorded as d2_status: reference following the ADJ-2 precedent (RWKV-7 7.2B, LFM2.5-8B) rather than dropped: falcon_h1_7b 7.585B, falcon_mamba_7b 7.271B, hunyuan_7b 7.504B raw params.",
    "questions": []
   },
   {
    "id": "P6.2",
    "title": "P2 degenerate-reduction gates: slicing off / one owner reproduces today bit-identically (lands with P2)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Two gates in tests/test_fws_cim.py, parametrized over fws_cim_optima_t1 + vit_huge_story_64, fws_cim_llama7b + llama2_7b_fws_inf, and fws_cim_moe + moe_small_fws_inf. The first runs run_perf twice per pair - shipped config, then the same config with an EXPLICIT but inert cim.cards (slicing off, bank = full mux depth) and cim.allocation (column_sets_per_tile = adc_mux) block - and asserts fws_cim_report.json and LLM_inference_results.txt are byte-identical. The second compares the same pair at law level (vec_cycles, arrays, area, chip usage, every stage time, period, stack energy) and checks the tiled path reproduces analog_gemm_time per stage. ASSUMPTION: byte-identity of the two report artifacts is the operative definition of 'reproduces today's numbers bit-identically' for the full report output.",
    "questions": []
   },
   {

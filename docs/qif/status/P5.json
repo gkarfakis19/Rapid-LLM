@@ -6,22 +6,22 @@
   {
    "id": "P5.1",
    "title": "fws_atlas/1 schema + hand-written fixture (Llama2-7B tp=2 decode, ADJ-7)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "docs/qif/atlas/SCHEMA.md freezes fws_atlas/1 (systems, chips, macros, tiles, links, metrics, relaxations, device cards, owner tuples, slice roles, groups, primary_group) plus the loader refusals and the fixture_invented convention. docs/qif/atlas/fixture_llama7b_tp2.json is a Llama2-7B tp=2 decode mapping: 8 chips (6 analog + 2 shared digital), 724 enumerated macro slots (720 analog + 4 shared-digital engine slots), 520 holding 648 tiles, 13 links. Capacities, per-array area (14.367386 mm2), 120 slots/chip, throughput and periods are recorded from run_perf.py on fws_cim_llama7b.yaml + llama2_7b_fws_inf.yaml; the tp=2 placement, tile split, column spans, DUTY CYCLES, digital-pool sizing and link bytes are hand-authored and marked (corrected: an earlier draft of this line also claimed duty cycles were recorded, which the fixture's own provenance contradicts). Assumptions I decided rather than escalating: (a) added link role 'act' for the chip-boundary handoff and the analog->shared-digital attention hop, because ADJ-5 forbids calling a chip boundary pp; (b) macros with no tiles must carry a 'reserved' string, which is how the named-owner invariant is enforced for reserved slots and for the digital fabric engines; (c) chips carry capacity.macro_slots, occupancy, groups and primary_group so the package view derives nothing; (d) the fixture's throughput/period figures are the tp=1 recording of the same model+hardware pair and that is disclosed as a relaxation, not buried in a footnote; (e) the shared digital chiplets show POOL MEMBERSHIP only — op residency needs P4's DAG and is phase 3, which the fixture's reserved strings already say (this closes plan-page open question 4); (f) plan-page open questions 1, 2, 3 and 5 are closed by ADJ-7 and the build conforms to all four.",
    "questions": []
   },
   {
    "id": "P5.2",
    "title": "Phase-1 renderer: package/chip views, group hues, occupancy, hover, file-drop + embedded blob",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "docs/qif/atlas/atlas.html is one self-contained file (inline JS + SVG, no external asset, no network). Package view clusters chips by pool with links weighted by sqrt(bytes) and dashed by role; chip view draws the macro grid ordered by id with hue = parallelism group, occupancy as a single-hue fill ramp, dashed outline = shared digital chiplet, hatch = reserved/unknown/over-palette, and a per-macro column strip showing tile spans and the gaps between them. Hover gives macro, chip, link and metric cards (click to pin); the legend is always on screen. Data arrives three ways: the embedded application/json blob (default, works from a USB stick), an optional sibling-file fetch when served over http, and file input or drag-and-drop. The four group hues (#108ca0 #a63931 #714ba8 #808402) were chosen by search and pass the dataviz validator all-pairs on surface #f7f9fa (CVD dE 9.3 deutan, normal-vision dE 17.8, contrast >= 3:1); the board accent #176778 is below the chroma floor and stays chrome. Verified by rendering package, chip and self-test views headlessly in Firefox and reading the screenshots.",
    "questions": []
   },
   {
    "id": "P5.3",
    "title": "Loader conformance refusals + validation panel",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "27 rules: referential integrity in both directions (chips<->macros<->tiles, links, cards, systems, models), integer enumerated chips (slot count must equal the enumerated macros; any *_per_chip / chip_count style quotient is refused by name, and the sweep now reaches macros[], tiles[], links[] and metrics[] — the placement tables a half-ported area-division producer would decorate), named owners, column spans inside capacity and non-overlapping with shape.N == columns.count and shape.K <= rows, declared occupancy checked against the enumerated spans at both macro and chip level, one labeled accounting per metric with a finite numeric value, and every relaxation carrying constraint/value/reason. Audit fix: the rules SCHEMA.md declared but validate() never enforced are now enforced — R1 requires title and a provenance object with authored/author/invented_fields (without it every fixture_invented mark silently disappears), R24 checks card kind, weight_bits, stored_cols == cols_adc x mux and the ADJ-4 slicing law, R25 refuses a tile slice role on a non-slicing card, R26 checks the systems role/phase enums, R27 bounds duty_cycle to [0,1], and links now require per and basis. R23 (the draw-budget warning) is documented. Any error refuses to draw and lists rule + field path + what is wrong. The self-test corrupts a copy of the loaded document once per corruption: 34/34 cases fire and name the right field. Audit fix: tests/test_qif_atlas.py runs that self-test headlessly in node (skipped when node is absent, the test_webui_browser.py precedent), asserts the fixture validates clean, asserts the embedded blob equals the sibling fixture byte-for-byte, asserts every rule id the loader can emit appears in SCHEMA.md, and re-proves each new rule one mutation at a time — so an atlas regression fails the suite instead of a screenshot. Suites: tests/test_qif_atlas.py 14 passed, full suite 1872 passed / 0 failed (baseline 1845 / 0), validator 152/152.",
    "questions": []
   },
   {
@@ -29,6 +29,13 @@
    "title": "Duty cycle + PD two-system view (needs P3/P4)",
    "status": "todo",
    "report": "",
+   "questions": []
+  },
+  {
+   "id": "P5.5",
+   "title": "Phase 2: drill-down with breadcrumbs, filters, owner search, macro column map with slice brackets",
+   "status": "todo",
+   "report": "UNBLOCKED and deferred by choice, not waiting on P3/P4. The plan page's Implement-now column and its build-phases table both put phase 2 behind phase 1 only. Phase 1 ships a chip view with a per-macro column strip and a hover tile table, and a chip dblclick descend; it ships no breadcrumbs, no filter-by-model/layer/group/pool, no owner search and no standalone Macro view with slice brackets. Recorded so the board does not read P5 as done bar external blockers.",
    "questions": []
   }
  ]

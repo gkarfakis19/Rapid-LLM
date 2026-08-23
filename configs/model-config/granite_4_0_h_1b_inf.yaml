@@ -1,0 +1,50 @@
+# Granite-4.0-H-1B inference config — the dense twin of the headline model.
+# Dims verified 2026-08-23 against the published HuggingFace config.json:
+#   https://huggingface.co/ibm-granite/granite-4.0-h-1b/blob/main/config.json
+# Same 40-layer 9:1 Mamba2 : attention backbone, no experts, one 4096-wide
+# shared MLP per layer. Rejected until the P2-P4 SSM pricing laws land.
+provenance:
+  source: "https://huggingface.co/ibm-granite/granite-4.0-h-1b/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 1461538368  # HF safetensors total (bf16)
+  d2_status: supported
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true
+  model_type: "llama"
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 1536
+  layer_plan:
+    pattern: ["mamba", "mamba", "mamba", "mamba", "mamba", "attention", "mamba", "mamba", "mamba", "mamba"]
+  attention:
+    attention_type: "gqa"
+    num_heads: 12
+    kv_heads: 4
+    use_flashattention: false
+  ssm:
+    variant: "mamba2"
+    d_state: 128
+    n_groups: 1
+    n_heads: 48
+    d_head: 64
+    expand: 2
+    d_conv: 4
+    chunk_size: 256
+  moe:
+    num_experts: 1  # HF num_local_experts: 0 — dense
+    top_k: 1
+    moe_intermediate_size: 4096
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 40  # all layers dense
+  intermediate_size: 4096  # HF shared_intermediate_size
+  vocab_size: 100352
+  num_layers: 40
+
+inference_param:
+  sample_every: -1

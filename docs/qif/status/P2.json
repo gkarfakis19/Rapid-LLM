@@ -6,36 +6,36 @@
   {
    "id": "P2.1",
    "title": "Device-card schema: CTT card, shared-digital-chiplet card, named empty ReRAM/MRAM slots",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "config.py gained CIMAnalogCardConfig / CIMDigitalChipletCardConfig / CIMCardLibrary / CIMCardValidityPoint under an optional cim.cards block; cim.analog and cim.fabric are the cards' parameter halves, so an absent block synthesizes cards wrapping those very objects with every knob inert. Knobs: bits_per_cell/weight_bits (slicing present iff bits_per_cell < weight_bits), slicing arrangement, bank_depth (allocation granularity in mux slots), stack_3d_height (footprint divisor only), bank_switch_cycles, a validity menu that refuses unlisted points (cim_timing.CardValidityError), and pool cost knobs defaulting to 0. reram/mram are named empty slots that refuse to inherit and must supply their own params (ADJ-4, no invented numbers). The digital chiplet card's energy_per_op_pj was REMOVED (audit fix): no law prices a fabric op's energy, and declaring it is now a named refusal rather than an inert knob that reads as active; its area_mm2 gained real consumers (CimDeviceModel.shared_digital_area_mm2 / system_area_mm2) and is reported, never smeared into the analog parity area total (D21). ASSUMPTION: CimDeviceModel binds self.analog/self.fabric to the ACTIVE card, which is object-identical for every shipped YAML, so numbers are bit-identical.",
    "questions": []
   },
   {
    "id": "P2.2",
    "title": "Tile object, enumerator, capacity/validity checks, banking allocation config",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "cim_timing.py gained TileOwner / TileSite / Tile plus CimDeviceModel.enumerate_tiles, tile_macro_count, macro_occupancy, validate_macro_capacity and allocation_sites/validate_allocation. A column set is one mux slot (cols_adc stored columns, one ADC pass) and is the smallest allocatable unit (ADJ-4); at the shipped defaults the enumerator returns exactly arrays(K,N) tiles on arrays(K,N) macros, so the census law IS the enumerator. Overflow, out-of-range and doubly-claimed column sets raise the named MacroCapacityError — and a user-written cim.allocation is now capacity-checked while the hardware YAML is PARSED (audit fix: the check existed but ran only from tests, so the run path accepted an out-of-range or doubly-claimed set). The optional cim.allocation block carries column_sets_per_tile plus explicit owner-named assignments; ABSENT reproduces dedicated-per-matrix behavior bit-identically (tested).",
    "questions": []
   },
   {
    "id": "P2.3",
    "title": "Active-column-set pricing law + full-occupancy identity test (ADJ-4); parity suites stay green",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "CimDeviceModel.analog_op_time / active_column_sets / price_tiled_op price an op at M_tokens * active_column_sets * slice_cycles / f_analog, charging the worst macro (macros holding one op's tiles convert concurrently). The arithmetic is grouped exactly as vec_latency_s is, so the full-occupancy identity is BIT-identical, not approximate, at every token count. Energy reads energy_per_vec_pj per column set and returns the pass-1 figure at full occupancy. Bank switching is now a DECLARED card figure, bank_switch_cycles, charged (active - 1) times per op (audit fix: zero was the law with no disclosure anywhere, the exact OPTIMA sin of AUDIT finding 3). ASSUMPTION: 0 is the shipped default for every card, so no number moves and the identity is untouched; the zero is disclosed in the card schema, the README and here rather than escalated. CORRECTION to the previous report: the ADJ-4 open-question-4 test asserted active sets == adc_mux, which the dedicated default makes a tautology. It now asserts the PHYSICAL statement (each stage's own N spans at least mux column sets) and names the one shipped stage that does not: the MoE router (N = 16 against cols_adc 256). The router still gets a whole macro under the dedicated default, so no parity number moves — but the parity configurations are not physically full-occupancy everywhere, and the board now says so. Validator stays 152/152. Suites after the fixes: tests/test_fws_cim.py 199 passed, validator 152/152, full suite 1872 passed / 0 failed (baseline on this tree 1845 / 0 — the earlier 1844 / 1 note and the failure it named were stale).",
    "questions": []
   },
   {
    "id": "P2.4",
    "title": "Bit-slice composition (column-set + chained) with priced shift-add reduction descriptors",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "n_slices = ceil(weight_bits / bits_per_cell) on the card. The column-set arrangement multiplies stored-column demand by n_s and keeps a slice group local to ONE macro — the enumerator now places slice groups as units instead of packing tiles by linear index (audit fix: at n_s = 3 into 4 tile slots the groups straddled macros and the descriptors charged p2p transport for an arrangement defined never to need any), and refuses by name when a group cannot fit one macro. chained_macros gives each slice its own macros and sets transport_partials = n_s-1 for the p2p law. reduction_descriptors() emits plain-data ReductionOpDescriptor records (kind, arrangement, owner, operand tiles, output lanes, adds_per_output = n_s-1, depth = ceil(log2 n_s), sink macro, local flag) and price_reduction() prices them as cycles = depth + ceil(results/lanes) - 1 with adds = results*(n_s-1). Nothing is wired into the closed-form spatial report (legacy-frozen). ASSUMPTION: pool energy/area knobs default to 0 so an undeclared cost reports zero instead of an invented number, and chained partial bytes are m*lanes*(n_s-1)*act_bytes with act_bytes supplied by the caller.",
    "questions": []
   },
   {
    "id": "P2.5",
    "title": "Per-macro digital pool sizing, derived and reported",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "digital_pool_sizing() derives lanes = ceil(cols_adc * f_analog / slice_cycles / f_pool) from the macro's peak result rate and lanes*(n_s-1) adders, with area from the card knob and macro_footprint_mm2() = area_mm2_per_array / stack_3d_height (height divides footprint only). The derived sizing is now actually REPORTED (audit fix: the deliverable was marked done against a title nothing satisfied): every device_class: fws_cim run prints report_digital_pool()'s '[FWS-CIM] per-macro digital pool (derived, D12)' line with lanes, adders, clock, consumed result rate and footprint share. ASSUMPTION: it goes to stdout, not into fws_cim_report.json or the results txt — those are the frozen closed-form accounting (ADJ-8) that the P6.2 byte-identity gate holds, and the pool constrains no number in them. POOL_DISCLOSURE_AREA_SHARE = 0.2 (ADJ-4): disclose_digital_pool() additionally prints a loud [NOTE] when the pool's derived area reaches a fifth of the served macro footprint and changes no number.",
    "questions": []
   }
  ]

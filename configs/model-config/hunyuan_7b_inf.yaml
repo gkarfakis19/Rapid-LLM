@@ -1,0 +1,42 @@
+# Hunyuan-7B-Instruct inference config — a RUNS-NOW row: a plain dense GQA
+# transformer that the existing laws and schema already price.
+# Dims verified 2026-08-23 against the published HuggingFace config.json:
+#   https://huggingface.co/tencent/Hunyuan-7B-Instruct/blob/main/config.json
+# seq_len / decode_len are kept small so the end-to-end smoke stays fast.
+provenance:
+  source: "https://huggingface.co/tencent/Hunyuan-7B-Instruct/blob/main/config.json"
+  verified: "2026-08-23"
+  published_total_params: 7504568320  # model.safetensors.index total_size
+  # 15,009,136,640 B / 2 (bf16). 7.50B RAW, over the D2 cutoff, so this row is
+  # an architecture reference; Hunyuan-4B is the in-scope sibling.
+  d2_status: reference
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true
+  model_type: "llama"
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 512
+  decode_len: 32
+  hidden_dim: 4096
+  attention:
+    attention_type: "gqa"
+    num_heads: 32
+    kv_heads: 8
+    # HF head_dim: 128 is exactly hidden_dim/num_heads, so the schema derives it.
+    use_flashattention: false
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 14336
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 32
+  intermediate_size: 14336
+  vocab_size: 128167
+  num_layers: 32
+
+inference_param:
+  sample_every: -1

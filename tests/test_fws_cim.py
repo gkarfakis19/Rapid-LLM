@@ -46,6 +46,16 @@ FWS_LLAMA7B_KVDRAM = HW_DIR / "fws_cim_llama7b_kvdram.yaml"
 FWS_MOE = HW_DIR / "fws_cim_moe.yaml"
 LLAMA2_7B_FWS_INF = MODEL_DIR / "llama2_7b_fws_inf.yaml"
 MOE_SMALL_FWS_INF = MODEL_DIR / "moe_small_fws_inf.yaml"
+#: QIF P1 model-matrix rows: hybrid block kinds vs the attention-only rows.
+HYBRID_MATRIX_INF = {
+    "ssm": MODEL_DIR / "granite_4_0_h_tiny_inf.yaml",
+    "linear_attn": MODEL_DIR / "qwen3_5_4b_inf.yaml",
+    "short_conv": MODEL_DIR / "lfm2_2p6b_inf.yaml",
+}
+ATTENTION_ONLY_MATRIX_INF = (
+    MODEL_DIR / "hunyuan_7b_inf.yaml",
+    MODEL_DIR / "smollm3_3b_inf.yaml",
+)
 
 
 def _load_yaml(path):
@@ -758,6 +768,53 @@ def test_fws_cim_rejects_mla_with_seam_reason():
     with pytest.raises(ValueError, match="mla") as excinfo:
         config.validate_configs(hw, model)
     assert "attention_type" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("block_kind", sorted(HYBRID_MATRIX_INF))
+def test_fws_cim_rejects_hybrid_layer_plan_with_seam_reason(block_kind):
+    # QIF P1.4: a model whose layer plan names a block kind the device laws do
+    # not cover is rejected by name, and the message points at the plans that
+    # will price it (P2-P4) instead of silently pricing it as attention.
+    hw = config.parse_config(str(FWS_LLAMA7B), "hardware")
+    model = config.parse_config(str(HYBRID_MATRIX_INF[block_kind]), "LLM")
+    with pytest.raises(ValueError, match="fws_cim") as excinfo:
+        config.validate_configs(hw, model)
+    message = str(excinfo.value)
+    assert "layer_plan" in message
+    assert block_kind in message
+    assert "P2" in message and "P4" in message
+
+
+def test_fws_cim_hybrid_gate_fires_before_the_mla_gate():
+    # A hybrid MLA model must name the layer plan, not the attention type:
+    # the layer plan is the reason nothing can price it.
+    hw = config.parse_config(str(FWS_LLAMA7B), "hardware")
+
+    def to_mla(d):
+        d["model_param"]["attention"] = {
+            "attention_type": "mla",
+            "num_heads": 12,
+            "kv_lora_rank": 256,
+            "q_lora_rank": 768,
+            "qk_nope_head_dim": 64,
+            "qk_rope_head_dim": 32,
+            "v_head_dim": 64,
+            "use_flashattention": False,
+        }
+
+    model = _model_from_yaml(HYBRID_MATRIX_INF["ssm"], mutate=to_mla)
+    with pytest.raises(ValueError, match="layer_plan"):
+        config.validate_configs(hw, model)
+
+
+@pytest.mark.parametrize("model_path", ATTENTION_ONLY_MATRIX_INF, ids=lambda p: p.stem)
+def test_fws_cim_accepts_attention_only_matrix_rows(model_path):
+    # The two runs-now rows of the matrix are plain GQA transformers; a
+    # layer plan whose every entry is attention must not trip the gate.
+    hw = config.parse_config(str(FWS_LLAMA7B), "hardware")
+    model = config.parse_config(str(model_path), "LLM")
+    assert model.model_config.hybrid_block_kinds == ()
+    config.validate_configs(hw, model)
 
 
 def test_fws_cim_llm_flash_still_rejected():
@@ -2365,3 +2422,797 @@ def test_dse_config_parse_error_exits_2_cleanly(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[FWS-CIM DSE] error:" in out
     assert "adc_mux" in out
+
+
+# ---------------------------------------------------------------------------
+# QIF P2: the macro resource model — cards, tiles, active-column-set pricing,
+# bit slicing, the per-macro digital pool (D10-D14, ADJ-4, D23: no accuracy)
+# ---------------------------------------------------------------------------
+
+#: Every shipped fws_cim template with the model it is paired with.
+SHIPPED_FWS_PAIRS = (
+    (FWS_T1, VIT_HUGE_64, "VIT"),
+    (FWS_T2, VIT_G_64, "VIT"),
+    (FWS_T3, VIT_HUGE_196, "VIT"),
+    (FWS_LLAMA7B, LLAMA2_7B_FWS_INF, "LLM"),
+    (FWS_LLAMA7B_KVDRAM, LLAMA2_7B_FWS_INF, "LLM"),
+    (FWS_MOE, MOE_SMALL_FWS_INF, "LLM"),
+)
+
+
+def _device_from_dicts(hw_dict, model_path, mode="VIT"):
+    """Device model from a mutated hardware dict plus a shipped model YAML."""
+    hw = _hw_from_dict(hw_dict)
+    model = config.parse_config(str(model_path), mode).model_config
+    return cim_timing.CimDeviceModel(hw, model)
+
+
+def _sliced_t1_device(**card_overrides):
+    """T1 with an explicit CTT card: 2 bits/cell of an 8-bit weight => n_s = 4."""
+    hw_dict = _load_yaml(FWS_T1)
+    card = {
+        "kind": "analog_macro",
+        "device": "ctt",
+        "bits_per_cell": 2,
+        "weight_bits": 8,
+        "bank_depth": 1,
+    }
+    card.update(card_overrides)
+    hw_dict["cim"]["cards"] = {"ctt_sliced": card}
+    return _device_from_dicts(hw_dict, VIT_HUGE_64)
+
+
+# --- P2.1 device cards -----------------------------------------------------
+
+
+@pytest.mark.parametrize("hw_path,model_path,mode", SHIPPED_FWS_PAIRS)
+def test_shipped_configs_synthesize_an_inert_card(hw_path, model_path, mode):
+    # Backward compatibility is the whole contract: a YAML with no cim.cards
+    # block gets a synthesized card whose every knob is inert, wrapping the
+    # very cim.analog / cim.fabric objects the laws already read.
+    hw = config.parse_config(str(hw_path), "hardware")
+    cim = hw.cim_config
+    card = cim.analog_card
+    assert card.name == "default" and card.device == "ctt"
+    assert card.params is cim.analog
+    assert cim.digital_card.fabric is cim.fabric
+    assert card.n_slices == 1 and not card.slicing_enabled
+    assert card.allocation_granularity == cim.analog.adc_mux  # whole macro
+    assert card.stack_3d_height == 1
+    assert card.validity == ()
+    assert (card.pool_clock_ghz, card.pool_energy_per_add_pj, card.pool_area_mm2_per_adder) == (
+        0.0,
+        0.0,
+        0.0,
+    )
+    assert cim.allocation is None  # dedicated per matrix
+
+    model = config.parse_config(str(model_path), mode).model_config
+    dev = cim_timing.CimDeviceModel(hw, model)
+    assert dev.analog is cim.analog and dev.fabric is cim.fabric
+    assert dev.n_slices == 1
+    assert dev.column_sets_per_tile == cim.analog.adc_mux
+
+
+def test_card_block_parses_structural_knobs():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {
+        "ctt_2bpc": {
+            "kind": "analog_macro",
+            "device": "ctt",
+            "bits_per_cell": 2,
+            "weight_bits": 8,
+            "slicing": "chained_macros",
+            "bank_depth": 2,
+            "stack_3d_height": 4,
+            "validity": [{"bits_per_cell": 2, "weight_bits": 8, "mux": 4}],
+            "pool_clock_ghz": 1.5,
+            "pool_energy_per_add_pj": 0.25,
+            "pool_area_mm2_per_adder": 0.001,
+        },
+        "shared_digital": {"kind": "digital_chiplet", "area_mm2": 12.0},
+    }
+    hw = _hw_from_dict(hw_dict)
+    card = hw.cim_config.analog_card
+    assert card.name == "ctt_2bpc"
+    assert (card.bits_per_cell, card.weight_bits) == (2, 8)
+    assert card.n_slices == 4 and card.slicing_enabled
+    assert card.slicing == "chained_macros"
+    assert card.allocation_granularity == 2
+    assert card.stack_3d_height == 4
+    assert card.pool_clock_ghz == pytest.approx(1.5)
+    digital = hw.cim_config.digital_card
+    assert digital.name == "shared_digital"
+    assert digital.area_mm2 == pytest.approx(12.0)
+    # The chiplet card wraps the fabric block verbatim: the SA and softmax
+    # laws are ITS laws and read the same parameters (D13).
+    assert digital.fabric is hw.cim_config.fabric
+
+
+def test_card_n_slices_law_and_opt_in():
+    # n_s = ceil(weight_bits / bits_per_cell); slicing is present iff
+    # bits_per_cell < weight_bits (ADJ-4).
+    for bpc, wbits, expected in ((2, 8, 4), (3, 8, 3), (4, 8, 2), (8, 8, 1), (16, 8, 1)):
+        hw_dict = _load_yaml(FWS_T1)
+        hw_dict["cim"]["cards"] = {
+            "c": {"kind": "analog_macro", "bits_per_cell": bpc, "weight_bits": wbits}
+        }
+        card = _hw_from_dict(hw_dict).cim_config.analog_card
+        assert card.n_slices == expected
+        assert card.slicing_enabled == (expected > 1)
+
+
+def test_card_bits_per_cell_and_weight_bits_declared_together():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "analog_macro", "bits_per_cell": 2}}
+    with pytest.raises(ValueError, match="declared together"):
+        _hw_from_dict(hw_dict)
+
+
+def test_card_bank_depth_must_divide_mux():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "analog_macro", "bank_depth": 3}}
+    with pytest.raises(ValueError, match="bank_depth"):
+        _hw_from_dict(hw_dict)
+
+
+def test_card_validity_menu_refuses_unlisted_points():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {
+        "c": {
+            "kind": "analog_macro",
+            "bits_per_cell": 2,
+            "weight_bits": 8,
+            "validity": [{"bits_per_cell": 2, "weight_bits": 8, "mux": 4}],
+        }
+    }
+    dev = _device_from_dicts(hw_dict, VIT_HUGE_64)
+    dev.check_card_point()  # the card's own point is on the menu
+    with pytest.raises(cim_timing.CardValidityError, match="does not admit"):
+        dev.check_card_point(bits_per_cell=3, weight_bits=8, mux=4)
+    with pytest.raises(cim_timing.CardValidityError, match="does not admit"):
+        dev.check_card_point(bits_per_cell=2, weight_bits=8, mux=8)
+
+    # The card's OWN point must be on its own menu, or the config is refused.
+    hw_dict["cim"]["cards"]["c"]["bits_per_cell"] = 4
+    with pytest.raises(ValueError, match="validity menu"):
+        _hw_from_dict(hw_dict)
+
+
+def test_card_without_validity_menu_admits_everything():
+    # An empty menu means the card declares none; nothing is refused, which
+    # is what keeps every shipped YAML working unchanged.
+    hw = config.parse_config(str(FWS_T1), "hardware")
+    model = config.parse_config(str(VIT_HUGE_64), "VIT").model_config
+    dev = cim_timing.CimDeviceModel(hw, model)
+    dev.check_card_point(bits_per_cell=3, weight_bits=17, mux=999)
+
+
+@pytest.mark.parametrize("device", ["reram", "mram"])
+def test_empty_device_slots_ship_no_numbers(device):
+    # ADJ-4: ReRAM/MRAM are NAMED EMPTY SLOTS. The schema admits them; no
+    # parameters are shipped, so nothing is inherited into one.
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"second": {"kind": "analog_macro", "device": device}}
+    with pytest.raises(ValueError, match="NAMED EMPTY CARD SLOT"):
+        _hw_from_dict(hw_dict)
+
+    # With a complete params block of its own it parses — the schema is
+    # genuinely device-generic, and every number came from the user.
+    hw_dict["cim"]["cards"]["second"]["params"] = {
+        "rows": 512,
+        "cols_adc": 128,
+        "adc_mux": 2,
+        "slice_cycles": 1,
+        "analog_clock_mhz": 200,
+        "energy_per_vec_pj": 1.0,
+        "area_mm2_per_array": 0.5,
+    }
+    cim = _hw_from_dict(hw_dict).cim_config
+    card = cim.analog_card
+    assert card.device == device
+    assert card.params.rows == 512 and card.params.adc_mux == 2
+    assert card.params is not cim.analog  # its own parameter set, nothing inherited
+
+
+def test_unknown_card_kind_and_device_rejected():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "quantum"}}
+    with pytest.raises(ValueError, match="kind must be one of"):
+        _hw_from_dict(hw_dict)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "analog_macro", "device": "flash"}}
+    with pytest.raises(ValueError, match="device must be one of"):
+        _hw_from_dict(hw_dict)
+
+
+def test_card_default_selection_names_a_declared_card():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {
+        "a": {"kind": "analog_macro"},
+        "b": {"kind": "analog_macro", "bank_depth": 1},
+        "default_analog": "b",
+    }
+    assert _hw_from_dict(hw_dict).cim_config.analog_card.name == "b"
+    hw_dict["cim"]["cards"]["default_analog"] = "missing"
+    with pytest.raises(ValueError, match="names no analog_macro card"):
+        _hw_from_dict(hw_dict)
+
+
+def test_stack_height_divides_footprint_only(cim_t1):
+    assert cim_t1.macro_footprint_mm2() == pytest.approx(cim_t1.analog.area_mm2_per_array)
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "analog_macro", "stack_3d_height": 4}}
+    dev = _device_from_dicts(hw_dict, VIT_HUGE_64)
+    assert dev.macro_footprint_mm2() == pytest.approx(dev.analog.area_mm2_per_array / 4)
+    # Silicon area and energy are untouched: height divides FOOTPRINT only.
+    assert dev.total_area_mm2() == pytest.approx(cim_t1.total_area_mm2())
+    assert dev.transformer_stack_energy_pj() == pytest.approx(
+        cim_t1.transformer_stack_energy_pj()
+    )
+
+
+# --- P2.2 tiles: object, enumerator, capacity ------------------------------
+
+
+TILE_SHAPES = ((1280, 3840), (1280, 1280), (1280, 5120), (5120, 1280), (1000, 7), (4096, 11008))
+
+
+@pytest.mark.parametrize("k,n", TILE_SHAPES)
+def test_tile_enumerator_reproduces_the_array_census(cim_t1, k, n):
+    owner = cim_timing.TileOwner(model="vit_huge", layer=3, op="qkv", shard=0)
+    tiles = cim_t1.enumerate_tiles(k, n, owner)
+    macros = {tile.site.macro_id for tile in tiles}
+    # The census law IS the tile enumerator at the shipped defaults.
+    assert len(tiles) == cim_t1.arrays(k, n)
+    assert len(macros) == cim_t1.arrays(k, n)
+    assert cim_t1.tile_macro_count(k, n) == cim_t1.arrays(k, n)
+    # Every tile has a named owner and a site (D21).
+    mux = cim_t1.analog.adc_mux
+    for tile in tiles:
+        assert tile.owner is owner
+        assert tile.slice_index == 0
+        assert tile.site.column_sets == tuple(range(mux))  # dedicated: the whole macro
+        assert tile.site.row_end == tile.k_end and tile.site.row_start == tile.k_start
+    # The tiles partition the matrix: no gap, no overlap.
+    covered = sorted((tile.k_start, tile.k_end, tile.n_start, tile.n_end) for tile in tiles)
+    assert len(set(covered)) == len(covered)
+    assert sum((t.k_end - t.k_start) * (t.n_end - t.n_start) for t in tiles) == k * n
+
+
+def test_tile_owner_label_names_model_layer_op_expert_shard():
+    owner = cim_timing.TileOwner(model="moe_small", layer=7, op="ffn1", expert=3, shard=1)
+    assert owner.label == "moe_small.L7.ffn1.e3.s1"
+    assert cim_timing.TileOwner(model="m", layer=0, op="qkv").label == "m.L0.qkv.s0"
+
+
+def test_finer_banks_let_tiles_co_reside_in_one_macro(cim_t1):
+    # ADJ-4: the mux slot is the smallest allocatable unit. One column set per
+    # tile lets four owners share a mux-4 macro.
+    mux = cim_t1.analog.adc_mux
+    tiles = cim_t1.enumerate_tiles(
+        1280, 4 * cim_t1.analog.cols_adc, cim_timing.TileOwner(op="qkv"), column_sets_per_tile=1
+    )
+    assert len(tiles) == 4
+    assert {tile.site.macro_id for tile in tiles} == {0}
+    assert [tile.site.column_sets for tile in tiles] == [(i,) for i in range(mux)]
+    cim_t1.validate_macro_capacity(tiles)
+
+
+def test_enumerator_rejects_a_bank_that_does_not_divide_mux(cim_t1):
+    with pytest.raises(ValueError, match="smallest allocatable unit"):
+        cim_t1.enumerate_tiles(1280, 1280, cim_timing.TileOwner(), column_sets_per_tile=3)
+
+
+def test_macro_capacity_overflow_is_a_named_hard_error(cim_t1):
+    mux = cim_t1.analog.adc_mux
+    site = cim_timing.TileSite(macro_id=0, row_start=0, row_end=1280, column_sets=(0,))
+    tile_a = cim_timing.Tile(
+        owner=cim_timing.TileOwner(model="a", op="qkv"),
+        k_start=0, k_end=1280, n_start=0, n_end=320, slice_index=0, site=site,
+    )
+    tile_b = cim_timing.Tile(
+        owner=cim_timing.TileOwner(model="b", op="ffn1"),
+        k_start=0, k_end=1280, n_start=0, n_end=320, slice_index=0, site=site,
+    )
+    # Two owners on one column set: the column set holds one tile.
+    with pytest.raises(cim_timing.MacroCapacityError, match="claimed by both"):
+        cim_t1.validate_macro_capacity([tile_a, tile_b])
+    # A column set the card does not have.
+    over = cim_timing.Tile(
+        owner=cim_timing.TileOwner(model="c", op="ffn2"),
+        k_start=0, k_end=1280, n_start=0, n_end=320, slice_index=0,
+        site=cim_timing.TileSite(macro_id=0, row_start=0, row_end=1280, column_sets=(mux,)),
+    )
+    with pytest.raises(cim_timing.MacroCapacityError, match="column sets"):
+        cim_t1.validate_macro_capacity([over])
+    # A legal full macro passes.
+    cim_t1.validate_macro_capacity(cim_t1.enumerate_tiles(1280, 1280, tile_a.owner))
+
+
+def test_allocation_block_parses_and_capacity_checks(cim_t1):
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["allocation"] = {
+        "column_sets_per_tile": 1,
+        "assignments": [
+            {"model": "vit", "layer": 0, "op": "qkv", "macro": 0, "column_sets": [0, 1]},
+            {"model": "vit", "layer": 1, "op": "ffn1", "macro": 0, "column_sets": [2, 3]},
+        ],
+    }
+    dev = _device_from_dicts(hw_dict, VIT_HUGE_64)
+    assert dev.column_sets_per_tile == 1
+    pairs = dev.allocation_sites()
+    assert [owner.label for owner, _ in pairs] == ["vit.L0.qkv.s0", "vit.L1.ffn1.s0"]
+    dev.validate_allocation()  # two owners, four disjoint column sets, one macro
+
+    # Overlapping claims are the named hard error, and it fires while the
+    # hardware config is PARSED: a user-written allocation is validated on the
+    # run path (D10), not only when a caller reaches for the device model.
+    hw_dict["cim"]["allocation"]["assignments"][1]["column_sets"] = [1, 2]
+    with pytest.raises(cim_timing.MacroCapacityError, match="claimed by both"):
+        _hw_from_dict(hw_dict)
+
+
+def test_allocation_out_of_range_column_set_is_refused_at_parse_time():
+    hw_dict = _load_yaml(FWS_T1)
+    mux = int(hw_dict["cim"]["analog"]["adc_mux"])
+    hw_dict["cim"]["allocation"] = {
+        "column_sets_per_tile": 1,
+        "assignments": [
+            {"model": "vit", "layer": 0, "op": "qkv", "macro": 0, "column_sets": [mux + 95]},
+        ],
+    }
+    with pytest.raises(cim_timing.MacroCapacityError, match="column sets \\(mux slots\\)"):
+        _hw_from_dict(hw_dict)
+
+
+def test_allocation_granularity_must_divide_mux():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["allocation"] = {"column_sets_per_tile": 3}
+    with pytest.raises(ValueError, match="smallest allocatable unit"):
+        _hw_from_dict(hw_dict)
+
+
+def test_allocation_absent_is_dedicated_per_matrix(cim_t1):
+    # ABSENT means today's behavior, bit-identically: the default bank is the
+    # whole macro and one owner activates every mux slot.
+    assert cim_t1.allocation is None
+    assert cim_t1.column_sets_per_tile == cim_t1.analog.adc_mux
+    tiles = cim_t1.enumerate_tiles(1280, 3840, cim_timing.TileOwner(op="qkv"))
+    assert cim_t1.active_column_sets(tiles) == cim_t1.analog.adc_mux
+
+
+# --- P2.3 active-column-set pricing (ADJ-4) --------------------------------
+
+
+@pytest.mark.parametrize("hw_path,model_path,mode", SHIPPED_FWS_PAIRS)
+def test_full_occupancy_identity_reproduces_the_pass_one_charge(hw_path, model_path, mode):
+    # THE required identity: one owner filling every mux slot pays exactly the
+    # pass-1 charge — same time (bit-identical, not approximate) and the same
+    # analog energy the census law gives.
+    hw = config.parse_config(str(hw_path), "hardware")
+    model = config.parse_config(str(model_path), mode).model_config
+    dev = cim_timing.CimDeviceModel(hw, model)
+    m_tokens = 64
+    for stage, (k, n) in dev.per_layer_stage_shapes().items():
+        tiles = dev.enumerate_tiles(k, n, cim_timing.TileOwner(model=stage, op=stage))
+        cost = dev.price_tiled_op(m_tokens, tiles)
+        assert cost.active_column_sets == dev.analog.adc_mux, stage
+        assert cost.time_s == dev.analog_gemm_time(m_tokens), stage
+        assert cost.macros == dev.arrays(k, n), stage
+        assert cost.energy_pj == pytest.approx(
+            dev.analog_stage_energy_pj(m_tokens, dev.arrays(k, n)), rel=1e-12
+        ), stage
+
+
+#: The one shipped parity stage whose own N does not fill a macro. The
+#: dedicated default still gives it the whole macro, so the parity charge is
+#: unmoved — but the configuration is not physically full-occupancy there.
+UNDERFILLED_PARITY_STAGES = ("router",)
+
+
+@pytest.mark.parametrize("hw_path,model_path,mode", SHIPPED_FWS_PAIRS)
+def test_parity_configs_are_full_occupancy_configurations(hw_path, model_path, mode):
+    # ADJ-4 open question 4. The enumerator's default hands one owner a whole
+    # macro, so asserting active_column_sets == mux would assert a tautology.
+    # The load-bearing statement is PHYSICAL and independent of the enumerator:
+    # each stage's own N spans at least mux column sets, so nothing under-fills
+    # a macro — with the MoE router named as the single exception.
+    hw = config.parse_config(str(hw_path), "hardware")
+    model = config.parse_config(str(model_path), mode).model_config
+    dev = cim_timing.CimDeviceModel(hw, model)
+    assert dev.n_slices == 1 and dev.allocation is None
+    shapes = dict(dev.per_layer_stage_shapes())
+    p = dev.params
+    if p.use_moe:
+        shapes["router"] = (p.hidden_dim, p.num_experts)
+        shapes["moe_ffn1"] = (p.hidden_dim, p.ffn1_fold * p.moe_intermediate)
+        shapes["moe_ffn2"] = (p.moe_intermediate, p.hidden_dim)
+    if p.lm_head_enabled:
+        shapes["lm_head"] = (p.hidden_dim, p.vocab_size)
+    if p.is_vit_shaped:
+        shapes["patch_embed"] = (p.patch_dim, p.hidden_dim)
+    cols_adc = int(dev.analog.cols_adc)
+    mux = int(dev.analog.adc_mux)
+    for stage, (k, n) in shapes.items():
+        physical_sets = -(-int(n) // cols_adc)
+        if stage in UNDERFILLED_PARITY_STAGES:
+            assert physical_sets < mux, stage
+        else:
+            assert physical_sets >= mux, stage
+        # And the dedicated default charges the whole macro either way, which
+        # is why active-set pricing leaves every parity number where it was.
+        tiles = dev.enumerate_tiles(k, n, cim_timing.TileOwner(op=stage))
+        assert dev.active_column_sets(tiles) == mux, stage
+
+
+def test_active_column_set_pricing_charges_only_the_sets_it_activates(cim_t1):
+    # The adopted law change: a half-occupied macro pays half the mux depth.
+    mux = cim_t1.analog.adc_mux
+    owner = cim_timing.TileOwner(model="vit", layer=0, op="qkv")
+    half = cim_t1.enumerate_tiles(
+        1280, 2 * cim_t1.analog.cols_adc, owner, column_sets_per_tile=1
+    )
+    assert cim_t1.active_column_sets(half) == mux // 2
+    assert cim_t1.price_tiled_op(64, half).time_s == pytest.approx(
+        cim_t1.analog_gemm_time(64) / 2, rel=1e-12
+    )
+    # And the co-resident owner pays its own sets, not the whole macro's.
+    other = cim_timing.TileOwner(model="vit", layer=1, op="ffn1")
+    rest = tuple(
+        cim_timing.Tile(
+            owner=other, k_start=t.k_start, k_end=t.k_end, n_start=t.n_start, n_end=t.n_end,
+            slice_index=0,
+            site=cim_timing.TileSite(
+                macro_id=0, row_start=t.k_start, row_end=t.k_end,
+                column_sets=tuple(c + mux // 2 for c in t.site.column_sets),
+            ),
+        )
+        for t in half
+    )
+    cim_t1.validate_macro_capacity(half + rest)  # they co-reside legally
+    assert cim_t1.active_column_sets(rest) == mux // 2
+
+
+def test_analog_op_time_is_the_generalized_vector_latency(cim_t1):
+    # vec_latency = mux * slice_cycles / f generalizes to active sets.
+    for sets in range(1, cim_t1.analog.adc_mux + 1):
+        expected = (
+            17 * sets * cim_t1.analog.slice_cycles / (cim_t1.analog.analog_clock_mhz * 1e6)
+        )
+        assert cim_t1.analog_op_time(17, sets) == pytest.approx(expected, rel=1e-12)
+    # The identity is bit-identical, not approximate, at every token count:
+    # analog_op_time groups its arithmetic exactly as vec_latency_s does.
+    for m_tokens in (1, 17, 64, 197, 1792):
+        assert cim_t1.analog_op_time(m_tokens, cim_t1.analog.adc_mux) == (
+            cim_t1.analog_gemm_time(m_tokens)
+        )
+
+
+def test_macros_hosting_an_op_fire_in_parallel(cim_t1):
+    # The charge is the WORST macro's active sets, not the sum: the K/N-free
+    # law says every macro holding the op's tiles converts concurrently.
+    owner = cim_timing.TileOwner(op="ffn1")
+    wide = cim_t1.enumerate_tiles(1280, 40 * cim_t1.analog.cols_adc, owner)
+    assert len({t.site.macro_id for t in wide}) == 10
+    assert cim_t1.active_column_sets(wide) == cim_t1.analog.adc_mux
+    assert cim_t1.price_tiled_op(64, wide).time_s == cim_t1.analog_gemm_time(64)
+
+
+# --- P2.4 bit slicing, priced (D11) ----------------------------------------
+
+
+def test_column_set_slicing_multiplies_stored_column_demand():
+    dev = _sliced_t1_device()
+    assert dev.n_slices == 4
+    for k, n in TILE_SHAPES[:4]:
+        tiles = dev.enumerate_tiles(k, n, cim_timing.TileOwner(op="qkv"))
+        macros = {tile.site.macro_id for tile in tiles}
+        # Stored-column demand x n_s (the column-set arrangement).
+        assert len(macros) == dev.arrays(k, n) * dev.n_slices
+        assert sorted({t.slice_index for t in tiles}) == [0, 1, 2, 3]
+        dev.validate_macro_capacity(tiles)
+
+
+def test_slicing_off_forces_the_degenerate_census(cim_t1):
+    dev = _sliced_t1_device()
+    # n_slices = 1 collapses the sliced enumerator back onto the census.
+    assert dev.tile_macro_count(1280, 3840, n_slices=1, column_sets_per_tile=4) == cim_t1.arrays(
+        1280, 3840
+    )
+    assert dev.reduction_descriptors(
+        dev.enumerate_tiles(1280, 3840, cim_timing.TileOwner(), n_slices=1)
+    ) == ()
+
+
+def test_sliced_op_still_pays_one_adc_pass_per_active_set():
+    # One ADC pass per column set: the four slices of an output block occupy
+    # the four mux slots of one macro, so the op pays mux * slice_cycles —
+    # the full-occupancy charge, with four times the stored columns.
+    dev = _sliced_t1_device()
+    owner = cim_timing.TileOwner(model="vit", layer=0, op="qkv")
+    tiles = dev.enumerate_tiles(1280, 3840, owner)
+    cost = dev.price_tiled_op(64, tiles)
+    assert cost.active_column_sets == dev.analog.adc_mux
+    assert cost.time_s == dev.analog_gemm_time(64)
+    assert cost.energy_pj == pytest.approx(
+        dev.n_slices * dev.analog_stage_energy_pj(64, dev.arrays(1280, 3840)), rel=1e-12
+    )
+
+
+def test_reduction_descriptors_are_emitted_per_slice_group():
+    dev = _sliced_t1_device()
+    owner = cim_timing.TileOwner(model="vit", layer=2, op="ffn1")
+    tiles = dev.enumerate_tiles(1280, 3840, owner)
+    descriptors = dev.reduction_descriptors(tiles)
+    # One tree per (row block, output block): 1 x ceil(3840/320) here.
+    assert len(descriptors) == 12
+    for descriptor in descriptors:
+        assert descriptor.kind == "shift_add_tree"
+        assert descriptor.arrangement == "column_sets"
+        assert descriptor.owner is owner
+        assert descriptor.n_slices == 4
+        assert descriptor.adds_per_output == 3          # n_s - 1
+        assert descriptor.depth == 2                    # ceil(log2(n_s))
+        assert descriptor.output_lanes == dev.analog.cols_adc
+        assert len(descriptor.operand_tiles) == 4
+        assert [t.slice_index for t in descriptor.operand_tiles] == [0, 1, 2, 3]
+        # Column-set arrangement: all four slices sit in the sink macro, so
+        # the tree is local to that macro's digital pool and nothing travels.
+        assert descriptor.local and descriptor.transport_partials == 0
+        assert {t.site.macro_id for t in descriptor.operand_tiles} == {
+            descriptor.site_macro_id
+        }
+
+
+def test_column_set_slice_groups_never_straddle_a_macro():
+    # D11 defines the column-set arrangement as a slice group reduced by ONE
+    # macro's digital pool. Linear packing broke that whenever n_s did not
+    # divide the macro's tile slots (n_s = 3 into 4 slots), and the descriptors
+    # then charged p2p transport for an arrangement that needs none.
+    dev = _sliced_t1_device(bits_per_cell=3, weight_bits=8)
+    assert dev.n_slices == 3
+    tiles = dev.enumerate_tiles(1280, 1280, cim_timing.TileOwner(op="qkv"))
+    by_group = {}
+    for tile in tiles:
+        by_group.setdefault((tile.k_start, tile.n_start), set()).add(tile.site.macro_id)
+    assert all(len(macros) == 1 for macros in by_group.values()), by_group
+    for descriptor in dev.reduction_descriptors(tiles):
+        assert descriptor.local and descriptor.transport_partials == 0
+    dev.validate_macro_capacity(tiles)
+
+
+def test_column_set_arrangement_refuses_a_group_it_cannot_keep_local():
+    # A whole-macro bank leaves one tile slot, so four slices cannot be local.
+    # A named refusal, not a silently non-local placement.
+    dev = _sliced_t1_device(bank_depth=0)
+    with pytest.raises(ValueError, match="cannot keep a slice group local"):
+        dev.enumerate_tiles(1280, 1280, cim_timing.TileOwner(op="qkv"))
+
+
+def test_bank_switch_cost_is_a_declared_card_figure(cim_t1):
+    # AUDIT finding 3: OPTIMA priced bank switching at zero silently. Zero is
+    # still the shipped number, but it is now the card's declared number.
+    assert cim_t1.card.bank_switch_cycles == 0
+    dev = _sliced_t1_device(bank_switch_cycles=3, bits_per_cell=8, weight_bits=8)
+    assert dev.n_slices == 1
+    mux = int(dev.analog.adc_mux)
+    base_cycles = mux * int(dev.analog.slice_cycles)
+    expected = 64 * ((base_cycles + (mux - 1) * 3) / (float(dev.analog.analog_clock_mhz) * 1e6))
+    assert dev.analog_op_time(64, mux) == pytest.approx(expected, rel=1e-12)
+    # One active set switches nothing.
+    assert dev.analog_op_time(64, 1) == cim_t1.analog_op_time(64, 1)
+
+
+def test_shared_digital_chiplet_area_is_accounted_and_never_smeared():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {
+        "ctt": {"kind": "analog_macro", "device": "ctt"},
+        "sa": {"kind": "digital_chiplet", "area_mm2": 12.0},
+    }
+    dev = _device_from_dicts(hw_dict, VIT_HUGE_64)
+    assert dev.shared_digital_area_mm2() == pytest.approx(12.0)
+    # The analog total is the OPTIMA parity accounting and does not absorb it.
+    assert dev.system_area_mm2() == pytest.approx(dev.total_area_mm2() + 12.0)
+    assert dev.total_area_mm2() < dev.system_area_mm2()
+
+
+def test_digital_chiplet_energy_knob_is_refused_by_name():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"sa": {"kind": "digital_chiplet", "energy_per_op_pj": 1.0}}
+    with pytest.raises(ValueError, match="energy_per_op_pj is not a card field"):
+        _hw_from_dict(hw_dict)
+
+
+def test_derived_pool_sizing_is_reported(cim_t1):
+    # D12: the derived sizing is REPORTED. The line names lanes, adders, the
+    # rate they consume and the footprint share, and it moves no number.
+    sizing = cim_t1.digital_pool_sizing()
+    line = cim_t1.report_digital_pool(sizing)
+    assert str(sizing.lanes) in line and str(sizing.adders) in line
+    assert "derived, D12" in line
+
+
+def test_a_real_run_reports_the_derived_pool_sizing():
+    # And the report reaches a user: an ordinary run prints it. On stdout only
+    # — the report file and the results txt stay the frozen closed-form
+    # accounting (ADJ-8), which the P6.2 byte-identity gate checks.
+    proc = _run_perf_subprocess(FWS_T1, VIT_HUGE_64)
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    assert "[FWS-CIM] per-macro digital pool (derived, D12)" in proc.stdout
+
+
+def test_chained_macro_arrangement_puts_partials_on_the_p2p_law():
+    dev = _sliced_t1_device(slicing="chained_macros")
+    owner = cim_timing.TileOwner(model="vit", layer=2, op="ffn2")
+    tiles = dev.enumerate_tiles(1280, 3840, owner, arrangement="chained_macros")
+    descriptors = dev.reduction_descriptors(tiles)
+    assert len(descriptors) == 12
+    descriptor = descriptors[0]
+    assert descriptor.arrangement == "chained_macros"
+    assert not descriptor.local
+    assert descriptor.transport_partials == descriptor.n_slices - 1
+    assert len({t.site.macro_id for t in descriptor.operand_tiles}) == descriptor.n_slices
+    cost = dev.price_reduction(descriptor, 64, act_bytes=2.0)
+    assert cost.transport_bytes == pytest.approx(64 * descriptor.output_lanes * 3 * 2.0)
+    # The partials ride the existing p2p law; the tree waits at the sink.
+    assert dev.p2p_time_s(cost.transport_bytes, 100e9, 1e-6) > 0
+
+
+def test_shift_add_tree_pricing_law():
+    dev = _sliced_t1_device(pool_energy_per_add_pj=0.25)
+    descriptor = dev.reduction_descriptors(
+        dev.enumerate_tiles(1280, 1280, cim_timing.TileOwner(op="qkv"))
+    )[0]
+    pool = dev.digital_pool_sizing()
+    m_tokens = 64
+    cost = dev.price_reduction(descriptor, m_tokens)
+    results = m_tokens * descriptor.output_lanes
+    # ~(n_s - 1) adds per output; pipelined, one result per lane per cycle
+    # after a fill of depth ~log2(n_s).
+    assert cost.adds == results * (descriptor.n_slices - 1)
+    assert cost.cycles == descriptor.depth + math.ceil(results / pool.lanes) - 1
+    assert cost.time_s == pytest.approx(cost.cycles / pool.pool_clock_hz, rel=1e-12)
+    assert cost.energy_pj == pytest.approx(cost.adds * 0.25, rel=1e-12)
+    assert cost.transport_bytes == 0.0
+
+
+def test_reduction_cost_terms_are_zero_until_a_card_declares_them():
+    # ADJ-4 / D23 honesty: no invented numbers. A card that declares no pool
+    # energy reports zero energy, exactly as area_mm2_per_array: 0 does.
+    dev = _sliced_t1_device()
+    descriptor = dev.reduction_descriptors(
+        dev.enumerate_tiles(1280, 1280, cim_timing.TileOwner(op="qkv"))
+    )[0]
+    assert dev.price_reduction(descriptor, 64).energy_pj == 0.0
+    assert dev.digital_pool_sizing().area_mm2 == 0.0
+
+
+# --- P2.5 the per-macro digital pool (D12) ---------------------------------
+
+
+def test_digital_pool_lanes_come_from_the_peak_result_rate(cim_t1):
+    sizing = cim_t1.digital_pool_sizing()
+    expected_rate = (
+        cim_t1.analog.cols_adc * cim_t1.analog.analog_clock_mhz * 1e6 / cim_t1.analog.slice_cycles
+    )
+    assert sizing.result_rate_per_s == pytest.approx(expected_rate, rel=1e-12)
+    assert sizing.pool_clock_hz == cim_t1.f_fabric_hz  # inherits the digital card's clock
+    assert sizing.lanes == math.ceil(expected_rate / sizing.pool_clock_hz)
+    # No slicing => no shift-add tree to hold.
+    assert sizing.adders == 0 and sizing.area_mm2 == 0.0
+    assert not sizing.disclose and sizing.note is None
+
+
+def test_digital_pool_adders_scale_with_the_slice_count():
+    dev = _sliced_t1_device(pool_area_mm2_per_adder=0.001, pool_clock_ghz=2.0)
+    sizing = dev.digital_pool_sizing()
+    assert sizing.pool_clock_hz == pytest.approx(2.0e9)
+    assert sizing.lanes == math.ceil(sizing.result_rate_per_s / 2.0e9)
+    assert sizing.adders == sizing.lanes * (dev.n_slices - 1)
+    assert sizing.area_mm2 == pytest.approx(sizing.adders * 0.001, rel=1e-12)
+
+
+def test_pool_disclosure_threshold_prints_and_changes_nothing(capsys):
+    # ADJ-4: 1/5 of the served macro footprint is a DISCLOSURE threshold.
+    small = _sliced_t1_device(pool_area_mm2_per_adder=1e-6)
+    assert small.digital_pool_sizing().area_share < cim_timing.POOL_DISCLOSURE_AREA_SHARE
+    capsys.readouterr()
+    assert small.disclose_digital_pool() is None
+    assert capsys.readouterr().out == ""
+
+    loud = _sliced_t1_device(pool_area_mm2_per_adder=0.02)
+    sizing = loud.digital_pool_sizing()
+    assert sizing.area_share >= cim_timing.POOL_DISCLOSURE_AREA_SHARE and sizing.disclose
+    capsys.readouterr()
+    note = loud.disclose_digital_pool(sizing)
+    out = capsys.readouterr().out
+    assert "[NOTE]" in out and "disclosure threshold 20%" in out
+    assert note is not None and "not a constraint" in note
+    # Reported, never a constraint: nothing else moves.
+    assert loud.analog_gemm_time(64) == _sliced_t1_device().analog_gemm_time(64)
+    assert loud.total_area_mm2() == _sliced_t1_device().total_area_mm2()
+
+
+def test_pool_share_uses_the_stacked_footprint():
+    flat = _sliced_t1_device(pool_area_mm2_per_adder=0.001)
+    stacked = _sliced_t1_device(pool_area_mm2_per_adder=0.001, stack_3d_height=4)
+    assert stacked.digital_pool_sizing().area_share == pytest.approx(
+        4 * flat.digital_pool_sizing().area_share, rel=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
+# P6.2 degenerate-reduction gates: slicing off + single owner + no allocation
+# block reproduces today's full report, bit-identically.
+# ---------------------------------------------------------------------------
+
+
+P6_2_GATE_PAIRS = (
+    (FWS_T1, VIT_HUGE_64, "VIT"),
+    (FWS_LLAMA7B, LLAMA2_7B_FWS_INF, "LLM"),
+    (FWS_MOE, MOE_SMALL_FWS_INF, "LLM"),
+)
+
+
+def _inert_p2_blocks(hw_dict):
+    """An explicit card + allocation block that must change nothing.
+
+    Slicing off (no bits_per_cell / weight_bits), one owner per macro
+    (bank = the whole mux depth), and an allocation block that names the same
+    granularity the absent block implies.
+    """
+    mux = int(hw_dict["cim"]["analog"]["adc_mux"])
+    hw_dict["cim"]["cards"] = {
+        "ctt_explicit": {"kind": "analog_macro", "device": "ctt", "bank_depth": mux},
+        "shared_digital": {"kind": "digital_chiplet"},
+    }
+    hw_dict["cim"]["allocation"] = {"column_sets_per_tile": mux}
+    return hw_dict
+
+
+@pytest.mark.parametrize("hw_path,model_path,mode", P6_2_GATE_PAIRS)
+def test_p6_2_degenerate_reduction_reproduces_today_bit_identically(
+    hw_path, model_path, mode, tmp_path
+):
+    out_dir = PROJECT_ROOT / "output" / mode
+    report_path = out_dir / "fws_cim_report.json"
+    results_path = out_dir / "LLM_inference_results.txt"
+
+    proc = _run_perf_subprocess(hw_path, model_path)
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    baseline_report = report_path.read_bytes()
+    baseline_results = results_path.read_bytes()
+
+    explicit_path = tmp_path / f"{Path(hw_path).stem}_p2_explicit.yaml"
+    explicit_path.write_text(yaml.safe_dump(_inert_p2_blocks(_load_yaml(hw_path))))
+    proc = _run_perf_subprocess(explicit_path, model_path)
+    assert proc.returncode == 0, proc.stdout[-4000:]
+
+    # Byte-for-byte: the P2 layer is inert on today's configurations.
+    assert report_path.read_bytes() == baseline_report
+    assert results_path.read_bytes() == baseline_results
+
+
+@pytest.mark.parametrize("hw_path,model_path,mode", P6_2_GATE_PAIRS)
+def test_p6_2_degenerate_laws_match_the_pass_one_laws(hw_path, model_path, mode):
+    # The same gate at law level, where a bit-identity claim is exact rather
+    # than formatted: every pass-1 law the report prints is untouched by the
+    # explicit-but-inert card and allocation blocks.
+    base = _device_from_dicts(_load_yaml(hw_path), model_path, mode)
+    explicit = _device_from_dicts(_inert_p2_blocks(_load_yaml(hw_path)), model_path, mode)
+    assert explicit.n_slices == 1
+    assert explicit.column_sets_per_tile == base.analog.adc_mux
+    assert explicit.vec_cycles == base.vec_cycles
+    assert explicit.vec_latency_s == base.vec_latency_s
+    assert explicit.total_arrays() == base.total_arrays()
+    assert explicit.total_area_mm2() == base.total_area_mm2()
+    assert explicit.chip_layer_counts() == base.chip_layer_counts()
+    assert explicit.chip_array_usage() == base.chip_array_usage()
+    assert dict(explicit.all_stage_times()) == dict(base.all_stage_times())
+    assert explicit.pipeline_period() == base.pipeline_period()
+    assert explicit.transformer_stack_energy_pj() == base.transformer_stack_energy_pj()
+    # And the tiled path reproduces the untiled one, stage by stage.
+    for stage, (k, n) in base.per_layer_stage_shapes().items():
+        tiles = explicit.enumerate_tiles(k, n, cim_timing.TileOwner(op=stage))
+        assert explicit.price_tiled_op(64, tiles).time_s == base.analog_gemm_time(64), stage
+        assert len(tiles) == base.arrays(k, n), stage
