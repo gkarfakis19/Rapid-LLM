@@ -426,8 +426,17 @@ class TimeCalculation:
         # Extended-roofline GEMM backend; replaces per-GEMM kernel time only.
         # The native tile model below still selects tiles, counts memory
         # accesses, and prices ops the backend declines (skinny GEMV, non-bf16).
-        import extended_timing
-        self._extended_gemm_backend = extended_timing.create(hw_config)
+        # For device_class fws_cim it is skipped entirely: it TypeErrors on the
+        # stub tech_param's missing GPU fields and must never price CIM runs
+        # (including big act-GEMMs under cim.fabric.model: gpu_native) against
+        # A100-latency constants. The getattr guard at the get_gemm_time
+        # consumer keeps None safe.
+        self._device_class = str(getattr(hw_config, "device_class", "gpu")).lower()
+        if self._device_class == "fws_cim":
+            self._extended_gemm_backend = None
+        else:
+            import extended_timing
+            self._extended_gemm_backend = extended_timing.create(hw_config)
 
         self.memory_hierarchy = MemoryHierarchy(hw_config, core=self.core)
         self.num_levels = self.memory_hierarchy.num_levels
@@ -550,6 +559,20 @@ class TimeCalculation:
             self.moe_layer_mask = list(getattr(self.model, "moe_layer_mask", []))
             self.use_moe = bool(getattr(self.model, "use_moe", False))
             self.num_moe_layers = sum(self.moe_layer_mask)
+
+        # FWS-CIM device model (single source of truth for the analog/fabric
+        # laws; see cim_timing.py). None keeps every GPU path bit-identical.
+        # Built last: CimModelParams duck-types the model dims set above.
+        self.cim_model = None
+        if self._device_class == "fws_cim":
+            if str(mode).upper() not in {"LLM", "VIT"}:
+                raise ValueError(
+                    "device_class: fws_cim supports only transformer (LLM or ViT) "
+                    f"inference; mode {mode!r} has no model dims to map onto "
+                    "analog arrays."
+                )
+            from cim_timing import CimDeviceModel
+            self.cim_model = CimDeviceModel(hw_config, self)
 
 
     def _derive_num_workers(self, hw_config) -> int:
@@ -677,8 +700,23 @@ class TimeCalculation:
         # print("Roofline: exited {}".format(name))
         return max_time
     
-    def get_gemm_time(self, dim1, dim2, dim3, name="", 
+    def get_gemm_time(self, dim1, dim2, dim3, name="",
                     flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
+        # FWS-CIM early branch: closed-form device laws price the op BEFORE the
+        # tile enumeration below (the tile loop, not the backend seam, is what
+        # requires the 4-level GPU machinery). price_gemm returning None means
+        # fall through to the native path (attention under fabric gpu_native).
+        # The stub tile dims / zero mem_access never reach a roofline call —
+        # this branch returns first — so the zero-last-level sys.exit trap in
+        # roofline() cannot fire from here.
+        cim_model = getattr(self, "cim_model", None)
+        if cim_model is not None:
+            cim_time = cim_model.price_gemm(name, dim1, dim2, dim3, self)
+            if cim_time is not None:
+                if not disable_overhead:
+                    cim_time = cim_time + self.O
+                return cim_time, 0, ((1, 1, 1), (1, 1, 1), (1, 1, 1)), (0, 0, 0, 0)
+
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]

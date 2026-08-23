@@ -28,6 +28,7 @@ tools/parallelism_results/
 !RAPIDLLM_WEBUI_REMOTE.md
 !MOE_ONE_HOT_EXPERT_MODEL.md
 !MLA_CODE_VALIDATION.md
+!docs/fws_cim/*.md
 !webui/
 !webui/*.md
 !webui/**/*.md

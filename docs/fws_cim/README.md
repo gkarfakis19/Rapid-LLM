@@ -1,0 +1,435 @@
+# FWS-CIM device class
+
+`device_class: fws_cim` models a fixed-weight-stationary compute-in-memory
+accelerator inside Rapid-LLM. The model is device-generic: you supply array
+geometry, energy, and area per array. The CTT-based OPTIMA model is only the
+numeric validation reference.
+
+## What the device class models
+
+- **Analog weight arrays.** Every weight GEMM (patch embed, QKV, O-proj,
+  FFN1/FFN2, MoE router and experts, classifier or LM head) is programmed
+  into analog arrays once. All arrays that hold one weight matrix fire in
+  parallel, so weight-GEMM time depends only on the token count, never on
+  K or N.
+- **Digital attention fabric.** Activation-by-activation GEMMs (QK^T, PV)
+  run on a systolic-array sidecar, modeled with a closed-form cycle count
+  verified bit-exact against recorded ScaleSim outputs. The same folded law
+  prices MHA/GQA prefill and per-step decode at the arriving call dims.
+- **Spatial pipeline.** Layers map to chips (`layers_per_chip`). A dense
+  layer runs as five stages (QKV, attention, O-proj, FFN1, FFN2); a MoE
+  layer runs as six (QKV, attention, O-proj, router, FFN1, FFN2). The
+  pipeline period is the slowest stage over all layer classes plus
+  endpoints; throughput is `1 / period`.
+- **Autoregressive decode.** Decode weight stages run at `M = B` streams;
+  decode attention grows with the step's context; decode stage 2 also
+  covers the KV read (`cim_sram` or `cim_dram` story).
+- **MoE experts-per-chip.** All routed expert arrays of a layer coexist
+  and fire in parallel; dispatch/combine are boundary transfers on the
+  `ep` link.
+- **Chip-to-chip transfers.** Boundary activations move over the existing
+  analytical p2p network (`bytes = tokens * hidden * act_bytes`).
+
+All laws live in one module, `cim_timing.py` (`CimDeviceModel`). The per-op
+GEMM path (`base_timing.get_gemm_time`) and the spatial report
+(`inference_timing.calc_time`) both call it; no law is duplicated.
+
+## Laws in brief
+
+- Analog vector latency: `vec_latency = adc_mux * slice_cycles / f_analog`.
+- Analog weight-GEMM time: `T = M_tokens * vec_latency` (K/N-independent).
+- Arrays per K×N matrix: `ceil(K / rows) * ceil(N / (cols_adc * adc_mux))`.
+- Systolic array: `cycles(M, N, K) = ceil(M/R) * ceil(N/C) * (K + R + C - 2) - 1`.
+- Attention folds heads into K (dual-buffered, fully pipelined arrays) and
+  prices the arriving call dims `(m, k, n)`: QK^T is `M=m, N=n,
+  K=k*heads_per_replica*streams`, PV mirrors it. `streams` is the number
+  of batch streams the wavefront carries: the B independent attention
+  problems fold into the contraction exactly like heads (an LLM wavefront
+  carries B streams, so S2 prices the same B streams whose tokens
+  S1/S3/S4/S5 price; ViT keeps the one-image wavefront, streams = 1). MHA
+  prefill at streams=1 is `m=S, k=head_dim, n=S` (the pass-1 law,
+  bit-identical); GQA prefill folds shared heads into `m = S *
+  shared_heads`; decode prices the score call `m=shared_heads, k=head_dim,
+  n=context, streams=B` per step. QK and PV run concurrently:
+  `total = max(QK, PV) + fill_drain_penalty`, default penalty `3 * rows`.
+- Decode stage 2 is `max(T_sa, T_softmax, kv_read_bytes / kv_bw)`; decode
+  weight stages run the analog law at `M = B`. The lm_head endpoint is
+  `arrays = ceil(H/rows) * ceil(vocab/(cols_adc*adc_mux))` at `M = B*S`
+  prefill / `M = B` decode.
+- MoE routed-FFN stage: `T = ceil(tokens_owner * top_k * alpha / E) *
+  vec_latency` (hot expert, one-hot imbalance factor alpha); shared experts
+  run concurrently over all owner tokens; the stage is `max(routed,
+  shared)`. At `E=1, top_k=1, shared=0` this reduces exactly to the dense
+  FFN law.
+- Softmax lanes: `cycles = pipeline_depth + ceil(tokens_q * heads_chip /
+  lanes) - 1` (prefill: `tokens_q = streams * S` — the pass-1 form `S` at
+  the recorded B=1 points; decode: `tokens_q = B * shared_heads`).
+  Attention stage time is `max(T_sa, T_softmax)`.
+- Energy per stage per layer: `E = M_tokens * energy_per_vec_pj *
+  shots_per_output * arrays`. `shots_per_output` affects energy only.
+- Area: `arrays * area_mm2_per_array`.
+- Report metrics: `period = max(stage times)`, `fps = 1/period`,
+  `block_latency = sum(S1..S5)`, `end_to_end_latency = num_layers *
+  block_latency + endpoint stages + boundary transfers`.
+
+## Assumptions (pass 2A)
+
+- **Transformer inference only.** ViT-class models plus
+  dense and MoE LLMs (`attention_type: mha`/`gqa`) with autoregressive
+  decode. Training, flash attention, MLA, `cp > 1`, `pp > 1`,
+  decode-only runs (`decode_len >= seq_len` — the spatial report prices
+  the prefill wavefront, so `prefill_len` must be > 0), and the
+  AstraSim backend are rejected at config validation with a message that
+  names the offending setting. Training is permanently out: fixed weights
+  admit no writes.
+- **KV stories.** For `fws_cim`, `inference.kvcache_type` must be
+  `cim_sram` (KV shares the activation SRAM — the DRAM-stub tier) or
+  `cim_dram` (a dedicated `cim.kv_dram` tier); `hbm_only` errors — the
+  device has no HBM. Decode stage 2 is
+  `max(T_sa, T_softmax, kv_read_bytes / kv_bw)`; the report adds a KV
+  section (bytes/stream, max streams, max context, fits flag — capacity
+  overflow WARNS, never fails) and a decode section evaluated directly
+  from the laws at three contexts (first, midpoint, final).
+- **Decode throughput: fabric ceiling vs sustained.** The aggregate
+  `B / period` figure is a FABRIC CEILING: it assumes the spatial
+  pipeline is fully occupied, which takes `wavefronts_full =
+  ceil(step_latency / period)` wavefronts (each one batch of B streams)
+  in flight. The KV capacity at the same context holds only
+  `wavefronts_kv = floor(kv_max_streams / B)` wavefronts, so the report
+  also prints the sustained figure
+  `min(min(wavefronts_full, wavefronts_kv) * B / step_latency,
+  B / period, kv_bw / kv_bytes_per_token)` with its limiting factor
+  (`fabric`, `kv_capacity`, `kv_bandwidth`, or `infeasible` when the KV
+  capacity holds no full wavefront). The `B / period` cap holds because
+  the bottleneck stage completes at most one wavefront of B per period;
+  the bandwidth cap holds because every resident wavefront's kv-reading
+  S2 stage draws on the ONE declared KV tier concurrently
+  (`kv_bytes_per_token` = the per-device KV bytes one generated token
+  reads across all layers). JSON: `sustained_tokens_per_s`,
+  `wavefronts_full`, `wavefronts_kv`, `decode_throughput_limit` next to
+  the unchanged `aggregate_tokens_per_s_final`.
+- **Decode staircase caveat.** Per-step decode times are stepwise in
+  context (systolic tile bins), so the integrated decode totals — a
+  trapezoid over sampled steps — are an approximation between samples.
+  For paper runs set `inference_param.sample_every` small enough to
+  resolve the staircase (`1` prices every step exactly; `-1` prices only
+  the first and last steps, which is the smoke-config setting). The decode
+  section's direct-law numbers at the three contexts are exact either way.
+- **MoE experts-per-chip.** All routed expert arrays coexist and fire in
+  parallel; the routed stage is `ceil(tokens_owner * top_k * alpha / E) *
+  vec_latency`, shared experts run concurrently over all owner tokens, and
+  dispatch/combine are per-MoE-layer boundary transfers on the `ep` link.
+  `cim.chip.moe_expert_parallel: k` spreads each layer's routed experts
+  over k dedicated chips (reported as their own pool). The per-op
+  sequential figure keeps the caller's serialized-expert multiplier and
+  the report discloses it.
+- **Placement.** `cim.chip.layers_per_chip` takes an int, a per-chip list,
+  or `auto` (greedy capacity-first packing from `arrays_per_chip`; the
+  derived split is reported).
+- **Helper absorption.** LN / GELU / adder lanes are sized so they never
+  bound a stage (the OPTIMA contract). Analog stage time is the analog law;
+  helpers are absorbed. The report states this.
+- **Partial energy.** The energy figure covers analog arrays plus boundary
+  interconnect — chip-boundary pp transfers AND MoE dispatch/combine
+  bytes on the ep link (link-count-invariant under `moe_expert_parallel`)
+  — plus `cim.kv_dram` KV traffic when that story is
+  configured. No fabric, SRAM, or helper energy; the report labels it
+  PARTIAL.
+- **Folded-K attention.** Per-head fill/drain is not priced; a single
+  configurable penalty (`fill_drain_penalty_cycles`, default `3*rows`)
+  covers it.
+- **Mapping is given or derived, never searched by the simulator.**
+  `layers_per_chip` comes from the config (int, list, or `auto`); capacity
+  (`arrays_per_chip`) is validated, and overflow is a hard error. The
+  design-space search lives in a separate tool, `tools/fws_cim_dse.py`
+  (see "DSE tool" below); a run_perf run never sweeps anything.
+- **pp must be 1.** Chip placement is a post-hoc report, not pipeline
+  parallelism. Weights live in arrays, so weight bytes are excluded from the
+  memory tables; the DRAM capacity check becomes an activation-feasibility
+  check.
+- The sequential per-op total in the results file is kept for contrast only.
+  Two disclosures ride with it (in the results text and the report's
+  `sequential_latency_note`): under `fabric.model: sa` it counts the one
+  folded QK+PV fabric run twice per layer (both attention ops return the
+  same folded run time), and on MoE models it prices the experts serialized
+  (the caller multiplies one per-expert call by the expert count). The FWS
+  spatial pipeline section is the authoritative number for both.
+
+## How to run
+
+From the repo root, with the project virtualenv:
+
+```bash
+# T1: ViT-Huge-story, seq 64, adc_mux 4
+.venv/bin/python run_perf.py \
+  --hardware_config configs/hardware-config/fws_cim_optima_t1.yaml \
+  --model_config configs/model-config/vit_huge_story_64_inf.yaml
+
+# T2: ViT-g, seq 64, adc_mux 2
+.venv/bin/python run_perf.py \
+  --hardware_config configs/hardware-config/fws_cim_optima_t2.yaml \
+  --model_config configs/model-config/vit_g_64_inf.yaml
+
+# T3: ViT-Huge-story, seq 196, adc_mux 16
+.venv/bin/python run_perf.py \
+  --hardware_config configs/hardware-config/fws_cim_optima_t3.yaml \
+  --model_config configs/model-config/vit_huge_story_196_inf.yaml
+
+# Dense LLM prefill + decode: Llama2-7B-class, B=4, prefill 1792, decode 256,
+# cim_sram KV story (swap the hardware config for fws_cim_llama7b_kvdram.yaml
+# to move the KV cache to a dedicated cim.kv_dram tier)
+.venv/bin/python run_perf.py \
+  --hardware_config configs/hardware-config/fws_cim_llama7b.yaml \
+  --model_config configs/model-config/llama2_7b_fws_inf.yaml
+
+# MoE prefill + decode: GQA, E=16, top_k=2, 1 shared expert, experts-per-chip
+.venv/bin/python run_perf.py \
+  --hardware_config configs/hardware-config/fws_cim_moe.yaml \
+  --model_config configs/model-config/moe_small_fws_inf.yaml
+```
+
+Each run writes:
+
+- `output/<MODE>/LLM_inference_results.txt` (`VIT` or `LLM` per the model
+  config) — the usual results plus a readable `FWS-CIM spatial pipeline`
+  section.
+- `output/<MODE>/fws_cim_report.json` — machine-readable: period, fps,
+  block latency, end-to-end latency, per-layer-class stage tables (dense
+  and MoE) with QK/PV cycles, endpoint list (ViT: patch_embed/vit_head;
+  LLM: lm_head, with the embedding lookup as a note), array counts, area,
+  per-chip occupancy, boundary and MoE dispatch/combine times, KV section,
+  decode section, partial energy.
+
+Validation against the recorded OPTIMA targets (cycles and array counts
+exact; times, areas, and fps within 0.1 %), plus the two GPU regression
+gates, an A100 comparison, the pass-2A rows (dense-LLM, cim_dram, and
+MoE smokes plus law spot-checks the script recomputes independently from
+the closed forms), and the pass-2B DSE rows (a T1-pinned sweep selection
+with its Pareto front, a Llama2-7B sweep with the `--emit-config`/
+`--verify` round trip, and the MoE `moe_expert_parallel` scaling checks;
+these DSE runs write only under `output/fws_cim_dse/validation_*`):
+
+```bash
+.venv/bin/python validation_scripts/validate_fws_cim_vs_optima.py
+```
+
+Exit code 0 means every check passed. Unit tests:
+`.venv/bin/python -m pytest -q tests/test_fws_cim.py`.
+
+## DSE tool (pass 2B)
+
+`tools/fws_cim_dse.py` sweeps the candidate space declared in `cim.dse`
+with CLOSED-FORM evaluation on `CimDeviceModel` only — it never runs
+run_perf per candidate. Knobs: array variants (`cim.dse.variants`, each a
+complete analog point after `cim.analog` inheritance), tp
+(`tp_candidates`; `auto` = divisors of `num_heads`, MoE-filtered by the
+routing-group divisibility gate), and `moe_expert_parallel`
+(`cim.dse.moe_expert_parallel`, MoE models only). tp >= 2 evaluates a
+SYSTEM of tp shard devices: the timing laws shard kv heads and KV bytes
+per device, and the chips / arrays / area metrics (plus the `max_chips`
+constraint) multiply the per-shard figures by tp — the array census does
+not shard weight matrices, so each shard is counted at the full
+per-device figure, a stated conservative upper bound. tp therefore costs
+real silicon in the selection instead of acting as a free throughput
+knob.
+`cim.dse.mux_candidates` never expands the sweep: when set it is a
+cross-check only — every variant's `adc_mux` must appear in it (a typo
+guard), or the tool exits with a config error. Chips are DERIVED per
+candidate via the `layers_per_chip: auto` greedy placement; the digital
+fabric is fixed. Constraints per candidate (every infeasible candidate is
+recorded with a stage tag and message): placement/capacity, optional
+`max_chips`, boundary and MoE dispatch bandwidth vs the pipeline period,
+and story-aware KV capacity. Metrics mirror the spatial report: period,
+throughput (fps for prefill/ViT workloads; on decode workloads the
+fabric-ceiling tok/s at the final decode context plus the sustained
+figure `sustained_tokens_per_s` with `wavefronts_full` / `wavefronts_kv`
+/ `decode_throughput_limit`), single-item latency, chips (backbone +
+expert pool), the derived per-chip layer split, one-way MoE dispatch time
+(`dispatch_time_us` in the JSON metrics; `moe_expert_parallel: k` divides
+it by k), total array area, arrays utilization, PARTIAL energy per
+inference. The Pareto front is throughput vs total array area; the final
+pick is lexicographic per `--objective` (`throughput`, the default: max
+throughput, then min chips, min area, min tp, min adc_mux; `min_chips`:
+min chips first, same tie-breakers). On decode workloads both the front's
+throughput axis and the selection rank on `sustained_tokens_per_s` — the
+honest headline; the fabric ceiling stays as info. An all-infeasible
+sweep exits nonzero and surfaces the best violation.
+
+```bash
+.venv/bin/python tools/fws_cim_dse.py \
+  --hardware_config configs/hardware-config/my_fws_cim_with_dse.yaml \
+  --model_config configs/model-config/llama2_7b_fws_inf.yaml \
+  --emit-config out/selected.yaml --verify
+```
+
+Artifacts land in `--output-dir` (default
+`output/fws_cim_dse/<hw-stem>__<model-stem>/`): `dse_report.md` (selected
+mapping, candidate table with ok flags, front, failures, config echo) and
+`dse_report.json` (machine-readable). `--emit-config` writes a complete
+runnable fws_cim hardware YAML for the selected point (chosen variant's
+analog fields, the DERIVED `layers_per_chip` list, tp, and
+`moe_expert_parallel`). `--verify` then runs run_perf once on the emitted
+config (with the run's `output/` tree placed inside the DSE output dir)
+and cross-checks period and fps (prefill) or the fabric-ceiling tok/s
+plus the sustained tok/s (decode) against the closed form — they must
+match within 0.1% (the DSE and the simulator share `CimDeviceModel`, so
+this guards drift); a mismatch exits nonzero.
+
+### Worked example (dense Llama2-7B decode; real output)
+
+The shipped templates carry no `cim.dse` block (a schema test pins that),
+so copy one and append the candidate space. This is the exact sweep the
+validator reruns as its pass-2B llama7b rows: the shipped Llama analog
+point plus a deliberately infeasible tiny array.
+
+```yaml
+# copy of configs/hardware-config/fws_cim_llama7b.yaml, plus under cim:
+  dse:
+    variants:
+      - { adc_mux: 4, cols_adc: 1024,          # the shipped Llama point;
+          energy_per_vec_pj: 97637.774,        # rows/slice_cycles/clock
+          area_mm2_per_array: 14.367386 }      # inherit cim.analog
+      - { adc_mux: 1, cols_adc: 8, rows: 64,   # too small to place a layer
+          energy_per_vec_pj: 1.0, area_mm2_per_array: 0.001 }
+    tp_candidates: [1]
+```
+
+```bash
+.venv/bin/python tools/fws_cim_dse.py \
+  --hardware_config my_llama_dse.yaml \
+  --model_config configs/model-config/llama2_7b_fws_inf.yaml \
+  --output-dir output/fws_cim_dse/validation_llama7b \
+  --emit-config output/fws_cim_dse/validation_llama7b/selected_config.yaml \
+  --verify
+```
+
+Printed output from this run:
+
+```
+[FWS-CIM DSE] 1/2 candidates valid; artifacts in output/fws_cim_dse/validation_llama7b
+[FWS-CIM DSE] selected c000 (lexicographic: max sustained throughput (sustained_tokens_per_s; the fabric-ceiling tok/s stays as info), then min chips, then min total array area, then min tp, then min adc_mux): period 27197.5 us, throughput 7205.28 tok/s, chips 4, area 6091.77 mm2
+[FWS-CIM DSE] sustained 449.187 tok/s at KV capacity (wavefronts: full 33, kv 2; limited by kv_capacity); the throughput figure above is the fabric ceiling.
+[FWS-CIM DSE] verify: run_perf matches the closed form (<= 0.1%).
+```
+
+What the artifacts recorded (`dse_report.md` / `dse_report.json`):
+
+- Selected mapping `c000`: the shipped array point at tp=1; decode
+  workload; period 27197.5 us (bottleneck `S2_attention`), throughput
+  7205.28 tok/s (the fabric ceiling B=4 / decode period 555.148 us at
+  the final context; filling the pipeline would take 33 wavefronts =
+  132 streams), sustained 449.19 tok/s (the KV tier holds 8 streams =
+  2 wavefronts of B=4, so `kv_capacity` limits — this is the decode
+  selection key), single-item latency 5.29214e+06 us, 424 arrays, total
+  array area 6091.77 mm2, utilization 0.8833, PARTIAL energy/inference
+  5.94897e+11 pJ.
+- Auto placement derived `layers_per_chip [9, 9, 9, 5]` — 4 chips.
+  Greedy capacity-first packs 9 Llama layers per chip (9 x 13 = 117
+  arrays <= 120), one more than the shipped manual `layers_per_chip: 8`;
+  the last chip carries 5 layers plus the 8 lm_head arrays.
+- The tiny variant is recorded, not dropped:
+  `c001 [placement]: cim.chip.layers_per_chip: 'auto' cannot place
+  layer 0 (dense): it needs 395264 analog arrays on one chip but
+  cim.chip.arrays_per_chip = 120. ...`
+- The Pareto front is `[c000]`, and `--verify` reran the emitted config
+  through run_perf: period, the fabric-ceiling tok/s, and the sustained
+  tok/s matched the closed form with rel_err 0.0 (the run's `output/LLM`
+  tree lands inside the DSE output dir, so repo outputs stay untouched).
+
+Note when comparing to OPTIMA outputs directly: OPTIMA's recorded block
+latency sums six stages (S1..S5 plus a trailing peripherals stage that costs
+one analog stage time). The report's `block_latency_us` is `sum(S1..S5)` per
+the design contract; add one analog stage time to reproduce OPTIMA's figure.
+
+## Config reference
+
+Hardware YAML (see `configs/hardware-config/fws_cim_optima_t1.yaml` for a
+complete template). Use plain numbers inside `cim:` — never unit strings
+such as `"100 MB"`; the global config preprocessor rewrites those into byte
+counts before the CIM parser sees them.
+
+```yaml
+device_class: fws_cim        # absent -> gpu (existing behavior, bit-identical)
+cim:
+  analog:
+    rows: 1280               # array rows (K per array tile)
+    cols_adc: 320            # ADC columns per array
+    adc_mux: 4               # column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 9534.9389   # per array per input vector (includes mux)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 1.403065   # 0 disables area reporting
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1
+    clock_ghz: 0.95
+    fill_drain_penalty_cycles: 96  # default 3*rows when absent
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 400     # capacity check; 0 = unchecked
+    layers_per_chip: 32      # int | list ([16, 16]) | "auto" (derive from arrays_per_chip)
+    moe_expert_parallel: 1   # spread each MoE layer's routed experts over k chips
+  kv_dram:                   # optional; required iff inference.kvcache_type: cim_dram
+    capacity_bytes: 8589934592           # 8 GiB (plain numbers, no unit strings)
+    bandwidth_bytes_per_s: 100000000000  # 100 GB/s
+    energy_per_bit_pj: 2.0               # feeds the PARTIAL energy; 0 disables
+  dse:                       # optional; consumed only by tools/fws_cim_dse.py
+    mux_candidates: [1, 2, 4, 8, 16]  # optional cross-check: every variant's adc_mux
+                                      # must appear here; the sweep enumerates
+                                      # variants, never this list
+    variants:                # per-mux array points; omitted fields inherit cim.analog
+      - { adc_mux: 4, cols_adc: 320, energy_per_vec_pj: 9534.9389, area_mm2_per_array: 1.403065 }
+    tp_candidates: auto      # auto = divisors of num_heads; or an explicit list
+    moe_expert_parallel: [1] # expert-spreading candidates (MoE models only)
+    max_chips: 0             # 0 = unbounded
+inference:
+  kvcache_type: cim_sram     # fws_cim: cim_sram | cim_dram (hbm_only errors — no HBM)
+```
+
+Shipped pass-2A templates: `fws_cim_llama7b.yaml` (dense LLM, `cim_sram`),
+`fws_cim_llama7b_kvdram.yaml` (same device, `cim_dram` KV tier), and
+`fws_cim_moe.yaml` (MoE experts-per-chip), paired with the model configs
+`llama2_7b_fws_inf.yaml` and `moe_small_fws_inf.yaml`
+(`use_flashattention: false`, small batch/decode for smoke speed).
+
+Notes:
+
+- `fabric.model: gpu_native` sends the attention act-GEMMs through the
+  native tile/roofline machinery instead of the SA law. The stub
+  `tech_param` then describes the sidecar, so calibrate it to the fabric
+  (peak flops ≈ `num_arrays * rows * cols * 2 * clock`), not to a GPU.
+- fws_cim YAMLs still need structurally complete `tech_param`,
+  `memory_hierarchy`, `parallelism`, and `network` blocks (ring dims,
+  `kernel_launch_overhead: 0`). Copy them from a shipped template.
+- Model YAMLs may set `model_param.vision.num_prefix_tokens` (int >= 0) to
+  override the default prefix-token count (vit: 1, vit_dinov3: 5). The
+  validation configs use 0 to hit the reference sequence lengths exactly.
+- `layers_per_chip: "auto"` requires `arrays_per_chip > 0` and packs layers
+  greedily (capacity-first, layer order preserved, endpoints on the first
+  and last chips). The derived split is reported
+  (`derived_layers_per_chip` in the JSON; `auto -> derived [...]` in the
+  text).
+- `inference.kvcache_type` accepts only `hbm_only`, `cim_sram`, or
+  `cim_dram` — enforced at parse time for every hardware config. For
+  `fws_cim`, `hbm_only` errors (the device has no HBM) and `cim_dram`
+  requires the `cim.kv_dram` block. On a non-`fws_cim` device a CIM KV
+  story is inert: validation warns that it is ignored and the run behaves
+  as `hbm_only`.
+- fws_cim model configs must keep `decode_len < seq_len`
+  (`prefill_len > 0`): the spatial report prices the prefill wavefront,
+  so a decode-only run is rejected at validation (matching the DSE).
+
+## Future seams
+
+- **MLA.** The MLA inference path discards per-op GEMM times upstream, so
+  it needs its own pricing seam; `attention_type: mla` is rejected.
+- **DSE extensions.** `tools/fws_cim_dse.py` sweeps mux/tp/expert
+  spreading today. Analog clock optimization, partial banking, fabric
+  resizing, and multi-tenant pools are later phases.
+- **Energy completeness.** Fabric, SRAM, and helper energy need a component
+  library story before the PARTIAL label can go.

@@ -152,6 +152,16 @@ class MemoryEstimator:
             key_seq_len=(kv_cache_tokens if mode == "inference" and kv_cache_tokens is not None else seq_len),
             swiglu_mlp=getattr(tc, "swiglu_mlp", False),
         )
+        if str(getattr(getattr(tc, "hw_config", None), "device_class", "gpu")).lower() == "fws_cim":
+            # FWS-CIM weights are stationary in the analog arrays, not in the
+            # DRAM stub (which stands in for the activation buffer): drop the
+            # weight bytes so the memory tables report activation feasibility.
+            # Zeroing weight_memory_layer_dense also zeroes bytes_per_param_weight
+            # below, which removes the embedding / head static bytes (fws_cim is
+            # inference-only, so grad/opt per-param bytes are already zero).
+            transformer_mem_layer_dense -= weight_memory_layer_dense
+            transformer_static_layer_dense -= weight_memory_layer_dense
+            weight_memory_layer_dense = 0.0
         transformer_mem_layer_moe = transformer_mem_layer_dense
         transformer_act_layer_moe = transformer_act_layer_dense
         transformer_act_layer_inf_moe = transformer_act_layer_inf_dense
@@ -602,6 +612,24 @@ class MemoryEstimator:
                     * float(precision.kv_cache)
                     * 2.0
                 )
+        if kv_cache_bytes_per_layer:
+            # fws_cim + kvcache_type cim_dram: KV lives on the dedicated
+            # cim.kv_dram tier, not in the DRAM stub (the activation buffer),
+            # so the SRAM check stays activations-only (mirrors the fws_cim
+            # weight exclusion above). The KV-vs-kv_dram side capacity check
+            # is reported by the FWS report (WARN, never raise). Under
+            # cim_sram KV stays here: it shares the activation SRAM.
+            hw_cfg = getattr(tc, "hw_config", None)
+            if str(getattr(hw_cfg, "device_class", "gpu")).lower() == "fws_cim":
+                kv_story = str(
+                    getattr(
+                        getattr(hw_cfg, "inference_config", None),
+                        "kvcache_type",
+                        "hbm_only",
+                    )
+                ).lower()
+                if kv_story == "cim_dram":
+                    kv_cache_bytes_per_layer = 0.0
 
         param_gather_bytes = 0.0
         if mode == "training" and zero3_ephemeral_peak_bytes and dp > 1 and zero_stage >= 3:

@@ -1,0 +1,159 @@
+# FWS-CIM MoE point (pass 2): arrays sized for a small MoE model, cim_sram KV.
+# Pair with configs/model-config/moe_small_fws_inf.yaml at tp=1, pp=1.
+#
+# Analog point: rows = 1024 (matches hidden_dim), stored cols = 1024.
+# Per-MoE-layer arrays for the paired model (H=1024, GQA q16/kv4 d=64,
+# I_moe=512, E=16 routed + 1 shared, gated MLP, router):
+# QKV arrays(1024, (16+2*4)*64=1536) = 2, O 1, 16*(1+1) routed,
+# 1*(1+1) shared, router 1 -> 2 + 1 + 32 + 2 + 1 = 38.
+# Dense layer 0 (I=2048, gated fused N=2*I): 2 + 1 + 4 + 2 = 9.
+# lm_head adds ceil(32000/1024) = 32 arrays on the last chip.
+# layers_per_chip 6 -> 2 chips; worst chip 6*38 + 32 = 260.
+# Energy/area per array are the T1 OPTIMA point scaled by cell count (x0.64).
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 1024               # array rows (K per array tile)
+    cols_adc: 256            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 6102.361    # T1 point scaled by cell count (x0.64)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 0.897962   # T1 point scaled by cell count (x0.64)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 300     # worst chip: 6 MoE layers * 38 + lm_head 32 = 260
+    layers_per_chip: 6       # 12 layers -> 2 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # routed experts of a layer stay on that layer's chip
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 512 MB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        # Deliberately distinct from dim1 (pp) so the smoke tests detect a
+        # regression that priced dispatch/combine on the wrong link.
+        bandwidth: 50 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)

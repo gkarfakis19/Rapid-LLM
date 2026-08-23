@@ -2432,7 +2432,11 @@ class TimeCalculationLLM(TimeCalculation):
         ):
             m_per_expert = bucket_tokens_per_expert * max(1, int(self.cp))
             gemm_override = (bucket_batch, m_per_expert, k, n)
-            bucket_name = name if bucket_label == "uniform" else f"{name}_{bucket_label}"
+            # Every bucket carries its label as a suffix — including the
+            # balanced "uniform" bucket — so device backends can tell
+            # token-true bucket M from per-stream decode M by name
+            # (cim_timing._MOE_BUCKET_SUFFIXES).
+            bucket_name = f"{name}_{bucket_label}"
             (
                 bucket_gemm_time,
                 bucket_tp_comm_time,
@@ -2507,7 +2511,11 @@ class TimeCalculationLLM(TimeCalculation):
         ):
             m_per_expert = bucket_tokens_per_expert * max(1, int(self.cp))
             gemm_override = (bucket_batch, m_per_expert, k, n)
-            bucket_name = name if bucket_label == "uniform" else f"{name}_{bucket_label}"
+            # Every bucket carries its label as a suffix — including the
+            # balanced "uniform" bucket — so device backends can tell
+            # token-true bucket M from per-stream decode M by name
+            # (cim_timing._MOE_BUCKET_SUFFIXES).
+            bucket_name = f"{name}_{bucket_label}"
             bucket_gemm_time, bucket_tp_comm_time, bucket_tp_comm_bytes = self._batched_gemm_backward_compute(
                 gemm_override,
                 bucket_name,
@@ -2586,9 +2594,13 @@ class TimeCalculationLLM(TimeCalculation):
             )
         return embedding_time + embedding_transfer_time, embedding_mem
 
-    def get_linear_softmax_f(self, gemm):
+    def get_linear_softmax_f(self, gemm, name="linear_softmax_f"):
         """Estimate time for final projection + softmax forward.
             assuming linear softmax gemm always use tensor parallelism sharded by vocab dimension
+
+        ``name`` labels the GEMM call; the decode graph passes
+        "decode_linear_softmax_f" so device backends that price by op name
+        (fws_cim) see the decode M = B rule for the lm_head (DESIGN2 1.5).
         """
         if self._is_vit_model():
             batch = self._effective_transformer_batch()
@@ -2635,7 +2647,7 @@ class TimeCalculationLLM(TimeCalculation):
         #     gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX
         # )
         # Linear softmax is modeled as running on a single device within each TP group.
-        gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
+        gemm_time, _, _, _, _ = self.single_gpu_gemm_forward(gemm, name, gemm_type=GemmType.LINEAR_SOFTMAX)
 
             
         elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension

@@ -231,7 +231,7 @@ def test_vit_rejects_extra_vision_keys():
     try:
         config.LLMConfig.from_dict(model_param)
     except ValueError as exc:
-        assert "only supports image_size and patch_size" in str(exc)
+        assert "only supports image_size, patch_size and num_prefix_tokens" in str(exc)
     else:
         raise AssertionError("Expected extra ViT vision keys to be rejected")
 

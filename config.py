@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass, field
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import yaml as _yaml
 from yaml import YAMLError as _YAMLError
@@ -46,6 +46,18 @@ def _is_vit_model_type(model_type: str) -> bool:
 
 def _vit_default_num_prefix_tokens(model_type: str) -> int:
     return 5 if str(model_type or "").strip().lower() == "vit_dinov3" else 1
+
+
+def _vit_effective_num_prefix_tokens(vision: Optional["ViTConfig"], model_type: str) -> int:
+    """Prefix-token count for a ViT run.
+
+    The explicit model_param.vision.num_prefix_tokens override wins when given;
+    otherwise the model-family default applies (vit -> 1 CLS token,
+    vit_dinov3 -> 5), which preserves prior behavior exactly.
+    """
+    if vision is not None and vision.num_prefix_tokens is not None:
+        return int(vision.num_prefix_tokens)
+    return int(_vit_default_num_prefix_tokens(model_type))
 
 
 @dataclass(frozen=True)
@@ -1480,6 +1492,9 @@ class MoEConfig:
 class ViTConfig:
     image_size: Tuple[int, int]
     patch_size: Tuple[int, int]
+    #: Optional override for the prefix-token count (CLS/register tokens).
+    #: None keeps the model-family default (vit -> 1, vit_dinov3 -> 5).
+    num_prefix_tokens: Optional[int] = None
 
     @property
     def patch_dim(self) -> int:
@@ -1498,15 +1513,27 @@ class ViTConfig:
             raise ValueError(
                 "model_param.vision.image_size must be divisible by model_param.vision.patch_size"
             )
-        allowed_keys = {"image_size", "patch_size"}
+        num_prefix_tokens_raw = vision_dict.get("num_prefix_tokens", None)
+        num_prefix_tokens = None
+        if num_prefix_tokens_raw is not None:
+            num_prefix_tokens = _coerce_int(
+                num_prefix_tokens_raw,
+                "model_param.vision.num_prefix_tokens",
+                min_value=0,
+            )
+        allowed_keys = {"image_size", "patch_size", "num_prefix_tokens"}
         extra_keys = sorted(set(vision_dict.keys()) - allowed_keys)
         if extra_keys:
             raise ValueError(
-                "model_param.vision only supports image_size and patch_size for ViT configs. "
+                "model_param.vision only supports image_size, patch_size and num_prefix_tokens for ViT configs. "
                 f"Unsupported keys: {', '.join(extra_keys)}"
             )
 
-        return cls(image_size=image_size, patch_size=patch_size)
+        return cls(
+            image_size=image_size,
+            patch_size=patch_size,
+            num_prefix_tokens=num_prefix_tokens,
+        )
 
 
 @dataclass
@@ -1646,7 +1673,7 @@ class LLMConfig:
 
     @property
     def num_prefix_tokens(self) -> int:
-        return 0 if self.vision is None else int(_vit_default_num_prefix_tokens(self.model_type))
+        return 0 if self.vision is None else _vit_effective_num_prefix_tokens(self.vision, self.model_type)
 
     @property
     def num_patches(self) -> int:
@@ -1724,7 +1751,7 @@ class LLMConfig:
         if seq_len_raw is None:
             if vision is None:
                 raise ValueError("model_param.seq_len must be specified")
-            seq_len = int(vision.num_patches) + int(_vit_default_num_prefix_tokens(model_type))
+            seq_len = int(vision.num_patches) + _vit_effective_num_prefix_tokens(vision, model_type)
         else:
             try:
                 seq_len = int(seq_len_raw)
@@ -1733,11 +1760,11 @@ class LLMConfig:
             if seq_len <= 0:
                 raise ValueError("model_param.seq_len must be >= 1")
             if vision is not None:
-                min_vit_seq_len = int(vision.num_patches) + int(_vit_default_num_prefix_tokens(model_type))
+                min_vit_seq_len = int(vision.num_patches) + _vit_effective_num_prefix_tokens(vision, model_type)
                 if seq_len < min_vit_seq_len:
                     raise ValueError(
                         "model_param.seq_len must be >= the ViT-derived token count "
-                        f"({min_vit_seq_len} from image_size/patch_size/default prefix tokens, got {seq_len})"
+                        f"({min_vit_seq_len} from image_size/patch_size/prefix tokens, got {seq_len})"
                     )
 
         vocab_size_raw = model_dict.get("vocab_size", None)
@@ -2139,6 +2166,11 @@ class ExecutionBackend:
         return cls(model=model, astra=astra)
 
 
+#: Valid inference.kvcache_type values. hbm_only is the GPU default;
+#: cim_sram / cim_dram are the fws_cim KV stories (the device has no HBM).
+_KVCACHE_TYPES = ("hbm_only", "cim_sram", "cim_dram")
+
+
 @dataclass
 class InferenceHWConfig:
     kvcache_type: str
@@ -2148,7 +2180,345 @@ class InferenceHWConfig:
         if not inference_dict:
             return cls(kvcache_type="hbm_only")
         inference_dict = _require_mapping("inference", inference_dict)
-        return cls(kvcache_type=str(inference_dict.get("kvcache_type", "hbm_only")))
+        kvcache_type = str(inference_dict.get("kvcache_type", "hbm_only")).strip().lower()
+        if kvcache_type not in _KVCACHE_TYPES:
+            raise ValueError(
+                "inference.kvcache_type must be one of 'hbm_only', 'cim_sram', or 'cim_dram' "
+                f"(got {inference_dict.get('kvcache_type')!r})"
+            )
+        return cls(kvcache_type=kvcache_type)
+
+
+def _parse_cim_float(block: Dict[str, object], context: str, field: str, *, default=None, min_value: float = 0.0, strict: bool = False):
+    """Parse a plain-number float from a cim sub-block.
+
+    The global convert() preprocessor rewrites any "<int> <Unit>" string in the
+    YAML into byte counts, so cim blocks must use plain numbers only; a
+    leftover string here means a unit string slipped in, which we reject.
+    """
+    if default is None:
+        raw = _require_field(context, block, field)
+    else:
+        raw = block.get(field, default)
+    if isinstance(raw, str):
+        raise ValueError(
+            f"{context}.{field} must be a plain number, not a string (got {raw!r}). "
+            "Unit strings like '100 MB' are rewritten to byte counts elsewhere in the YAML "
+            "and are not allowed inside the cim block."
+        )
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context}.{field} must be a number (got {raw!r})") from exc
+    if strict and parsed <= min_value:
+        raise ValueError(f"{context}.{field} must be > {min_value} (got {parsed})")
+    if not strict and parsed < min_value:
+        raise ValueError(f"{context}.{field} must be >= {min_value} (got {parsed})")
+    return parsed
+
+
+@dataclass
+class CIMAnalogConfig:
+    """Analog fixed-weight-stationary array parameters (cim.analog).
+
+    Modeling assumptions: an array stores rows x (cols_adc * adc_mux) weights;
+    one input vector is evaluated in adc_mux * slice_cycles analog cycles;
+    shots_per_output affects energy only, never time. All values are plain
+    numbers (no unit strings — see convert()).
+    """
+
+    rows: int
+    cols_adc: int
+    adc_mux: int
+    slice_cycles: int
+    analog_clock_mhz: float
+    energy_per_vec_pj: float   # per array per input vector (already includes mux); 0 reports zero analog energy
+    shots_per_output: int      # energy only, never time
+    area_mm2_per_array: float  # 0 disables area reporting
+
+    @property
+    def cols(self) -> int:
+        """Stored weight columns per array (cols_adc * adc_mux)."""
+        return int(self.cols_adc) * int(self.adc_mux)
+
+    @classmethod
+    def from_dict(cls, analog_dict: Optional[Dict[str, object]]) -> "CIMAnalogConfig":
+        analog_dict = _require_mapping("cim.analog", analog_dict)
+        return cls(
+            rows=_parse_int_field("cim.analog", analog_dict, "rows"),
+            cols_adc=_parse_int_field("cim.analog", analog_dict, "cols_adc"),
+            adc_mux=_parse_int_field("cim.analog", analog_dict, "adc_mux"),
+            slice_cycles=_parse_int_field("cim.analog", analog_dict, "slice_cycles"),
+            analog_clock_mhz=_parse_cim_float(analog_dict, "cim.analog", "analog_clock_mhz", strict=True),
+            energy_per_vec_pj=_parse_cim_float(analog_dict, "cim.analog", "energy_per_vec_pj", default=0.0),
+            shots_per_output=_coerce_int(
+                analog_dict.get("shots_per_output", 1), "cim.analog.shots_per_output", min_value=1
+            ),
+            area_mm2_per_array=_parse_cim_float(analog_dict, "cim.analog", "area_mm2_per_array", default=0.0),
+        )
+
+
+@dataclass
+class CIMFabricConfig:
+    """Digital attention-sidecar fabric parameters (cim.fabric).
+
+    model 'sa' prices act-act attention GEMMs on a closed-form systolic-array
+    law; 'gpu_native' lets them fall through to the native tile/roofline
+    machinery priced against the stub tech_param.
+    """
+
+    model: str                      # "sa" | "gpu_native"
+    rows: int
+    cols: int
+    num_arrays: int                 # QK and PV run concurrently on these
+    replicas: int                   # attention array replicas
+    clock_ghz: float
+    fill_drain_penalty_cycles: int  # default 3 * rows when absent
+    softmax_lanes: int
+    softmax_pipeline_depth: int
+
+    @classmethod
+    def from_dict(cls, fabric_dict: Optional[Dict[str, object]]) -> "CIMFabricConfig":
+        fabric_dict = _require_mapping("cim.fabric", fabric_dict)
+        model = str(fabric_dict.get("model", "sa")).strip().lower()
+        if model not in {"sa", "gpu_native"}:
+            raise ValueError(
+                f"cim.fabric.model must be 'sa' or 'gpu_native' (got {fabric_dict.get('model')!r})"
+            )
+        rows = _parse_int_field("cim.fabric", fabric_dict, "rows")
+        return cls(
+            model=model,
+            rows=rows,
+            cols=_parse_int_field("cim.fabric", fabric_dict, "cols"),
+            num_arrays=_coerce_int(fabric_dict.get("num_arrays", 2), "cim.fabric.num_arrays", min_value=1),
+            replicas=_coerce_int(fabric_dict.get("replicas", 1), "cim.fabric.replicas", min_value=1),
+            clock_ghz=_parse_cim_float(fabric_dict, "cim.fabric", "clock_ghz", strict=True),
+            fill_drain_penalty_cycles=_coerce_int(
+                fabric_dict.get("fill_drain_penalty_cycles", 3 * rows),
+                "cim.fabric.fill_drain_penalty_cycles",
+                min_value=0,
+            ),
+            softmax_lanes=_coerce_int(fabric_dict.get("softmax_lanes", 1), "cim.fabric.softmax_lanes", min_value=1),
+            softmax_pipeline_depth=_coerce_int(
+                fabric_dict.get("softmax_pipeline_depth", 20),
+                "cim.fabric.softmax_pipeline_depth",
+                min_value=1,
+            ),
+        )
+
+
+@dataclass
+class CIMChipConfig:
+    """Chip-level mapping parameters (cim.chip)."""
+
+    arrays_per_chip: int  # capacity limit for validation; 0 = unchecked
+    #: Uniform layers per chip (int), an explicit per-chip list, or "auto"
+    #: (derive the chip count and per-chip layer split greedily from
+    #: arrays_per_chip; the mapping becomes an output, not an input).
+    layers_per_chip: Union[int, Tuple[int, ...], str]
+    #: Chips each MoE layer's routed experts spread over (parallel links);
+    #: 1 keeps every routed expert of a layer on that layer's chip.
+    moe_expert_parallel: int = 1
+
+    @classmethod
+    def from_dict(cls, chip_dict: Optional[Dict[str, object]]) -> "CIMChipConfig":
+        chip_dict = _require_mapping("cim.chip", chip_dict)
+        arrays_per_chip = _coerce_int(
+            chip_dict.get("arrays_per_chip", 0), "cim.chip.arrays_per_chip", min_value=0
+        )
+        layers_raw = _require_field("cim.chip", chip_dict, "layers_per_chip")
+        if isinstance(layers_raw, str):
+            if layers_raw.strip().lower() != "auto":
+                raise ValueError(
+                    "cim.chip.layers_per_chip must be an integer, a list of integers, or 'auto' "
+                    f"(got {layers_raw!r})"
+                )
+            if arrays_per_chip <= 0:
+                raise ValueError(
+                    "cim.chip.layers_per_chip: 'auto' derives the per-chip layer split from the "
+                    "array capacity, which requires cim.chip.arrays_per_chip > 0 "
+                    f"(got arrays_per_chip={arrays_per_chip})."
+                )
+            layers_per_chip: Union[int, Tuple[int, ...], str] = "auto"
+        elif isinstance(layers_raw, (list, tuple)):
+            if not layers_raw:
+                raise ValueError("cim.chip.layers_per_chip list must not be empty")
+            layers_per_chip = tuple(
+                _coerce_int(item, "cim.chip.layers_per_chip entries", min_value=1) for item in layers_raw
+            )
+        else:
+            layers_per_chip = _coerce_int(layers_raw, "cim.chip.layers_per_chip", min_value=1)
+        moe_expert_parallel = _coerce_int(
+            chip_dict.get("moe_expert_parallel", 1), "cim.chip.moe_expert_parallel", min_value=1
+        )
+        return cls(
+            arrays_per_chip=arrays_per_chip,
+            layers_per_chip=layers_per_chip,
+            moe_expert_parallel=moe_expert_parallel,
+        )
+
+
+@dataclass
+class CIMKvDramConfig:
+    """Optional per-device KV-cache DRAM tier (cim.kv_dram).
+
+    Required iff inference.kvcache_type is 'cim_dram'; ignored (with a
+    warning) under 'cim_sram'. All values are plain numbers (no unit
+    strings — see convert()).
+    """
+
+    capacity_bytes: float
+    bandwidth_bytes_per_s: float
+    energy_per_bit_pj: float  # 0 reports zero KV DRAM energy
+
+    @classmethod
+    def from_dict(cls, kv_dict: Optional[Dict[str, object]]) -> "CIMKvDramConfig":
+        kv_dict = _require_mapping("cim.kv_dram", kv_dict)
+        return cls(
+            capacity_bytes=_parse_cim_float(kv_dict, "cim.kv_dram", "capacity_bytes", strict=True),
+            bandwidth_bytes_per_s=_parse_cim_float(
+                kv_dict, "cim.kv_dram", "bandwidth_bytes_per_s", strict=True
+            ),
+            energy_per_bit_pj=_parse_cim_float(kv_dict, "cim.kv_dram", "energy_per_bit_pj", default=0.0),
+        )
+
+
+@dataclass
+class CIMDseVariant:
+    """One analog array design point for the DSE sweep (a cim.dse.variants entry).
+
+    rows / slice_cycles / analog_clock_mhz default to None, meaning "inherit
+    the corresponding cim.analog value".
+    """
+
+    adc_mux: int
+    cols_adc: int
+    energy_per_vec_pj: float
+    area_mm2_per_array: float
+    rows: Optional[int] = None
+    slice_cycles: Optional[int] = None
+    analog_clock_mhz: Optional[float] = None
+
+    @classmethod
+    def from_dict(cls, variant_dict: Optional[Dict[str, object]], index: int) -> "CIMDseVariant":
+        context = f"cim.dse.variants[{index}]"
+        variant_dict = _require_mapping(context, variant_dict)
+        rows_raw = variant_dict.get("rows")
+        slice_raw = variant_dict.get("slice_cycles")
+        clock_present = "analog_clock_mhz" in variant_dict
+        return cls(
+            adc_mux=_parse_int_field(context, variant_dict, "adc_mux"),
+            cols_adc=_parse_int_field(context, variant_dict, "cols_adc"),
+            energy_per_vec_pj=_parse_cim_float(variant_dict, context, "energy_per_vec_pj", default=0.0),
+            area_mm2_per_array=_parse_cim_float(variant_dict, context, "area_mm2_per_array", default=0.0),
+            rows=None if rows_raw is None else _coerce_int(rows_raw, f"{context}.rows"),
+            slice_cycles=None if slice_raw is None else _coerce_int(slice_raw, f"{context}.slice_cycles"),
+            analog_clock_mhz=(
+                _parse_cim_float(variant_dict, context, "analog_clock_mhz", strict=True)
+                if clock_present
+                else None
+            ),
+        )
+
+
+@dataclass
+class CIMDseConfig:
+    """Parse-only `cim.dse` block: the candidate space for the DSE tool.
+
+    Validated structurally here; consumed only by tools/fws_cim_dse.py
+    (pass 2B). The simulator itself never reads it.
+    """
+
+    #: Cross-check only, never a knob: when set, the DSE tool requires every
+    #: variant's adc_mux to appear here (typo guard); the sweep itself
+    #: enumerates variants.
+    mux_candidates: Tuple[int, ...]
+    variants: Tuple[CIMDseVariant, ...]
+    #: "auto" = divisors of the model's num_heads; or an explicit list.
+    tp_candidates: Union[str, Tuple[int, ...]]
+    max_chips: int  # 0 = unbounded
+    #: MoE expert-spreading candidates (cim.chip.moe_expert_parallel values
+    #: the DSE sweeps); the knob applies only when the model is MoE
+    #: (DESIGN2 section 5). Default: no spreading.
+    moe_expert_parallel: Tuple[int, ...] = (1,)
+
+    @classmethod
+    def from_dict(cls, dse_dict: Optional[Dict[str, object]]) -> "CIMDseConfig":
+        dse_dict = _require_mapping("cim.dse", dse_dict)
+        mux_raw = dse_dict.get("mux_candidates", ())
+        if not isinstance(mux_raw, (list, tuple)):
+            raise ValueError(
+                f"cim.dse.mux_candidates must be a list of integers (got {mux_raw!r})"
+            )
+        mux_candidates = tuple(
+            _coerce_int(item, "cim.dse.mux_candidates entries") for item in mux_raw
+        )
+        variants_raw = dse_dict.get("variants", ())
+        if not isinstance(variants_raw, (list, tuple)):
+            raise ValueError(
+                f"cim.dse.variants must be a list of array-point mappings (got {variants_raw!r})"
+            )
+        variants = tuple(
+            CIMDseVariant.from_dict(item, index) for index, item in enumerate(variants_raw)
+        )
+        tp_raw = dse_dict.get("tp_candidates", "auto")
+        if isinstance(tp_raw, str):
+            if tp_raw.strip().lower() != "auto":
+                raise ValueError(
+                    f"cim.dse.tp_candidates must be 'auto' or a list of integers (got {tp_raw!r})"
+                )
+            tp_candidates: Union[str, Tuple[int, ...]] = "auto"
+        elif isinstance(tp_raw, (list, tuple)):
+            tp_candidates = tuple(
+                _coerce_int(item, "cim.dse.tp_candidates entries") for item in tp_raw
+            )
+        else:
+            raise ValueError(
+                f"cim.dse.tp_candidates must be 'auto' or a list of integers (got {tp_raw!r})"
+            )
+        moe_ep_raw = dse_dict.get("moe_expert_parallel", (1,))
+        if not isinstance(moe_ep_raw, (list, tuple)):
+            raise ValueError(
+                "cim.dse.moe_expert_parallel must be a list of integers >= 1 "
+                f"(got {moe_ep_raw!r})"
+            )
+        moe_expert_parallel = tuple(
+            _coerce_int(item, "cim.dse.moe_expert_parallel entries", min_value=1)
+            for item in moe_ep_raw
+        ) or (1,)
+        return cls(
+            mux_candidates=mux_candidates,
+            variants=variants,
+            tp_candidates=tp_candidates,
+            max_chips=_coerce_int(dse_dict.get("max_chips", 0), "cim.dse.max_chips", min_value=0),
+            moe_expert_parallel=moe_expert_parallel,
+        )
+
+
+@dataclass
+class CIMConfig:
+    """Top-level `cim:` block for device_class: fws_cim hardware configs."""
+
+    analog: CIMAnalogConfig
+    fabric: CIMFabricConfig
+    chip: CIMChipConfig
+    #: Optional KV DRAM tier; required iff inference.kvcache_type == cim_dram.
+    kv_dram: Optional[CIMKvDramConfig] = None
+    #: Optional DSE candidate space; parse-only (tools/fws_cim_dse.py).
+    dse: Optional[CIMDseConfig] = None
+
+    @classmethod
+    def from_dict(cls, cim_dict: Optional[Dict[str, object]]) -> "CIMConfig":
+        cim_dict = _require_mapping("cim", cim_dict)
+        kv_dram_dict = cim_dict.get("kv_dram")
+        dse_dict = cim_dict.get("dse")
+        return cls(
+            analog=CIMAnalogConfig.from_dict(_require_field("cim", cim_dict, "analog")),
+            fabric=CIMFabricConfig.from_dict(_require_field("cim", cim_dict, "fabric")),
+            chip=CIMChipConfig.from_dict(_require_field("cim", cim_dict, "chip")),
+            kv_dram=None if kv_dram_dict is None else CIMKvDramConfig.from_dict(kv_dram_dict),
+            dse=None if dse_dict is None else CIMDseConfig.from_dict(dse_dict),
+        )
 
 
 @dataclass
@@ -2163,6 +2533,11 @@ class HWConfig:
     network_layout: NetworkLayoutConfig
     execution_backend: ExecutionBackend
     inference_config: InferenceHWConfig
+    #: Device class of the accelerator: "gpu" (default, existing behavior) or
+    #: "fws_cim" (fixed-weight-stationary compute-in-memory).
+    device_class: str = "gpu"
+    #: Parsed `cim:` block; None unless the YAML provides one.
+    cim_config: Optional[CIMConfig] = None
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, object]) -> "HWConfig":
@@ -2217,6 +2592,14 @@ class HWConfig:
         execution_backend = ExecutionBackend.from_dict(config_dict.get("execution_backend", {}))
         inference_config = InferenceHWConfig.from_dict(config_dict.get("inference"))
 
+        device_class = str(config_dict.get("device_class", "gpu")).strip().lower()
+        if device_class not in {"gpu", "fws_cim"}:
+            raise ValueError(
+                f"device_class must be 'gpu' or 'fws_cim' (got {config_dict.get('device_class')!r})"
+            )
+        cim_dict = config_dict.get("cim")
+        cim_config = CIMConfig.from_dict(cim_dict) if cim_dict is not None else None
+
         return cls(
             sw_config=sw_config,
             tech_config=tech_config,
@@ -2228,6 +2611,8 @@ class HWConfig:
             network_layout=network_layout_config,
             execution_backend=execution_backend,
             inference_config=inference_config,
+            device_class=device_class,
+            cim_config=cim_config,
         )
 
 @dataclass
@@ -2393,6 +2778,126 @@ def validate_hw_config(hw_config: HWConfig) -> None:
                     "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
                 )
 
+    device_class = str(getattr(hw_config, "device_class", "gpu")).lower()
+    cim_config = getattr(hw_config, "cim_config", None)
+    if device_class == "fws_cim":
+        if cim_config is None:
+            raise ValueError(
+                "device_class: fws_cim requires a top-level 'cim:' block (analog/fabric/chip) "
+                "in the hardware config. Add the cim block or set device_class: gpu."
+            )
+        if str(model).lower() == "astra":
+            raise ValueError(
+                "device_class: fws_cim supports only the analytical backend; "
+                "set execution_backend.model: analytical (got 'astra')."
+            )
+        pp = int(getattr(getattr(hw_config, "sch_config", None), "pp", 1) or 1)
+        if pp != 1:
+            raise ValueError(
+                "device_class: fws_cim requires parallelism.pp = 1: chip placement comes from "
+                f"cim.chip.layers_per_chip, not pipeline stages (got pp={pp})."
+            )
+        # Rejected here (not only in the sa-fabric pricing path) so that
+        # fabric.model: gpu_native cannot silently ignore cp.
+        cp = int(getattr(getattr(hw_config, "sch_config", None), "cp", 1) or 1)
+        if cp != 1:
+            raise ValueError(
+                "device_class: fws_cim does not support context parallelism; "
+                f"set parallelism.cp: 1 (got cp={cp})."
+            )
+        kvcache_type = str(
+            getattr(getattr(hw_config, "inference_config", None), "kvcache_type", "hbm_only")
+        ).strip().lower()
+        if kvcache_type == "hbm_only":
+            raise ValueError(
+                "device_class: fws_cim requires inference.kvcache_type: cim_sram or cim_dram — "
+                "the device has no HBM (got 'hbm_only')."
+            )
+        if kvcache_type == "cim_dram" and cim_config.kv_dram is None:
+            raise ValueError(
+                "inference.kvcache_type: cim_dram requires a cim.kv_dram block "
+                "(capacity_bytes, bandwidth_bytes_per_s[, energy_per_bit_pj]) in the "
+                "hardware config."
+            )
+        if kvcache_type == "cim_sram" and cim_config.kv_dram is not None:
+            print(
+                "[WARNING]: hardware config defines cim.kv_dram but inference.kvcache_type is "
+                "'cim_sram'; the kv_dram block is ignored. Set kvcache_type: cim_dram to use it."
+            )
+    elif cim_config is not None:
+        # Unknown top-level YAML keys are silently ignored, so a missing/typo'd
+        # device_class would otherwise turn a CIM config into a silent GPU run.
+        print(
+            "[WARNING]: hardware config contains a 'cim:' block but device_class is "
+            f"'{device_class}'; the cim block is ignored. Set device_class: fws_cim to use it."
+        )
+    if device_class != "fws_cim":
+        # Mirror of the ignored-cim-block warning above: a CIM KV story on a
+        # non-CIM device is inert (the GPU path never reads kvcache_type), so
+        # say so instead of silently pricing the KV cache as hbm_only.
+        kvcache_type = str(
+            getattr(getattr(hw_config, "inference_config", None), "kvcache_type", "hbm_only")
+        ).strip().lower()
+        if kvcache_type in ("cim_sram", "cim_dram"):
+            print(
+                f"[WARNING]: inference.kvcache_type is '{kvcache_type}' but "
+                f"device_class is '{device_class}'; the CIM KV story is ignored "
+                "and the run behaves as kvcache_type: hbm_only. Set "
+                "device_class: fws_cim to use it."
+            )
+
+
+def _validate_fws_cim_model(model: object) -> None:
+    """Scope gate for device_class: fws_cim — transformer inference only.
+
+    Pass 2 admits dense and MoE LLMs (attention_type mha/gqa) with
+    autoregressive decode next to the pass-1 ViT class. Fixed-weight-
+    stationary arrays admit no weight writes, so training is permanently out
+    (not deferred); flash attention, MLA, and the astra backend stay out of
+    scope. Every rejection names the offending setting.
+    """
+    if not isinstance(model, LLMConfig):
+        model_type = getattr(model, "model_type", type(model).__name__)
+        raise ValueError(
+            "device_class: fws_cim supports only transformer (LLM or ViT) inference; "
+            f"got a non-transformer model config ({model_type!r})."
+        )
+    run_type = str(getattr(model, "run_type", "training")).lower()
+    if run_type != "inference":
+        raise ValueError(
+            "device_class: fws_cim does not support model_param.run_type: training — "
+            "fixed-weight-stationary arrays admit no weight writes. Set run_type: inference."
+        )
+    attention_type = str(
+        getattr(getattr(model, "attention", None), "attention_type", "mha")
+    ).lower()
+    if attention_type == "mla":
+        raise ValueError(
+            "device_class: fws_cim does not support model_param.attention.attention_type: mla — "
+            "the MLA inference path discards per-op GEMM times and keeps only memory accesses "
+            "(_mla_component_forward_stats), so the CIM intercept's zero-memory-access results "
+            "would feed an aggregate roofline instead of the CIM laws; MLA needs its own "
+            "pricing seam. Use attention_type: mha or gqa."
+        )
+    if bool(getattr(model, "use_flashattention", False)):
+        raise ValueError(
+            "device_class: fws_cim prices attention on the digital fabric and does not support "
+            "model_param.attention.use_flashattention: true; set it to false."
+        )
+    # A decode-only run (prefill_len <= 0) would skip calc_time's prefill
+    # branch and with it the entire FWS spatial report — the authoritative
+    # device output — while still exiting 0. Reject it loudly, exactly like
+    # the DSE does for the same input.
+    seq_len = int(getattr(model, "seq_len", 0) or 0)
+    decode_len = int(getattr(model, "decode_len", 0) or 0)
+    if seq_len > 0 and decode_len >= seq_len:
+        raise ValueError(
+            "device_class: fws_cim requires prefill_len = seq_len - decode_len > 0 "
+            "— the FWS spatial report (like the DSE) prices the prefill wavefront "
+            f"(got seq_len={seq_len}, decode_len={decode_len}). Reduce "
+            "model_param.decode_len."
+        )
+
 
 def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> None:
     sch = getattr(hw_config, "sch_config", None)
@@ -2407,6 +2912,9 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     train_ep = sch.train.ep
 
     model = model_config.model_config
+
+    if str(getattr(hw_config, "device_class", "gpu")).lower() == "fws_cim":
+        _validate_fws_cim_model(model)
 
     if isinstance(model, GEMMConfig):
         if tp > 1:

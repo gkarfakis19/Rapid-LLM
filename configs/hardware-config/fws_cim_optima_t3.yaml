@@ -1,0 +1,153 @@
+# FWS-CIM validation target T3 (OPTIMA seq196 mux16 reference, ViT-Huge-story seq 196).
+# Pair with configs/model-config/vit_huge_story_196_inf.yaml at tp=1, pp=1, B=1.
+#
+# device_class: fws_cim routes weight GEMMs to the analog CIM law and
+# attention act-act GEMMs to the digital fabric (cim.fabric.model: sa).
+# tech_param below is a STUB calibrated to the FABRIC, not to a GPU:
+# core peak flops ~= num_arrays * rows * cols * 2 * clock; the DRAM level
+# stands in for the chip's activation SRAM. It prices vector ops
+# (LN/softmax/GELU/residual) and analytical collectives only.
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 1280               # array rows (K per array tile)
+    cols_adc: 80             # ADC columns per array
+    adc_mux: 16              # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 12470.0063  # per array per input vector (already includes mux)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 1.135296   # 0 disables area reporting
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 0       # 0 = capacity unchecked
+    layers_per_chip: 32      # single chip: all num_layers on chip 0
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chip's activation SRAM
+    size: 256 MB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_tp
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # fws_cim KV story: KV lives in the fabric activation SRAM (the device has no HBM)

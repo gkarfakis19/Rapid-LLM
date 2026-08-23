@@ -335,6 +335,15 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("\n".join(topology_lines))
         handle.write("\n")
 
+    # FWS-CIM spatial pipeline section (device_class: fws_cim only). calc_time
+    # stashes the lines because this function rewrites the results file above;
+    # absent attribute keeps every GPU run byte-identical.
+    fws_cim_lines = getattr(tc_inf, "fws_cim_report_lines", None)
+    if fws_cim_lines:
+        with open(output_path, "a") as handle:
+            handle.write("\n".join(fws_cim_lines))
+            handle.write("\n")
+
     extend_log(topology_lines, category="network")
     log_message("LLM inference results written to {}".format(output_path), category="results")
     warning_message = tc_inf.memory_capacity_warning()
