@@ -188,5 +188,34 @@ the bridge gate.</p>
 <div class="status"><h2>Status &amp; notes</h2>
 <p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
 <p>Divergence flag: the bridge check is called a gate. D18 bans invented process gates. This is a numeric parity check in the style of the existing validator rows, with no ceremony attached &mdash; but the naming is worth a nod from George.</p>
+<p><span class="tag">Built</span> 2026-08-23 &mdash; <strong>P6.3 and P6.4 land.</strong>
+New <code>fws_bridge.py</code> re-reads a priced DAG in the closed form&#39;s vocabulary and holds it
+against the <code>fws_cim_report.json</code> that <code>run_perf</code> actually wrote from the same two
+YAMLs with no <code>mapping:</code> block. 231 rows appended to the validator over ADJ-8&#39;s five points
+(T1/T2/T3 + their ViT configs, <code>fws_cim_llama7b</code> + Llama2-7B, <code>fws_cim_moe</code> + MoE-small):
+<strong>383/383 PASS, exit 0</strong>, the original 152 rows untouched and in order. Discrete rows exact,
+continuous rows at 1e-3, prefill and decode. 23 tests in <code>tests/test_qif_bridge.py</code>, including a
+negative test that a 1&nbsp;% error in one analog op turns a row red.</p>
+<p>The gate paid for itself on its first run by finding <strong>three upstream bugs</strong>, all fixed with the
+owning workstream&#39;s tests: P3 lowered the ViT head over the whole sequence where P2 prices it at
+<em>M = batch</em>; P3 priced every routed MoE expert at the full owner batch instead of
+<code>moe_tokens_hot</code>; and P4 priced prefill attention with the MHA-only <code>attention_timing</code>
+instead of the GQA-aware <code>prefill_attention_timing</code>, undercharging a GQA stack by exactly
+<code>shared_heads</code> (4&times; on the MoE point &mdash; the dense-LLM point is MHA and could never have caught it).</p>
+<p>Open question 3 is answered in the build, not on paper: where the two paths disagree the DAG wins and the
+closed form carries the annotation (ADJ-8). The attention stage is the case &mdash; the closed form folds QK and PV
+concurrently and the DAG serializes three dependent ops &mdash; so the gate compares the law&#39;s cycle counts exactly
+plus the identity <code>closed-form total = max(QK op, PV op + fill/drain, softmax op)</code>, which holds by
+construction and breaks the moment either path changes its attention law. Eight exclusions are named in
+<code>fws_bridge.EXCLUSIONS</code>, printed under the validator table and asserted by tests, because an undisclosed
+exclusion is AUDIT finding 5. On the naming flag above: the check ships as validator rows and pytest, with no
+ceremony attached &mdash; the word &ldquo;gate&rdquo; is a label, not a process.</p>
+<p><span class="tag">P6.4</span> 2026-08-23 &mdash; standing suites re-run serially at the end of Wave B:
+<code>tests/test_fws_cim.py</code> <strong>199 passed</strong>;
+<code>validation_scripts/validate_fws_cim_vs_optima.py</code> <strong>383/383 PASS, exit 0</strong>
+(152 legacy + 231 bridge);
+full suite from the repo root <strong>2110 passed / 45 skipped / 7 xfailed / 2 xpassed / 0 failed</strong> (baseline on this tree before the wave: 2063 / 44 / 7 / 2 / 0). One disclosed flake: the first post-change full run reported <code>test_webui_browser.py::test_webui_layout_and_visual_health</code> failing; it passes alone and passes on the serial repeat quoted here. Nothing this wave touches the webui<strong></strong>. The 221 golden-equivalence specs
+and both A100 bit-identity baselines are inside those runs and unmoved.</p>
+<p><strong>Wave B audit fixes 2026-08-23</strong> &mdash; the bridge went red on inapplicability rather than disagreement: when the closed form&rsquo;s first decode context reported an <code>s2</code> bound other than <code>sa</code> (KV-read-bound decode attention, a bandwidth story the DAG&rsquo;s fabric op does not carry), <code>_decode_rows</code> emitted <code>ok=False</code> and the whole validator exited non-zero on a legitimate configuration. It is now the named <code>kv_read_bound_decode</code> exclusion, handled exactly as <code>fabric_fill_drain</code> and <code>energy_scope</code> are &mdash; a disclosed non-comparison. Nine exclusions are now printed under the table; no shipped bridge point hits the new one. On the standing suites: the full-suite figure reproduces (2110 passed / 45 skipped / 7 xfailed / 2 xpassed / 0 failed), but the run is only meaningful in a QUIET tree &mdash; every test that shells out to <code>run_perf.py</code> writes the shared <code>output/LLM</code> and <code>output/VIT</code> directories, so a second session running pytest in the same checkout injects spurious failures (three auditors independently hit this, and it is the likeliest cause of the intermittent <code>test_webui_browser</code> failure both P2.6 and P6.4 disclosed). That is pre-existing repo design, not a Wave B defect; the recommendation for a later wave is a per-test output root or a private checkout for suite runs, and until then a &ldquo;suites green&rdquo; claim should name the tree it was measured in.</p>
 </div>
 </main></body></html>

@@ -52,14 +52,18 @@ def _node() -> str:
     return node
 
 
-def _run_core(driver: str, tmp_path: Path) -> str:
-    """Evaluate the ATLAS core block headlessly and run a driver against it."""
+def _run_core(driver: str, tmp_path: Path, document: Path = FIXTURE) -> str:
+    """Evaluate the ATLAS core block headlessly and run a driver against it.
+
+    ``document`` defaults to the P5 fixture; P3's export tests pass their own
+    emitted document so the SAME loader judges both (tests/test_qif_mapping.py).
+    """
     html = _html()
     core = html[html.index(CORE_START) : html.index(CORE_END)]
     script = tmp_path / "driver.js"
     script.write_text(
         "const fs = require('fs');\n"
-        "const doc = JSON.parse(fs.readFileSync(%r, 'utf8'));\n" % str(FIXTURE)
+        "const doc = JSON.parse(fs.readFileSync(%r, 'utf8'));\n" % str(document)
         + "const ATLAS = eval('(function(){' + "
         + json.dumps(core)
         + " + '; return ATLAS; })()');\n"

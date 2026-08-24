@@ -454,6 +454,33 @@ cim:
     max_chips: 0             # 0 = unbounded
 inference:
   kvcache_type: cim_sram     # fws_cim: cim_sram | cim_dram (hbm_only errors — no HBM)
+
+mapping:                     # optional TOP-LEVEL block (QIF P3.1, ADJ-5).
+                             # ABSENT = the derived dedicated mapping, which
+                             # reproduces cim.chip.layers_per_chip exactly.
+                             # Requires device_class: fws_cim.
+  chips: 8                   # total ANALOG chips; CHECKED against the chips the
+                             # placement enumerates (a mismatch is a hard error,
+                             # and a chip count is never a quotient — D21)
+  macros_per_chip: 120       # macro slots per analog chip; must agree with
+                             # cim.chip.arrays_per_chip when that is declared
+  shared_chiplets: 2         # shared digital chiplets (D13). A CONFIG INPUT; the
+                             # derived suggestion (one per analog chip) is always
+                             # reported next to the declared value
+  parallelism:               # tp and ep must AGREE with parallelism.tp and
+    tp: 2                    # cim.chip.moe_expert_parallel (one degree, one home).
+    ep: 1                    # pp is the exception: it is an INDEPENDENT annotation
+    pp: 1                    # over chips (ADJ-5), so mapping pp > 1 is legal while
+                             # the hardware parallelism.pp stays 1
+  layers_per_chip: 8         # int | list | "auto"; absent -> the cim.chip value
+  membership:                # per-analog-chip axis indices, in chip-id order;
+    pp: [0, 0, 1, 1, 0, 0, 1, 1]   # an axis you do not list is derived
+  decode_window: 2           # decode steps the DAG lowers (ADJ-6); the truncation
+                             # is disclosed, never silently extrapolated
+  pd:                        # optional PD disaggregation (D16): TWO inventories,
+    prefill: {shared_chiplets: 4}  # two mappings, one handoff priced as bytes.
+    decode: {shared_chiplets: 1}   # Setting both halves equal reproduces the
+                             # unified machine. Both halves are required.
 ```
 
 Shipped pass-2A templates: `fws_cim_llama7b.yaml` (dense LLM, `cim_sram`),
@@ -488,6 +515,37 @@ Notes:
 - fws_cim model configs must keep `decode_len < seq_len`
   (`prefill_len > 0`): the spatial report prices the prefill wavefront,
   so a decode-only run is rejected at validation (matching the DSE).
+- The `mapping:` block is a CLAIM the tool checks, not an input that wins
+  over the machine it describes: `chips`, `macros_per_chip`, `parallelism`
+  and `membership` are each validated against the placement
+  `fws_mapping.build_mapping` enumerates, and every refusal names the
+  offending setting with a stage tag (`residency`, `assembly`, `package`,
+  `execution`, `annotation`).
+- The mapping PLACES; it prices nothing. Every op in the DAG it emits
+  carries a zero duration and the annotation P4's pricing table needs
+  (per-op device class, tiles, bytes, owner, shard group, law name). A
+  duration written by P3 would be a second accounting of a metric P4 owns.
+
+## Mapping and the system atlas (QIF P3)
+
+`fws_mapping.build_mapping(hw, model)` returns the mapping object: tiles on
+macro column sets, macros on integer chips, ops on typed devices (analog
+macro, per-macro digital pool, shared digital chiplet, link), and tp/ep/pp
+annotations constructed from (axis, coords) by
+`program.groups.CommunicatorFactory`. `program.fws_build.build_fws_program`
+lowers it into the rewrite's program IR — a placed, annotated, UNPRICED DAG.
+`FwsMapping.boundary_table()` reports per-boundary bytes and, when the caller
+supplies a period and names its basis, the rate against the declared link
+bandwidth; a violated boundary is REPORTED, not priced (D17), and the report
+says so.
+
+```bash
+# Write an fws_atlas/1 document and open it with docs/qif/atlas/atlas.html
+python3 tools/fws_emit_atlas.py \
+  --hardware_config configs/hardware-config/fws_cim_llama7b.yaml \
+  --model_config configs/model-config/llama2_7b_fws_inf.yaml \
+  --tp 2 --shared_chiplets 2 --out docs/qif/atlas/p3_llama7b_tp2.json
+```
 
 ## Future seams
 

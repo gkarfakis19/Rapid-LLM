@@ -70,19 +70,58 @@ Preserved legacy semantics (each one measured, not assumed):
 * compute durations read ``ComputeOp.duration[0]`` — the legacy
   ``Node.duration`` property over a per-DP profile tuple, which is how hybrid
   retiming (:mod:`program.retime`) reaches the evaluator.
+
+THE HETEROGENEOUS DEVICE LAYER (QIF P4.1, A2/D22)
+=================================================
+``evaluate_detailed`` grew three keyword arguments. **All three are additive
+and their absence is the old evaluator, number for number** — the 221
+golden-equivalence specs are the standing proof and they run on every change:
+
+* ``resources`` — a device is a :class:`DeviceResource`: an integer
+  **capacity** and a **named owner**, not a boolean. D22 forbids exclusive
+  ownership *assumptions* in a resource abstraction; ``capacity = 1`` IS the
+  legacy ``GPU_list`` semantics and is what an absent mapping gives every
+  device. The one place the two representations could have diverged is the
+  root rule: a root does not occupy its device, yet its completion still
+  frees it, and ``gpu_free[d] = True`` was idempotent where ``free[d] += 1``
+  is not. The release is therefore ``min(capacity, free + 1)``, which is
+  ``= True`` at capacity 1 exactly and is the honest ceiling above it.
+* ``durations`` — a per-uid duration vector supplied by the caller. The FWS
+  DAG (:mod:`program.fws_build`) carries ``0.0`` durations by construction
+  because P3 places and P4 prices (A1), so P4 hands the priced vector in
+  rather than mutating the program. Supplying it skips
+  :func:`comm_durations` entirely, so ``network_model`` may be ``None``.
+* ``record_timeline`` is not a switch: ``start_times`` is always recorded.
+  Every P4 metric is a projection of ONE timeline object (P4 §3), and a
+  timeline you have to ask for twice is two timelines.
+
+Nothing else moves. Transfers still never occupy a device slot (D17: priced,
+never contended), the heap key is still ``(finish_time, insertion_counter)``,
+and the tie discipline is still ascending uid.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from typing import Any, Collection, Dict, List, Mapping, Optional, Set, Tuple
+from typing import (
+    Any,
+    Collection,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from program.ir import CollectiveOp, ComputeOp, Program, TransferOp
 
 __all__ = [
     "COMM_DURATIONS_KEY",
     "CoarseEvalResult",
+    "DeviceResource",
     "comm_durations",
     "evaluate",
     "evaluate_detailed",
@@ -159,16 +198,46 @@ def comm_durations(
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class DeviceResource:
+    """One schedulable device: an integer capacity and a NAMED owner (P4.1).
+
+    D22 forbids exclusive-ownership assumptions in a resource abstraction, and
+    D21 requires every macro to have a named owner. Both are the same object
+    here. ``capacity`` is how many ops the device runs at once; ``1`` is the
+    legacy boolean exclusivity, bit-identically (module docstring). ``basis``
+    says where the capacity number came from, so a report can print it without
+    a reader having to guess whether it was declared or assumed.
+    """
+
+    device_id: int
+    capacity: int = 1
+    owner: str = ""
+    device_class: str = ""
+    basis: str = ""
+
+    def __post_init__(self) -> None:
+        if int(self.capacity) < 1:
+            raise ValueError(
+                f"DeviceResource(device_id={self.device_id}) has capacity "
+                f"{self.capacity}: a device that can run no op is not a capacity, it "
+                "is an absent device. Drop it from the inventory instead."
+            )
+
+
 @dataclass
 class CoarseEvalResult:
     """Detailed evaluation output (parity/differential surface).
 
     ``finish_times[uid]`` is the finish time of op ``uid`` (-1 when the op never
-    ran — the legacy ``Node.finish_time`` reset value).
+    ran — the legacy ``Node.finish_time`` reset value). ``start_times[uid]`` is
+    the matching issue time (-1 on the same condition); it is the one timeline
+    object every P4 metric projects from (P4 §3), so it is always recorded.
     """
 
     total_time: float
     finish_times: List[float]
+    start_times: List[float] = field(default_factory=list)
 
 
 def _device_count(program: Program) -> int:
@@ -184,22 +253,43 @@ def evaluate_detailed(
     program: Program,
     network_model: Any,
     interconnect_params: Mapping[str, Tuple[float, float]],
+    *,
+    resources: Optional[Mapping[int, DeviceResource]] = None,
+    durations: Optional[Sequence[float]] = None,
+    require_pipeline: bool = True,
 ) -> CoarseEvalResult:
-    """Convert comm sizes and replay the legacy list scheduler over the ops."""
+    """Convert comm sizes and replay the legacy list scheduler over the ops.
+
+    ``resources`` / ``durations`` / ``require_pipeline`` are the QIF P4.1
+    additions; omitting all three is today's evaluator, number for number (see
+    the module docstring, and ``tests/test_equiv_golden.py``, which is the
+    standing proof).
+    """
     if not isinstance(program, Program):
         raise TypeError(f"evaluate expects a Program (got {type(program).__name__})")
-    if program.meta.misc.get("granularity") != "pipeline":
+    if require_pipeline and program.meta.misc.get("granularity") != "pipeline":
         raise RuntimeError(
             "Analytical evaluation requires a PIPELINE program "
             "(build(..., granularity=Granularity.PIPELINE))."
         )
 
     ops = program.ops
-    durations = list(comm_durations(program, network_model, interconnect_params))
-    for op in ops:
-        if isinstance(op, ComputeOp):
-            # Legacy Node.duration property: profile tuples read index 0.
-            durations[op.uid] = float(op.duration[0])
+    if durations is None:
+        durations = list(comm_durations(program, network_model, interconnect_params))
+        for op in ops:
+            if isinstance(op, ComputeOp):
+                # Legacy Node.duration property: profile tuples read index 0.
+                durations[op.uid] = float(op.duration[0])
+    else:
+        # A CALLER-PRICED program (P4): the vector is the pricing, verbatim.
+        # Nothing is re-derived from the ops, so no second accounting of a
+        # duration can exist (D21).
+        if len(durations) != len(ops):
+            raise ValueError(
+                f"durations has {len(durations)} entries but the program has "
+                f"{len(ops)} ops: a priced timeline is uid-indexed."
+            )
+        durations = [float(value) for value in durations]
     #: the renderer reads these back (the legacy pass mutated the events).
     program.meta.misc[COMM_DURATIONS_KEY] = tuple(
         0.0 if isinstance(op, ComputeOp) else durations[op.uid] for op in ops
@@ -220,13 +310,25 @@ def evaluate_detailed(
     done: Set[int] = set()
     scheduled: Set[int] = set()
     finish: Dict[int, float] = {}
-    gpu_free = [True] * _device_count(program)
+    start: Dict[int, float] = {}
+    # A device is (capacity, free) rather than a boolean. Absent resources give
+    # every device capacity 1, which IS the legacy GPU_list exclusivity.
+    device_count = _device_count(program)
+    capacity = [1] * device_count
+    if resources:
+        for device_id, resource in resources.items():
+            index = int(device_id)
+            if index >= len(capacity):
+                capacity.extend([1] * (index + 1 - len(capacity)))
+            capacity[index] = int(resource.capacity)
+    free = list(capacity)
 
     # Roots at t=0, in program order, WITHOUT occupying their device.
     for op in ops:
         if not op.deps:
             heappush(heap, (durations[op.uid], counter, op.uid))
             scheduled.add(op.uid)
+            start[op.uid] = 0.0
             counter += 1
 
     while heap:
@@ -242,26 +344,34 @@ def evaluate_detailed(
                 ready.append(child)
 
         if isinstance(ops[uid], ComputeOp):
-            gpu_free[int(ops[uid].device)] = True
+            device = int(ops[uid].device)
+            # min(): a ROOT never took the slot, and the legacy release was the
+            # idempotent ``gpu_free[d] = True``. At capacity 1 this is that
+            # assignment exactly; above it, it is the honest ceiling.
+            free[device] = min(capacity[device], free[device] + 1)
 
         for candidate in ready[:]:
             op = ops[candidate]
             if isinstance(op, ComputeOp):
-                if gpu_free[int(op.device)]:
+                device = int(op.device)
+                if free[device] > 0:
                     heappush(heap, (time + durations[candidate], counter, candidate))
                     scheduled.add(candidate)
+                    start[candidate] = time
                     counter += 1
-                    gpu_free[int(op.device)] = False
+                    free[device] -= 1
                     ready.remove(candidate)
             else:
                 heappush(heap, (time + durations[candidate], counter, candidate))
                 scheduled.add(candidate)
+                start[candidate] = time
                 counter += 1
                 ready.remove(candidate)
 
     return CoarseEvalResult(
         total_time=time,
         finish_times=[finish.get(op.uid, -1) for op in ops],
+        start_times=[start.get(op.uid, -1) for op in ops],
     )
 
 

@@ -2170,6 +2170,14 @@ class LLMConfig:
     short_conv: Optional[ShortConvBlockConfig] = None
     ffn_dims: Dict[str, int] = field(default_factory=dict)
     shared_weight_groups: Tuple[SharedWeightGroup, ...] = ()
+    #: The model's OWN name (QIF P1). ``model_type`` is a PRICING CARRIER — it
+    #: selects the FFN/attention arithmetic — and several supported models
+    #: declare a carrier that is not their name (Granite-4.0-H-Tiny declares
+    #: ``llama`` for the SwiGLU gated MLP). Anything that shows a reader a model
+    #: name (tile owners, atlas labels, the DAG report) uses THIS. Empty means
+    #: "no separate name declared", and consumers fall back to ``model_type``,
+    #: which is exactly the behaviour before this field existed.
+    model_id: str = ""
 
     @property
     def num_heads(self) -> int:
@@ -2371,6 +2379,8 @@ class LLMConfig:
                 "model_param.model_type must be one of 'gpt', 'llama', 'deepseek_v3', 'vit', 'vit_dinov3', or 'glm4_moe' "
                 f"(got {model_type_raw!r})"
             )
+
+        model_id = str(model_dict.get("model_id", "") or "").strip()
 
         attention_raw = model_dict.get("attention", None)
         attention = None if attention_raw is None else LLMAttentionConfig.from_dict(attention_raw)
@@ -2623,6 +2633,7 @@ class LLMConfig:
             short_conv=short_conv,
             ffn_dims=ffn_dims,
             shared_weight_groups=shared_weight_groups,
+            model_id=model_id,
         )
 
 
@@ -3467,11 +3478,59 @@ class CIMDigitalChipletCardConfig:
     exactly as `area_mm2_per_array: 0` does. There is no energy knob: no law
     prices a fabric op's energy yet, and a cost knob nothing reads is worse
     than a missing one.
+
+    The ENGINE CAPABILITY knobs below (QIF P2.6) describe the chiplet's
+    VECTOR/SCAN engine — the unit the SSM scan, delta-rule and RG-LRU laws
+    are timed on, as distinct from the systolic array that runs attention.
     """
 
     name: str
     fabric: CIMFabricConfig
     area_mm2: float = 0.0
+    #: --- ENGINE CAPABILITY knobs (QIF P2.6, digital op laws) ---------------
+    #: The chiplet's VECTOR/SCAN engine: the unit every non-attention digital
+    #: op law (SSD scan, selective scan, delta rule, RG-LRU) is timed on. One
+    #: lane retires ONE scalar arithmetic operation (a multiply OR an add) per
+    #: vector cycle — the peak is `vector_lanes * vector_clock`, and every law
+    #: is bound by it by construction.
+    #:
+    #: `vector_lanes` has NO default on purpose (ADJ-4, no invented numbers).
+    #: The systolic array's rows x cols is a MATMUL engine, not a scan engine,
+    #: and `softmax_lanes` is a softmax pipeline, not a general vector unit —
+    #: deriving scan lanes from either would invent silicon. A card that does
+    #: not declare it makes `cim_timing.EngineCapabilityError` the answer to
+    #: every scan/delta-rule pricing call, which is the honest answer.
+    vector_lanes: int = 0
+    #: 0 -> inherit `fabric.clock_ghz`. Honest: the vector engine sits on THIS
+    #: chiplet, and the chiplet declares exactly one clock.
+    vector_clock_ghz: float = 0.0
+    #: 0 -> inherit `fabric.softmax_pipeline_depth`. Honest by the same rule:
+    #: it is the only elementwise-pipeline depth the chiplet declares, and a
+    #: scan lane is the same class of unit as a softmax lane. DISCLOSED by
+    #: `cim_timing.CimDeviceModel.vector_engine_disclosures`.
+    vector_pipeline_depth: int = 0
+    #: Recurrent-state bytes the engine can read+write per vector cycle.
+    #: 0 = UNDECLARED: the state traffic is REPORTED by every scan law and
+    #: BOUNDS nothing, which is a disclosed relaxation, not a silent zero
+    #: (AUDIT finding 3 is the precedent for saying so out loud).
+    state_bytes_per_cycle: float = 0.0
+
+    @property
+    def has_vector_engine(self) -> bool:
+        """True when the card declares a vector/scan engine at all."""
+        return int(self.vector_lanes) > 0
+
+    @property
+    def vector_clock_ghz_effective(self) -> float:
+        """Vector-engine clock: the declared one, else the chiplet's clock."""
+        return float(self.vector_clock_ghz) if self.vector_clock_ghz > 0 else float(self.fabric.clock_ghz)
+
+    @property
+    def vector_pipeline_depth_effective(self) -> int:
+        """Vector-engine fill depth: the declared one, else the softmax depth."""
+        if self.vector_pipeline_depth > 0:
+            return int(self.vector_pipeline_depth)
+        return int(self.fabric.softmax_pipeline_depth)
 
     @classmethod
     def synthesized(cls, fabric: CIMFabricConfig) -> "CIMDigitalChipletCardConfig":
@@ -3504,6 +3563,20 @@ class CIMDigitalChipletCardConfig:
             name=name,
             fabric=fabric,
             area_mm2=_parse_cim_float(card_dict, context, "area_mm2", default=0.0),
+            vector_lanes=_coerce_int(
+                card_dict.get("vector_lanes", 0), f"{context}.vector_lanes", min_value=0
+            ),
+            vector_clock_ghz=_parse_cim_float(
+                card_dict, context, "vector_clock_ghz", default=0.0
+            ),
+            vector_pipeline_depth=_coerce_int(
+                card_dict.get("vector_pipeline_depth", 0),
+                f"{context}.vector_pipeline_depth",
+                min_value=0,
+            ),
+            state_bytes_per_cycle=_parse_cim_float(
+                card_dict, context, "state_bytes_per_cycle", default=0.0
+            ),
         )
 
 
@@ -3757,6 +3830,225 @@ class CIMConfig:
         )
 
 
+
+# ---------------------------------------------------------------------------
+# The `mapping:` block (QIF P3.1, ADJ-5)
+#
+# A NEW TOP-LEVEL BLOCK, not an extension of `cim.chip`: the concept widened
+# from "how many layers sit on a chip" to "which macros, chips, shard groups
+# and devices exist and who owns them", and a new name is the honest way to
+# say so (P3 plan-page open question 5, adjudicated by ADJ-5).
+#
+# ABSENT means the DERIVED DEDICATED MAPPING: chips, macros and layer
+# assignment reproduce today's `cim.chip.layers_per_chip` semantics exactly.
+# Present means the user DECLARES the placement and the tool validates it
+# (D10); every refusal names the offending setting.
+# ---------------------------------------------------------------------------
+
+
+#: Parallelism axes a mapping annotates. `cp` is deliberately absent: P3
+#: annotates tp / ep / pp only (D20), and an axis nothing colors is an axis
+#: nothing checks.
+MAPPING_AXES: Tuple[str, ...] = ("tp", "ep", "pp")
+
+
+@dataclass(frozen=True)
+class MappingParallelism:
+    """Declared tp / ep / pp degrees. ``None`` = inherit the derived degree.
+
+    ``tp`` and ``ep`` must agree with the hardware settings that already carry
+    them (`parallelism.tp`, `cim.chip.moe_expert_parallel`) — two spellings of
+    one degree is two accountings of one number (D21), so a disagreement is a
+    named error rather than a precedence rule.
+
+    ``pp`` is the exception and it is deliberate: ADJ-5 makes pp an INDEPENDENT
+    annotation over chips, so a mapping may declare `pp > 1` while the hardware
+    keeps `parallelism.pp: 1` (which the fws_cim run path requires). The two
+    are different axes that share a name; the mapping's pp never reaches the
+    GPU rank grid.
+    """
+
+    tp: Optional[int] = None
+    ep: Optional[int] = None
+    pp: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, raw: object, context: str) -> "MappingParallelism":
+        if raw is None:
+            return cls()
+        raw = _require_mapping(context, raw)
+        _reject_unknown_keys(context, raw, MAPPING_AXES)
+        values = {}
+        for axis in MAPPING_AXES:
+            if raw.get(axis) is None:
+                values[axis] = None
+            else:
+                values[axis] = _coerce_int(raw[axis], f"{context}.{axis}", min_value=1)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class MappingSystemConfig:
+    """One system's declared placement (the whole block, or one PD half).
+
+    Every field is optional; an omitted field is DERIVED and the derivation is
+    reported. A declared field is checked against the placement the tool
+    builds, so the block is a claim the tool can refuse — never an input that
+    silently wins over the machine it describes.
+    """
+
+    #: Total ANALOG chips. Declared, then checked against the enumerated
+    #: placement: a chip count that disagrees with the chips actually built is
+    #: a named error, and a non-integer never parses (D21: chips are integers).
+    chips: Optional[int] = None
+    #: Macro slots per analog chip. None inherits `cim.chip.arrays_per_chip`.
+    macros_per_chip: Optional[int] = None
+    #: Shared digital chiplets (D13). A CONFIG INPUT per ADJ-5; the derived
+    #: suggestion is always reported next to the declared value.
+    shared_chiplets: Optional[int] = None
+    parallelism: MappingParallelism = field(default_factory=MappingParallelism)
+    #: Layer -> chip assignment, `cim.chip.layers_per_chip` spelling (int, list
+    #: or "auto"). None inherits the cim block, which is what makes an absent
+    #: `mapping:` reproduce today's placement.
+    layers_per_chip: Optional[Union[int, Tuple[int, ...], str]] = None
+    #: Per-analog-chip axis indices, e.g. `{"pp": [0, 0, 1, 1]}`. An axis the
+    #: user does not list is derived. This is the membership half of ADJ-5:
+    #: chip index is NOT implicitly pp.
+    membership: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
+    #: Decode steps the DAG builder lowers (ADJ-6's bounded window). None
+    #: leaves the builder's default; the truncation is always disclosed.
+    decode_window: Optional[int] = None
+
+    _KEYS = (
+        "chips",
+        "macros_per_chip",
+        "shared_chiplets",
+        "parallelism",
+        "layers_per_chip",
+        "membership",
+        "decode_window",
+    )
+
+    @classmethod
+    def from_dict(cls, raw: object, context: str) -> "MappingSystemConfig":
+        raw = _require_mapping(context, raw)
+        _reject_unknown_keys(context, raw, cls._KEYS)
+        layers_raw = raw.get("layers_per_chip")
+        layers: Optional[Union[int, Tuple[int, ...], str]]
+        if layers_raw is None:
+            layers = None
+        elif isinstance(layers_raw, str):
+            if layers_raw.strip().lower() != "auto":
+                raise ValueError(
+                    f"{context}.layers_per_chip must be an integer, a list of integers "
+                    f"or 'auto' (got {layers_raw!r})"
+                )
+            layers = "auto"
+        elif isinstance(layers_raw, (list, tuple)):
+            if not layers_raw:
+                raise ValueError(f"{context}.layers_per_chip list must not be empty")
+            layers = tuple(
+                _coerce_int(item, f"{context}.layers_per_chip entries", min_value=1)
+                for item in layers_raw
+            )
+        else:
+            layers = _coerce_int(layers_raw, f"{context}.layers_per_chip", min_value=1)
+
+        membership_raw = raw.get("membership")
+        membership: Dict[str, Tuple[int, ...]] = {}
+        if membership_raw is not None:
+            membership_raw = _require_mapping(f"{context}.membership", membership_raw)
+            _reject_unknown_keys(f"{context}.membership", membership_raw, MAPPING_AXES)
+            for axis in MAPPING_AXES:
+                entries = membership_raw.get(axis)
+                if entries is None:
+                    continue
+                if not isinstance(entries, (list, tuple)) or not entries:
+                    raise ValueError(
+                        f"{context}.membership.{axis} must be a non-empty list of "
+                        f"per-chip {axis} indices (got {entries!r})"
+                    )
+                membership[axis] = tuple(
+                    _coerce_int(item, f"{context}.membership.{axis} entries", min_value=0)
+                    for item in entries
+                )
+        return cls(
+            chips=(
+                None
+                if raw.get("chips") is None
+                else _coerce_int(raw["chips"], f"{context}.chips", min_value=1)
+            ),
+            macros_per_chip=(
+                None
+                if raw.get("macros_per_chip") is None
+                else _coerce_int(
+                    raw["macros_per_chip"], f"{context}.macros_per_chip", min_value=1
+                )
+            ),
+            shared_chiplets=(
+                None
+                if raw.get("shared_chiplets") is None
+                else _coerce_int(
+                    raw["shared_chiplets"], f"{context}.shared_chiplets", min_value=0
+                )
+            ),
+            parallelism=MappingParallelism.from_dict(
+                raw.get("parallelism"), f"{context}.parallelism"
+            ),
+            layers_per_chip=layers,
+            membership=membership,
+            decode_window=(
+                None
+                if raw.get("decode_window") is None
+                else _coerce_int(raw["decode_window"], f"{context}.decode_window", min_value=1)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class MappingConfig:
+    """The parsed `mapping:` block (P3.1).
+
+    Either one unified system, or a PD pair (D16): two separate inventories,
+    two mappings, one handoff priced as bytes. Setting both halves equal
+    reproduces the unified machine, which is a test, not a claim.
+    """
+
+    system: MappingSystemConfig = field(default_factory=MappingSystemConfig)
+    prefill: Optional[MappingSystemConfig] = None
+    decode: Optional[MappingSystemConfig] = None
+
+    @property
+    def is_pd(self) -> bool:
+        return self.prefill is not None and self.decode is not None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "MappingConfig":
+        context = "mapping"
+        raw = _require_mapping(context, raw)
+        _reject_unknown_keys(context, raw, MappingSystemConfig._KEYS + ("pd",))
+        pd_raw = raw.get("pd")
+        prefill = decode = None
+        if pd_raw is not None:
+            pd_raw = _require_mapping(f"{context}.pd", pd_raw)
+            _reject_unknown_keys(f"{context}.pd", pd_raw, ("prefill", "decode"))
+            missing = [half for half in ("prefill", "decode") if pd_raw.get(half) is None]
+            if missing:
+                raise ValueError(
+                    f"{context}.pd requires BOTH prefill and decode (missing: "
+                    f"{', '.join(missing)}). PD disaggregation is two inventories and "
+                    "one handoff (D16); one half alone is not a machine."
+                )
+            prefill = MappingSystemConfig.from_dict(pd_raw["prefill"], f"{context}.pd.prefill")
+            decode = MappingSystemConfig.from_dict(pd_raw["decode"], f"{context}.pd.decode")
+        unified_keys = {k: v for k, v in raw.items() if k != "pd"}
+        return cls(
+            system=MappingSystemConfig.from_dict(unified_keys, context),
+            prefill=prefill,
+            decode=decode,
+        )
+
+
 @dataclass
 class HWConfig:
     sw_config: SWConfig
@@ -3774,6 +4066,9 @@ class HWConfig:
     device_class: str = "gpu"
     #: Parsed `cim:` block; None unless the YAML provides one.
     cim_config: Optional[CIMConfig] = None
+    #: Parsed `mapping:` block (P3.1, ADJ-5); None = the derived dedicated
+    #: mapping, which reproduces today's `cim.chip.layers_per_chip` placement.
+    mapping_config: Optional[MappingConfig] = None
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, object]) -> "HWConfig":
@@ -3835,6 +4130,16 @@ class HWConfig:
             )
         cim_dict = config_dict.get("cim")
         cim_config = CIMConfig.from_dict(cim_dict) if cim_dict is not None else None
+        mapping_dict = config_dict.get("mapping")
+        mapping_config = (
+            None if mapping_dict is None else MappingConfig.from_dict(mapping_dict)
+        )
+        if mapping_config is not None and device_class != "fws_cim":
+            raise ValueError(
+                "the mapping: block describes an FWS-CIM placement (macros, chips, "
+                "shard groups, shared digital chiplets) and requires "
+                f"device_class: fws_cim (got {device_class!r})."
+            )
 
         return cls(
             sw_config=sw_config,
@@ -3849,6 +4154,7 @@ class HWConfig:
             inference_config=inference_config,
             device_class=device_class,
             cim_config=cim_config,
+            mapping_config=mapping_config,
         )
 
 @dataclass
@@ -4083,7 +4389,17 @@ def validate_hw_config(hw_config: HWConfig) -> None:
             )
 
 
-def _validate_fws_cim_model(model: object) -> None:
+#: Layer-plan block kinds the MAPPED fws_cim path prices END TO END: P3 places
+#: them on a device and P4 prices every op through a NAMED P2 law (QIF P1.5).
+#: ``ssm`` rides ``price_ssm_block`` (SSD / selective scan) on the shared
+#: digital chiplet, ``short_conv`` is absorbed into the per-macro pool sizing
+#: (ADJ-3), ``linear_attn`` rides ``price_linear_attention_block`` (the gated
+#: delta rule), and ``attention`` rides the fabric laws (D13). A kind reaches
+#: this tuple only when a run of a real model produced a priced op for it.
+_FWS_CIM_MAPPED_BLOCK_KINDS = ("attention", "ssm", "short_conv", "linear_attn")
+
+
+def _validate_fws_cim_model(model: object, *, mapped: bool = False) -> None:
     """Scope gate for device_class: fws_cim — transformer inference only.
 
     Pass 2 admits dense and MoE LLMs (attention_type mha/gqa) with
@@ -4091,6 +4407,13 @@ def _validate_fws_cim_model(model: object) -> None:
     stationary arrays admit no weight writes, so training is permanently out
     (not deferred); flash attention, MLA, and the astra backend stay out of
     scope. Every rejection names the offending setting.
+
+    ``mapped`` is the QIF P1.5 narrowing (ADJ-1). A run that declares a
+    ``mapping:`` block takes the placed-DAG path, where the hybrid block kinds
+    in :data:`_FWS_CIM_MAPPED_BLOCK_KINDS` ARE priced — so the hybrid refusal
+    lifts for exactly those kinds and for nothing else. The UNMAPPED fws_cim
+    path keeps the full refusal: the closed-form spatial report has no stage
+    for a recurrence and would silently price a Mamba layer as attention.
     """
     if not isinstance(model, LLMConfig):
         model_type = getattr(model, "model_type", type(model).__name__)
@@ -4105,14 +4428,28 @@ def _validate_fws_cim_model(model: object) -> None:
             "fixed-weight-stationary arrays admit no weight writes. Set run_type: inference."
         )
     hybrid_kinds = tuple(getattr(model, "hybrid_block_kinds", ()) or ())
-    if hybrid_kinds:
+    unpriced_kinds = (
+        tuple(kind for kind in hybrid_kinds if kind not in _FWS_CIM_MAPPED_BLOCK_KINDS)
+        if mapped
+        else hybrid_kinds
+    )
+    if unpriced_kinds:
         raise ValueError(
             "device_class: fws_cim does not support model_param.layer_plan block kinds "
-            f"{', '.join(hybrid_kinds)} — the analog macro laws price weight GEMMs and "
+            f"{', '.join(unpriced_kinds)} — the analog macro laws price weight GEMMs and "
             "the digital fabric prices attention, and neither covers a recurrence, a "
-            "delta-rule state, or a depthwise short convolution. Pricing for these "
-            "blocks lands with P2 (macro resource model), P3 (mapping) and P4 "
-            "(evaluation); until then use a model whose layer plan is attention-only."
+            "delta-rule state, or a depthwise short convolution. "
+            + (
+                "The mapped path prices "
+                + ", ".join(_FWS_CIM_MAPPED_BLOCK_KINDS)
+                + "; these kinds are not priced anywhere."
+                if mapped
+                else "Pricing for these blocks lands with the MAPPED path: declare a "
+                "`mapping:` block in the hardware config and the run is placed by P3 "
+                "(mapping) and priced op by op by P4 (evaluation) through the P2 "
+                "(macro resource model) laws. The unmapped closed-form report has no "
+                "stage for them."
+            )
         )
     attention_type = str(
         getattr(getattr(model, "attention", None), "attention_type", "mha")
@@ -4145,17 +4482,24 @@ def _validate_fws_cim_model(model: object) -> None:
         )
 
 
-def _unpriced_model_inputs(model: "LLMConfig") -> Tuple[str, ...]:
+def _unpriced_model_inputs(model: "LLMConfig", *, mapped_fws: bool = False) -> Tuple[str, ...]:
     """Modeling inputs that parse but that no timing path prices yet (P1.4).
 
     Same rule as the hybrid block-kind gate: pricing a declared input as if it
     were absent is a wrong number rather than a missing one. Only the parameter
     census (`llm_util`) reads these; the pricing seam lands with P2-P4.
+
+    ``mapped_fws`` is the QIF P1.5 narrowing: on the placed-DAG path two of
+    these inputs ARE priced now, and each is lifted for a named reason rather
+    than as a block. Everything else stays refused, on every path.
     """
     unpriced: List[str] = []
     attention = getattr(model, "attention", None)
     window = getattr(attention, "window", None)
-    if window is not None and int(window.local_global_interval) != 1:
+    if window is not None and int(window.local_global_interval) != 1 and not mapped_fws:
+        # PRICED on the mapped path: fws_eval reads the pattern per layer and
+        # calls sliding_window_prefill_timing / sliding_window_decode_timing at
+        # the capped context (P2.6 5).
         unpriced.append(
             "model_param.attention.window (every attention op is priced against "
             "the full KV context, so a local layer would be charged as global)"
@@ -4169,10 +4513,18 @@ def _unpriced_model_inputs(model: "LLMConfig") -> Tuple[str, ...]:
             "model_param.shared_weight_groups (depth-shared weights are stored once "
             "but every path prices one weight set per layer)"
         )
-    if dict(getattr(model, "ffn_dims", {}) or {}):
+    ffn_dims = dict(getattr(model, "ffn_dims", {}) or {})
+    if mapped_fws:
+        # PRICED on the mapped path: the shared-expert width reaches the array
+        # census and the mapping's stage shapes, the same number llm_util's
+        # parameter census already reads. Any OTHER key still only moves the
+        # census, so it stays refused BY NAME.
+        ffn_dims = {key: value for key, value in ffn_dims.items() if key != "shared_expert"}
+    if ffn_dims:
         unpriced.append(
-            "model_param.ffn_dims (every FFN stage is priced at "
-            "model_param.intermediate_size)"
+            "model_param.ffn_dims keys "
+            + ", ".join(sorted(ffn_dims))
+            + " (every dense FFN stage is priced at model_param.intermediate_size)"
         )
     return tuple(unpriced)
 
@@ -4191,8 +4543,17 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     model = model_config.model_config
 
-    if str(getattr(hw_config, "device_class", "gpu")).lower() == "fws_cim":
-        _validate_fws_cim_model(model)
+    device_class = str(getattr(hw_config, "device_class", "gpu")).lower()
+    # QIF P1.5 (ADJ-1): a `mapping:` block is what makes a run take the
+    # placed-DAG path, and that path prices block kinds the closed form cannot
+    # express. The narrowing is scoped to exactly that pair — fws_cim AND a
+    # declared mapping — so the GPU paths and the unmapped closed-form path
+    # keep the P1.4 refusal verbatim.
+    mapped_fws = device_class == "fws_cim" and (
+        getattr(hw_config, "mapping_config", None) is not None
+    )
+    if device_class == "fws_cim":
+        _validate_fws_cim_model(model, mapped=mapped_fws)
 
     if isinstance(model, GEMMConfig):
         if tp > 1:
@@ -4210,26 +4571,38 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     # SSM / linear-attention / short-conv blocks were attention layers, which
     # is a wrong number rather than a missing one — so refuse it outright on
     # every device class. Pricing lands with P2-P4.
-    if model.has_hybrid_blocks:
+    unpriced_kinds = (
+        tuple(
+            kind
+            for kind in model.hybrid_block_kinds
+            if kind not in _FWS_CIM_MAPPED_BLOCK_KINDS
+        )
+        if mapped_fws
+        else tuple(model.hybrid_block_kinds)
+    )
+    if unpriced_kinds:
         raise ValueError(
             "model_param.layer_plan declares block kinds "
-            f"{', '.join(model.hybrid_block_kinds)}, which no device path prices yet: "
-            f"device_class {str(getattr(hw_config, 'device_class', 'gpu')).lower()!r} would "
+            f"{', '.join(unpriced_kinds)}, which no device path prices yet: "
+            f"device_class {device_class!r} would "
             "price them as plain attention layers. Pricing for these blocks lands with "
-            "P2 (macro resource model), P3 (mapping) and P4 (evaluation); until then only "
-            "attention-only layer plans run."
+            "the fws_cim MAPPED path: a hardware config that declares a `mapping:` "
+            "block is placed by P3 (mapping) and priced by P4 (evaluation) through the "
+            "P2 (macro resource model) laws. Until then only attention-only layer "
+            "plans run."
         )
 
-    unpriced = _unpriced_model_inputs(model)
+    unpriced = _unpriced_model_inputs(model, mapped_fws=mapped_fws)
     if unpriced:
         raise ValueError(
             "model_param declares modeling inputs no device path prices yet: "
             + "; ".join(unpriced)
             + ". device_class "
-            + repr(str(getattr(hw_config, "device_class", "gpu")).lower())
+            + repr(device_class)
             + " would price the model as if they were absent, which is a wrong number "
-            "rather than a missing one. Pricing lands with P2 (macro resource model), "
-            "P3 (mapping) and P4 (evaluation); until then remove the field."
+            "rather than a missing one. Pricing lands with the fws_cim MAPPED path: "
+            "P3 (mapping) places the model and P4 (evaluation) prices it through the "
+            "P2 (macro resource model) laws. Until then remove the field."
         )
 
     if model.use_moe and model.top_k > model.num_experts:

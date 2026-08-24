@@ -497,6 +497,12 @@ class TimeCalculation:
 
         model_class = self.get_model_class(mode)
         self.model = model_class(model_config)
+        #: The PARSED model config the wrapper above was flattened from. The
+        #: wrapper drops the block-typed schema (model_param.ssm /
+        #: linear_attention / short_conv / attention.window), which the QIF
+        #: mapper and evaluator read, so the source object is kept beside it.
+        #: Nothing reads this on any GPU path; it moves no number.
+        self.model_source_config = getattr(model_config, "model_config", model_config)
 
         if mode == "GEMM":
             self.M = self.model.M

@@ -6,43 +6,43 @@
   {
    "id": "P4.1",
    "title": "Heterogeneous device pricing in the analytic evaluator (capacity-1 degenerate bit-identical)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "program/analytic_sim.py's evaluator gained three keyword-only arguments (resources, durations, record_timeline); a device is now a DeviceResource with an integer capacity and a named owner, and capacity 1 reproduces the legacy gpu_free exclusivity BIT-IDENTICALLY, which the 221 golden-equivalence specs and both A100 baselines pin. WAVE B FIX: above capacity 1 the root rule releases a slot a root op never took, so the schedule is optimistic by up to one op per root on that device -- that is a relaxation, and it now rides the artifact as a named device_capacity_root_release disclosure instead of living only in a source docstring. No shipped run raises a capacity, so it fires only under an explicit capacity_overrides call, which a test drives.",
    "questions": []
   },
   {
    "id": "P4.2",
    "title": "Metric set as timeline projections (ADJ-6 headline rules)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Every metric is a projection of ONE timeline: prefill latency and the decode series are differences of timeline finishes, tokens/s is generated tokens over the OBSERVED span, and the extrapolated remainder lives in its own labeled block that never enters metrics[]. WAVE B FIX (critical): on a WINDOWED run the makespan is not a request's end-to-end latency and no request completes inside it, so publishing 'end-to-end request latency' and 'completed requests per second' put a second, contradicting value for request latency in the same artifact beside extrapolated_request_latency_s. The two keys now state the span they measure -- lowered_window_latency and requests_per_s_lowered_window, with bases saying ZERO of the batch completes -- and neither is back-derived from the extrapolation (P4 sec.3 forbids a period times a count). ASSUMPTION: at decode_window >= decode_len nothing is truncated and both keep their unqualified names, which a control fixture pins.",
    "questions": []
   },
   {
    "id": "P4.3",
    "title": "Memory feasibility verdicts with named violations",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Activation high-water is replayed over the same timeline (alloc at the producer's finish, release at the last consumer's finish, the memory_sim shape), recurrent state is resident per layer on the chiplet that runs its scan, and KV bytes come from P2's kv_bytes_per_stream_layer at the context the LOWERED window actually reached. Verdicts are per chip with a named owner, the contributors itemized, and status fits / VIOLATED / undeclared — an absent capacity field is NOT a pass. Two relaxations are disclosed: the config declares one activation tier size and no per-chip field, and cim_sram makes KV and activations share one tier so the verdict is on the sum. Tests pin a real violation (the Llama2-7B point overruns 8 GiB) with owner and quantity, the undeclared-capacity verdict, and that KV lands on the shared digital chiplets (D13) and totals P2's own law. ASSUMPTION: attention score blocks are NOT counted resident — the systolic array streams them into the softmax lanes — so only the attention output is; stated in the basis string.",
    "questions": []
   },
   {
    "id": "P4.4",
    "title": "Itemized energy with per-component coverage labels",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Six named components, each with its OWN coverage label: analog arrays (covered, P2 price_tiled_op energies), link traffic incl. the PD handoff (covered where a dimension declares energy_per_bit; partial when intra-chip movement is in the term), priced reduction (covered iff the card declares pool_energy_per_add_pj), per-macro pool helpers (partial: D12 absorbs them, no component library), shared digital chiplet (uncovered: no law prices a fabric op's energy and the card schema refuses the knob), KV traffic (uncovered: the placed DAG contains no KV op to price). A component whose ops disagree reads PARTIAL, which is the true statement. The total is math.fsum of the printed parts and nothing else; tests pin that identity, the label set, and that declaring pool_energy_per_add_pj on a card flips the reduction component to covered.",
    "questions": []
   },
   {
    "id": "P4.5",
    "title": "Derived per-macro pool sizing report",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "_build_pools sizes each macro's digital pool FROM THE TIMELINE: peak concurrent digital demand (overlapping [ready, finish) intervals, so queued work counts as demand) times P2.5's per-unit derivation, nothing clamped. WAVE B FIX: FwsEvaluation.atlas_pool_sizing() now carries that measured width into the priced atlas, so macros[].digital_pool and the report's pool table are ONE accounting instead of two numbers under one field name (the Granite point has 40 macros at 42 lanes and 6360 at 21; the atlas previously said 21 everywhere). A pool area of 0.0 is labelled UNCOVERED -- no card declares a pool area law -- so an absent law and a measured zero are distinguishable.",
    "questions": []
   },
   {
    "id": "P4.6",
    "title": "Report JSON + text section (single-accounting structure)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "report_document is the single JSON artifact and render_report renders the text section FROM it, never recomputing; a mapped run writes fws_qif_report.json ONLY, so the closed form and the DAG cannot share an artifact. WAVE B FIX: disclosures are merged by CONSTRAINT KEY -- P3 declared intra_chip_activation_movement generically and P4 declared it again with a measured byte count, and two entries under one key read as two claims. The merge keeps the first value and every distinct reason, naming the second producer inline, and a test asserts no key appears twice. The report's model block now prints model_id beside model_type so the model and its pricing carrier are both visible.",
    "questions": []
   }
  ]
