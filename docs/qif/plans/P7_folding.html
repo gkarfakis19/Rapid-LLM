@@ -33,7 +33,7 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 <nav><a href="../index.html">&larr; Plan of Plans</a></nav>
 <div class="pid">Plan P7</div>
 <h1>Folding &amp; the Mapping Optimizer</h1>
-<p class="mission">Make spatial-vs-temporal folding a per-tensor mapping decision, and choose it optimally per model &mdash; decode only, with the dead folds refused by name before any machinery exists for them.</p>
+<p class="mission">Never waste weight space, pin analog at the cell floor, and sweep the (area, decode throughput) frontier by sizing the whole system &mdash; with the dead folds refused by name before any machinery exists for them.</p>
 
 <h2>Mission context</h2>
 <p>The QIF core question, stated by George 2026-08-24: the hardware is FIXED
@@ -46,40 +46,38 @@ center. The Wave D DSE proved the gap by construction: its Pareto front
 collapsed to one point and its own <code>front_shape</code> note said why &mdash;
 nothing swept traded silicon for speed. Folding is the missing axis.</p>
 
-<h2>The two facts that prune the space</h2>
-<p><strong>Fact 1 &mdash; folding never changes cell count.</strong> Weights own
-cells (D2): a 1024&times;1024 tensor needs 2<sup>20</sup> cells whether it maps
-to 4 macros or 1. A "2&times;2 spatial" mapping buys 4 fixed macros and leaves
-their mux banks IDLE to buy parallel time; folding fills the banks the spatial
-mapping wastes. Therefore <code>min_macros(tensor) = ceil(tensor_cells /
-cells_per_macro)</code> &mdash; the CELL FLOOR &mdash; and the whole per-tensor
-mapping space is one small integer: how far between the floor and full-spatial
-the tensor sits. Area = macros bought; time multiplier = temporal folds walked;
-there is no separate taxonomy of folds to build machinery for.</p>
-<p><strong>Fact 2 &mdash; decode makes the optimizer nearly analytic.</strong>
-In the Granite decode timeline the analog macros run at ~0.06% duty: the step
-is bound by the shared digital chiplet (scan for hybrids, attention/KV for
-transformers). And within one decode step the layers execute SEQUENTIALLY, so
-tiles of different layers sharing one macro's banks NEVER contend &mdash; the
-evaluator already prices this as zero by construction. Consequence: fold
-depth is limited only by each tensor's FOLD HEADROOM (fold until its analog
-time approaches the binding step time), and cross-layer bank sharing is a pure
-area win. The decode optimizer is headroom computation plus bank packing, not
-search. Prefill is where folding gets hard (all layers fire concurrently,
-SSD chunking interacts with fold walks) &mdash; which is exactly why it is out.</p>
-
-<h2>Scope &amp; exclusions &mdash; the DOA register</h2>
-<div class="overflow"><table>
-<tr><th>Fold / feature</th><th>Verdict</th><th>Why</th></tr>
-<tr><td>N-temporal fold (walk output banks across mux passes)</td><td><b>ALIVE</b></td><td>Already the mux law (active-column-set charging); needs per-tensor freedom, not new physics.</td></tr>
-<tr><td>K-temporal fold (partials accumulated across passes in a shift-add buffer)</td><td><b>ALIVE</b></td><td>The one genuinely new arrangement. K-INNER canonical walk only: one accumulator per output bank, minimal buffer.</td></tr>
-<tr><td>Cross-tensor / cross-layer bank sharing</td><td><b>ALIVE</b></td><td>Machinery exists (A3); decode sequentiality makes it contention-free; the optimizer's main packing lever.</td></tr>
-<tr><td>PREFILL folding</td><td><b>OUT (George, 2026-08-24)</b></td><td>Concurrent layers + SSD chunk interplay; refused by name; the decode-only assumption is stamped on every P7 artifact.</td></tr>
-<tr><td>Non-canonical walk orders (N-inner under K-folds, interleaves)</td><td><b>DOA</b></td><td>Larger buffers for no modeled gain; refused by name until a physics reason exists.</td></tr>
-<tr><td>Slicing &times; folding product</td><td><b>DOA for pass one</b></td><td>CTT cells hold W4/W5 unsliced; the product multiplies arrangements for no live card. Refused by name when both are requested.</td></tr>
-<tr><td>Weight replication (spatial &gt; natural census)</td><td><b>DOA in decode</b></td><td>Buys parallel M-throughput the decode regime cannot use (analog is 0.06% busy). No machinery.</td></tr>
-<tr><td>Folding the digital side (scan/attention engines)</td><td><b>OUT</b></td><td>The shared chiplet is already time-multiplexed by construction.</td></tr>
-</table></div>
+<h2>The invariant and the three facts that define the problem</h2>
+<p><strong>Invariant W (George, 2026-08-24, HARD): weight space is NEVER
+wasted.</strong> Every mux bank of every macro holds real weights &mdash; a
+"spatial" mapping does not idle banks, it fills them with other projections,
+layers, or tensors. Waste exists only at dimension-mismatch remainders and is
+a REPORTED metric (target ~0). Consequence: <code>analog_macros ~=
+ceil(total_model_cells / cells_per_macro)</code> &mdash; the GLOBAL cell floor.
+Analog silicon is determined by the model, not chosen by the mapper.</p>
+<p><strong>Fact 1 &mdash; at the floor, decode analog time is
+assignment-invariant to first order.</strong> Dense packing means every bank
+fires once per decode step (each weight read once per token), so each macro
+walks ~m ADC passes per step regardless of which tensors co-reside. Packing
+still chooses two SECONDARY things: whether a tensor's K-blocks stack in one
+macro (priced accumulator + buffer) or spread across macros (partial-sum
+transport), and which chip holds what (activation locality). Both are
+optimized greedily (keep K-blocks together, keep a layer on one chip); neither
+is the frontier.</p>
+<p><strong>Fact 2 &mdash; the frontier is SYSTEM SIZING.</strong> The observed
+0.06% analog duty on Granite was a diagnosis of a mis-provisioned config (10
+analog chips against a starved scan engine), not a law. With analog pinned at
+the floor, the DSE's real levers are the DIGITAL side: shared chiplet count,
+vector lanes, SA geometry, pool widths. Provision digital up until the step
+time falls and every device class is well utilized; the knee is where the
+analog m-pass time becomes co-bound with the digital side. THE OBJECTIVE:
+sweep the (total area = analog floor + digital silicon, decode tokens/s)
+frontier, with per-device utilization reported at every point so idle silicon
+is always visible. NO safety margins anywhere (George).</p>
+<p><strong>Fact 3 &mdash; decode sequentiality keeps co-residency free.</strong>
+Layers execute sequentially within a decode step, so cross-tensor and
+cross-layer bank sharing never contends; the evaluator prices this correctly
+by construction. Prefill breaks this (concurrent layers, SSD chunking) and is
+OUT (D25).</p>
 
 <h2>Where we stand</h2>
 <div class="overflow"><table>
@@ -92,31 +90,30 @@ SSD chunking interacts with fold walks) &mdash; which is exactly why it is out.<
 </table></div>
 
 <h2>The investigation</h2>
-<h3>1. The fold vector (P7's one new object)</h3>
-<p>Per tensor: <code>fold = (f_K, f_N)</code> with <code>f_K &le; ceil(K/r)</code>,
-<code>f_N &le; ceil(N/c)</code>, and the bank-capacity constraint
-<code>(blocks / (f_K &middot; f_N)) &middot; banks_per_block &le; mux</code> per
-macro. <code>(1,1)</code> = today's fully spatial mapping (degenerate identity:
-bit-exact reproduction of current numbers, gated). Area = macros bought; time
-= analog M-law &times; <code>f_K &middot; f_N</code>; energy adds the
-accumulator term for <code>f_K &gt; 1</code>. New card parameters (Samyak
-seam, honest defaults): accumulator width/energy per fold, input re-drive
-cost, bank-switch cycles (knob exists, default 0 disclosed).</p>
-<h3>2. The decode headroom law</h3>
-<p><code>headroom(tensor) = binding_step_time &times; safety /
-analog_time_at_(1,1)</code>, read off the existing decode timeline. Fold to
-<code>min(cell-floor-fold, headroom)</code>. On Granite the aggregate analog
-time is ~12.8 &micro;s of a ~892 &micro;s step &mdash; headroom O(70&times;)
-&mdash; so the cell floor, not time, binds almost everywhere. The knee where
-folded analog time meets the scan bound is the deliverable figure.</p>
-<h3>3. The optimizer (deliberately not a search)</h3>
-<p>Objective pass one: MIN AREA at a declared tokens/s target; the Pareto
-traced by sweeping the target. Per-tensor folds from the headroom law, then
-first-fit-decreasing bank packing with cross-layer sharing (contention-free in
-decode; the evaluator re-verifies every chosen point &mdash; the two-speed
-pattern). Every chosen mapping is emitted as a normal <code>mapping:</code> +
-<code>cim.allocation</code> config: the optimizer WRITES configs, the existing
-machinery validates, prices and draws them. No new evaluator, no ML.</p>
+<h3>1. Dense packing (Invariant W in code)</h3>
+<p>The packer's contract: fill every bank with real weights; report waste%
+(remainder columns/rows from dimension mismatch) as a first-class metric.
+K-blocks of one tensor stack in-macro by preference (one accumulator per
+output bank, K-inner walk, priced buffer); a layer's tensors stay on one chip
+by preference (locality); overflow spills to the next macro/chip, never idles.
+The degenerate identity: today's shipped configs, re-expressed as dense
+packings, reproduce their numbers bit-exactly where the placement coincides,
+and the delta is disclosed where dense packing changes macro count.</p>
+<h3>2. The floor law and the analog step time</h3>
+<p><code>analog_macros = ceil(total_cells / cells_per_macro)</code> per model
+(+ endpoint terms); decode analog step time ~= m &times; vec_latency &times;
+(sequential chain depth effects), assignment-invariant at the floor.
+Accumulator and partial-transport costs ride the affected ops (P2 laws).
+Utilization per device class is a required output of every run.</p>
+<h3>3. The system-sizing DSE (the core loop)</h3>
+<p>Analog fixed at the floor; sweep the DIGITAL provisioning axes &mdash;
+shared chiplet count, vector_lanes, SA geometry (rows &times; cols &times;
+num_arrays), pool widths &mdash; plus chip-count granularity, through the
+mapped path (fws_qif_dse). Output: the (total area, decode tokens/s) Pareto
+frontier with per-device utilization at every point. The knee &mdash; where
+digital provisioning stops buying throughput because the analog m-pass time
+co-binds &mdash; is the deliverable figure per model. No safety margin; the
+frontier itself shows how close each point runs.</p>
 <h3>4. The visualization (the part George asked for by name)</h3>
 <ul>
 <li><b>Folding card</b>: one tensor, the mapping family side by side &mdash; spatial boxes, time-lanes stacked inside a box, the accumulator drawn where K-partials meet; area/time/energy under each.</li>
@@ -133,18 +130,18 @@ machinery validates, prices and draws them. No new evaluator, no ML.</p>
 <h2>Implement now vs address only</h2>
 <div class="overflow"><table>
 <tr><th>Now</th><th>Address only (named, empty)</th></tr>
-<tr><td>Fold vector + K-inner K-fold arrangement + accumulator pricing, with the (1,1) bit-exact identity</td><td>Prefill folding (per George; SSD interplay)</td></tr>
-<tr><td>Per-tensor folds in <code>mapping:</code>; cross-layer bank sharing in decode</td><td>Slicing &times; folding; replication; non-canonical walks (all refused by name)</td></tr>
-<tr><td>Headroom law + min-area optimizer + Pareto trace, DAG-verified per point</td><td>Multi-tenant folding (same machinery, later per D8)</td></tr>
-<tr><td>Fold axis in fws_qif_dse; Granite + Qwen decode knee curves, checked in with regenerate gates</td><td>Pipelined/overlapped decode steps beyond D15's batched-synchronous regime</td></tr>
+<tr><td>Dense packer (Invariant W) + K-inner accumulator pricing + waste% metric, with the degenerate identity</td><td>Prefill folding (per George; SSD interplay)</td></tr>
+<tr><td>Dense-packing mapping mode in <code>mapping:</code>; cross-layer bank sharing in decode</td><td>Slicing &times; folding; replication; non-canonical walks (all refused by name)</td></tr>
+<tr><td>System-sizing sweep: digital provisioning axes vs (area, tokens/s) frontier, DAG-verified per point</td><td>Multi-tenant folding (same machinery, later per D8)</td></tr>
+<tr><td>Granite + Qwen decode frontier curves with utilization per point, checked in with regenerate gates</td><td>Pipelined/overlapped decode steps beyond D15's batched-synchronous regime</td></tr>
 <tr><td>Folding card + time-lane view + knee explorer in the atlas</td><td>&mdash;</td></tr>
 </table></div>
 
 <h2>Open questions for George</h2>
 <ul>
-<li>Safety margin for the headroom law (how close folded analog time may come to the binding step time): propose 80%. Confirm or set.</li>
+<li>RESOLVED by George 2026-08-24: no safety margins; the objective is the (area, throughput) frontier itself, including digital provisioning in the sweep.</li>
 <li>Samyak parameter asks (priced with honest defaults until then): accumulator energy/width per fold, input re-drive cost, real bank-switch cycles, practical max bank depth.</li>
-<li>Objective confirmation: min-area @ tokens/s target as the tool, Pareto trace as the figure &mdash; both, or one first?</li>
+<li>RESOLVED by George 2026-08-24: minimize area while maximizing throughput &mdash; sweep the frontier.</li>
 </ul>
 
 <div class="status"><h2>Status &amp; notes</h2>
