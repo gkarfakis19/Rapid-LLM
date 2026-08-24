@@ -27,6 +27,7 @@ What lands where (P3 §3, A2, D12, D13)::
     weight GEMM (qkv, o_proj, ffn1/2, router, experts,        analog macro
       endpoints, SSM / linear-attn / short-conv projections)     device
     bit-slice + row-block shift-and-add reduction             that macro's pool
+    in-macro K-stack accumulation (dense packing, P7.3)       that macro's pool
     norm, activation, gating, residual, short depthwise conv  that macro's pool
     attention QK^T / softmax / PV, every act x act GEMM,      shared digital
       SSM scan and state update, delta rule                     chiplet
@@ -54,7 +55,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from cim_timing import Tile, TileOwner
+from cim_timing import KStack, Tile, TileOwner
 from fws_mapping import (
     MAPPING_AXES,
     FwsMapping,
@@ -68,6 +69,12 @@ from program.layout import RankLayout
 #: it; P4 dispatches on this string and never on an op name.
 LAW_ANALOG_GEMM = "P2 analog vector law at the tile's column set"
 LAW_SLICE_REDUCTION = "P2 priced reduction (D11)"
+#: P7.3. A K STACK that lives in ONE macro reduces on that macro's pool: the
+#: banks fire back to back under the K-inner walk, every add but the last hides
+#: under the following ADC pass, and the tail is the final drain. The law is
+#: ``CimDeviceModel.price_accumulation`` and the descriptor is the packer's own
+#: :class:`cim_timing.KStack` — the DAG carries it, it never re-derives it.
+LAW_K_ACCUMULATION = "P7 in-macro K-stack accumulation (price_accumulation)"
 LAW_POOL = "P2 pool component costs (D12)"
 LAW_FABRIC = "P2 fabric laws (D13)"
 LAW_LINK = "bytes / link law (D17)"
@@ -105,6 +112,10 @@ class FwsOpAnnotation:
     tokens: float
     owner: Optional[TileOwner] = None
     tiles: Tuple[Tile, ...] = ()
+    #: The packer's K-stack descriptor (P7.3), set on accumulation ops only.
+    #: P4 prices the op FROM this object, so the depth, the width and the sink
+    #: macro the pricer uses are the packer's own numbers, not a re-derivation.
+    k_stack: Optional[KStack] = None
     bytes_moved: float = 0.0
     src_device: int = -1
     dst_device: int = -1
@@ -169,6 +180,23 @@ class _Lowering:
         self._owner_tiles = OrderedDict(
             (owner, tuple(tiles)) for owner, tiles in self._owner_tiles.items()
         )
+        # P7.3: the packer's own K-stack descriptors, indexed by the pair that
+        # identifies an output block, (owner, n_start). Only the LOCAL stacks
+        # are here: a stack whose blocks span macros is priced end to end by
+        # the row-block partial-sum law this builder already emits, and pricing
+        # it twice would be two accountings of one metric (D21).
+        self._k_stacks: Dict[Tuple[TileOwner, int], KStack] = {}
+        for packing in getattr(mapping, "packings", {}).values():
+            for stack in packing.k_stacks:
+                if stack.depth > 1 and stack.local:
+                    self._k_stacks[(stack.owner, int(stack.n_start))] = stack
+        #: Local K stacks the DAG found but the PACKER did not describe — the
+        #: dedicated placement can build one when a card's bank is finer than
+        #: its macro. Keyed by (owner, output block, macro) so the count is
+        #: STACKS and not stack-firings. Nothing is charged for them here (that
+        #: would move a shipped number silently); P4 turns the count into a
+        #: disclosure.
+        self.undescribed_local_stacks: set = set()
 
     # -- helpers ---------------------------------------------------------
 
@@ -208,6 +236,7 @@ class _Lowering:
         tokens: float,
         owner: Optional[TileOwner] = None,
         tiles: Sequence[Tile] = (),
+        k_stack: Optional[KStack] = None,
         note: str = "",
     ) -> int:
         dev = self.mapping.device_record(device_id)
@@ -231,6 +260,7 @@ class _Lowering:
                 tokens=float(tokens),
                 owner=owner,
                 tiles=tuple(tiles),
+                k_stack=k_stack,
                 groups=dict(dev.shard.as_dict()),
                 primary_group=self.mapping.primary_group,
                 group_keys=self._group_keys(device_id),
@@ -319,6 +349,9 @@ class _Lowering:
         program.meta.misc["fws_serving"] = self.serving
         program.meta.misc["fws_duration_basis"] = DURATION_BASIS
         program.meta.misc["fws_shard_layout"] = self.mapping.shard_layout
+        program.meta.misc["fws_undescribed_local_k_stacks"] = len(
+            self.undescribed_local_stacks
+        )
         return program
 
     def _phase(self, phase: str, step: int, tokens: float, seed: Sequence[int]) -> List[int]:
@@ -499,6 +532,35 @@ class _Lowering:
                         tiles=macro_tiles,
                         note=f"{len(slices)} bit slices composed on the host macro's pool",
                     )
+                # P7.3: this macro holds SEVERAL K blocks of one output block
+                # (a K stack). The banks fired back to back; their partials now
+                # reduce on this macro's own pool, with the packer's descriptor
+                # carrying the depth and the width P4 prices from.
+                stack = self._k_stacks.get((owner, int(n_start)))
+                if stack is not None and stack.sink_macro_id == macro_id:
+                    uid = self.compute(
+                        f"{prefix}.n{n_start}.m{macro_id}.kacc",
+                        macro.pool_device,
+                        [uid],
+                        kind="reduction",
+                        law=LAW_K_ACCUMULATION,
+                        phase=phase,
+                        step=step,
+                        layer=layer,
+                        block=owner.op,
+                        tokens=tokens,
+                        owner=owner,
+                        tiles=macro_tiles,
+                        k_stack=stack,
+                        note=(
+                            f"K stack of depth {stack.depth} accumulated in macro "
+                            f"{macro_id} (k_inner walk: one accumulator, live once)"
+                        ),
+                    )
+                elif len({tile.k_start for tile in macro_tiles}) > 1:
+                    # A local K stack nobody described. Counted, never priced
+                    # here and never silently absorbed: P4 discloses it.
+                    self.undescribed_local_stacks.add((owner, int(n_start), macro_id))
                 partials.append(uid)
             if len(partials) > 1:
                 # Several ROW blocks of one output block: real partial sums.

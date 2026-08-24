@@ -263,7 +263,7 @@ OPTIMA block-latency equivalence (recon note for validation)
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import llm_util
 
@@ -747,6 +747,322 @@ def check_allocation_capacity(column_sets_per_macro: int, assignments) -> None:
                     f"{claimed[key]} and {label}. One column set holds one tile."
                 )
             claimed[key] = label
+
+
+# ---------------------------------------------------------------------------
+# Dense packing (QIF P7.2): Invariant W in code
+#
+# INVARIANT W (D27, George 2026-08-24, HARD): weight space is NEVER wasted.
+# Every bank of every macro holds real weights — a "spatial" mapping does not
+# idle banks, it fills them with other projections, layers or tensors. Waste
+# therefore exists ONLY at dimension-mismatch remainders, and it is a REPORTED
+# first-class metric rather than a rounding nobody sees.
+#
+# The consequence is the GLOBAL CELL FLOOR: analog silicon is determined by the
+# model, not chosen by the mapper. ``cell_floor_macros`` is that floor,
+# ``macro_count`` is what the packing actually reached, and the difference is
+# the waste, itemized — never a single number that hides which of the two
+# mismatches produced it.
+#
+# The bank, not the macro, is the packing unit: a bank is
+# ``column_sets_per_tile`` mux slots (the card's declared allocation
+# granularity, ADJ-4), so a card that admits only whole-macro allocation packs
+# whole macros and a card that admits single mux slots packs single slots. The
+# packer never allocates finer than the card admits.
+# ---------------------------------------------------------------------------
+
+#: The ONE walk the dense packer admits (D26). K-INNER means the K blocks of
+#: one output block are CONSECUTIVE in the bank stream, so a tensor's K stack
+#: lands in one macro whenever it fits, and — because the stack's banks fire
+#: back to back — one accumulator per macro is live at a time. Every other walk
+#: is on the DOA register: it buys nothing and costs a partial-sum transport.
+CANONICAL_WALK = "k_inner"
+
+#: The DOA register, in code (D26). "Machinery for a dead fold is a conformance
+#: violation, not initiative", so these names exist HERE, as refusals, and
+#: nowhere else in the tree as capability.
+DEAD_FOLDS: "OrderedDict[str, str]" = OrderedDict(
+    (
+        (
+            "non_canonical_walk",
+            "P7 admits the K-INNER walk only (cim_timing.CANONICAL_WALK). An N-inner "
+            "or slice-major walk scatters one output block's K partials across macros, "
+            "which buys no weight space and costs a partial-sum transport per block. "
+            "It is on the DOA register (D26) and no code path implements it.",
+        ),
+        (
+            "slicing_x_folding",
+            "Bit slicing x folding is on the DOA register (D26). Slicing already owns a "
+            "placement law (P2.4: a slice group is local to one macro, or the chained "
+            "arrangement prices the partials), and folding the same tensor again on top "
+            "of it composes two placement laws whose interaction nothing validates. A "
+            "card that slices packs through enumerate_tiles, not through dense_pack.",
+        ),
+        (
+            "replication",
+            "Replication is on the DOA register (D26) and contradicts Invariant W "
+            "(D27): a second copy of a weight either idles or duplicates work decode "
+            "cannot use, and it buys throughput only in a regime D15 does not serve.",
+        ),
+        (
+            "prefill_folding",
+            "DECODE ONLY (D25). Prefill folding is out for P7 — concurrent layers and "
+            "SSD chunking break the decode sequentiality that makes cross-tensor bank "
+            "sharing free (Fact 3) — so no prefill mapping may be packed densely.",
+        ),
+    )
+)
+
+
+class DeadFoldError(ValueError):
+    """A DOA-register fold was asked for by name (D26).
+
+    The register is BINDING: the refusal is the entire implementation, and the
+    error names which entry was hit and why it is dead.
+    """
+
+
+def refuse_dead_fold(name: str, *, context: str = "") -> None:
+    """Raise :class:`DeadFoldError` for a registered dead fold (D26).
+
+    ``name`` must be a key of :data:`DEAD_FOLDS`; asking to refuse something
+    that is not on the register is itself an error, because the register is the
+    only place a fold may be declared dead.
+    """
+    if name not in DEAD_FOLDS:
+        raise ValueError(
+            f"{name!r} is not on the DOA register (D26). The register is "
+            f"cim_timing.DEAD_FOLDS = {tuple(DEAD_FOLDS)}; a fold is dead there or it "
+            "is not dead."
+        )
+    where = f"{context}: " if context else ""
+    raise DeadFoldError(f"{where}{name}. {DEAD_FOLDS[name]}")
+
+
+@dataclass(frozen=True)
+class PackRequest:
+    """One weight matrix offered to the dense packer: an owner and a (K, N).
+
+    ``group`` is a LOCALITY hint and nothing else — the packer keeps a group's
+    tensors adjacent in the bank stream (a layer's tensors stay together, which
+    is what keeps them on one chip), and it never reorders across groups.
+    """
+
+    owner: TileOwner
+    k: int
+    n: int
+    group: str = ""
+
+
+@dataclass(frozen=True)
+class MacroFill:
+    """What one macro actually holds after dense packing.
+
+    ``real_cells`` is weights; ``committed_cells`` is every cell the macro
+    has. Invariant W is the statement that the two are equal up to the
+    dimension-mismatch remainder, which is exactly ``committed - real``.
+    """
+
+    macro_id: int
+    banks_used: int
+    banks_total: int
+    real_cells: int
+    committed_cells: int
+    owners: Tuple[TileOwner, ...]
+
+    @property
+    def occupancy(self) -> float:
+        """Real cells over the macro's cells — 1.0 is a perfectly packed macro."""
+        if self.committed_cells <= 0:
+            return 0.0
+        return self.real_cells / self.committed_cells
+
+
+@dataclass(frozen=True)
+class KStack:
+    """The K blocks of ONE output block of one tensor, in walk order.
+
+    ``depth`` is how many K blocks reduce into the block: ``depth == 1`` needs
+    no accumulator at all. ``local`` is the whole point of the K-inner walk —
+    every block in one macro, so the partials never leave it.
+    """
+
+    owner: TileOwner
+    n_start: int
+    n_end: int
+    depth: int
+    macro_ids: Tuple[int, ...]
+    sink_macro_id: int
+
+    @property
+    def local(self) -> bool:
+        return len(set(self.macro_ids)) == 1
+
+    @property
+    def width(self) -> int:
+        """Logical output columns this stack produces (the accumulator's lanes)."""
+        return int(self.n_end) - int(self.n_start)
+
+
+@dataclass(frozen=True)
+class DensePacking:
+    """A dense packing and its accounting (Invariant W, D27).
+
+    ONE waste accounting, itemized into the two mismatches that produce it:
+
+      * ``remainder_cells`` — cells inside a committed bank that the tensor's
+        own dimensions do not reach (a K or N remainder).
+      * ``tail_cells`` — banks of the last macro that the stream did not fill.
+
+    ``waste_cells = remainder_cells + tail_cells`` and
+    ``waste_pct = 100 * waste_cells / committed_cells``. There is no third
+    number and no rounding anywhere: ``real + remainder + tail == committed``.
+    """
+
+    tiles: Tuple[Tile, ...]
+    macro_fills: Tuple[MacroFill, ...]
+    k_stacks: Tuple[KStack, ...]
+    walk: str
+    first_macro_id: int
+    macro_count: int
+    banks_used: int
+    banks_per_macro: int
+    column_sets_per_bank: int
+    cells_per_bank: int
+    cells_per_macro: int
+    real_cells: int
+    block_cells: int
+    committed_cells: int
+    remainder_cells: int
+    tail_cells: int
+    cell_floor_macros: int
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def waste_cells(self) -> int:
+        return int(self.remainder_cells) + int(self.tail_cells)
+
+    @property
+    def waste_pct(self) -> float:
+        """The reported metric (D27). 0.0 when nothing is committed."""
+        if self.committed_cells <= 0:
+            return 0.0
+        return 100.0 * self.waste_cells / self.committed_cells
+
+    @property
+    def floor_delta_macros(self) -> int:
+        """Macros this packing costs ABOVE the global cell floor.
+
+        Never negative: the floor is a lower bound the packing cannot beat.
+        """
+        return int(self.macro_count) - int(self.cell_floor_macros)
+
+    @property
+    def local_k_stacks(self) -> Tuple[KStack, ...]:
+        return tuple(stack for stack in self.k_stacks if stack.depth > 1 and stack.local)
+
+    @property
+    def spread_k_stacks(self) -> Tuple[KStack, ...]:
+        return tuple(stack for stack in self.k_stacks if stack.depth > 1 and not stack.local)
+
+    def summary(self) -> "OrderedDict[str, object]":
+        """The packing's numbers, flat, for a report or an atlas."""
+        return OrderedDict(
+            (
+                ("walk", self.walk),
+                ("macros", int(self.macro_count)),
+                ("cell_floor_macros", int(self.cell_floor_macros)),
+                ("floor_delta_macros", int(self.floor_delta_macros)),
+                ("banks_used", int(self.banks_used)),
+                ("banks_per_macro", int(self.banks_per_macro)),
+                ("real_cells", int(self.real_cells)),
+                ("committed_cells", int(self.committed_cells)),
+                ("remainder_cells", int(self.remainder_cells)),
+                ("tail_cells", int(self.tail_cells)),
+                ("waste_cells", int(self.waste_cells)),
+                ("waste_pct", float(self.waste_pct)),
+                ("k_stacks", len(self.k_stacks)),
+                ("local_k_stacks", len(self.local_k_stacks)),
+                ("spread_k_stacks", len(self.spread_k_stacks)),
+            )
+        )
+
+
+@dataclass(frozen=True)
+class AccumulatorCost:
+    """What ONE K stack's accumulation costs beyond the analog pass walk (P7.2).
+
+    THE LAW. A K stack of depth ``d`` fires ``d`` banks back to back (K-inner),
+    each pass emitting ``m * width`` results into one accumulator. Add ``j``
+    retires while pass ``j + 1`` is converting, so adds 1..d-2 are HIDDEN by
+    construction; only the LAST add has no pass behind it to hide under, and it
+    is the tail this law charges. A stall appears only if the pool cannot drain
+    a pass before the next one lands — which the P2.5 pool sizing forbids by
+    construction (``lanes * pool_clock >= cols_adc * f_analog / slice_cycles``),
+    so ``stall_cycles`` is 0 for every shipped card and the zero is DERIVED,
+    not assumed.
+
+    The accumulation is modelled BATCH-PER-PASS — a pass's results are added as
+    one vector through the pool's lanes — which is the same stance
+    :meth:`price_reduction` takes for the shift-add tree, so one shape has one
+    modelling stance rather than two. It is not a safety margin (D28): a
+    per-result streaming accumulator would retire the tail in one add latency
+    instead of one drain, and the difference is stated here rather than padded
+    into a number.
+
+    ONE ACCOUNTING (D21). A SPREAD stack (its K blocks on different macros) is
+    already priced end to end by the row-block partial-sum law — P3 emits the
+    transfer and the pool rowsum, P4 prices them with
+    :meth:`CimDeviceModel.price_reduction`. This law therefore charges a spread
+    stack NOTHING and reports ``priced_here = False`` plus the transport bytes
+    for reconciliation. The new content here is the LOCAL stack, which the DAG
+    absorbs into the analog op at zero today.
+    """
+
+    stack: KStack
+    depth: int
+    width: int
+    lanes: int
+    partial_adds: float
+    hidden_adds: float
+    drain_cycles: int
+    stall_s: float
+    time_s: float
+    energy_pj: float
+    transport_partials: int
+    transport_bytes: float
+    priced_here: bool
+    law: str
+    disclosures: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PackingAccumulatorCost:
+    """Every K stack of a packing, charged the way the machine pays for them.
+
+    TIME is the WORST MACRO's accumulator tail, exactly as
+    :meth:`CimDeviceModel.active_column_sets` charges the worst macro's passes:
+    macros fire concurrently, so an op waits on the slowest one, and the tails
+    of stacks that share a macro add up because that macro walks them in
+    sequence.
+
+    AREA counts ONE accumulator per macro that hosts a local stack, not one per
+    stack: under the K-inner walk a stack's banks are consecutive, so its
+    partial is consumed before the next stack's first pass and exactly one
+    accumulator is live per macro at a time. That is what the canonical walk
+    buys, stated as the number it changes.
+    """
+
+    stacks: Tuple[AccumulatorCost, ...]
+    time_s: float
+    energy_pj: float
+    area_mm2: float
+    accumulators: int
+    adders_per_accumulator: int
+    transport_bytes: float
+    local_stacks: int
+    spread_stacks: int
+    disclosures: Tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -3014,6 +3330,423 @@ class CimDeviceModel:
             energy_pj=adds * float(self.card.pool_energy_per_add_pj),
             transport_bytes=results * int(descriptor.transport_partials) * float(act_bytes),
         )
+
+    # ------------------------------------------------------------------
+    # Dense packing: Invariant W in code (P7.2, D27)
+    # ------------------------------------------------------------------
+
+    def bank_columns(self, column_sets_per_tile: Optional[int] = None) -> int:
+        """Stored weight columns in one allocatable BANK: ``cols_adc * bank``."""
+        bank = self._packing_bank(column_sets_per_tile)
+        return int(self.card.stored_columns_per_set) * bank
+
+    def _packing_bank(self, column_sets_per_tile: Optional[int]) -> int:
+        """The bank size the packer allocates in, validated against the card."""
+        mux = int(self.card.column_sets_per_macro)
+        bank = (
+            self.column_sets_per_tile
+            if column_sets_per_tile is None
+            else int(column_sets_per_tile)
+        )
+        if bank < 1 or mux % bank != 0:
+            raise ValueError(
+                f"column_sets_per_tile = {bank} must be >= 1 and divide the card's mux "
+                f"= {mux}: the mux slot is the smallest allocatable unit (ADJ-4)."
+            )
+        return bank
+
+    def dense_blocks(
+        self,
+        k: int,
+        n: int,
+        *,
+        column_sets_per_tile: Optional[int] = None,
+        walk: str = CANONICAL_WALK,
+    ) -> Tuple[Tuple[int, int, int, int], ...]:
+        """One tensor's (K, N) blocks in the CANONICAL walk order.
+
+        Returns half-open ``(k_start, k_end, n_start, n_end)`` quadruples. A
+        block is one bank's worth of weights: ``rows`` tall and
+        ``cols_adc * bank`` wide, clipped to the tensor at the far edge — the
+        clip is the dimension-mismatch remainder Invariant W reports.
+
+        K-INNER (D26): the K blocks of one output block come out CONSECUTIVELY,
+        so ``dense_pack`` lands them in one macro whenever they fit and their
+        partial sums never cross a link.
+        """
+        if walk != CANONICAL_WALK:
+            refuse_dead_fold("non_canonical_walk", context=f"dense_blocks(walk={walk!r})")
+        k = int(k)
+        n = int(n)
+        if k < 1 or n < 1:
+            raise ValueError(
+                f"a weight matrix needs K >= 1 and N >= 1 (got K x N = {k} x {n}): a "
+                "tensor with an empty dimension holds no weights and cannot be packed."
+            )
+        rows = int(self.card.params.rows)
+        width = self.bank_columns(column_sets_per_tile)
+        blocks = []
+        for cb in range(_ceil_div(n, width)):
+            for rb in range(_ceil_div(k, rows)):
+                blocks.append(
+                    (
+                        rb * rows,
+                        min(k, (rb + 1) * rows),
+                        cb * width,
+                        min(n, (cb + 1) * width),
+                    )
+                )
+        return tuple(blocks)
+
+    def dense_pack(
+        self,
+        requests: Sequence["PackRequest"],
+        *,
+        first_macro_id: int = 0,
+        column_sets_per_tile: Optional[int] = None,
+        walk: str = CANONICAL_WALK,
+    ) -> DensePacking:
+        """Pack every tensor's blocks into a CONTIGUOUS bank stream (D27).
+
+        Invariant W in one sentence: bank ``i`` of the stream goes to macro
+        ``first_macro_id + i // banks_per_macro``, slot ``i % banks_per_macro``,
+        with no gap and no per-tensor rounding — a tensor that ends mid-macro is
+        followed by the next tensor's first block in the very next bank, so a
+        bank idles only when the stream itself runs out.
+
+        The order is the caller's: requests are packed as given, which keeps a
+        layer's tensors adjacent (and therefore on one chip) because that is the
+        order a mapper offers them in. The packer reorders nothing — a packer
+        that shuffled tensors to save a remainder would be choosing the mapping,
+        which is the optimizer's job and not this law's.
+
+        Refusals (D26): a non-canonical walk, and a slicing card — slicing x
+        folding is on the DOA register, and a card that slices places its slice
+        groups through :meth:`enumerate_tiles`.
+        """
+        if walk != CANONICAL_WALK:
+            refuse_dead_fold("non_canonical_walk", context=f"dense_pack(walk={walk!r})")
+        if self.n_slices > 1:
+            refuse_dead_fold(
+                "slicing_x_folding",
+                context=(
+                    f"dense_pack on a card declaring {self.n_slices} bit slices "
+                    f"(bits_per_cell {self.card.bits_per_cell} < weight_bits "
+                    f"{self.card.weight_bits})"
+                ),
+            )
+        card = self.card
+        rows = int(card.params.rows)
+        bank = self._packing_bank(column_sets_per_tile)
+        mux = int(card.column_sets_per_macro)
+        width = int(card.stored_columns_per_set) * bank
+        banks_per_macro = mux // bank
+        cells_per_bank = rows * width
+        cells_per_macro = rows * int(card.stored_columns_per_set) * mux
+
+        tiles: List[Tile] = []
+        stacks: List[KStack] = []
+        fills: "OrderedDict[int, List[object]]" = OrderedDict()
+        real_cells = 0
+        index = 0
+        for request in requests:
+            blocks = self.dense_blocks(
+                request.k, request.n, column_sets_per_tile=bank, walk=walk
+            )
+            by_column: "OrderedDict[int, List[int]]" = OrderedDict()
+            for (k_start, k_end, n_start, n_end) in blocks:
+                macro_id = first_macro_id + index // banks_per_macro
+                slot = index % banks_per_macro
+                index += 1
+                tiles.append(
+                    Tile(
+                        owner=request.owner,
+                        k_start=k_start,
+                        k_end=k_end,
+                        n_start=n_start,
+                        n_end=n_end,
+                        slice_index=0,
+                        site=TileSite(
+                            macro_id=macro_id,
+                            row_start=k_start,
+                            row_end=k_end,
+                            column_sets=tuple(range(slot * bank, (slot + 1) * bank)),
+                        ),
+                    )
+                )
+                cells = (k_end - k_start) * (n_end - n_start)
+                real_cells += cells
+                entry = fills.setdefault(macro_id, [0, 0, OrderedDict()])
+                entry[0] += 1
+                entry[1] += cells
+                entry[2].setdefault(request.owner, None)
+                by_column.setdefault(n_start, []).append(macro_id)
+            for n_start, macro_ids in by_column.items():
+                n_end = min(int(request.n), n_start + width)
+                stacks.append(
+                    KStack(
+                        owner=request.owner,
+                        n_start=n_start,
+                        n_end=n_end,
+                        depth=len(macro_ids),
+                        macro_ids=tuple(macro_ids),
+                        sink_macro_id=macro_ids[0],
+                    )
+                )
+        banks_used = index
+        macro_count = _ceil_div(banks_used, banks_per_macro)
+        block_cells = banks_used * cells_per_bank
+        committed_cells = macro_count * cells_per_macro
+        macro_fills = tuple(
+            MacroFill(
+                macro_id=macro_id,
+                banks_used=int(entry[0]),
+                banks_total=banks_per_macro,
+                real_cells=int(entry[1]),
+                committed_cells=cells_per_macro,
+                owners=tuple(entry[2]),
+            )
+            for macro_id, entry in fills.items()
+        )
+        disclosures: List[str] = []
+        if bank == mux:
+            disclosures.append(
+                f"the card admits WHOLE-MACRO allocation only (bank_depth = {mux} mux "
+                "slots), so the dense packer allocates whole macros: every tensor still "
+                "starts on a fresh macro and this packing is the dedicated placement, "
+                "block for block. The reported waste is then the card's granularity "
+                "speaking, not the packer's — a card declaring a smaller bank_depth is "
+                "what lets Invariant W actually fill the remainder."
+            )
+        if macro_count and banks_used % banks_per_macro:
+            disclosures.append(
+                f"the last macro holds {banks_used % banks_per_macro} of "
+                f"{banks_per_macro} banks: the stream ran out, so those banks hold no "
+                "weights. They are counted in tail_cells, never rounded away."
+            )
+        return DensePacking(
+            tiles=tuple(tiles),
+            macro_fills=macro_fills,
+            k_stacks=tuple(stacks),
+            walk=walk,
+            first_macro_id=int(first_macro_id),
+            macro_count=macro_count,
+            banks_used=banks_used,
+            banks_per_macro=banks_per_macro,
+            column_sets_per_bank=bank,
+            cells_per_bank=cells_per_bank,
+            cells_per_macro=cells_per_macro,
+            real_cells=real_cells,
+            block_cells=block_cells,
+            committed_cells=committed_cells,
+            remainder_cells=block_cells - real_cells,
+            tail_cells=committed_cells - block_cells,
+            cell_floor_macros=_ceil_div(real_cells, cells_per_macro),
+            disclosures=tuple(disclosures),
+        )
+
+    # ------------------------------------------------------------------
+    # Accumulator pricing for K stacks (P7.2)
+    # ------------------------------------------------------------------
+
+    def price_accumulation(
+        self,
+        stack: KStack,
+        m_tokens: float,
+        *,
+        act_bytes: float = 0.0,
+        pool: Optional[DigitalPoolSizing] = None,
+    ) -> AccumulatorCost:
+        """One K stack's accumulation cost BEYOND the analog pass walk.
+
+        See :class:`AccumulatorCost` for the law. The short form: the walk fires
+        the stack's ``d`` banks back to back, add ``j`` hides under pass
+        ``j + 1``, and what is left over is the final drain plus any stall the
+        pool cannot keep up with. A SPREAD stack is charged nothing here — the
+        row-block partial-sum law already prices it end to end (D21).
+        """
+        pool = self.digital_pool_sizing() if pool is None else pool
+        depth = int(stack.depth)
+        width = int(stack.width)
+        results = float(m_tokens) * width
+        if depth <= 1:
+            return AccumulatorCost(
+                stack=stack,
+                depth=depth,
+                width=width,
+                lanes=int(pool.lanes),
+                partial_adds=0.0,
+                hidden_adds=0.0,
+                drain_cycles=0,
+                stall_s=0.0,
+                time_s=0.0,
+                energy_pj=0.0,
+                transport_partials=0,
+                transport_bytes=0.0,
+                priced_here=True,
+                law="none: one K block reaches the output, so nothing accumulates",
+            )
+        if not stack.local:
+            partials = len(dict.fromkeys(stack.macro_ids)) - 1
+            return AccumulatorCost(
+                stack=stack,
+                depth=depth,
+                width=width,
+                lanes=int(pool.lanes),
+                partial_adds=0.0,
+                hidden_adds=0.0,
+                drain_cycles=0,
+                stall_s=0.0,
+                time_s=0.0,
+                energy_pj=0.0,
+                transport_partials=partials,
+                transport_bytes=results * partials * float(act_bytes),
+                priced_here=False,
+                law=(
+                    "row_block_partial_sum: P3 emits the partial transfer and the pool "
+                    "rowsum, P4 prices them with price_reduction (the chained-transport "
+                    "sibling, D11)"
+                ),
+                disclosures=(
+                    f"K stack {stack.owner.label} n[{stack.n_start}:{stack.n_end}] spans "
+                    f"{len(set(stack.macro_ids))} macros, so its partials cross a link "
+                    "and the EXISTING row-block law prices them. This accumulator law "
+                    "charges it zero on purpose: two laws for one shape would be two "
+                    "accountings of one metric (D21). transport_bytes is reported for "
+                    "reconciliation, not to be added on top.",
+                ),
+            )
+        lanes = max(1, int(pool.lanes))
+        drain_cycles = _ceil_div(math.ceil(results), lanes)
+        drain_s = drain_cycles / float(pool.pool_clock_hz)
+        # One ADC pass of this stack: the time the NEXT partial takes to arrive,
+        # which is what an intermediate add can hide under.
+        pass_s = self.analog_op_time(m_tokens, 1)
+        stall_s = max(0.0, drain_s - pass_s)
+        hidden = max(0, depth - 2)
+        disclosures: List[str] = []
+        if float(self.card.pool_energy_per_add_pj) <= 0:
+            disclosures.append(
+                "accumulator energy is 0 pJ: cim.cards.<card>.pool_energy_per_add_pj is "
+                "not declared, so the term reports zero rather than an invented "
+                "per-add figure. The accumulator TIME is fully priced."
+            )
+        if stall_s > 0:
+            disclosures.append(
+                f"the pool drains one partial in {drain_s:.3e} s against an ADC pass of "
+                f"{pass_s:.3e} s, so the accumulator STALLS the pass walk. P2.5 sizes "
+                "the pool to consume the macro's peak result rate, so a stall means the "
+                "sizing was overridden, not that the law disagrees with itself."
+            )
+        return AccumulatorCost(
+            stack=stack,
+            depth=depth,
+            width=width,
+            lanes=lanes,
+            partial_adds=results * (depth - 1),
+            hidden_adds=results * hidden,
+            drain_cycles=drain_cycles,
+            stall_s=stall_s,
+            time_s=drain_s + hidden * stall_s,
+            energy_pj=results * (depth - 1) * float(self.card.pool_energy_per_add_pj),
+            transport_partials=0,
+            transport_bytes=0.0,
+            priced_here=True,
+            law=(
+                "in-macro K accumulation: (depth - 1) adds per output, all but the last "
+                "hidden under the following ADC pass; the tail is the final drain"
+            ),
+            disclosures=tuple(disclosures),
+        )
+
+    def price_packing_accumulation(
+        self,
+        packing: DensePacking,
+        m_tokens: float,
+        *,
+        act_bytes: float = 0.0,
+        pool: Optional[DigitalPoolSizing] = None,
+    ) -> PackingAccumulatorCost:
+        """Every K stack of a packing, charged the way the machine pays.
+
+        Time is the WORST MACRO's accumulator tail (macros fire concurrently,
+        stacks sharing a macro serialize); area counts ONE accumulator per macro
+        that hosts a local stack, because the K-inner walk keeps exactly one
+        live at a time. See :class:`PackingAccumulatorCost`.
+        """
+        pool = self.digital_pool_sizing() if pool is None else pool
+        costs = tuple(
+            self.price_accumulation(stack, m_tokens, act_bytes=act_bytes, pool=pool)
+            for stack in packing.k_stacks
+            if stack.depth > 1
+        )
+        per_macro: "OrderedDict[int, float]" = OrderedDict()
+        for cost in costs:
+            if cost.priced_here and cost.time_s > 0:
+                macro = cost.stack.sink_macro_id
+                per_macro[macro] = per_macro.get(macro, 0.0) + cost.time_s
+        hosts = {
+            cost.stack.sink_macro_id
+            for cost in costs
+            if cost.priced_here and cost.depth > 1
+        }
+        adders = min(
+            int(packing.cells_per_bank // max(1, int(self.card.params.rows))),
+            max(1, int(pool.lanes)),
+        )
+        area_knob = float(self.card.pool_area_mm2_per_adder)
+        disclosures: List[str] = []
+        for cost in costs:
+            for note in cost.disclosures:
+                if note not in disclosures:
+                    disclosures.append(note)
+        if hosts and area_knob <= 0:
+            disclosures.append(
+                "accumulator area is 0 mm2: cim.cards.<card>.pool_area_mm2_per_adder is "
+                "not declared, exactly as area_mm2_per_array: 0 disables area reporting. "
+                "The accumulator COUNT and its adder width are reported regardless."
+            )
+        if hosts:
+            disclosures.append(
+                "the accumulator's holding REGISTER is not priced separately: no card "
+                "declares a register area or energy, so the adder knob prices the adder "
+                "and the register is a named gap rather than an invented number."
+            )
+        return PackingAccumulatorCost(
+            stacks=costs,
+            time_s=max(per_macro.values()) if per_macro else 0.0,
+            energy_pj=sum(cost.energy_pj for cost in costs),
+            area_mm2=len(hosts) * adders * area_knob,
+            accumulators=len(hosts),
+            adders_per_accumulator=adders if hosts else 0,
+            transport_bytes=sum(cost.transport_bytes for cost in costs),
+            local_stacks=sum(1 for cost in costs if cost.priced_here),
+            spread_stacks=sum(1 for cost in costs if not cost.priced_here),
+            disclosures=tuple(disclosures),
+        )
+
+    def report_dense_packing(self, packing: DensePacking) -> str:
+        """The Invariant W line: floor, reached, and waste% itemized (D27)."""
+        summary = packing.summary()
+        lines = [
+            "[FWS-CIM] dense packing (Invariant W, D27) — waste is a metric, not a rounding",
+            f"  walk                    {packing.walk} (canonical; D26 refuses the rest)",
+            f"  banks                   {packing.banks_used} used"
+            f" ({packing.banks_per_macro} per macro, {packing.column_sets_per_bank}"
+            f" mux slot(s) each, {packing.cells_per_bank} cells)",
+            f"  macros                  {packing.macro_count}"
+            f"  (global cell floor {packing.cell_floor_macros},"
+            f" delta {packing.floor_delta_macros:+d})",
+            f"  cells                   {packing.real_cells} real /"
+            f" {packing.committed_cells} committed",
+            f"  waste                   {packing.waste_pct:.3f}%"
+            f"  = remainder {packing.remainder_cells} + tail {packing.tail_cells} cells",
+            f"  K stacks                {summary['k_stacks']}"
+            f" ({summary['local_k_stacks']} in-macro, {summary['spread_k_stacks']} spread)",
+        ]
+        for note in packing.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Per-macro digital pool sizing (P2.5, D12)

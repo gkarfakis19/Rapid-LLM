@@ -879,9 +879,22 @@ def test_disclosures_are_one_entry_per_constraint_and_name_their_candidates():
     for item in union:
         assert item["candidates"], item
         assert set(item["candidates"]) <= set(valid_ids)
-        # On this sweep every disclosure is uniform; if one ever were not,
-        # the entry would carry the disagreement instead of hiding it.
-        assert "varies_by_candidate" not in item, item
+        # A constraint CAN legitimately differ between candidates — P7.3's
+        # per-device-class utilization does, because provisioning is what this
+        # sweep moves. What must never happen is the difference being merged
+        # away: every disagreeing candidate is named beside the entry, with
+        # its own value and reason, which is what stops a per-candidate
+        # quantity from being read as a sweep-level one.
+        for variant in item.get("varies_by_candidate", ()):
+            assert variant["id"] in valid_ids, variant
+            assert variant["value"] and variant["reason"], variant
+    utilization = [i for i in union if i["constraint"] == "device_class_utilization"]
+    assert len(utilization) == 1, "D28's utilization finding is on every candidate"
+    assert utilization[0]["varies_by_candidate"], (
+        "the candidates provision different digital widths, so their utilization "
+        "differs; the union entry must carry the differences rather than present "
+        "one candidate's numbers as the sweep's"
+    )
 
 
 def test_markdown_carries_the_silicon_accountings_coverage():
