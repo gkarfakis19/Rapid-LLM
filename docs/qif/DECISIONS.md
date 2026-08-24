@@ -184,3 +184,14 @@ Process and scope:
 - **D26: The DOA register binds.** P7's dead-fold list (slicing x folding,
   replication, non-canonical walks, prefill folds) is refused BY NAME in
   code — machinery for a dead fold is a conformance violation, not initiative.
+
+- **D27 (GEORGE, HARD): NEVER waste weight space.** Every mux bank holds real
+  weights; dense packing is the invariant; waste exists only at
+  dimension-mismatch remainders and is a reported metric. Analog macro count
+  = the global cell floor. Replication that idles or duplicates for
+  throughput decode cannot use violates this.
+- **D28 (GEORGE): no safety margins; the P7 objective is the (total area,
+  decode throughput) Pareto frontier, with SYSTEM SIZING (digital chiplet
+  count, engine widths, pool widths) as first-class sweep axes — low
+  utilization anywhere is a provisioning bug the DSE must expose, not a fact
+  to accept.
