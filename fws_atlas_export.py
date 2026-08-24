@@ -511,6 +511,79 @@ def _metrics(mapping: FwsMapping, boundary_rows: Sequence[BoundaryRow]) -> List[
     return out
 
 
+def _merge_disclosures(
+    entries: Sequence[Tuple[str, str, str, str]], system_ids: Sequence[str]
+) -> List[Dict[str, object]]:
+    """One entry per CONSTRAINT KEY, naming every system that disclosed it.
+
+    ``entries`` is ``(system_id, constraint, value, reason)`` in document order.
+    A constraint EVERY system discloses identically speaks for the document and
+    is printed as it stands. Anything else — a constraint only one half of a PD
+    pair raises, or one whose halves lower different decode windows — becomes
+    ONE entry whose value names the systems it belongs to. Two entries under one
+    key would read as two claims, and dropping the second would lose a
+    disclosure; D21 allows neither.
+
+    A single-system document has exactly one contributor per entry and it is
+    always the whole document, so this is a no-op there and the shipped
+    exports do not move by a byte.
+    """
+    everyone = list(dict.fromkeys(system_ids))
+    order: List[str] = []
+    variants: Dict[str, "OrderedDict[Tuple[str, str], List[str]]"] = OrderedDict()
+    for system_id, constraint, value, reason in entries:
+        if constraint not in variants:
+            variants[constraint] = OrderedDict()
+            order.append(constraint)
+        contributors = variants[constraint].setdefault((value, reason), [])
+        if system_id not in contributors:
+            contributors.append(system_id)
+    out: List[Dict[str, object]] = []
+    for constraint in order:
+        items = list(variants[constraint].items())
+        (value, reason), contributors = items[0]
+        if len(items) == 1 and set(contributors) == set(everyone):
+            merged_value, merged_reason = value, reason
+        else:
+            merged_value = "; ".join(
+                f"{', '.join(who)}: {text}" for (text, _why), who in items
+            )
+            merged_reason = reason + "".join(
+                f" ({', '.join(who)}: {why})" for (_text, why), who in items[1:]
+            )
+        out.append(
+            OrderedDict(
+                (
+                    ("constraint", constraint),
+                    ("value", merged_value),
+                    ("reason", merged_reason),
+                )
+            )
+        )
+    return out
+
+
+def _handoff_endpoint(mapping: FwsMapping, *, last: bool):
+    """Which chip the PD handoff is drawn from / to, and why (D16).
+
+    The KV a prefill system hands over lives in the shared digital chiplets'
+    activation tier (D13; P4.3 puts KV there), so the handoff is drawn between
+    those chiplets when the inventory has any, and falls back to the backbone
+    end of the chain when it has none. The choice is a DRAWING decision and
+    says so in the link's basis: the byte count is the handoff's own, and no
+    endpoint here recomputes it.
+    """
+    digital = [chip for chip in mapping.chips if chip.pool == "digital"]
+    if digital:
+        chip = digital[-1] if last else digital[0]
+        return chip, f"{mapping.system_id}'s shared digital chiplet {chip.chip_id}"
+    chip = mapping.chips[-1] if last else mapping.chips[0]
+    return chip, (
+        f"{mapping.system_id}'s {'last' if last else 'first'} chip "
+        f"({chip.chip_id}) — this inventory declares no shared digital chiplet"
+    )
+
+
 def export_atlas(
     mappings: Sequence[FwsMapping],
     *,
@@ -550,7 +623,11 @@ def export_atlas(
     links: List[Dict[str, object]] = []
     metrics: List[Dict[str, object]] = []
     relaxations: List[Relaxation] = []
-    extra_relaxations_list: List[Dict[str, object]] = []
+    # (system_id, constraint, value, reason) of P3's placement disclosures and
+    # of P4's, kept apart because a constraint P3 already states is P3's to
+    # word: the priced path adds detail to it, never a second entry.
+    placement_disclosures: List[Tuple[str, str, str, str]] = []
+    priced_disclosures: List[Tuple[str, str, str, str]] = []
     cards: Dict[str, object] = OrderedDict()
 
     duty_per_system = list(duty_cycles or [None] * len(mappings))
@@ -571,6 +648,7 @@ def export_atlas(
     priced = any(entry is not None for entry in duty_per_system) or any(
         bool(entry) for entry in metrics_per_system
     )
+    system_ids = [mapping.system_id for mapping in mappings]
 
     for index, (mapping, rows) in enumerate(zip(mappings, rows_per_system)):
         cards.update(_card_block(mapping))
@@ -604,30 +682,58 @@ def export_atlas(
                 continue
             if relaxation not in relaxations:
                 relaxations.append(relaxation)
-        # P4's disclosures ride the same document as its metrics. Deduplicated by
+            # Recorded even when an earlier system said exactly the same thing:
+            # the merge needs every contributor to know whether a constraint
+            # speaks for the document or for one half of it.
+            placement_disclosures.append(
+                (
+                    mapping.system_id,
+                    relaxation.constraint,
+                    relaxation.value,
+                    relaxation.reason,
+                )
+            )
+        # P4's disclosures ride the same document as its metrics. Merged by
         # CONSTRAINT KEY, not by identity: one constraint listed twice with two
-        # wordings reads as two claims (D21).
-        seen = {item.constraint for item in relaxations}
+        # wordings reads as two claims (D21). The merge spans SYSTEMS as well as
+        # producers — a PD pair prices two timelines, and its halves disclose
+        # the same constraints with different numbers.
         for entry in relax_per_system[index]:
             key = str(entry.get("constraint", ""))
-            if key and key not in seen:
-                seen.add(key)
-                extra_relaxations_list.append(OrderedDict(entry))
+            if key:
+                priced_disclosures.append(
+                    (
+                        mapping.system_id,
+                        key,
+                        str(entry.get("value", "")),
+                        str(entry.get("reason", "")),
+                    )
+                )
 
     if handoff is not None and len(mappings) == 2:
         src = mappings[0]
         dst = mappings[1]
+        src_chip, src_why = _handoff_endpoint(src, last=True)
+        dst_chip, dst_why = _handoff_endpoint(dst, last=False)
         links.append(
             OrderedDict(
                 (
                     ("id", "link.pd_handoff"),
-                    ("from", f"{src.system_id}.chip.{src.chips[-1].chip_id:03d}"),
-                    ("to", f"{dst.system_id}.chip.{dst.chips[0].chip_id:03d}"),
+                    ("from", f"{src.system_id}.chip.{src_chip.chip_id:03d}"),
+                    ("to", f"{dst.system_id}.chip.{dst_chip.chip_id:03d}"),
                     ("role", "pd"),
                     ("bytes", float(handoff.total_bytes)),
                     ("per", "request"),
-                    ("label", "prefill -> decode handoff (D16)"),
-                    ("basis", handoff.basis),
+                    ("label", "prefill -> decode handoff (D16): the KV of the request plus the state that seeds decode"),
+                    (
+                        "basis",
+                        handoff.basis
+                        + f" Drawn from {src_why} to {dst_why}: the KV tier lives in "
+                        "the shared digital chiplets' activation SRAM (D13, P4.3), so "
+                        "those are the endpoints the bytes actually leave and enter. "
+                        "The ENDPOINT CHOICE is a drawing decision; the byte count is "
+                        "fws_mapping.pd_handoff_bytes and nothing here recomputes it.",
+                    ),
                 )
             )
         )
@@ -718,31 +824,49 @@ def export_atlas(
             ("metrics", metrics),
             (
                 "relaxations",
-                [
-                    OrderedDict(
-                        (
-                            ("constraint", relaxation.constraint),
-                            ("value", relaxation.value),
-                            ("reason", relaxation.reason),
-                        )
-                    )
-                    for relaxation in relaxations
-                ]
-                + extra_relaxations_list,
+                _merge_disclosures(placement_disclosures, system_ids)
+                + _merge_disclosures(
+                    [
+                        item
+                        for item in priced_disclosures
+                        if item[1] not in {entry.constraint for entry in relaxations}
+                    ],
+                    system_ids,
+                ),
             ),
         )
     )
     return document
 
 
-def export_pd_atlas(pair: PDPair, *, title: str, subtitle: str = "", reference_command: str = ""):
-    """The two-system document of a PD machine (D16, ADJ-7)."""
+def export_pd_atlas(
+    pair: PDPair,
+    *,
+    title: str,
+    subtitle: str = "",
+    reference_command: str = "",
+    duty_cycles: Optional[Sequence[Optional[Mapping[int, float]]]] = None,
+    extra_metrics: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
+    pool_sizing: Optional[Sequence[Optional[Mapping[int, Mapping[str, object]]]]] = None,
+    extra_relaxations: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
+):
+    """The two-system document of a PD machine (D16, ADJ-7).
+
+    The P4 arguments are the same per-mapping sequences ``export_atlas`` takes,
+    in prefill-then-decode order. Each half is priced on its OWN timeline: a
+    PD pair is two inventories (D16), so borrowing one half's duty cycles for
+    the other would be one measurement printed as two.
+    """
     return export_atlas(
         [pair.prefill, pair.decode],
         title=title,
         subtitle=subtitle,
         reference_command=reference_command,
         handoff=pair.handoff,
+        duty_cycles=duty_cycles,
+        extra_metrics=extra_metrics,
+        pool_sizing=pool_sizing,
+        extra_relaxations=extra_relaxations,
     )
 
 

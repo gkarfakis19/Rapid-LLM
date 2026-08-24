@@ -27,9 +27,25 @@ h1{font-size:1.65rem;line-height:1.2;margin:.3rem 0 .25rem;text-wrap:balance}
 .pill.on{background:#e4eef0;color:var(--accent)}
 .pill.mark{background:#efeadd;color:#6b5a2a}
 
+.bar.filt{border-top:0;padding-top:.1rem}
+.bar .tag{font:700 10px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.13em;text-transform:uppercase;color:var(--faint)}
+.bar .pick{display:inline-flex;align-items:center;gap:.35rem;font-size:11.5px;color:var(--muted)}
+.bar .pick select,.bar .pick input{font:inherit;font-size:11.5px;padding:.18rem .3rem;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--ink)}
+.bar .pick input[type=search]{min-width:15rem}
+.bar .chk{display:inline-flex;align-items:center;gap:.3rem;font-size:11.5px;color:var(--muted)}
+.crumbs{display:flex;flex-wrap:wrap;align-items:baseline;gap:.35rem;margin:.1rem 0 .6rem;font-size:12px}
+.crumbs a{color:var(--accent);text-decoration:none;border-bottom:1px solid #cfe0e4}
+.crumbs a:hover{border-bottom-color:var(--accent)}
+.crumbs .here{font-weight:700;color:var(--ink)}
+.crumbs .sep{color:var(--faint)}
+.crumbs .note{color:var(--faint);font-size:11px}
+.st tr.skip td{color:var(--faint)}
 .band{border-left:3px solid var(--notice-rule);background:var(--notice-bg);padding:.7rem .9rem;margin:0 0 1rem;border-radius:0 4px 4px 0}
 .band h2{font:700 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.13em;text-transform:uppercase;margin:0 0 .45rem;color:var(--notice-rule)}
 .band ul{margin:0;padding-left:1.1rem}
+.band ul.two{column-count:2;column-gap:1.6rem}
+.band ul.two li{break-inside:avoid}
+@media (max-width:60rem){.band ul.two{column-count:1}}
 .band li{margin:.22rem 0;font-size:.9rem}
 .band .c{font-weight:700}
 
@@ -103,6 +119,7 @@ foreignObject div{font:11px/1.2 "Segoe UI",system-ui,sans-serif}
   <div id="h-band"></div>
   <div id="h-metrics"></div>
   <div id="h-bar"></div>
+  <div id="h-crumbs"></div>
   <div class="body">
     <div class="canvas" id="h-canvas"></div>
     <div class="rail">
@@ -128,6 +145,13 @@ var ATLAS = (function () {
   var PAPER = "#f7f9fa";
   var MUTED = "#5f7280";
   var DRAW_BUDGET = 10000;
+  // Duty cycle is its OWN channel: a dedicated bar in one neutral ink, never a
+  // hue and never the occupancy fill (P5's encoding law). The ink is deliberately
+  // outside HUES so no reader can mistake a duty bar for a group.
+  var DUTY_INK = "#3d4f5c";
+  // A tile band narrower than this would vanish; it is drawn at the floor and
+  // the exact span is printed in the card beside it.
+  var BAND_FLOOR_PX = 1.5;
 
   function isInt(n) { return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
   function isStr(s) { return typeof s === "string" && s.length > 0; }
@@ -538,6 +562,61 @@ var ATLAS = (function () {
       });
     });
 
+    // R28 - in a document with more than one system, every metric must name the
+    // system it measures. A PD pair publishes the same headline LABEL twice,
+    // once per inventory (D16), so a metric strip that does not say whose figure
+    // it is puts two readings of one quantity in front of a reader with no way
+    // to tell them apart - AUDIT finding 4 one level up.
+    if (doc.systems.length > 1) {
+      doc.metrics.forEach(function (m, i) {
+        var at = "metrics[" + i + " " + (m && m.key) + "]";
+        var named = null;
+        if (m && m.system != null) {
+          if (!sysById[m.system]) {
+            E("R28", at + ".system", 'names system "' + m.system + '", which is not in systems[]');
+          } else named = m.system;
+        } else if (isStr(m && m.key)) {
+          doc.systems.forEach(function (sy) {
+            if (m.key.indexOf(sy.id + ".") === 0 && (named == null || sy.id.length > named.length)) {
+              named = sy.id;
+            }
+          });
+        }
+        if (named == null) {
+          E("R28", at + ".system",
+            "this document holds " + doc.systems.length + " systems, so every metric states which one it " +
+            "measures: give it a system field naming one, or a key prefixed with the system id");
+        }
+      });
+    }
+
+    // R29 - PD is two inventories and ONE handoff (D16). Two systems drawn side
+    // by side with no link between them are two pictures, not a machine, and a
+    // pd link with both ends inside one system is a handoff to itself.
+    var pdLinks = doc.links.filter(function (l) { return l.role === "pd"; });
+    pdLinks.forEach(function (l) {
+      var a = chipById[l.from], b = chipById[l.to];
+      if (a && b && a.system === b.system) {
+        E("R29", "links[" + l.id + "].role",
+          'a pd handoff runs BETWEEN a prefill system and a decode system (D16); both ends of this one are in "' +
+          a.system + '"');
+      }
+    });
+    if (doc.systems.length > 1) {
+      var roles = doc.systems.map(function (sy) { return sy.role; });
+      if (roles.slice().sort().join(",") !== "decode,prefill") {
+        E("R29", "systems[].role",
+          "two or more systems in one document is PD disaggregation: exactly one prefill and one decode " +
+          "(D16). Found " + JSON.stringify(roles));
+      }
+      if (pdLinks.length !== 1) {
+        E("R29", "links[].role",
+          "a PD document carries exactly ONE handoff link (D16); found " + pdLinks.length +
+          ". The handoff is the only coupling the two inventories have, so a document without it draws " +
+          "two machines that never meet");
+      }
+    }
+
     // R22 - hue capacity. A warning: the excess draws as the over-palette hatch,
     // and no hue is ever cycled.
     var keys = hueKeys(doc);
@@ -547,16 +626,307 @@ var ATLAS = (function () {
         HUES.length + ". " + keys.slice(HUES.length).join(", ") + " draw as the over-palette hatch. Hues are never cycled.");
     }
 
-    // draw budget, stated out loud
+    // draw budget, stated out loud - and measured in the unit it is stated in
     doc.chips.forEach(function (c) {
-      var slots = (c.capacity && c.capacity.macro_slots) || 0;
-      if (slots > DRAW_BUDGET) {
-        W("R23", "chips[" + c.id + "].capacity.macro_slots",
-          slots + " slots exceeds the phase-1 draw budget of " + DRAW_BUDGET + " rects; this chip is not drawn");
+      var rects = chipRects(doc, c, true);
+      if (rects > DRAW_BUDGET) {
+        W("R23", "chips[" + c.id + "].macros",
+          ((c.macros || []).length) + " enumerated macros draw " + rects +
+          " rects with the duty overlay on, past the phase-1 draw budget of " +
+          DRAW_BUDGET + "; this chip is not drawn");
       }
     });
 
     return { errors: errors, warnings: warnings };
+  }
+
+  // ---- the drill/filter view rules (phase 2) --------------------------------
+  // Everything here is PURE: it decides what is drawn, never what a number is.
+  // A filter changes the picture and never a figure, and the hue map is built
+  // from the whole file so a filter can never repaint a group.
+
+  function makeIndex(doc) {
+    var ix = {
+      chip: byId(doc.chips), macro: byId(doc.macros), tile: byId(doc.tiles),
+      link: byId(doc.links), sys: byId(doc.systems), owner: {}
+    };
+    // owner tuple -> every tile that carries a piece of that ONE weight matrix,
+    // wherever it sits. It is what tells a reader whether a matrix composes
+    // inside one macro or chains across several (D11).
+    (doc.tiles || []).forEach(function (t) {
+      var key = ownerKey(t);
+      (ix.owner[key] = ix.owner[key] || []).push(t.id);
+    });
+    return ix;
+  }
+
+  function emptyFilter() { return { model: "", layer: "", group: "", pool: "", q: "" }; }
+  function filterActive(f) {
+    return !!(f && (f.model || f.layer || f.group || f.pool || f.q));
+  }
+
+  function layerKey(tile) {
+    var o = (tile && tile.owner) || {};
+    return o.layer == null ? "endpoint" : String(o.layer);
+  }
+  // The owner vocabulary a search may match: identities only. Occupancy, duty
+  // cycle and every other MEASURED number is deliberately absent - a search that
+  // matched digits would let a reader select by a value and read the selection
+  // as a fact about it.
+  function ownerText(doc, ix, tile) {
+    var o = (tile && tile.owner) || {};
+    var chip = ix.macro[tile.macro] ? ix.macro[tile.macro].chip : "";
+    return [
+      tile.id, tile.macro, chip, o.model, o.block,
+      o.layer == null ? "endpoint" : "layer " + o.layer,
+      o.expert == null ? "" : "expert " + o.expert,
+      tile.slice ? "slice " + tile.slice.index + "/" + tile.slice.of : "",
+      groupKey(tile) || ""
+    ].join(" ").toLowerCase();
+  }
+  function macroText(doc, ix, macro) {
+    return [macro.id, macro.chip, macro.card, macro.reserved || ""].join(" ").toLowerCase();
+  }
+  function chipText(doc, ix, chip) {
+    return [chip.id, chip.label || "", chip.system, chip.pool].join(" ").toLowerCase();
+  }
+
+  function tileMatches(doc, ix, tile, f) {
+    if (!filterActive(f)) return true;
+    var o = (tile && tile.owner) || {};
+    if (f.model && o.model !== f.model) return false;
+    if (f.layer && layerKey(tile) !== f.layer) return false;
+    if (f.group && groupKey(tile) !== f.group) return false;
+    if (f.pool) {
+      var macro = ix.macro[tile.macro], chip = macro && ix.chip[macro.chip];
+      if (!chip || chip.pool !== f.pool) return false;
+    }
+    if (f.q && ownerText(doc, ix, tile).indexOf(f.q.toLowerCase()) < 0) return false;
+    return true;
+  }
+
+  function macroMatches(doc, ix, macro, f) {
+    if (!filterActive(f)) return true;
+    var chip = ix.chip[macro.chip];
+    if (f.pool && (!chip || chip.pool !== f.pool)) return false;
+    var owned = (macro.tiles || []).map(function (id) { return ix.tile[id]; }).filter(Boolean);
+    // An owner filter is about tiles, so a macro holding none can only match on
+    // the axes that are its own: its pool and its text. It is still DRAWN either
+    // way - a reserved slot is an object, not a gap (D21).
+    var ownerish = !!(f.model || f.layer || f.group);
+    if (!owned.length) {
+      if (ownerish) return false;
+      return f.q ? macroText(doc, ix, macro).indexOf(f.q.toLowerCase()) >= 0 : true;
+    }
+    var hit = owned.some(function (t) { return tileMatches(doc, ix, t, f); });
+    if (hit) return true;
+    return !!(f.q && !f.model && !f.layer && !f.group &&
+      macroText(doc, ix, macro).indexOf(f.q.toLowerCase()) >= 0);
+  }
+
+  function chipMatches(doc, ix, chip, f) {
+    if (!filterActive(f)) return true;
+    if (f.pool && chip.pool !== f.pool) return false;
+    var ownerish = !!(f.model || f.layer || f.group);
+    if (!ownerish && f.q && chipText(doc, ix, chip).indexOf(f.q.toLowerCase()) >= 0) return true;
+    return (chip.macros || []).some(function (mid) {
+      var m = ix.macro[mid];
+      return m && macroMatches(doc, ix, m, f);
+    });
+  }
+
+  // The filter controls, built from the file itself so a filter can only ever
+  // name something the document contains.
+  function filterOptions(doc, ix) {
+    var models = {}, layers = {}, pools = {};
+    doc.systems.forEach(function (sy) {
+      (sy.models || []).forEach(function (m) { if (m && m.id != null) models[m.id] = true; });
+    });
+    doc.tiles.forEach(function (t) { layers[layerKey(t)] = true; });
+    doc.chips.forEach(function (c) { pools[c.pool] = true; });
+    var layerList = Object.keys(layers).sort(function (a, b) {
+      if (a === "endpoint") return 1;
+      if (b === "endpoint") return -1;
+      return (+a) - (+b);
+    });
+    return {
+      models: Object.keys(models).sort(),
+      layers: layerList,
+      groups: hueKeys(doc),
+      pools: Object.keys(pools).sort()
+    };
+  }
+
+  // ---- duty cycle (P4) ------------------------------------------------------
+  // The bar is drawn on the ABSOLUTE 0-1 scale, because a duty cycle is already
+  // a fraction of the period and rescaling it to the busiest macro would invent
+  // a second reading of the same number. dutyExtreme SELECTS the largest value
+  // in the file - it is a lookup, not an accounting - so the legend can say out
+  // loud why every bar on a real run is short.
+  function dutyExtreme(doc) {
+    var best = null;
+    (doc.macros || []).forEach(function (m) {
+      if (typeof m.duty_cycle === "number" && isFinite(m.duty_cycle)) {
+        if (best == null || m.duty_cycle > best.value) best = { id: m.id, value: m.duty_cycle };
+      }
+    });
+    return best;
+  }
+  function dutyState(macro) {
+    if (!macro || macro.duty_cycle == null) return "unknown";
+    return macro.duty_cycle > 0 ? "active" : "idle";
+  }
+  function hasDuty(doc) { return dutyExtreme(doc) != null; }
+
+  // ---- the macro column map (D11) -------------------------------------------
+  // Tiles that share ONE owner tuple are one weight matrix carried by several
+  // tiles: bit slices of it (D11), or row slabs of a K taller than the macro.
+  // They share a bracket. A bracket therefore never spans two owners - that is
+  // the whole claim it makes.
+  function ownerKey(tile) {
+    var o = (tile && tile.owner) || {};
+    return [o.model, o.layer == null ? "endpoint" : o.layer, o.block,
+            o.expert == null ? "-" : o.expert].join("/");
+  }
+  function macroTiles(doc, ix, macro) {
+    return (macro.tiles || []).map(function (id) { return ix.tile[id]; }).filter(Boolean)
+      .sort(function (a, b) { return a.columns.start - b.columns.start; });
+  }
+  function bracketsFor(doc, ix, macro) {
+    var tiles = macroTiles(doc, ix, macro);
+    var order = [], groups = {};
+    tiles.forEach(function (t) {
+      var k = ownerKey(t);
+      if (!groups[k]) { groups[k] = []; order.push(k); }
+      groups[k].push(t);
+    });
+    var out = [];
+    order.forEach(function (k) {
+      var list = groups[k];
+      var all = ix.owner[k] || list.map(function (t) { return t.id; });
+      var elsewhere = {};
+      all.forEach(function (id) {
+        var t = ix.tile[id];
+        if (t && t.macro !== macro.id) elsewhere[t.macro] = true;
+      });
+      var chained = Object.keys(elsewhere);
+      // A matrix that is one tile on one macro needs no bracket: there is
+      // nothing it composes with.
+      if (list.length < 2 && !chained.length) return;
+      var sliced = list.filter(function (t) { return t.slice != null; }).length;
+      var o = list[0].owner || {};
+      var what = sliced ? "bit slices (D11)" : (list.length > 1 ? "column sets" : "pieces");
+      out.push({
+        key: k,
+        kind: sliced ? "slice" : (list.length > 1 ? "row" : "chain"),
+        tiles: list.map(function (t) { return t.id; }),
+        of: all.length,
+        chained: chained.sort(),
+        start: Math.min.apply(null, list.map(function (t) { return t.columns.start; })),
+        end: Math.max.apply(null, list.map(function (t) { return t.columns.start + t.columns.count; })),
+        label: list.length + " of " + all.length + " " + what + " of " +
+          (o.layer == null ? "" : "layer " + o.layer + " ") + o.block +
+          (o.expert == null ? "" : " expert " + o.expert) +
+          (chained.length ? " \u00b7 chains across " + chained.length + " more macro" +
+            (chained.length === 1 ? "" : "s") : "")
+      });
+    });
+    return out;
+  }
+
+  // ---- containment, for breadcrumbs -----------------------------------------
+  function crumbs(doc, ix, view, chipId, macroId) {
+    var out = [{ level: "package", id: null, label: "Package" }];
+    var macro = view === "macro" ? ix.macro[macroId] : null;
+    var chip = ix.chip[macro ? macro.chip : chipId];
+    if (chip && (view === "chip" || view === "macro")) {
+      var sys = ix.sys[chip.system];
+      out.push({ level: "chip", id: chip.id, label: chip.id, note: sys ? sys.role : "" });
+    }
+    if (macro) out.push({ level: "macro", id: macro.id, label: macro.id });
+    return out;
+  }
+
+  // The stated draw budget, applied. Above it only the opened chip is drawn -
+  // and a chip that alone is past the budget is not drawn either, and says so.
+  //
+  // WAVE C AUDIT. The budget is stated in RECTS, so it is now COUNTED in rects.
+  // It used to be enforced against capacity.macro_slots, which undercounts by
+  // ~5x on every shipped document (a 640-slot chip emits ~3,160 rects), so a
+  // chip declaring 9,999 slots was admitted and drew ~50,000. These three
+  // counters mirror what drawPackage / drawChip / drawMacro actually emit;
+  // CHANGE A DRAWER, CHANGE ITS COUNTER - they sit next to the drawers'
+  // rect-per-object comments for exactly that reason.
+  function packageRects(doc) {
+    // drawPackage: one lane box per system when there is more than one, one
+    // pool box per (lane, pool) that holds chips, and 3 rects per chip (body,
+    // inner outline, label plate).
+    var pools = {};
+    doc.chips.forEach(function (c) { pools[c.system + "/" + c.pool] = true; });
+    var lanes = doc.systems.length > 1 ? doc.systems.length : 0;
+    return lanes + Object.keys(pools).length + doc.chips.length * 3;
+  }
+  function chipRects(doc, chip, duty) {
+    // drawChip, per macro: the macro rect, plus two duty rects when the
+    // overlay is on, plus - when the macro holds tiles - the column-strip base
+    // and one band per resident tile.
+    var ids = (chip && chip.macros) || [];
+    if (!ids.length) return 0;
+    var by = byId(doc.macros || []);
+    var total = ids.length * (1 + (duty ? 2 : 0));
+    for (var i = 0; i < ids.length; i++) {
+      var m = by[ids[i]];
+      var held = (m && m.tiles) ? m.tiles.length : 0;
+      if (held) total += 1 + held;
+    }
+    return total;
+  }
+  function macroRects(macro, duty) {
+    // drawMacro: the full-width track, one band per resident tile, and the two
+    // duty rects when the overlay is on. Brackets and the axis are paths and
+    // text, not rects.
+    return 1 + ((macro && macro.tiles) || []).length + (duty ? 2 : 0);
+  }
+  function chipDrawable(doc, chip) {
+    // Judged with the duty overlay ON: the overlay is the reader's own toggle,
+    // so the budget has to hold in the worst case the reader can ask for.
+    return chipRects(doc, chip, true) <= DRAW_BUDGET;
+  }
+  function drawnRects(doc, view, chip, macro, duty) {
+    if (view === "package") return packageRects(doc);
+    if (view === "chip") return chipRects(doc, chip, !!duty);
+    return macroRects(macro, !!duty);
+  }
+
+  // Systems are lanes in the package view; two of them is the PD picture (D16).
+  function systemLanes(doc) {
+    return doc.systems.map(function (sy) {
+      return {
+        system: sy,
+        chips: doc.chips.filter(function (c) { return c.system === sy.id; })
+      };
+    });
+  }
+  function crossSystemLinks(doc, ix) {
+    return doc.links.filter(function (l) {
+      var a = ix.chip[l.from], b = ix.chip[l.to];
+      return a && b && a.system !== b.system;
+    });
+  }
+  // Which system a metric measures (R28 guarantees the answer exists whenever
+  // the document holds more than one).
+  function metricSystem(doc, metric) {
+    if (!metric) return null;
+    if (metric.system != null) return metric.system;
+    var named = null;
+    if (isStr(metric.key)) {
+      doc.systems.forEach(function (sy) {
+        if (metric.key.indexOf(sy.id + ".") === 0 && (named == null || sy.id.length > named.length)) {
+          named = sy.id;
+        }
+      });
+    }
+    return named;
   }
 
   // ---- self-test: corrupt a copy once per rule, assert the refusal fires -----
@@ -607,7 +977,9 @@ var ATLAS = (function () {
     { rule: "R10", what: "a macro holds no tiles and names no reservation", expect: "\\.reserved$", mutate: function (d) { var m = firstReserved(d); if (m) m.reserved = null; } },
     { rule: "R11", what: "a tile owner names a block the model does not have", expect: "owner\\.block$", mutate: function (d) { d.tiles[0].owner.block = "mystery_proj"; } },
     { rule: "R12", what: "a tile's columns run past the macro's capacity", expect: "^tiles\\[.*\\]\\.columns$", mutate: function (d) { d.tiles[0].columns.start = 4000000; } },
-    { rule: "R13", what: "two tiles overlap on one macro", expect: "^tiles\\[.*\\]\\.columns$", mutate: function (d) { var m = firstMacroWith(d, 2), a = null, b = null; d.tiles.forEach(function (t) { if (t.macro === m.id) { if (!a) a = t; else if (!b) b = t; } }); if (b) b.columns.start = a.columns.start; } },
+    { rule: "R13", what: "two tiles overlap on one macro", expect: "^tiles\\[.*\\]\\.columns$",
+      needs: function (d) { return d.macros.some(function (m) { return (m.tiles || []).length >= 2; }); },
+      mutate: function (d) { var m = firstMacroWith(d, 2), a = null, b = null; d.tiles.forEach(function (t) { if (t.macro === m.id) { if (!a) a = t; else if (!b) b = t; } }); if (b) b.columns.start = a.columns.start; } },
     { rule: "R14", what: "shape.N disagrees with the column span", expect: "shape\\.N$", mutate: function (d) { d.tiles[0].shape.N = d.tiles[0].shape.N + 7; } },
     { rule: "R15", what: "shape.K exceeds the macro's rows", expect: "shape\\.K$", mutate: function (d) { d.tiles[0].shape.K = 999999; } },
     { rule: "R16", what: "declared macro occupancy disagrees with its spans", expect: "^macros\\[.*\\]\\.occupancy$", mutate: function (d) { firstMacroWith(d, 1).occupancy = 0.123; } },
@@ -627,19 +999,69 @@ var ATLAS = (function () {
     { rule: "R26", what: "a system role is outside the PD vocabulary", expect: "^systems\\[.*\\]\\.role$", mutate: function (d) { d.systems[0].role = "mixed"; } },
     { rule: "R27", what: "a duty cycle is outside [0, 1]", expect: "^macros\\[.*\\]\\.duty_cycle$", mutate: function (d) { d.macros[0].duty_cycle = 5.0; } },
     {
-      rule: "R23", warn: true, what: "a chip declares more slots than the phase-1 draw budget",
-      expect: "capacity\\.macro_slots$",
-      mutate: function (d) { d.chips[0].capacity.macro_slots = DRAW_BUDGET + 1; }
+      rule: "R29", what: "a pd handoff runs inside one system",
+      expect: "^links\\[.*\\]\\.role$",
+      needs: function (d) {
+        var sys = {};
+        d.chips.forEach(function (c) { sys[c.id] = c.system; });
+        return d.links.some(function (l) { return sys[l.from] && sys[l.from] === sys[l.to]; });
+      },
+      mutate: function (d) {
+        var sys = {};
+        d.chips.forEach(function (c) { sys[c.id] = c.system; });
+        for (var i = 0; i < d.links.length; i++) {
+          if (sys[d.links[i].from] && sys[d.links[i].from] === sys[d.links[i].to]) {
+            d.links[i].role = "pd";
+            return;
+          }
+        }
+      }
+    },
+    {
+      rule: "R29", what: "a PD document loses the handoff that couples its two systems",
+      expect: "^links\\[\\]\\.role$",
+      needs: function (d) { return d.systems.length > 1; },
+      mutate: function (d) {
+        d.links = d.links.filter(function (l) { return l.role !== "pd"; });
+      }
+    },
+    {
+      rule: "R28", what: "a metric in a two-system document says whose figure it is",
+      expect: "\\.system$",
+      needs: function (d) { return d.systems.length > 1; },
+      mutate: function (d) {
+        delete d.metrics[0].system;
+        d.metrics[0].key = "orphan_metric";
+      }
+    },
+    {
+      rule: "R23", warn: true, what: "a chip's grid would draw more rects than the phase-1 budget",
+      expect: "^chips\\[.*\\]\\.macros$",
+      mutate: function (d) {
+        var c = d.chips[0], extra = [];
+        for (var i = 0; i <= DRAW_BUDGET; i++) extra.push("ghost.mac." + i);
+        c.macros = c.macros.concat(extra);
+        c.capacity.macro_slots = c.macros.length;
+      }
     },
     {
       rule: "R22", warn: true, what: "more groups are co-visible than the validated palette holds",
       expect: "primary_group$",
+      needs: function (d) {
+        var held = {};
+        d.macros.forEach(function (m) { if ((m.tiles || []).length) held[m.chip] = true; });
+        return d.chips.filter(function (c) { return c.pool === "digital"; }).length >= 2 &&
+          d.chips.filter(function (c) { return c.pool === "analog" && held[c.id]; }).length >= 2;
+      },
       mutate: function (d) {
         var dig = d.chips.filter(function (c) { return c.pool === "digital"; });
         if (dig[0]) { dig[0].groups.ep = 1; dig[0].primary_group = "ep"; }
         if (dig[1]) { dig[1].groups.pp = 1; dig[1].primary_group = "pp"; }
-        var an = d.chips.filter(function (c) { return c.pool === "analog"; });
+        var held = {};
+        d.macros.forEach(function (m) { if ((m.tiles || []).length) held[m.chip] = true; });
+        var an = d.chips.filter(function (c) { return c.pool === "analog" && held[c.id]; });
         if (an[0]) retag(d, an[0].id, "tp", 7);
+        if (an[1]) retag(d, an[1].id, "tp", 8);
       }
     }
   ];
@@ -652,6 +1074,15 @@ var ATLAS = (function () {
       got: clean.errors.slice(0, 2).map(function (e) { return e.rule + " " + e.field; }).join("; ") || "no errors"
     });
     CORRUPTIONS.forEach(function (c) {
+      // A corruption that cannot be BUILT on this document proves nothing about
+      // it, and reporting it as a miss would read as a broken loader. It is
+      // reported as what it is: a rule this file gives the harness no way to
+      // exercise (no macro holds two tiles, no second digital chiplet exists).
+      if (c.needs && !c.needs(doc)) {
+        rows.push({ rule: c.rule, what: c.what, pass: true, skipped: true,
+          got: "not constructible on this document" });
+        return;
+      }
       var d = clone(doc);
       c.mutate(d);
       var r = validate(d);
@@ -666,12 +1097,147 @@ var ATLAS = (function () {
     return rows;
   }
 
+  // ---- the view rules, asserted on the loaded document ----------------------
+  // The refusal self-test proves the loader stops a wrong FILE. These prove the
+  // renderer keeps its own encoding law on a right one: one fact per channel,
+  // a filter that moves no number, a stated draw budget, and brackets that
+  // claim only what D11 says they claim.
+  function fillFor(doc, ix, macro, hue) {
+    if (!(macro.tiles || []).length) return "url(#p-res)";
+    if (hue == null) return "url(#p-over)";
+    return ramp(hue, macro.occupancy);
+  }
+
+  function viewTest(doc) {
+    var ix = makeIndex(doc);
+    var rows = [];
+    function row(rule, what, pass, got) { rows.push({ rule: rule, what: what, pass: !!pass, got: String(got) }); }
+
+    // V1 - hue is assigned from the whole file, so no filter repaints a group.
+    var base = JSON.stringify(hueMap(doc));
+    var opts = filterOptions(doc, ix);
+    var probes = [{ pool: "analog" }, { pool: "digital" }, { q: "lm_head" }];
+    if (opts.models[0]) probes.push({ model: opts.models[0] });
+    if (opts.groups[0]) probes.push({ group: opts.groups[0] });
+    if (opts.layers[0]) probes.push({ layer: opts.layers[0] });
+    var repainted = probes.filter(function (probe) {
+      var f = emptyFilter();
+      Object.keys(probe).forEach(function (k) { f[k] = probe[k]; });
+      doc.chips.forEach(function (c) { chipMatches(doc, ix, c, f); });
+      return JSON.stringify(hueMap(doc)) !== base;
+    });
+    row("V1", "no filter repaints a group: hue comes from the file, not from what is on screen",
+      repainted.length === 0, repainted.length ? JSON.stringify(repainted[0]) : probes.length + " filters, one hue map");
+
+    // V2 - duty cycle has its own channel and never borrows the group's.
+    row("V2", "the duty channel is drawn in one neutral ink that is not a group hue",
+      HUES.indexOf(DUTY_INK) < 0, DUTY_INK + " vs " + HUES.join(" "));
+
+    // V3 - the occupancy fill is occupancy and nothing else.
+    var probe = doc.macros.filter(function (m) { return (m.tiles || []).length; })[0] || doc.macros[0];
+    var hue = macroHue(doc, ix, probe);
+    var before = fillFor(doc, ix, probe, hue);
+    var moved = JSON.parse(JSON.stringify(probe));
+    moved.duty_cycle = moved.duty_cycle === 1 ? 0 : 1;
+    row("V3", "moving a macro's duty cycle does not move its occupancy fill",
+      fillFor(doc, ix, moved, hue) === before, before);
+
+    // V4 - the draw budget is stated and applied.
+    var fat = JSON.parse(JSON.stringify(doc.chips[0]));
+    for (var gi = 0; gi <= DRAW_BUDGET; gi++) fat.macros.push("ghost.mac." + gi);
+    fat.capacity.macro_slots = fat.macros.length;
+    row("V4", "a chip past the " + DRAW_BUDGET + "-rect draw budget is not drawn, and the others still are",
+      !chipDrawable(doc, fat) && doc.chips.every(function (c) { return chipDrawable(doc, c); }),
+      "budget " + DRAW_BUDGET);
+
+    // V5 - a slice bracket spans ONE weight matrix (D11).
+    var bad = null, brackets = 0;
+    doc.macros.forEach(function (m) {
+      bracketsFor(doc, ix, m).forEach(function (b) {
+        brackets++;
+        var keys = {};
+        b.tiles.forEach(function (id) { keys[ownerKey(ix.tile[id])] = true; });
+        var span = b.tiles.every(function (id) {
+          var t = ix.tile[id];
+          return t.columns.start >= b.start && t.columns.start + t.columns.count <= b.end;
+        });
+        if (Object.keys(keys).length !== 1 || !span) bad = bad || (m.id + " " + b.key);
+      });
+    });
+    row("V5", "every column-map bracket covers one owner tuple and its own tiles (D11)",
+      bad == null, bad || brackets + " brackets");
+
+    // V6 - breadcrumbs are containment, never a guess.
+    var held = doc.macros.filter(function (m) { return (m.tiles || []).length; })[0] || doc.macros[0];
+    var path = crumbs(doc, ix, "macro", null, held.id);
+    row("V6", "the breadcrumb of a macro is package -> its own chip -> itself",
+      path.length === 3 && path[1].id === held.chip && path[2].id === held.id,
+      path.map(function (c) { return c.label; }).join(" / "));
+
+    // V7 - owner search matches identities, never measurements.
+    // A measured value with a decimal point: "1" would be a substring of half
+    // the ids in the file and would prove nothing.
+    var measured = doc.macros.filter(function (m) {
+      return typeof m.duty_cycle === "number" && String(m.duty_cycle).indexOf(".") > 0;
+    })[0] || doc.macros.filter(function (m) {
+      return typeof m.occupancy === "number" && String(m.occupancy).indexOf(".") > 0;
+    })[0];
+    var needle = measured
+      ? String(measured.duty_cycle != null && String(measured.duty_cycle).indexOf(".") > 0
+          ? measured.duty_cycle : measured.occupancy)
+      : "";
+    var f7 = emptyFilter(); f7.q = needle;
+    var leaked = needle
+      ? doc.macros.filter(function (m) { return macroMatches(doc, ix, m, f7); }).length
+      : 0;
+    row("V7", "searching a measured value selects nothing: the search index is the owner vocabulary",
+      leaked === 0, "q = " + (needle || "(no measured value in this file)") + " -> " + leaked + " macros");
+
+    // V8 - one lane per system, and the PD handoff crosses between them (D16).
+    var lanes = systemLanes(doc);
+    var placed = lanes.reduce(function (n, lane) { return n + lane.chips.length; }, 0);
+    var crossing = crossSystemLinks(doc, ix);
+    var pdOk = doc.systems.length > 1
+      ? crossing.filter(function (l) { return l.role === "pd"; }).length === 1
+      : crossing.length === 0;
+    row("V8", "one lane per system, every chip in exactly one lane, and a PD pair joined by its handoff",
+      lanes.length === doc.systems.length && placed === doc.chips.length && pdOk,
+      lanes.length + " lane(s), " + placed + "/" + doc.chips.length + " chips, " + crossing.length + " crossing link(s)");
+
+    // V9 - a metric that names a system names one that exists.
+    var orphan = doc.metrics.filter(function (m) {
+      var id = metricSystem(doc, m);
+      return id != null && !ix.sys[id];
+    });
+    row("V9", "every metric that names a system names one this document has",
+      orphan.length === 0, orphan.length ? orphan[0].key : doc.metrics.length + " metrics");
+
+    return rows;
+  }
+
+  // The hue a macro draws with: its first tile's group, else its chip's.
+  function macroHue(doc, ix, macro) {
+    var tiles = macroTiles(doc, ix, macro);
+    var key = groupKey(tiles.length ? tiles[0] : ix.chip[macro.chip]);
+    return key == null ? null : hueMap(doc).hue[key];
+  }
+
   return {
     HUES: HUES, AXES: AXES, PAPER: PAPER, MUTED: MUTED, DRAW_BUDGET: DRAW_BUDGET,
     validate: validate, selfTest: selfTest, CORRUPTIONS: CORRUPTIONS,
     hueKeys: hueKeys, hueMap: hueMap, groupKey: groupKey, capacityOf: capacityOf, byId: byId,
     mix: mix, ramp: ramp, fmt: fmt, fmtBytes: fmtBytes, pct: pct,
-    inventedIndex: inventedIndex, isInvented: isInvented
+    inventedIndex: inventedIndex, isInvented: isInvented,
+    DUTY_INK: DUTY_INK, BAND_FLOOR_PX: BAND_FLOOR_PX,
+    viewTest: viewTest, makeIndex: makeIndex, emptyFilter: emptyFilter,
+    filterActive: filterActive, filterOptions: filterOptions, layerKey: layerKey,
+    tileMatches: tileMatches, macroMatches: macroMatches, chipMatches: chipMatches,
+    ownerKey: ownerKey, macroTiles: macroTiles, bracketsFor: bracketsFor,
+    crumbs: crumbs, chipDrawable: chipDrawable, drawnRects: drawnRects,
+    packageRects: packageRects, chipRects: chipRects, macroRects: macroRects,
+    systemLanes: systemLanes, crossSystemLinks: crossSystemLinks,
+    metricSystem: metricSystem, dutyExtreme: dutyExtreme, dutyState: dutyState,
+    hasDuty: hasDuty, fillFor: fillFor
   };
 })();
 // ==ATLAS-CORE-END==
@@ -681,7 +1247,11 @@ var ATLAS = (function () {
   if (typeof document === "undefined") return;
 
   var A = ATLAS;
-  var S = { doc: null, res: null, view: "package", chip: null, source: "", pinned: false, card: null, selftest: null };
+  var S = {
+    doc: null, res: null, ix: null, hue: null, view: "package", chip: null, macro: null,
+    source: "", pinned: false, card: null, selftest: null, duty: false,
+    filter: A.emptyFilter()
+  };
 
   var $ = function (id) { return document.getElementById(id); };
   function esc(s) {
@@ -724,7 +1294,9 @@ var ATLAS = (function () {
       li.push("<li><span class=\"c\">" + esc(w.rule) + " " + esc(w.field) + "</span> — " + esc(w.message) + "</li>");
     });
     host.innerHTML = '<div class="band ui"><h2>Relaxations disclosed — ' + li.length +
-      "</h2><ul>" + li.join("") + "</ul></div>";
+      (S.doc && S.doc.systems && S.doc.systems.length > 1
+        ? " · they apply across every system in this document" : "") +
+      '</h2><ul' + (li.length > 6 ? ' class="two"' : "") + ">" + li.join("") + "</ul></div>";
   }
 
   // ------------------------------------------------------------- metrics ----
@@ -741,8 +1313,11 @@ var ATLAS = (function () {
     order.forEach(function (k) {
       byKey[k].forEach(function (e) {
         var inv = A.isInvented(paths, "metrics", e.m, "value");
+        var sysId = S.doc.systems.length > 1 ? A.metricSystem(S.doc, e.m) : null;
+        var short = sysId && k.indexOf(sysId + ".") === 0 ? k.slice(sysId.length + 1) : k;
         out.push('<div class="metric ui" data-metric="' + e.i + '">' +
-          '<div class="k">' + esc(k) + (byKey[k].length > 1 ? " &middot; " + byKey[k].length + " figures" : "") + "</div>" +
+          '<div class="k">' + (sysId ? '<b>' + esc((S.ix.sys[sysId] || {}).role || sysId) + "</b> &middot; " : "") +
+          esc(short) + (byKey[k].length > 1 ? " &middot; " + byKey[k].length + " figures" : "") + "</div>" +
           '<div class="v">' + (inv ? '<span class="inv">◇</span> ' : "") + esc(A.fmt(e.m.value)) +
           "<small>" + esc(e.m.unit || "") + "</small></div>" +
           '<div class="l">' + esc(e.m.label) + "</div></div>");
@@ -761,31 +1336,147 @@ var ATLAS = (function () {
   // ---------------------------------------------------------------- toolbar --
   function renderBar() {
     var host = $("h-bar");
-    var chips = S.doc && !S.res.errors.length ? S.doc.chips : [];
+    var ok = S.doc && !S.res.errors.length;
+    var chips = ok ? S.doc.chips : [];
     var opts = chips.map(function (c) {
       return '<option value="' + esc(c.id) + '"' + (c.id === S.chip ? " selected" : "") + ">" +
         esc(c.id) + " — " + esc(c.label || "") + "</option>";
     }).join("");
-    host.innerHTML = '<div class="bar ui">' +
+    var f = S.filter;
+    var choices = ok ? A.filterOptions(S.doc, S.ix) : { models: [], layers: [], groups: [], pools: [] };
+    function sel(id, label, values, current, render) {
+      return '<label class="pick">' + esc(label) +
+        '<select id="' + id + '"><option value="">any</option>' +
+        values.map(function (v) {
+          return '<option value="' + esc(v) + '"' + (String(v) === String(current) ? " selected" : "") +
+            ">" + esc(render ? render(v) : v) + "</option>";
+        }).join("") + "</select></label>";
+    }
+    var dutyOn = A.hasDuty(S.doc || { macros: [] });
+    var rects = ok ? A.drawnRects(S.doc, S.view, S.ix.chip[S.chip], S.ix.macro[S.macro], S.duty) : 0;
+    var lines = [];
+    lines.push('<div class="bar ui">' +
       '<button id="b-pkg" aria-pressed="' + (S.view === "package") + '">Package</button>' +
       '<button id="b-chip" aria-pressed="' + (S.view === "chip") + '">Chip</button>' +
+      '<button id="b-macro" aria-pressed="' + (S.view === "macro") + '"' +
+      (S.macro ? "" : " disabled") + ">Macro</button>" +
       (chips.length ? '<select id="b-sel">' + opts + "</select>" : "") +
+      '<label class="chk"><input type="checkbox" id="b-duty"' + (S.duty ? " checked" : "") +
+      (dutyOn ? "" : " disabled") + "> duty cycle overlay" +
+      (dutyOn ? "" : " <span class=\"note\">— this file declares none</span>") + "</label>" +
       '<label class="file">Open atlas.json<input type="file" id="b-file" accept=".json,application/json"></label>' +
       '<button id="b-test">Self-test</button>' +
-      '<span class="note">phase-1 draw budget ' + A.DRAW_BUDGET.toLocaleString("en-US") +
-      " rects &middot; only the opened chip is drawn &middot; layout is deterministic from ids</span></div>";
+      '<span class="note">draw budget ' + A.DRAW_BUDGET.toLocaleString("en-US") +
+      " rects &middot; above it only the opened chip is drawn &middot; this view draws " +
+      rects.toLocaleString("en-US") + " &middot; layout is deterministic from ids</span></div>");
+    if (ok) {
+      lines.push('<div class="bar filt ui">' +
+        '<span class="tag">filter</span>' +
+        sel("f-model", "model", choices.models, f.model) +
+        sel("f-layer", "layer", choices.layers, f.layer) +
+        sel("f-group", "group", choices.groups, f.group, function (v) { return v.replace(":", " "); }) +
+        sel("f-pool", "pool", choices.pools, f.pool) +
+        '<label class="pick">owner search<input type="search" id="f-q" value="' + esc(f.q) +
+        '" placeholder="model / layer / block / expert / id"></label>' +
+        '<button id="f-clear"' + (A.filterActive(f) ? "" : " disabled") + ">Clear</button>" +
+        '<span class="note">' + selectionNote() + "</span></div>");
+    }
+    host.innerHTML = lines.join("");
 
-    var pkg = $("b-pkg"), chip = $("b-chip"), sel = $("b-sel");
-    if (pkg) pkg.addEventListener("click", function () { S.view = "package"; S.selftest = null; render(); });
-    if (chip) chip.addEventListener("click", function () { S.view = "chip"; S.selftest = null; render(); });
-    if (sel) sel.addEventListener("change", function () { S.chip = sel.value; S.view = "chip"; S.selftest = null; render(); });
+    var pkg = $("b-pkg"), chip = $("b-chip"), macro = $("b-macro"), pick = $("b-sel");
+    if (pkg) pkg.addEventListener("click", function () { go("package", null, null); });
+    if (chip) chip.addEventListener("click", function () { go("chip", S.chip, null); });
+    if (macro) macro.addEventListener("click", function () { go("macro", S.chip, S.macro); });
+    if (pick) pick.addEventListener("change", function () { go("chip", pick.value, null); });
+    var duty = $("b-duty");
+    if (duty) duty.addEventListener("change", function () { S.duty = duty.checked; S.selftest = null; render(); });
     $("b-file").addEventListener("change", function (e) {
       if (e.target.files && e.target.files[0]) readFile(e.target.files[0]);
     });
     $("b-test").addEventListener("click", function () {
-      S.selftest = S.doc ? A.selfTest(S.doc) : null;
+      S.selftest = S.doc ? { refusals: A.selfTest(S.doc), views: A.viewTest(S.doc) } : null;
       render();
     });
+    [["f-model", "model"], ["f-layer", "layer"], ["f-group", "group"], ["f-pool", "pool"]].forEach(function (pair) {
+      var node = $(pair[0]);
+      if (node) node.addEventListener("change", function () { S.filter[pair[1]] = node.value; S.selftest = null; render(); });
+    });
+    var q = $("f-q");
+    if (q) {
+      q.addEventListener("change", function () { S.filter.q = q.value; S.selftest = null; render(); });
+      q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.filter.q = q.value; S.selftest = null; render(); } });
+    }
+    var clear = $("f-clear");
+    if (clear) clear.addEventListener("click", function () { S.filter = A.emptyFilter(); S.selftest = null; render(); });
+  }
+
+  // A SELECTION count: how many drawn objects the filter picks out. It is a
+  // fact about the picture, never about the machine — no figure in the metric
+  // strip moves when a filter does (D21).
+  function selectionNote() {
+    if (!A.filterActive(S.filter)) return "no filter: every object draws at full strength";
+    var d = S.doc, n = 0, total = 0;
+    if (S.view === "package") {
+      total = d.chips.length;
+      d.chips.forEach(function (c) { if (A.chipMatches(d, S.ix, c, S.filter)) n++; });
+      return "selects " + n + " of " + total + " chips — the rest still draw, dimmed. A selection count, not a figure";
+    }
+    if (S.view === "macro") {
+      var macro = S.ix.macro[S.macro];
+      A.macroTiles(d, S.ix, macro || { tiles: [] }).forEach(function (t) {
+        total++;
+        if (A.tileMatches(d, S.ix, t, S.filter)) n++;
+      });
+      return "selects " + n + " of " + total + " tiles on this macro — the rest still draw, dimmed. A selection count, not a figure";
+    }
+    var chip = S.ix.chip[S.chip];
+    (chip ? chip.macros || [] : []).forEach(function (mid) {
+      var m = S.ix.macro[mid];
+      if (!m) return;
+      total++;
+      if (A.macroMatches(d, S.ix, m, S.filter)) n++;
+    });
+    return "selects " + n + " of " + total + " macros on this chip — the rest still draw, dimmed. A selection count, not a figure";
+  }
+
+  // ------------------------------------------------------------ breadcrumbs --
+  function renderCrumbs() {
+    var host = $("h-crumbs");
+    if (!S.doc || S.res.errors.length || S.selftest) { host.innerHTML = ""; return; }
+    var path = A.crumbs(S.doc, S.ix, S.view, S.chip, S.macro);
+    var parts = path.map(function (c, i) {
+      var last = i === path.length - 1;
+      var label = esc(c.label) + (c.note ? ' <span class="note">' + esc(c.note) + "</span>" : "");
+      return last
+        ? '<span class="here">' + label + "</span>"
+        : '<a href="#" data-crumb="' + esc(c.level) + '" data-id="' + esc(c.id == null ? "" : c.id) + '">' + label + "</a>";
+    });
+    host.innerHTML = '<nav class="crumbs ui">' + parts.join('<span class="sep">&rsaquo;</span>') + "</nav>";
+    Array.prototype.forEach.call(host.querySelectorAll("[data-crumb]"), function (n) {
+      n.addEventListener("click", function (e) {
+        e.preventDefault();
+        var level = n.getAttribute("data-crumb"), id = n.getAttribute("data-id");
+        if (level === "package") go("package", null, null);
+        else go("chip", id, null);
+      });
+    });
+  }
+
+  // Descend / ascend. Containment only: a view knows its chip and its macro,
+  // and nothing else about where the reader has been.
+  function go(view, chipId, macroId) {
+    S.view = view;
+    S.selftest = null;
+    S.pinned = false;
+    if (chipId != null) S.chip = chipId;
+    S.macro = macroId == null ? (view === "macro" ? S.macro : null) : macroId;
+    if (view === "macro" && S.macro && S.ix.macro[S.macro]) S.chip = S.ix.macro[S.macro].chip;
+    render();
+    // Descending keeps the card of the thing you descended INTO. Rendering
+    // resets the rail to the system card, which would throw away the one card
+    // the click was about.
+    if (view === "macro" && S.ix.macro[S.macro]) { S.pinned = true; showCard(macroCard(S.ix.macro[S.macro])); }
+    else if (view === "chip" && S.ix.chip[S.chip]) { S.pinned = true; showCard(chipCard(S.ix.chip[S.chip])); }
   }
 
   // ----------------------------------------------------------------- SVG -----
@@ -806,33 +1497,58 @@ var ATLAS = (function () {
 
   function hueOf(obj) { var k = A.groupKey(obj); return k == null ? null : S.hue.hue[k]; }
 
-  // Package view: chips clustered by pool, links weighted by bytes.
+  // Package view: one LANE per system (two of them is the PD picture, D16),
+  // chips clustered by pool inside it, links weighted by bytes.
   function drawPackage() {
     var d = S.doc;
-    var CW = 158, CH = 106, GAP = 18, PAD = 14, HEADER = 22;
-    var pools = ["analog", "digital"];
-    var boxes = [], pos = {}, x = PAD;
-    var maxRows = 1;
-    pools.forEach(function (p) {
-      var list = d.chips.filter(function (c) { return c.pool === p; });
-      if (!list.length) return;
-      var cols = Math.min(4, Math.ceil(Math.sqrt(list.length)));
-      var rows = Math.ceil(list.length / cols);
-      maxRows = Math.max(maxRows, rows);
-      var bw = cols * CW + (cols - 1) * GAP + 2 * PAD;
-      var bh = rows * CH + (rows - 1) * GAP + 2 * PAD + HEADER;
-      boxes.push({ pool: p, x: x, y: 0, w: bw, h: bh, n: list.length });
-      list.forEach(function (c, i) {
-        var r = Math.floor(i / cols), q = i % cols;
-        pos[c.id] = { x: x + PAD + q * (CW + GAP), y: PAD + HEADER + r * (CH + GAP), w: CW, h: CH };
+    var CW = 158, CH = 106, GAP = 18, PAD = 14, HEADER = 22, LANE_HEAD = 34, LANE_GAP = 54;
+    var lanes = A.systemLanes(d);
+    var boxes = [], laneBoxes = [], pos = {}, x = PAD, maxH = 0;
+    lanes.forEach(function (lane) {
+      var laneX = x, laneW = 0, laneH = 0;
+      ["analog", "digital"].forEach(function (p) {
+        var list = lane.chips.filter(function (c) { return c.pool === p; });
+        if (!list.length) return;
+        var cols = Math.min(4, Math.ceil(Math.sqrt(list.length)));
+        var rows = Math.ceil(list.length / cols);
+        var bw = cols * CW + (cols - 1) * GAP + 2 * PAD;
+        var bh = rows * CH + (rows - 1) * GAP + 2 * PAD + HEADER;
+        boxes.push({ pool: p, x: x, y: LANE_HEAD, w: bw, h: bh, n: list.length });
+        list.forEach(function (c, i) {
+          var r = Math.floor(i / cols), q = i % cols;
+          pos[c.id] = {
+            x: x + PAD + q * (CW + GAP),
+            y: LANE_HEAD + PAD + HEADER + r * (CH + GAP), w: CW, h: CH
+          };
+        });
+        x += bw + 30;
+        laneW += bw + 30;
+        laneH = Math.max(laneH, bh);
       });
-      x += bw + 44;
+      laneW = Math.max(0, laneW - 30);
+      laneBoxes.push({ lane: lane, x: laneX, w: laneW, h: laneH + LANE_HEAD });
+      maxH = Math.max(maxH, laneH + LANE_HEAD);
+      x += LANE_GAP;
     });
-    var W = x - 44 + PAD, H = Math.max.apply(null, boxes.map(function (b) { return b.h; })) + PAD;
+    var W = x - LANE_GAP + PAD, H = maxH + PAD;
 
     var maxBytes = Math.max.apply(null, d.links.map(function (l) { return l.bytes || 0; }).concat([1]));
     var s = [];
     s.push(svgDefs());
+    // the lane frame: only drawn when the document holds more than one system,
+    // because a single system IS the package and a frame around it says nothing
+    if (laneBoxes.length > 1) {
+      laneBoxes.forEach(function (b) {
+        var sy = b.lane.system;
+        s.push('<rect x="' + (b.x - 8) + '" y="0" width="' + (b.w + 16) + '" height="' + (b.h + 8) +
+          '" rx="9" fill="#ffffff" stroke="#d5dfe4"/>');
+        s.push('<text class="ui" x="' + b.x + '" y="15" font-size="11.5" font-weight="700" fill="#1c2a33">' +
+          esc(sy.role.toUpperCase() + " SYSTEM") + "</text>");
+        s.push('<text class="ui" x="' + b.x + '" y="28" font-size="10.5" fill="#5f7280">' +
+          esc(sy.id + " · " + (sy.label || "") + " · phase " + sy.phase + " · " +
+            A.AXES.map(function (a) { return a + " " + ((sy.parallelism || {})[a]); }).join("/")) + "</text>");
+      });
+    }
     boxes.forEach(function (b) {
       s.push('<rect x="' + b.x + '" y="' + b.y + '" width="' + b.w + '" height="' + b.h +
         '" rx="7" fill="none" stroke="#e6ecef"/>');
@@ -849,8 +1565,14 @@ var ATLAS = (function () {
       s.push('<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
         '" stroke="' + A.PAPER + '" stroke-width="' + (w + 3.5) + '" stroke-linecap="round"/>');
       s.push('<line class="hit" data-link="' + esc(l.id) + '" x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
-        '" stroke="#4a5c68" stroke-width="' + w + '" stroke-linecap="round" stroke-dasharray="' + roleDash(l.role) +
+        '" stroke="' + (l.role === "pd" ? "#1c2a33" : "#4a5c68") + '" stroke-width="' + w +
+        '" stroke-linecap="round" stroke-dasharray="' + roleDash(l.role) +
         '" style="cursor:pointer"><title>' + esc(l.role + " · " + A.fmtBytes(l.bytes) + " per " + (l.per || "")) + "</title></line>");
+      if (l.role === "pd") {
+        s.push('<text class="ui" x="' + ((x1 + x2) / 2) + '" y="' + ((y1 + y2) / 2 - 7) +
+          '" text-anchor="middle" font-size="10.5" fill="#1c2a33">handoff ' +
+          esc(A.fmtBytes(l.bytes).split(" (")[0]) + " / " + esc(l.per || "") + "</text>");
+      }
     });
 
     d.chips.forEach(function (c) {
@@ -858,7 +1580,8 @@ var ATLAS = (function () {
       var hue = hueOf(c);
       var fill = hue == null ? "url(#p-over)" : A.ramp(hue, c.occupancy);
       var stroke = hue == null ? A.MUTED : hue;
-      s.push('<g data-chip="' + esc(c.id) + '" style="cursor:pointer">');
+      var dim = !A.chipMatches(d, S.ix, c, S.filter);
+      s.push('<g data-chip="' + esc(c.id) + '" style="cursor:pointer"' + (dim ? ' opacity="0.22"' : "") + ">");
       s.push('<rect x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + p.h +
         '" rx="5" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.4"' + poolDash(c.pool) + "/>");
       // the identity plate: the fill carries occupancy, so the label gets its own ground
@@ -875,19 +1598,18 @@ var ATLAS = (function () {
       s.push("<title>" + esc(c.id + " — " + (c.label || "")) + "</title></g>");
     });
 
-    return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="min-width:' + Math.min(W, 720) + 'px">' + s.join("") + "</svg></div>";
+    return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="width:' + Math.min(W, 1100) + "px;max-width:" + W + 'px">' + s.join("") + "</svg></div>";
   }
 
   // Chip view: the macro grid, ordered by id.
   function drawChip() {
     var d = S.doc;
-    var chip = null;
-    d.chips.forEach(function (c) { if (c.id === S.chip) chip = c; });
+    var chip = S.ix.chip[S.chip];
     if (!chip) return '<p class="ui">No chip selected.</p>';
-    var slots = (chip.capacity && chip.capacity.macro_slots) || 0;
-    if (slots > A.DRAW_BUDGET) {
-      return '<p class="ui">' + esc(chip.id) + " declares " + slots +
-        " slots, past the phase-1 draw budget of " + A.DRAW_BUDGET + " rects. Not drawn.</p>";
+    if (!A.chipDrawable(d, chip)) {
+      return '<p class="ui">' + esc(chip.id) + " declares " +
+        ((chip.capacity && chip.capacity.macro_slots) || 0) +
+        " slots, past the draw budget of " + A.DRAW_BUDGET + " rects. Not drawn.</p>";
     }
     var ids = (chip.macros || []).slice().sort();
     var n = ids.length;
@@ -896,51 +1618,177 @@ var ATLAS = (function () {
     var CW = 46, GAP = 6, PAD = 12, HEADER = 30;
     var W = cols * CW + (cols - 1) * GAP + 2 * PAD;
     var H = rows * CW + (rows - 1) * GAP + 2 * PAD + HEADER;
-    var mById = A.byId(d.macros), tById = A.byId(d.tiles);
+    var sys = S.ix.sys[chip.system];
     var s = [svgDefs()];
     s.push('<text class="mono" x="' + PAD + '" y="16" font-size="11.5" fill="#1c2a33">' + esc(chip.id) + "</text>");
     s.push('<text class="ui" x="' + PAD + '" y="30" font-size="10.5" fill="#5f7280">' +
-      esc((chip.label || "") + " · " + chip.pool + " pool · " + n + " slots · occupancy " + A.pct(chip.occupancy)) + "</text>");
+      esc((chip.label || "") + " · " + chip.pool + " pool · " + n + " slots · occupancy " + A.pct(chip.occupancy) +
+        (sys ? " · " + sys.role + " system" : "")) + "</text>");
 
     ids.forEach(function (mid, i) {
-      var m = mById[mid];
+      var m = S.ix.macro[mid];
       var r = Math.floor(i / cols), q = i % cols;
       var x = PAD + q * (CW + GAP), y = PAD + HEADER + r * (CW + GAP);
       if (!m) {
         s.push('<rect x="' + x + '" y="' + y + '" width="' + CW + '" height="' + CW + '" rx="3" fill="url(#p-unk)" stroke="' + A.MUTED + '"/>');
         return;
       }
-      var tiles = (m.tiles || []).map(function (t) { return tById[t]; }).filter(Boolean);
+      var tiles = A.macroTiles(d, S.ix, m);
       var lead = tiles.slice().sort(function (a, b) { return a.id < b.id ? -1 : 1; })[0];
       var hue = lead ? hueOf(lead) : hueOf(chip);
       var reserved = !tiles.length;
-      var fill = reserved ? "url(#p-res)" : (hue == null ? "url(#p-over)" : A.ramp(hue, m.occupancy));
+      var fill = A.fillFor(d, S.ix, m, hue);
       var stroke = reserved ? "#c2ced5" : (hue == null ? A.MUTED : hue);
-      s.push('<g data-macro="' + esc(m.id) + '" style="cursor:pointer">');
+      var dim = !A.macroMatches(d, S.ix, m, S.filter);
+      s.push('<g data-macro="' + esc(m.id) + '" style="cursor:pointer"' + (dim ? ' opacity="0.22"' : "") + ">");
       s.push('<rect x="' + x + '" y="' + y + '" width="' + CW + '" height="' + CW + '" rx="3" fill="' + fill +
         '" stroke="' + stroke + '" stroke-width="1.2"' + poolDash(chip.pool) + "/>");
+      // the DUTY CHANNEL: its own bar on its own edge, in its own neutral ink,
+      // on the absolute 0-1 scale. It never touches the occupancy fill and it
+      // never becomes a hue (P5's encoding law).
+      if (S.duty) s.push(dutyBar(m, x + 4, y + 4, CW - 8));
       // the column strip: position is the column offset inside the macro
       var cap = A.capacityOf(d, m);
       if (cap && cap.stored_cols && tiles.length) {
-        var sx = x + 4, sw = CW - 8, sy = y + CW - 9;
-        s.push('<rect x="' + sx + '" y="' + sy + '" width="' + sw + '" height="5" rx="1" fill="#ffffff" opacity="0.75"/>');
+        var sx = x + 4, sw = CW - 8, sy2 = y + CW - 9;
+        s.push('<rect x="' + sx + '" y="' + sy2 + '" width="' + sw + '" height="5" rx="1" fill="#ffffff" opacity="0.75"/>');
         tiles.forEach(function (t) {
           var th = hueOf(t);
           var a = sx + (t.columns.start / cap.stored_cols) * sw;
           var w = Math.max(1, (t.columns.count / cap.stored_cols) * sw);
-          s.push('<rect x="' + a + '" y="' + sy + '" width="' + w + '" height="5" rx="1" fill="' + (th || "#8497a2") + '"/>');
+          s.push('<rect x="' + a + '" y="' + sy2 + '" width="' + w + '" height="5" rx="1" fill="' + (th || "#8497a2") + '"/>');
         });
       }
-      s.push("<title>" + esc(m.id + (reserved ? " — reserved" : " — occupancy " + A.pct(m.occupancy) + ", " + tiles.length + " tile(s)")) + "</title>");
+      s.push("<title>" + esc(m.id + (reserved ? " — reserved" : " — occupancy " + A.pct(m.occupancy) + ", " + tiles.length + " tile(s)") +
+        (S.duty ? " · duty " + (m.duty_cycle == null ? "unknown" : A.pct(m.duty_cycle)) : "")) + "</title>");
       s.push("</g>");
     });
-    return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="min-width:' + Math.min(W, 640) + 'px">' + s.join("") + "</svg></div>";
+    return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="width:' + Math.min(W, 1100) + "px;max-width:" + W + 'px">' + s.join("") + "</svg></div>";
+  }
+
+  // One macro's duty cycle, drawn on the absolute 0-1 scale. A file that
+  // declares none draws the unknown hatch: an absent measurement is not zero.
+  function dutyBar(m, x, y, w) {
+    var out = ['<rect x="' + x + '" y="' + y + '" width="' + w + '" height="4" rx="1" fill="#ffffff" opacity="0.85" stroke="#d5dfe4" stroke-width="0.5"/>'];
+    if (m.duty_cycle == null) {
+      out.push('<rect x="' + x + '" y="' + y + '" width="' + w + '" height="4" rx="1" fill="url(#p-unk)"/>');
+      return out.join("");
+    }
+    var t = Math.max(0, Math.min(1, m.duty_cycle));
+    if (t > 0) {
+      out.push('<rect x="' + x + '" y="' + y + '" width="' + Math.max(A.BAND_FLOOR_PX, t * w) +
+        '" height="4" rx="1" fill="' + A.DUTY_INK + '"/>');
+    }
+    return out.join("");
+  }
+
+  // Macro view: the column map. One band per resident tile, positioned at its
+  // own column offset; tiles that carry ONE weight matrix share a bracket (D11).
+  function drawMacro() {
+    var d = S.doc;
+    var m = S.ix.macro[S.macro];
+    if (!m) return '<p class="ui">No macro selected. Open a chip and click a macro.</p>';
+    var cap = A.capacityOf(d, m) || {};
+    var stored = cap.stored_cols || 1;
+    var tiles = A.macroTiles(d, S.ix, m);
+    var brackets = A.bracketsFor(d, S.ix, m);
+    var PAD = 14, W = 900, TRACK = 58, LANE = 24;
+    var lanes = brackets.length;
+    // an empty macro spends its bracket lane on the reservation line instead
+    var top = 46 + lanes * LANE + (tiles.length ? 0 : 14);
+    var H = top + TRACK + 74;
+    var x0 = PAD, w0 = W - 2 * PAD;
+    function px(col) { return x0 + (col / stored) * w0; }
+    var s = [svgDefs()];
+    s.push('<text class="mono" x="' + PAD + '" y="16" font-size="11.5" fill="#1c2a33">' + esc(m.id) + "</text>");
+    s.push('<text class="ui" x="' + PAD + '" y="30" font-size="10.5" fill="#5f7280">' +
+      esc("on " + m.chip + " · card " + m.card + " · " + cap.rows + " rows × " + stored +
+        " stored columns · occupancy " + A.pct(m.occupancy) +
+        " · duty " + (m.duty_cycle == null ? "unknown" : A.fmt(m.duty_cycle))) + "</text>");
+
+    // brackets, one lane each, above the track. The label sits above its own
+    // bracket and is clamped into the box: a caption that runs off the edge is
+    // a caption the reader does not get.
+    brackets.forEach(function (b, i) {
+      var lane = 40 + i * LANE;
+      var y = lane + 11;
+      var a = px(b.start), z = px(b.end);
+      s.push('<path d="M' + a + " " + (y + 9) + "V" + y + "H" + z + "V" + (y + 9) +
+        '" fill="none" stroke="' + (b.kind === "slice" ? "#1c2a33" : "#8497a2") +
+        '" stroke-width="' + (b.kind === "slice" ? 1.5 : 1) + '"/>');
+      var est = b.label.length * 5.1;
+      var lx = Math.max(PAD, Math.min(a, W - PAD - est));
+      s.push('<text class="ui" x="' + lx + '" y="' + (lane + 7) + '" font-size="10" fill="#5f7280">' +
+        esc(b.label) + "</text>");
+    });
+
+    // A macro with no tiles is still a drawn object with a NAMED owner (D21):
+    // the column map is empty and the reservation says why.
+    if (!tiles.length) {
+      s.push('<text class="ui" x="' + PAD + '" y="' + (top - 8) + '" font-size="10.5" fill="#5f7280">' +
+        esc("no tiles — reserved: " + (m.reserved || "(unnamed)")) + "</text>");
+    }
+    // the track: every stored column of the macro, whether or not a tile holds it
+    s.push('<rect x="' + x0 + '" y="' + top + '" width="' + w0 + '" height="' + TRACK +
+      '" rx="3" fill="url(#p-unk)" stroke="#d5dfe4"/>');
+    tiles.forEach(function (t) {
+      var a = px(t.columns.start);
+      var w = Math.max(A.BAND_FLOOR_PX, (t.columns.count / stored) * w0);
+      var hue = hueOf(t) || "#8497a2";
+      var dim = !A.tileMatches(d, S.ix, t, S.filter);
+      s.push('<g data-tile="' + esc(t.id) + '" style="cursor:pointer"' + (dim ? ' opacity="0.22"' : "") + ">");
+      s.push('<rect x="' + a + '" y="' + top + '" width="' + w + '" height="' + TRACK +
+        '" rx="2" fill="' + hue + '" stroke="#ffffff" stroke-width="0.75"/>');
+      if (w > 54) {
+        var o = t.owner || {};
+        s.push('<text class="ui" x="' + (a + 5) + '" y="' + (top + 17) + '" font-size="10.5" fill="#ffffff">' +
+          esc(o.block + (o.layer == null ? "" : " L" + o.layer)) + "</text>");
+        s.push('<text class="ui" x="' + (a + 5) + '" y="' + (top + 31) + '" font-size="10" fill="#ffffff" opacity="0.88">' +
+          esc(t.shape.K + "×" + t.shape.N) + "</text>");
+        if (t.slice) {
+          s.push('<text class="ui" x="' + (a + 5) + '" y="' + (top + 45) + '" font-size="10" fill="#ffffff" opacity="0.88">' +
+            esc("slice " + t.slice.index + "/" + t.slice.of) + "</text>");
+        }
+      }
+      s.push("<title>" + esc(t.id + " — columns [" + t.columns.start + ", " +
+        (t.columns.start + t.columns.count) + ")") + "</title></g>");
+    });
+
+    // the column axis: the only positions on screen are column offsets
+    var yAxis = top + TRACK + 16;
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+      var col = Math.round(f * stored);
+      s.push('<line x1="' + px(col) + '" y1="' + (top + TRACK) + '" x2="' + px(col) + '" y2="' + (yAxis - 8) +
+        '" stroke="#c8d4da"/>');
+      s.push('<text class="mono" x="' + px(col) + '" y="' + yAxis + '" font-size="10" fill="#8497a2" text-anchor="' +
+        (f === 0 ? "start" : f === 1 ? "end" : "middle") + '">' + col + "</text>");
+    });
+    s.push('<text class="ui" x="' + x0 + '" y="' + (yAxis + 16) + '" font-size="10.5" fill="#8497a2">' +
+      esc("stored column offset · hatch = columns no tile holds (unowned capacity is legal and reported, ADJ-5)") +
+      "</text>");
+    if (S.duty) {
+      s.push('<text class="ui" x="' + x0 + '" y="' + (yAxis + 32) + '" font-size="10.5" fill="' + A.DUTY_INK + '">' +
+        esc(m.duty_cycle == null
+          ? "duty cycle unknown — this document declares none for this macro"
+          : "duty cycle " + A.fmt(m.duty_cycle) + " — the fraction of the period this macro is " +
+            "active, drawn on the absolute 0–1 scale") + "</text>");
+      s.push(dutyBar(m, x0, yAxis + 38, w0));
+    }
+    return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="width:' + Math.min(W, 1100) + "px;max-width:" + W + 'px">' + s.join("") + "</svg></div>";
   }
 
   // ----------------------------------------------------------------- cards ---
   function meter(v, hue) {
     var t = Math.max(0, Math.min(1, v == null ? 0 : v));
     return '<div class="meter"><i style="width:' + (t * 100) + "%;background:" + (hue || A.MUTED) + '"></i></div>';
+  }
+  // The duty bar in a card: the SAME absolute 0-1 scale and the SAME neutral
+  // ink as the overlay, so one number reads one way wherever it appears.
+  function dutyMeter(v) {
+    var t = Math.max(0, Math.min(1, v == null ? 0 : v));
+    return '<div class="meter" title="absolute 0–1 scale"><i style="width:' +
+      (t > 0 ? Math.max(0.6, t * 100) : 0) + "%;background:" + A.DUTY_INK + '"></i></div>' +
+      '<span class="hintline" style="display:block">fraction of the period this macro is active — absolute 0–1 scale</span>';
   }
   function invMark(paths, coll, obj, field) {
     return A.isInvented(paths, coll, obj, field) ? '<span class="inv" title="fixture-invented value">◇</span> ' : "";
@@ -965,7 +1813,10 @@ var ATLAS = (function () {
       esc(cap.rows + " rows × " + cap.cols_adc + " ADC × " + cap.mux + " mux = " + cap.stored_cols + " stored columns") + "</span></dd>");
     h.push("<dt>area</dt><dd>" + (card.area_mm2 == null ? '<span style="color:#8497a2">unknown — no run supplies it</span>' : esc(A.fmt(card.area_mm2)) + " mm²") + "</dd>");
     h.push("<dt>occupancy</dt><dd>" + invMark(paths, "macros", m, "occupancy") + esc(A.pct(m.occupancy)) + meter(m.occupancy, hue) + "</dd>");
-    h.push("<dt>duty cycle</dt><dd>" + invMark(paths, "macros", m, "duty_cycle") + esc(A.fmt(m.duty_cycle)) + meter(m.duty_cycle, hue) + "</dd>");
+    h.push("<dt>duty cycle</dt><dd>" + invMark(paths, "macros", m, "duty_cycle") +
+      (m.duty_cycle == null
+        ? '<span style="color:#8497a2">unknown — this document declares none (P4 owns it)</span>'
+        : esc(A.fmt(m.duty_cycle)) + dutyMeter(m.duty_cycle)) + "</dd>");
     if (m.digital_pool) {
       h.push("<dt>per-macro digital pool (D12)</dt><dd>" + invMark(paths, "macros", m, "digital_pool") +
         esc(m.digital_pool.shift_add_units + " shift/add units · " + m.digital_pool.act_lanes + " activation lanes · " +
@@ -991,6 +1842,44 @@ var ATLAS = (function () {
       });
       h.push("</table>");
       h.push('<p class="hintline">Gaps in the column strip are columns no tile spans. Unowned capacity is legal and reported (ADJ-5).</p>');
+      var brackets = A.bracketsFor(d, S.ix, m);
+      if (brackets.length) {
+        h.push('<div class="ttl" style="margin-top:.7rem">column map brackets — ' + brackets.length + "</div>");
+        h.push("<ul style=\"margin:.2rem 0 0;padding-left:1.05rem;font-size:11.5px\">");
+        brackets.forEach(function (b) {
+          h.push("<li>" + esc(b.label) +
+            (b.chained.length ? ' <span class="mono" style="font-size:10.5px">' + esc(b.chained.join(" ")) + "</span>" : "") +
+            "</li>");
+        });
+        h.push("</ul>");
+      }
+      h.push('<p class="hintline">Open the Macro view for the full column map and its brackets (D11).</p>');
+    }
+    return h.join("");
+  }
+
+  function tileCard(t) {
+    var d = S.doc, paths = A.inventedIndex(d);
+    var o = t.owner || {};
+    var macro = S.ix.macro[t.macro];
+    var siblings = (S.ix.owner[A.ownerKey(t)] || []).filter(function (id) { return id !== t.id; });
+    var h = ['<div class="ttl">tile</div><div class="idl mono">' + esc(t.id) + "</div><dl>"];
+    h.push("<dt>owner</dt><dd>" + esc(o.model) + "<br>" +
+      esc((o.layer == null ? "endpoint" : "layer " + o.layer) + " · " + o.block +
+        (o.expert == null ? "" : " · expert " + o.expert)) + "</dd>");
+    h.push("<dt>shape</dt><dd>" + esc(t.shape.K + " × " + t.shape.N) + " — this tile, not the whole matrix</dd>");
+    h.push("<dt>columns</dt><dd>" + invMark(paths, "tiles", t, "columns") +
+      esc("[" + t.columns.start + ", " + (t.columns.start + t.columns.count) + ") of " +
+        ((A.capacityOf(d, macro) || {}).stored_cols || "?")) + "</dd>");
+    h.push("<dt>slice</dt><dd>" + (t.slice
+      ? esc("slice " + t.slice.index + " of " + t.slice.of + " · " + t.slice.bits + " bits per cell (D11)")
+      : '<span style="color:#8497a2">none — this card stores whole weight words</span>') + "</dd>");
+    h.push("<dt>group</dt><dd>" + groupWords(t) + "</dd>");
+    h.push("<dt>host</dt><dd class=\"mono\">" + esc(t.macro + " · " + (macro ? macro.chip : "?")) + "</dd>");
+    h.push("</dl>");
+    if (siblings.length) {
+      h.push('<p class="hintline">This weight matrix is carried by ' + (siblings.length + 1) +
+        " tiles sharing one owner tuple; the column map brackets them (D11).</p>");
     }
     return h.join("");
   }
@@ -1033,7 +1922,11 @@ var ATLAS = (function () {
 
   function metricCard(m) {
     var paths = A.inventedIndex(S.doc);
+    var sysId = A.metricSystem(S.doc, m);
     return ['<div class="ttl">metric</div><div class="idl mono">' + esc(m.key) + "</div><dl>",
+      (S.doc.systems.length > 1
+        ? "<dt>system</dt><dd class=\"mono\">" + esc(sysId || "—") +
+          "</dd>" : ""),
       "<dt>figure</dt><dd>" + esc(m.label) + "</dd>",
       "<dt>value</dt><dd>" + invMark(paths, "metrics", m, "value") + esc(A.fmt(m.value)) + " " + esc(m.unit || "") + "</dd>",
       "<dt>basis</dt><dd>" + esc(m.basis || "—") + "</dd></dl>",
@@ -1044,6 +1937,7 @@ var ATLAS = (function () {
   function defaultCard() {
     var d = S.doc;
     if (!d) return '<div class="ttl">No document</div><p class="hintline">Drop an atlas.json onto this page, or use Open.</p>';
+    if (d.systems.length > 1) return pdCard();
     var sys = d.systems[0] || {}, mdl = (sys.models || [])[0] || {};
     var h = ['<div class="ttl">system</div><div class="idl mono">' + esc(sys.id || "") + "</div><dl>"];
     h.push("<dt>role &middot; phase</dt><dd>" + esc((sys.role || "?") + " · " + (sys.phase || "?")) + "</dd>");
@@ -1055,6 +1949,35 @@ var ATLAS = (function () {
     if (d.provenance) h.push("<dt>provenance</dt><dd>" + esc(d.provenance.note || "") + "</dd>");
     h.push("</dl>");
     h.push('<p class="hintline">Hover a chip, link or macro for its card. Click to pin it.</p>');
+    return h.join("");
+  }
+
+  // A PD document has two systems and no single "the system" (D16), so the
+  // resting card is the pair and the one thing that couples them.
+  function pdCard() {
+    var d = S.doc;
+    var h = ['<div class="ttl">PD machine — ' + d.systems.length + " systems</div>"];
+    d.systems.forEach(function (sys) {
+      var mdl = (sys.models || [])[0] || {};
+      var chips = d.chips.filter(function (c) { return c.system === sys.id; });
+      h.push('<div class="idl mono">' + esc(sys.id) + "</div><dl>");
+      h.push("<dt>role &middot; phase</dt><dd>" + esc(sys.role + " · " + sys.phase) + "</dd>");
+      h.push("<dt>inventory</dt><dd>" + esc(chips.filter(function (c) { return c.pool === "analog"; }).length +
+        " analog chiplets · " + chips.filter(function (c) { return c.pool === "digital"; }).length +
+        " shared digital") + "</dd>");
+      h.push("<dt>parallelism</dt><dd>" + esc(A.AXES.map(function (a) {
+        return a + " = " + ((sys.parallelism || {})[a]);
+      }).join(" · ")) + "</dd>");
+      h.push("<dt>model</dt><dd>" + esc(mdl.label || mdl.id || "—") + "</dd>");
+      h.push("</dl>");
+    });
+    var pd = d.links.filter(function (l) { return l.role === "pd"; })[0];
+    if (pd) {
+      h.push('<div class="ttl" style="margin-top:.7rem">handoff</div><dl>');
+      h.push("<dt>bytes per " + esc(pd.per || "unit") + "</dt><dd>" + esc(A.fmtBytes(pd.bytes)) + "</dd>");
+      h.push("<dt>basis</dt><dd>" + esc(pd.basis || "—") + "</dd></dl>");
+    }
+    h.push('<p class="hintline">Two inventories, one priced handoff (D16). Each system holds the whole model and is priced on its own timeline — read relaxations[] before comparing the two.</p>');
     return h.join("");
   }
 
@@ -1103,6 +2026,27 @@ var ATLAS = (function () {
         '<span class="tx"' + (n ? "" : ' style="color:#aebac2"') + "><b>" + r + "</b> " + (n ? n + " drawn" : "not present") + "</span></div>");
     });
 
+    var duty = A.dutyExtreme(S.doc);
+    h.push('<div class="leg-sub">Duty cycle — its own channel, never a hue</div>');
+    if (!duty) {
+      h.push('<div class="legrow"><span class="tx" style="font-size:11px">This document declares no duty cycle. ' +
+        'P4 owns it; an absent measurement draws as the unknown hatch, never as zero.</span></div>');
+    } else {
+      h.push('<div class="legrow"><span class="sw"><svg width="26" height="10"><rect x="0" y="2" width="26" height="5" rx="1" fill="#fff" stroke="#d5dfe4" stroke-width="0.5"/><rect x="0" y="2" width="9" height="5" rx="1" fill="' +
+        A.DUTY_INK + '"/></svg></span><span class="tx">bar on the top edge of the macro — absolute 0–1 scale</span></div>');
+      h.push('<div class="legrow"><span class="tx" style="font-size:11px">Busiest macro in this file: <b>' +
+        esc(A.pct(duty.value)) + '</b> (<span class="mono">' + esc(duty.id) +
+        '</span>). Every bar is short because the analog macros idle for most of the timeline — ' +
+        'that is the finding, not a rendering fault. The scale stays absolute so the number on the ' +
+        'card and the bar beside it are one reading.</span></div>');
+    }
+    h.push('<div class="leg-sub">Column map — brackets (D11)</div>');
+    h.push('<div class="legrow"><span class="sw"><svg width="26" height="12"><path d="M2 9V3H24V9" fill="none" stroke="#1c2a33" stroke-width="1.5"/></svg></span><span class="tx">tiles of ONE weight matrix: bit slices</span></div>');
+    h.push('<div class="legrow"><span class="sw"><svg width="26" height="12"><path d="M2 9V3H24V9" fill="none" stroke="#8497a2" stroke-width="1"/></svg></span><span class="tx">column sets, or a piece that chains to other macros</span></div>');
+    if (A.filterActive(S.filter)) {
+      h.push('<div class="leg-sub">Filter</div>');
+      h.push('<div class="legrow"><span class="tx" style="font-size:11px">Objects the filter does not select are drawn dimmed, never removed: position is containment, so hiding one would move the rest. No figure on this page changes when a filter does.</span></div>');
+    }
     h.push('<div class="leg-sub">◇ fixture-invented value</div>');
     var paths = ((S.doc.provenance || {}).invented_fields || []);
     h.push('<div class="legrow"><span class="tx mono" style="font-size:10.5px">' + esc(paths.join("  ")) + "</span></div>");
@@ -1123,32 +2067,52 @@ var ATLAS = (function () {
   }
 
   function selfTestPanel() {
-    var pass = S.selftest.filter(function (r) { return r.pass; }).length;
-    var rows = S.selftest.map(function (r) {
-      return "<tr><td class=\"mono\">" + esc(r.rule) + '</td><td>' + esc(r.what) + '</td><td class="' + (r.pass ? "ok" : "no") +
-        '">' + (r.pass ? "fires" : "MISSED") + '</td><td class="mono" style="font-size:11px">' + esc(r.got) + "</td></tr>";
+    var refusals = S.selftest.refusals, views = S.selftest.views;
+    var skipped = refusals.filter(function (r) { return r.skipped; }).length;
+    var pass = refusals.filter(function (r) { return r.pass; }).length;
+    var rows = refusals.map(function (r) {
+      return '<tr' + (r.skipped ? ' class="skip"' : "") + '><td class="mono">' + esc(r.rule) + "</td><td>" + esc(r.what) +
+        '</td><td class="' + (r.skipped ? "" : r.pass ? "ok" : "no") + '">' +
+        (r.skipped ? "n/a" : r.pass ? "fires" : "MISSED") + '</td><td class="mono" style="font-size:11px">' +
+        esc(r.got) + "</td></tr>";
     }).join("");
-    return '<div class="st ui"><h3 style="font:600 10.5px/1 \'Segoe UI\',sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#8497a2;margin:0 0 .5rem">Loader self-test &mdash; ' +
-      pass + " / " + S.selftest.length + " pass</h3>" +
+    var vpass = views.filter(function (r) { return r.pass; }).length;
+    var vrows = views.map(function (r) {
+      return '<tr><td class="mono">' + esc(r.rule) + "</td><td>" + esc(r.what) +
+        '</td><td class="' + (r.pass ? "ok" : "no") + '">' + (r.pass ? "holds" : "BROKEN") +
+        '</td><td class="mono" style="font-size:11px">' + esc(r.got) + "</td></tr>";
+    }).join("");
+    var head = 'style="font:600 10.5px/1 \'Segoe UI\',sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#8497a2;margin:0 0 .5rem"';
+    return '<div class="st ui"><h3 ' + head + ">Loader self-test &mdash; " +
+      pass + " / " + refusals.length + " pass" +
+      (skipped ? " (" + skipped + " not constructible on this document)" : "") + "</h3>" +
       "<table><tr><th>rule</th><th>corruption</th><th>refusal</th><th>field named</th></tr>" + rows + "</table>" +
-      '<p class="hintline">Each row corrupts a copy of the loaded document and asserts the loader refuses it and names the right field.</p></div>';
+      '<p class="hintline">Each row corrupts a copy of the loaded document and asserts the loader refuses it and names the right field. A rule this document gives the harness no way to corrupt is reported as n/a rather than as a miss.</p>' +
+      '<h3 ' + head + ' style="margin-top:1rem">View rules &mdash; ' + vpass + " / " + views.length + " hold</h3>" +
+      "<table><tr><th>rule</th><th>what the renderer promises</th><th>verdict</th><th>evidence</th></tr>" + vrows + "</table>" +
+      '<p class="hintline">The encoding law, asserted on this document: one fact per channel, a filter that moves no figure, a stated draw budget, brackets that claim only what D11 says, and one lane per system.</p></div>';
   }
 
   // ---------------------------------------------------------------- render ---
   function render() {
     S.res = S.doc ? A.validate(S.doc) : { errors: [], warnings: [] };
     S.hue = S.doc ? A.hueMap(S.doc) : { order: [], hue: {} };
+    S.ix = S.doc ? A.makeIndex(S.doc) : { chip: {}, macro: {}, tile: {}, link: {}, sys: {}, owner: {} };
     if (S.doc && !S.chip) {
       var first = S.doc.chips && S.doc.chips[0];
       S.chip = first ? first.id : null;
     }
-    renderHeader(); renderBand(); renderMetrics(); renderBar();
+    if (S.macro && !S.ix.macro[S.macro]) S.macro = null;
+    if (S.view === "macro" && !S.macro) S.view = "chip";
+    renderHeader(); renderBand(); renderMetrics(); renderBar(); renderCrumbs();
 
     var canvas = $("h-canvas");
     if (!S.doc) { canvas.innerHTML = '<p class="ui">No document loaded.</p>'; }
     else if (S.selftest) { canvas.innerHTML = selfTestPanel(); }
     else if (S.res.errors.length) { canvas.innerHTML = refusalPanel(); }
-    else { canvas.innerHTML = S.view === "package" ? drawPackage() : drawChip(); }
+    else if (S.view === "package") { canvas.innerHTML = drawPackage(); }
+    else if (S.view === "macro") { canvas.innerHTML = drawMacro(); }
+    else { canvas.innerHTML = drawChip(); }
 
     renderLegend();
     if (!S.pinned) showCard(defaultCard());
@@ -1157,38 +2121,53 @@ var ATLAS = (function () {
 
   function wireCanvas() {
     var canvas = $("h-canvas");
-    function bind(sel, attr, make) {
+    // Hover previews the card; click DESCENDS one level of containment
+    // (package -> chip -> macro) and leaves the card pinned on the way. A leaf
+    // — a link, a tile — has nothing under it, so a click there only pins.
+    function bind(sel, attr, make, descend) {
       Array.prototype.forEach.call(canvas.querySelectorAll(sel), function (n) {
         var id = n.getAttribute(attr);
         n.addEventListener("mouseenter", function () { if (!S.pinned) showCard(make(id)); });
         n.addEventListener("click", function (ev) {
           ev.stopPropagation();
-          S.pinned = true; showCard(make(id));
+          S.pinned = true;
+          showCard(make(id));
+          if (descend) descend(id);
         });
       });
     }
-    var mById = S.doc ? A.byId(S.doc.macros) : {};
-    var cById = S.doc ? A.byId(S.doc.chips) : {};
-    var lById = S.doc ? A.byId(S.doc.links) : {};
-    bind("[data-macro]", "data-macro", function (id) { return macroCard(mById[id]); });
-    bind("[data-chip]", "data-chip", function (id) { return chipCard(cById[id]); });
-    bind("[data-link]", "data-link", function (id) { return linkCard(lById[id]); });
+    bind("[data-macro]", "data-macro", function (id) { return macroCard(S.ix.macro[id]); },
+      function (id) { go("macro", null, id); });
+    bind("[data-chip]", "data-chip", function (id) { return chipCard(S.ix.chip[id]); },
+      function (id) { go("chip", id, null); });
+    bind("[data-link]", "data-link", function (id) { return linkCard(S.ix.link[id]); }, null);
+    bind("[data-tile]", "data-tile", function (id) { return tileCard(S.ix.tile[id]); }, null);
     canvas.addEventListener("click", function () { S.pinned = false; showCard(defaultCard()); });
-    Array.prototype.forEach.call(canvas.querySelectorAll("[data-chip]"), function (n) {
-      n.addEventListener("dblclick", function () { S.chip = n.getAttribute("data-chip"); S.view = "chip"; S.selftest = null; render(); });
-    });
   }
 
   // ------------------------------------------------------------------ input --
   // Deep links keep a screenshot reproducible: ?view=chip&chip=<id>, ?selftest=1
   function adopt(doc, source) {
-    S.doc = doc; S.source = source; S.chip = null; S.pinned = false; S.selftest = null;
+    S.doc = doc; S.source = source; S.chip = null; S.macro = null;
+    S.pinned = false; S.selftest = null; S.filter = A.emptyFilter();
     var q = location.search || "";
-    var m = /[?&]chip=([^&]+)/.exec(q);
-    if (m) S.chip = decodeURIComponent(m[1]);
-    if (/[?&]view=chip/.test(q)) S.view = "chip";
+    function param(name) {
+      var m = new RegExp("[?&]" + name + "=([^&]*)").exec(q);
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+    if (param("chip")) S.chip = param("chip");
+    if (param("macro")) S.macro = param("macro");
+    if (param("view") === "chip") S.view = "chip";
+    if (param("view") === "macro") S.view = "macro";
+    if (param("duty") === "1") S.duty = true;
+    ["model", "layer", "group", "pool", "q"].forEach(function (k) {
+      if (param(k) != null) S.filter[k] = param(k);
+    });
     render();
-    if (/[?&]selftest=1/.test(q)) { S.selftest = A.selfTest(S.doc); render(); }
+    if (param("selftest") === "1") {
+      S.selftest = { refusals: A.selfTest(S.doc), views: A.viewTest(S.doc) };
+      render();
+    }
   }
   function readFile(file) {
     var fr = new FileReader();
@@ -1213,15 +2192,22 @@ var ATLAS = (function () {
   if (embedded) adopt(embedded, "embedded blob");
   else { S.doc = null; S.source = "none"; render(); }
 
+  // ?data=<file> opens a sibling document instead of the embedded fixture, so a
+  // screenshot of any document in this directory is one URL. The name is a bare
+  // basename: the atlas fetches from its own directory and nowhere else.
+  var wanted = (/[?&]data=([^&]+)/.exec(location.search || "") || [])[1];
+  wanted = wanted ? decodeURIComponent(wanted) : null;
+  if (wanted && /[\/\\]/.test(wanted)) wanted = null;
+
   if (typeof fetch === "function") {
-    fetch("fixture_llama7b_tp2.json", { cache: "no-store" })
+    fetch(wanted || "fixture_llama7b_tp2.json", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
         // Only ever replaces the embedded blob. A document the user dropped or
         // picked while this was in flight stays authoritative: silently swapping
         // it would show the wrong mapping under the right title.
         if (j && j.schema && S.source === "embedded blob") {
-          adopt(j, "fixture_llama7b_tp2.json (sibling file)");
+          adopt(j, (wanted || "fixture_llama7b_tp2.json") + " (sibling file)");
         }
       })
       .catch(function () { /* file:// blocks this; the embedded blob already drew */ });

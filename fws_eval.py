@@ -72,6 +72,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from cim_timing import (
+    LAW_UNVALIDATED,
     CimDeviceModel,
     DigitalPoolSizing,
     ReductionOpDescriptor,
@@ -517,12 +518,52 @@ class _Pricer:
             )
             basis = f"CimDeviceModel.price_ssm_block (law {cost.law}, {cost.validated})"
         elif a.block == "delta_rule":
+            # model_param.linear_attention.chunk_size is OPTIONAL and has no
+            # default. Declared -> the chunked UT-transform form runs on
+            # prefill (decode retires one token, so a chunk of Q is not a
+            # thing it can do). Undeclared -> the recurrent form, and the
+            # disclosure below says what that costs in BOTH directions.
+            declared_q = getattr(self.model.linear_attention, "chunk_size", None)
+            chunk_size = (
+                int(declared_q) if (declared_q and a.phase == "prefill") else 1
+            )
             cost = self.device.price_linear_attention_block(
                 self.model.linear_attention,
                 a.tokens,
-                chunk_size=1,
+                chunk_size=chunk_size,
                 act_bytes=self.act_bytes,
             )
+            if declared_q:
+                self._disclose(
+                    "delta_rule_chunk_size",
+                    f"{int(declared_q)} (DECLARED), the chunked UT-transform form on "
+                    "prefill; decode retires one token and stays recurrent",
+                    "model_param.linear_attention.chunk_size is declared, so P4 prices "
+                    "the chunked form P2.6's law carries. Both forms are "
+                    "LAW_UNVALIDATED and neither is checked against a reference; what "
+                    "the declaration buys is that the Q the number rests on is written "
+                    "down instead of assumed.",
+                )
+            else:
+                self._disclose(
+                    "delta_rule_chunk_size",
+                    "1 (the RECURRENT form), in prefill as well as decode",
+                    "P2.6's delta-rule law has a chunked form, but this model declares "
+                    "no chunk size — model_param.linear_attention.chunk_size is "
+                    "optional and has no default — so P4 prices the token-by-token "
+                    "recurrent form on both phases rather than invent a Q (ADJ-4, no "
+                    "invented numbers). THE DIRECTION OF THE RESULTING ERROR IS NOT "
+                    "ESTABLISHED, and this disclosure does not claim it is. The chunked "
+                    "form's saving is state traffic, and this card prices state traffic "
+                    "at ZERO: no cim.cards.<card>.state_bytes_per_cycle is declared, so "
+                    "state_time_s is 0.0 and the whole duration is arithmetic (see the "
+                    "vector_engine:state_bytes_per_cycle entry, which says recurrent-"
+                    "state traffic is reported and bounds nothing). On retired OPS the "
+                    "chunked form is CHEAPER only for small Q and DEARER above Q ~ 34 "
+                    "at this model's dims — measured against the recurrent form: 0.92x "
+                    "at Q=8, 0.99x at Q=32, 1.12x at Q=64, 1.38x at Q=128. Declaring "
+                    "chunk_size is the fix, and the schema now has the field.",
+                )
             basis = f"CimDeviceModel.price_linear_attention_block (law {cost.law}, {cost.validated})"
         else:
             raise MappingError(
@@ -533,6 +574,25 @@ class _Pricer:
             )
         for note in cost.disclosures:
             self._disclose(f"vector_engine:{note[:48]}", "declared relaxation", note)
+        if str(cost.validated) == LAW_UNVALIDATED:
+            # D21: a law's provenance is part of its number. cim_timing labels
+            # every priced digital op `validated` (optima_m3_reference,
+            # optima_m3_subset or unvalidated); the label reached the op's
+            # basis string and stopped there, so a reader of the report or the
+            # atlas saw a duration with no way to know NO numeric reference
+            # exists for the law that produced it.
+            self._disclose(
+                f"unvalidated_law:{cost.law}",
+                f"{a.block}: law {cost.law} is UNVALIDATED",
+                f"CimDeviceModel prices this op with {cost.law!r}, which carries "
+                f"validated == {LAW_UNVALIDATED!r}: the work counts are derived from "
+                "first principles and NO numeric reference exists to check them "
+                "against anywhere (D21). Every number this op contributes to — the "
+                "makespan, the headline throughput, this device's occupancy — inherits "
+                "that status. The law is not a guess about the hardware card, which is "
+                "declared; it is an unchecked count of the arithmetic the algorithm "
+                "does.",
+            )
         self._fabric_energy_disclosure()
         return self._cost(
             a,

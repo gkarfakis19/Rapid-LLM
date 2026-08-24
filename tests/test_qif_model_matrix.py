@@ -9,6 +9,7 @@ yet, and P6.1 the raw-parameter consistency rows (D2 / ADJ-2).
 
 import argparse
 import copy
+import re
 import importlib.util
 from pathlib import Path
 
@@ -36,9 +37,14 @@ MATRIX_YAMLS = {
     "falcon_mamba_7b": ("ssm",),
     "hunyuan_7b": (),
     "smollm3_3b": (),
+    # Wave C carriers: the SUPPORTED sibling of each family whose only shipped
+    # row was over the D2 cutoff, plus the first windowed-attention row.
+    "falcon_h1_3b": ("ssm",),
+    "hunyuan_4b": (),
+    "gemma_3_4b": (),
 }
-#: The two rows that must parse AND run on the existing (non-hybrid) paths.
-RUNS_NOW_YAMLS = ("hunyuan_7b", "smollm3_3b")
+#: The rows that must parse AND run on the existing (non-hybrid) paths.
+RUNS_NOW_YAMLS = ("hunyuan_7b", "smollm3_3b", "hunyuan_4b")
 #: D2 (ADJ-2) hard cutoff on RAW total parameters.
 D2_PARAM_CUTOFF = 7_000_000_000
 
@@ -433,21 +439,51 @@ def test_attention_output_gate_flag():
     assert gated.attention.output_gate is True
 
 
-def test_head_dim_may_decouple_only_under_a_hybrid_layer_plan():
-    # The relaxation exists for Qwen3.5 / Falcon-H1, whose head_dim genuinely
-    # decouples — and both are hybrids that no device path prices. An
-    # attention-only plan is a plain transformer that still runs, so it keeps
-    # the guard: a layer plan is not a licence to drop a validation.
+def test_a_declared_head_dim_is_authoritative_and_is_honored():
+    """A declared head_dim may decouple from hidden_dim/num_heads, on any plan.
+
+    The old rule refused a declared head_dim that differed from
+    hidden_dim // num_heads unless the model also declared a HYBRID layer plan.
+    The model window D3 covers breaks that rule on plain transformers: Gemma 3
+    4B is 2560 / 8 heads with head_dim 256 and Hunyuan-4B is 3072 / 32 heads
+    with head_dim 128, and neither declares a layer plan of any kind — so the
+    field was refusable on exactly the models it exists for.
+
+    What the guard was standing in for is that the declared value must actually
+    be USED, and that is what this asserts instead: q / k / v / o are sized from
+    num_heads * head_dim everywhere, so a decoupled declaration changes the
+    parameter census and the placed stage shapes rather than being ignored.
+    """
     attention = {**BASE_MODEL_PARAM["attention"], "head_dim": 256}
-    with pytest.raises(ValueError, match="head_dim must match hidden_dim/num_heads"):
-        _model_from_dict(_with(attention=attention))
-    with pytest.raises(ValueError, match="head_dim must match hidden_dim/num_heads"):
-        _model_from_dict(_with(attention=attention, layer_plan={"pattern": ["full_attention"]}))
-    model = _model_from_dict(
+    # 512 / 8 = 64, so 256 is a 4x decoupling on a plain attention-only model.
+    model = _model_from_dict(_with(attention=attention))
+    assert model.attention.head_dim == 256
+    derived = _model_from_dict(_with())
+    assert derived.attention.head_dim in (None, 64)
+
+    # It is HONORED by the census: q_size and kv_size follow the declaration.
+    _head_dim, q_size, kv_size = llm_util.attention_dim_sizes(
+        512, 8, 2, head_dim=model.attention.head_dim
+    )
+    assert (q_size, kv_size) == (2048, 512)
+    assert llm_util.attention_block_param_count(
+        hidden_dim=512, attention=model.attention
+    ) == 512 * 2048 + 2 * 512 * 512 + 2048 * 512
+
+    # ... and it still decouples under a hybrid plan, which is where the
+    # relaxation started (Qwen3.5, Falcon-H1).
+    hybrid = _model_from_dict(
         _with(attention=attention, layer_plan={"pattern": ["linear_attention", "full_attention"]},
               linear_attention=LINEAR_ATTENTION_BLOCK)
     )
-    assert model.attention.head_dim == 256
+    assert hybrid.attention.head_dim == 256
+
+    # A model that declares NO head_dim still has to be divisible, because that
+    # is the only case where the value is derived.
+    with pytest.raises(ValueError, match="divisible by attention.num_heads"):
+        _model_from_dict(
+            _with(hidden_dim=513, attention={**BASE_MODEL_PARAM["attention"]})
+        )
 
 
 def test_ffn_dims_per_block_kind():
@@ -538,7 +574,12 @@ def test_matrix_yaml_parses_with_expected_block_kinds(name):
 def test_matrix_yaml_records_its_published_source(name):
     provenance = _load_yaml(_matrix_yaml_path(name))["provenance"]
     assert provenance["source"].startswith("https://huggingface.co/")
-    assert provenance["verified"] == "2026-08-23"
+    # Every row records the DAY its dims were read off the published config.
+    # Wave A verified its rows on 2026-08-23 and Wave C its carriers on
+    # 2026-08-24; a row with no date, or a date before the matrix existed, is
+    # a row nobody checked.
+    assert re.fullmatch(r"20\d\d-\d\d-\d\d", str(provenance["verified"]))
+    assert str(provenance["verified"]) >= "2026-08-23"
     assert provenance["d2_status"] in {"supported", "reference"}
     assert int(provenance["published_total_params"]) > 0
 
@@ -882,8 +923,62 @@ HUNYUAN_7B_HF = {
     "max_position_embeddings": 32768,
 }
 
+FALCON_H1_3B_HF = {
+    "model_type": "falcon_h1",
+    "hidden_size": 2560,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 10,
+    "num_key_value_heads": 2,
+    "head_dim": 128,
+    "intermediate_size": 6144,
+    "vocab_size": 65536,
+    "tie_word_embeddings": False,
+    "mamba_d_state": 256,
+    "mamba_n_groups": 1,
+    "mamba_n_heads": 32,
+    "mamba_d_head": 128,
+    "mamba_d_ssm": 4096,
+    "mamba_expand": 2,
+    "mamba_d_conv": 4,
+    "mamba_chunk_size": 128,
+    "max_position_embeddings": 131072,
+}
+
+HUNYUAN_4B_HF = {
+    "model_type": "hunyuan_v1_dense",
+    "hidden_size": 3072,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "intermediate_size": 8192,
+    "vocab_size": 120818,
+    "tie_word_embeddings": True,
+    "max_position_embeddings": 262144,
+}
+
+#: Gemma 3's text_config, kept beside the fixtures it cannot join: the importer
+#: REFUSES a sliding-window import family-agnostically (P1.2), so the checked-in
+#: gemma_3_4b_inf.yaml is hand-authored and the refusal is what gets tested.
+GEMMA_3_4B_HF = {
+    "model_type": "gemma3_text",
+    "hidden_size": 2560,
+    "num_hidden_layers": 34,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 4,
+    "head_dim": 256,
+    "intermediate_size": 10240,
+    "vocab_size": 262208,
+    "tie_word_embeddings": True,
+    "max_position_embeddings": 131072,
+    "sliding_window": 1024,
+    "sliding_window_pattern": 6,
+}
+
 HF_FIXTURES = {
     "granite_4_0_h_tiny": GRANITE_H_TINY_HF,
+    "falcon_h1_3b": FALCON_H1_3B_HF,
+    "hunyuan_4b": HUNYUAN_4B_HF,
     "qwen3_5_4b": QWEN3_5_4B_HF,
     "lfm2_2p6b": LFM2_2P6B_HF,
     "falcon_h1_7b": FALCON_H1_7B_HF,
@@ -995,3 +1090,30 @@ def test_hf_ingestion_refuses_a_sliding_window_model_whatever_the_family():
     # A model that publishes the field but switches the pattern off imports.
     off = dict(hf_config, use_sliding_window=False)
     module._validate_supported_config_features(off, "smollm3")
+
+
+def test_the_gemma_3_row_is_hand_authored_because_the_importer_refuses_it():
+    """gemma_3_4b_inf.yaml exists only because P1.2's rule holds against it.
+
+    The importer refuses every sliding-window model family-agnostically, so the
+    first WINDOWED row in the matrix cannot be imported and is hand-authored
+    against the same published text_config. That is not a hole in P1.2: the
+    importer's rule is about what the DEFAULT paths price, and the checked-in
+    YAML carries the window precisely so the MAPPED path can price it.
+    """
+    module = _load_hf_to_config_module()
+    with pytest.raises(SystemExit) as exc:
+        module._validate_supported_config_features(GEMMA_3_4B_HF, "gemma3_text")
+    assert "sliding-window attention is not modeled" in str(exc.value)
+
+    # The hand-authored row carries exactly the published pattern.
+    checked_in = config.parse_config(str(_matrix_yaml_path("gemma_3_4b")), "LLM").model_config
+    assert checked_in.hidden_dim == GEMMA_3_4B_HF["hidden_size"]
+    assert checked_in.num_layers == GEMMA_3_4B_HF["num_hidden_layers"]
+    assert checked_in.vocab_size == GEMMA_3_4B_HF["vocab_size"]
+    assert checked_in.attention.head_dim == GEMMA_3_4B_HF["head_dim"]
+    assert checked_in.attention.window.window_size == GEMMA_3_4B_HF["sliding_window"]
+    assert (
+        checked_in.attention.window.local_global_interval
+        == GEMMA_3_4B_HF["sliding_window_pattern"]
+    )

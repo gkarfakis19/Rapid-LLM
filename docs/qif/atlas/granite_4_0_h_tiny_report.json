@@ -90309,6 +90309,11 @@
       "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
     },
     {
+      "constraint": "unvalidated_law:ssd_chunked_scan",
+      "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+      "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+    },
+    {
       "constraint": "shared_digital_energy",
       "value": "0 pJ: no law",
       "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."

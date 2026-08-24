@@ -92,10 +92,10 @@ def test_the_gpu_path_rejection_is_untouched():
 @pytest.mark.parametrize(
     "field, override",
     [
-        (
-            "attention.output_gate",
-            {"attention": {"output_gate": True}},
-        ),
+        # attention.output_gate is NO LONGER on this list: C1 places W_g as an
+        # analog tile and the gate multiply as pool work, so the mapped path
+        # prices it. tests/test_qif_qwen_e2e.py holds it end to end, and it
+        # stays refused on the GPU and unmapped paths there.
         (
             "shared_weight_groups",
             {"shared_weight_groups": [{"name": "depth_shared", "layers": [0, 1]}]},
@@ -104,7 +104,7 @@ def test_the_gpu_path_rejection_is_untouched():
     ],
 )
 def test_inputs_the_mapped_path_still_cannot_price_stay_refused(field, override):
-    """The narrowing lifted exactly two inputs. Everything else keeps its name.
+    """The narrowing lifted a NAMED list. Everything else keeps its name.
 
     ``ffn_dims`` is the sharp one: ``shared_expert`` is priced now (it reaches
     the array census and the mapping's stage shapes), and any OTHER key still
@@ -373,34 +373,23 @@ def test_the_atlas_export_covers_every_placed_macro(granite):
 
 
 # ---------------------------------------------------------------------------
-# Qwen3.5-4B: the linear-attention row, run only if it prices cleanly
+# Qwen3.5-4B: the linear-attention row (ADJ-1's second P0)
 # ---------------------------------------------------------------------------
 
 
-def test_qwen3_5_4b_linear_attention_prices_or_refuses_by_name():
-    """ADJ-1's second P0. It runs only if the delta law is wired end to end.
+def test_qwen3_5_4b_linear_attention_prices_on_the_mapped_path():
+    """ADJ-1's second P0 no longer skips: it runs.
 
-    If it does not price, the failure must NAME the missing law rather than
-    produce a number — that is the whole P1.4 rule, and it does not stop
-    applying because a model is on a plan page.
+    P1.5 left it refused BY NAME on attention.output_gate — the delta law was
+    wired but no stage placed the gate matrix. C1 places W_g as an ordinary
+    analog tile, so this test now proves the delta law prices every linear
+    layer of a real model instead of proving a refusal. The end-to-end proof of
+    the GATE lives in tests/test_qif_qwen_e2e.py; what is asserted here is the
+    thing this module has always asserted — the law, on its consumer.
     """
-    hw = _hw(GRANITE_HW)
+    hw = _hw(os.path.join(HW_DIR, "fws_cim_qwen3_5_4b.yaml"))
     model = config.parse_config(QWEN_MODEL, "LLM")
-    try:
-        config.validate_configs(hw, model)
-    except ValueError as error:
-        # The refusal must name the model_param field that has no law. Today it
-        # is attention.output_gate: Qwen3.5's gated attention output projection
-        # is a weight matrix no stage places (the LINEAR-attention block's own
-        # gate IS placed, which is why the delta law alone was not enough).
-        message = str(error)
-        assert "model_param." in message
-        assert any(
-            field in message
-            for field in ("output_gate", "linear_attn", "layer_plan", "ffn_dims")
-        ), message
-        pytest.skip("Qwen3.5-4B is refused BY NAME (%s), which is the correct "
-                    "answer until the named input has a law" % message.split(":")[1].strip()[:60])
+    config.validate_configs(hw, model)
     mapping = fws_mapping.build_mapping(hw, model)
     evaluation = fws_eval.evaluate_fws(build_fws_program(mapping))
     delta = [cost for cost in evaluation.pricing.costs if cost.block == "delta_rule"]
@@ -411,6 +400,17 @@ def test_qwen3_5_4b_linear_attention_prices_or_refuses_by_name():
         ops = float((cost.detail or {}).get("ops", 0.0))
         if ops > 0 and cost.duration_s > 0:
             assert ops / cost.duration_s <= peak * (1 + 1e-9)
+
+
+def test_the_granite_run_places_no_gate_because_granite_declares_none(granite):
+    """The C1 narrowing is guarded by the model's own declaration.
+
+    Granite-4.0-H-Tiny sets no attn_output_gate, so its placement, its report
+    and its atlas must be exactly what they were before the gate existed.
+    """
+    assert not bool(granite.mapping.model.attention.output_gate)
+    assert not [o for o in granite.mapping.owners() if o.op == "attn_gate_proj"]
+    assert not [c for c in granite.pricing.costs if c.block == "attn_output_gate"]
 
 
 def test_the_shipped_granite_atlas_validates_through_the_real_loader(tmp_path):
@@ -483,8 +483,12 @@ def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     shipped = open(path, encoding="utf-8").read()
     # BYTES, against the exact serialization inference_timing._write_fws_dag_report
     # uses (json.dump(..., indent=2), no trailing newline). Comparing the parsed
-    # objects would prove value equality only, and the status board claims byte
-    # equality with run_perf's own output.
+    # objects would prove value equality only.
+    #
+    # WAVE C AUDIT: what this gate proves is byte equality with
+    # fws_eval.report_document, regenerated in-process. No run_perf subprocess
+    # runs here, so it is not evidence about run_perf's serialization, key order
+    # or indent -- the status files and the plan page now say so.
     assert shipped == json.dumps(fws_eval.report_document(granite), indent=2)
 
 

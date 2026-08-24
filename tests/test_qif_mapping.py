@@ -593,7 +593,13 @@ def test_bit_slicing_puts_a_real_shift_add_op_on_the_hosting_macros_pool(tmp_pat
     # loader's business, so let the loader say it.
     report = _validate_with_the_p5_loader(document, tmp_path)
     assert report["errors"] == []
-    assert report["warnings"] == []
+    # WAVE C AUDIT: this fixture declares arrays_per_chip = 4000 purely to make
+    # the slicing row reachable, and P5's draw budget is now counted in RECTS
+    # rather than macro slots -- 4000 macros with their tile bands and duty bars
+    # are well past 10,000 rects, so the atlas says out loud that it will not
+    # draw this chip. That is the rule working, not a mapping defect, and it is
+    # the ONLY thing the loader may complain about here.
+    assert report["warnings"] == ["R23 chips[sys.fws.chip.000].macros"]
 
 
 def test_the_decode_series_is_a_bounded_window(llama_mapping):

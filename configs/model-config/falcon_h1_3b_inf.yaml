@@ -1,0 +1,64 @@
+# Falcon-H1-3B-Base inference config — the SUPPORTED carrier of the Falcon-H1
+# family (P1.3's recorded assumption: a family whose only row is over the D2
+# cutoff contributes zero supported models, so the in-scope sibling ships).
+# Dims verified 2026-08-24 against the published HuggingFace config.json:
+#   https://huggingface.co/tiiuae/Falcon-H1-3B-Base/blob/main/config.json
+# Every one of the 32 layers runs attention || Mamba2 || MLP side by side,
+# which is why layer_plan uses structure: parallel_branch instead of a list.
+#
+# It is REFUSED on fws_cim, and the refusal is the point of the row. Every LAW
+# the branches need exists — attention, ssm and ffn are all on the mapped list
+# — but program/fws_build lowers a layer's mixers SEQUENTIALLY, chaining each
+# onto the previous one's output and never summing them. A parallel model
+# lowered that way is priced as a deeper sequential one: a wrong number, not a
+# missing one. device_class: fws_cim therefore refuses
+# model_param.layer_plan.structure: parallel_branch by name.
+provenance:
+  source: "https://huggingface.co/tiiuae/Falcon-H1-3B-Base/blob/main/config.json"
+  verified: "2026-08-24"
+  published_total_params: 3149387264  # model.safetensors.index total_size
+  # 6,298,774,528 B / 2 (bf16). 3.15B RAW, inside the D2 cutoff.
+  d2_status: supported
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: false  # HF tie_word_embeddings: false
+  model_id: "falcon_h1_3b"
+  model_type: "llama"     # PRICING CARRIER: the gated MLP is the llama stage shape
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 2560
+  layer_plan:
+    structure: "parallel_branch"
+    branches: ["attention", "mamba", "ffn"]
+  attention:
+    attention_type: "gqa"
+    num_heads: 10
+    kv_heads: 2
+    head_dim: 128  # HF head_dim; NOT hidden_dim/num_heads (2560/10 = 256)
+    use_flashattention: false
+  ssm:
+    variant: "mamba2"
+    d_state: 256  # HF mamba_d_state
+    n_groups: 1
+    n_heads: 32  # HF mamba_n_heads
+    d_head: 128  # HF mamba_d_head
+    d_inner: 4096  # HF mamba_d_ssm wins over HF mamba_expand: 2 (2*2560 = 5120)
+    d_conv: 4
+    chunk_size: 128  # HF mamba_chunk_size
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 6144
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 32
+  intermediate_size: 6144  # HF intermediate_size
+  vocab_size: 65536
+  num_layers: 32
+
+inference_param:
+  sample_every: -1

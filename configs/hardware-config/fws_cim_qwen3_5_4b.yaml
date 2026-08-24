@@ -1,0 +1,231 @@
+# FWS-CIM MAPPED run for Qwen3.5-4B — the QIF P1 SECOND P0 model (ADJ-1).
+# Pair with configs/model-config/qwen3_5_4b_inf.yaml at tp=1, pp=1.
+#
+# SECOND READER (Wave C audit): tests/test_qif_carrier_rows.py also runs
+# Gemma-3-4B on this card, because its 2560-row analog point is the one Gemma
+# needs and inventing a second design point is the ADJ-4 failure. The two
+# sizing knobs below ARE derived from Qwen, so Gemma's own arithmetic is
+# recorded here and pinned by that file: 34 layers at layers_per_chip 4 = 9
+# analog chips, and the busiest chip (the last, carrying the 262208-wide
+# lm_head) holds 133 macros against arrays_per_chip 180. An edit to the Qwen
+# sizing that breaks the Gemma fit fails that test instead of moving a row
+# silently. Gemma ships no artifact from this card; it is a test row only.
+#
+# This is the FIRST consumer of the delta-rule law (P2.6 3), which is
+# LAW_UNVALIDATED by design: no reference implementation exists to check it
+# against, so every delta_rule op in this run carries the `unvalidated` label
+# in its basis string and the run's report and atlas say so. Read that label
+# before quoting a number from this point.
+#
+# It is also the first GATED-ATTENTION point. Qwen3.5 declares
+# attn_output_gate, and the QIF C1 adjudication treats it as an ordinary
+# weight matrix: W_g is placed as an analog tile of shape
+# (hidden, num_heads * head_dim) = 2560 x 4096 beside qkv and o_proj, and the
+# sigmoid + elementwise multiply is per-macro pool work (ADJ-3 / D12).
+#
+# It runs ONLY on the mapped path — the `mapping:` block at the bottom is what
+# makes P3 place the model and P4 price it op by op (ADJ-6 / A1). Drop that
+# block and validate_model_config refuses the run by name: the closed form has
+# no stage for a linear-attention recurrence and none for the gate matrix
+# (P1.4, narrowed by P1.5 and by C1).
+#
+# Analog point: rows = 2560 (K per array tile matches hidden_dim), stored
+# cols = cols_adc * adc_mux = 2560. Per-layer analog macros for Qwen3.5-4B
+# (H=2560, dense SwiGLU FFN I=9216, GQA q16/kv4 head_dim=256, gated-DeltaNet
+# 16 key heads x 128 and 32 value heads x 128, conv k=4):
+#   dense FFN, every layer: ffn1 ceil(2*9216/2560)=8 + ffn2 ceil(9216/2560)=4
+#     = 12
+#   linear-attention mixer (24 layers): la_qkv_proj ceil(12288/2560)=5,
+#     la_gate_proj 1, la_out_proj ceil(4096/2560)=2 -> 8, so 20 macros/layer
+#   gated-attention mixer (8 layers): qkv ceil((16+2*4)*256/2560)=3,
+#     attn_gate_proj ceil(4096/2560)=2, o_proj ceil(4096/2560)=2 -> 7,
+#     so 19 macros/layer
+#   lm_head adds ceil(248320/2560) = 97 macros on the last chip.
+# layers_per_chip 4 (the layer_plan period: 3 linear + 1 attention) -> 8
+# chips; worst chip = 3*20 + 19 + 97 = 176.
+#
+# Energy/area per array are the T1 OPTIMA point scaled by cell count
+# (2560*2560 / 1280*1280 = 4.0), the same convention fws_cim_llama7b.yaml,
+# fws_cim_moe.yaml and fws_cim_granite_tiny.yaml use. They are NOT measured
+# Qwen silicon.
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 2560               # array rows (K per array tile) = hidden_dim
+    cols_adc: 640            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 38139.7556   # T1 point scaled by cell count (x4.0)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 5.61226     # T1 point scaled by cell count (x4.0)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 180     # worst chip: 3*20 + 19 + lm_head 97 = 176
+    layers_per_chip: 4       # 32 layers -> 8 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # dense FFN on every layer; no expert spreading
+
+  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
+  # The shared digital chiplet card is what makes the DELTA RULE timeable: the
+  # P2.6 laws refuse to run without a declared vector engine (ADJ-4 forbids
+  # deriving the state-update lanes from the systolic array or the softmax
+  # pipeline).
+  cards:
+    ctt:
+      kind: analog_macro
+      device: ctt
+    sa:
+      kind: digital_chiplet
+      # DECLARED DESIGN POINT, not measured silicon and not an OPTIMA port.
+      # 1024 lanes at the chiplet clock = 9.7e11 scalar ops/s, about an eighth
+      # of the same chiplet's systolic matmul peak (2 arrays x 32x64 MACs x 2
+      # x 0.95 GHz = 7.8e12 FLOP/s) — the ratio an elementwise/scan unit beside
+      # a matmul engine plausibly carries. It is the SAME declared point
+      # fws_cim_granite_tiny.yaml uses, so the two P0 rows are read on one
+      # engine. Every delta-rule number in this run scales inversely with it;
+      # replace it with Samyak's figure when it exists and re-run (P6
+      # calibration seam: cards change, laws do not).
+      vector_lanes: 1024
+      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
+      # undeclared on purpose: the first two inherit the chiplet's own clock
+      # and softmax depth (disclosed per priced op), and an undeclared state
+      # bandwidth REPORTS recurrent-state traffic without bounding it.
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 8 GB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
+
+# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
+# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+mapping:
+  parallelism:
+    tp: 1
+  # ADJ-6: the decode series is a bounded window plus a disclosed
+  # extrapolation. Three steps give a first / median / last that are three
+  # different readings rather than one repeated.
+  decode_window: 3

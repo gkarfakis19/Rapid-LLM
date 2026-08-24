@@ -31,6 +31,7 @@ tools/parallelism_results/
 !docs/fws_cim/*.md
 !docs/qif/*.md
 !docs/qif/plans/*.md
+!docs/qif/atlas/*.md
 !webui/
 !webui/*.md
 !webui/**/*.md

@@ -1,0 +1,70 @@
+# Gemma-3-4B inference config — the first WINDOWED-ATTENTION row in the matrix.
+# The sliding-window law has been priced end to end since Wave B (P1.5 / the
+# Wave B audit fix), but the window was only ever INJECTED into another model's
+# config, because no Gemma-class YAML existed whose dims could be verified.
+# This row closes that: it is the real 5 local : 1 global pattern, on the model
+# the pattern was written for.
+#
+# Dims verified 2026-08-24 against the published HuggingFace config.json
+# (text_config sub-block). The upstream google/ repo is gated, so the figures
+# were read from a public verbatim mirror of the same checkpoint:
+#   https://huggingface.co/unsloth/gemma-3-4b-pt/blob/main/config.json
+# The ~417M SigLIP vision tower and the multimodal projector are NOT modeled
+# here (D8, address-only); only the text backbone is.
+#
+# It RUNS on the mapped fws_cim path, where P4 reads the window pattern per
+# layer. The unmapped closed-form path and the GPU path still refuse it by
+# name: they price every attention op against the FULL KV context, so a local
+# layer would be charged as global.
+provenance:
+  source: "https://huggingface.co/unsloth/gemma-3-4b-pt/blob/main/config.json"
+  # The canonical repo is GATED, so the verbatim mirror above is what was read.
+  # It is named here so the canonical name is never lost (Wave C audit).
+  source_canonical: "https://huggingface.co/google/gemma-3-4b-pt"
+  verified: "2026-08-24"
+  published_total_params: 4300079472  # model.safetensors.index total_size
+  # DISCLOSED RELAXATION: 8,600,158,944 B / 2 (bf16) is the WHOLE checkpoint —
+  # text backbone plus the SigLIP vision tower plus the projector. This YAML
+  # models the text backbone only (D8), which the census puts at 3.880B, so the
+  # unmodeled vision half is ~0.420B = 9.8% of the published figure and the
+  # tolerance is widened to exactly cover it. The split is arithmetic, not an
+  # estimate: 3.880B + 0.420B = 4.300B, and Google's own published breakdown of
+  # the 4B text model (675M embedding + 3,209M non-embedding) agrees with the
+  # census's 3.880B to ~0.1%.
+  published_total_params_tolerance: 0.10
+  d2_status: supported
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true   # Gemma 3 ties the text embedding to the lm_head
+  model_id: "gemma_3_4b"
+  model_type: "llama"     # PRICING CARRIER: the gated MLP is the llama stage shape
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 2560
+  attention:
+    attention_type: "gqa"
+    num_heads: 8
+    kv_heads: 4
+    head_dim: 256  # HF head_dim; NOT hidden_dim/num_heads (2560/8 = 320)
+    use_flashattention: false
+    window:
+      window_size: 1024        # HF sliding_window
+      local_global_interval: 6 # HF sliding_window_pattern: 5 local then 1 global
+      last_layer_global: false # Gemma 3 has no "last layer always global" rule
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 10240
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 34
+  intermediate_size: 10240
+  vocab_size: 262208
+  num_layers: 34
+
+inference_param:
+  sample_every: -1

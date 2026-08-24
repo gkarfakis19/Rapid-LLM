@@ -83,21 +83,21 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 
 <h3>(b)&ndash;(d) The matrix</h3>
 
-<p>One table. Status is <em>runs now</em> (the laws and schema already cover it), <em>schema gap</em> (the laws generalize but the config cannot say it), or <em>new op</em> (a device-level law does not exist). Priority is P0 build-first, P1, P2, or <em>ref</em> (out of scope by D2, kept as an architecture reference).</p>
+<p>One table. Status is <em>runs now</em> (the laws and schema already cover it &mdash; <em>mapped</em> means it has been run end to end on the mapped <code>fws_cim</code> path, and the YAML that runs is named), <em>schema gap</em> (the laws generalize but the config cannot say it), <em>new op</em> (a device-level law does not exist), or <em>new lowering</em> (every law and every schema field exists and the DAG builder cannot yet express the shape). Priority is P0 build-first, P1, P2, or <em>ref</em> (out of scope by D2, kept as an architecture reference).</p>
 
 <div class="overflow">
 <table>
 <tr><th>Model</th><th>Family / released</th><th>Total</th><th>Architecture facts needed for modeling</th><th>Status</th><th>Pri</th></tr>
 
-<tr><td><strong>Qwen3.5</strong> 0.8B / 2B / 4B</td><td>Qwen3.5 dense, 2 Mar 2026</td><td>0.8&ndash;4B</td><td>3:1 gated-DeltaNet : gated attention. 4B verified: 32L, <code>layer_types</code> = 3&times;linear + 1&times;full repeated 8&times;; d=2560, ffn 9216; attn 16 q / 4 kv heads, head_dim 256, output gate, partial RoPE 0.25; linear block 32 value heads &times;128, 16 key heads &times;128, conv k=4; vocab 248320; native vision tower</td><td>New op (delta rule) + schema gap</td><td>P0</td></tr>
+<tr><td><strong>Qwen3.5</strong> 0.8B / 2B / 4B</td><td>Qwen3.5 dense, 2 Mar 2026</td><td>0.8&ndash;4B</td><td>3:1 gated-DeltaNet : gated attention. 4B verified: 32L, <code>layer_types</code> = 3&times;linear + 1&times;full repeated 8&times;; d=2560, ffn 9216; attn 16 q / 4 kv heads, head_dim 256, output gate, partial RoPE 0.25; linear block 32 value heads &times;128, 16 key heads &times;128, conv k=4; vocab 248320; native vision tower</td><td>Runs now (mapped) &mdash; <code>qwen3_5_4b_inf.yaml</code></td><td>P0</td></tr>
 
-<tr><td><strong>Granite 4.0-H-Tiny</strong></td><td>IBM Granite 4.0, Oct 2025</td><td>7B (1B active)</td><td>40L, 36 Mamba2 : 4 attention (9:1, attn at 5/15/25/35); d=1536; Mamba2 d_state 128, 48 heads &times; d_head 64, expand 2, groups 1, conv k=4, chunk 256; NoPE; GQA 12 q / 4 kv; MoE 64 experts top-6, expert ffn 512, shared ffn 1024</td><td>New op (SSD) + schema gap</td><td>P0</td></tr>
+<tr><td><strong>Granite 4.0-H-Tiny</strong></td><td>IBM Granite 4.0, Oct 2025</td><td>7B (1B active)</td><td>40L, 36 Mamba2 : 4 attention (9:1, attn at 5/15/25/35); d=1536; Mamba2 d_state 128, 48 heads &times; d_head 64, expand 2, groups 1, conv k=4, chunk 256; NoPE; GQA 12 q / 4 kv; MoE 64 experts top-6, expert ffn 512, shared ffn 1024</td><td>Runs now (mapped) &mdash; <code>granite_4_0_h_tiny_inf.yaml</code></td><td>P0</td></tr>
 
 <tr><td>Granite 4.0-H-1B / H-350M / H-Micro 3B</td><td>IBM Granite 4.0 Nano, Oct 2025</td><td>0.35&ndash;3B</td><td>Same 40L 9:1 backbone, dense (no experts), shared ffn 4096, d=1536 at 1B</td><td>New op + schema gap</td><td>P0</td></tr>
 
 <tr><td>Granite 4.0-Micro 3B</td><td>IBM Granite 4.0, Oct 2025</td><td>3B</td><td>Conventional dense transformer, GQA &mdash; the non-hybrid twin</td><td>Runs now</td><td>P1</td></tr>
 
-<tr><td><strong>Falcon-H1</strong> 0.5B / 1.5B / 1.5B-deep / 3B / 7B<br>Falcon-H1R 7B</td><td>TII, 21 May 2025 (H1R Jan 2026)</td><td>0.5&ndash;7B</td><td>PARALLEL hybrid: every layer runs attention &#8214; Mamba2 &#8214; MLP. 7B verified: 44L, d=3072, 12 q / 2 kv heads, head_dim 128; Mamba2 d_ssm 3072, d_state 256, 24 heads &times;128, groups 1, conv k=4, chunk 128; ffn 12288</td><td>New op + schema gap (branch structure, not a layer list)</td><td>P0</td></tr>
+<tr><td><strong>Falcon-H1</strong> 0.5B / 1.5B / 1.5B-deep / 3B / 7B<br>Falcon-H1R 7B</td><td>TII, 21 May 2025 (H1R Jan 2026)</td><td>0.5&ndash;7B</td><td>PARALLEL hybrid: every layer runs attention &#8214; Mamba2 &#8214; MLP. 7B verified: 44L, d=3072, 12 q / 2 kv heads, head_dim 128; Mamba2 d_ssm 3072, d_state 256, 24 heads &times;128, groups 1, conv k=4, chunk 128; ffn 12288</td><td>New lowering (parallel branch); laws and schema present &mdash; <code>falcon_h1_3b_inf.yaml</code> is refused BY NAME</td><td>P0</td></tr>
 
 <tr><td><strong>LFM2</strong> 350M / 700M / 1.2B / 2.6B<br><strong>LFM2.5</strong> 230M / 350M / 1.2B / 2.6B</td><td>Liquid AI, Jul 2025; LFM2.5 through Aug 2026</td><td>0.23&ndash;2.6B</td><td>Double-gated short-conv blocks + GQA. 2.6B verified: 30L, 20 conv : 10 full attention, d=2048, ffn 10752 (SwiGLU), 32 q / 8 kv heads, conv cache L=3. Small sizes: 16 blocks = 10 conv + 6 GQA</td><td>New op (short conv) + schema gap</td><td>P0</td></tr>
 
@@ -113,13 +113,13 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 
 <tr><td>Nemotron Nano 2 (9B / 12B)</td><td>NVIDIA, Aug 2025</td><td>8.9 / 12B</td><td>62L = 6 attention + 28 FFN + 28 Mamba2; d=5120, ffn 20480, GQA 40 q / 8 kv; Mamba2 groups 8, d_state 128, d_head 64, expand 2, conv k=4</td><td>Over D2 &mdash; reference for the layer plan</td><td>ref</td></tr>
 
-<tr><td>Hunyuan 0.5B / 1.8B / 4B / 7B</td><td>Tencent, 30 Jul 2025</td><td>0.5&ndash;7B</td><td>Dense transformer, GQA, 256K context, fast/slow thinking modes</td><td>Runs now</td><td>P1</td></tr>
+<tr><td>Hunyuan 0.5B / 1.8B / 4B / 7B</td><td>Tencent, 30 Jul 2025</td><td>0.5&ndash;7B</td><td>Dense transformer, GQA, 256K context, fast/slow thinking modes</td><td>Runs now &mdash; <code>hunyuan_4b_inf.yaml</code> (GPU path)</td><td>P1</td></tr>
 
 <tr><td>SmolLM3-3B</td><td>HuggingFace, 9 Jul 2025</td><td>3B</td><td>36L dense, GQA (4 groups), NoPE on every 4th layer (3:1). Position encoding is not priced, so NoPE is free</td><td>Runs now</td><td>P1</td></tr>
 
 <tr><td>Qwen3 0.6B / 1.7B / 4B</td><td>Alibaba, Apr 2025 (honorary)</td><td>0.6&ndash;4B</td><td>Dense transformer, GQA, QK-norm, SwiGLU. The pre-linear-attention baseline</td><td>Runs now</td><td>P1</td></tr>
 
-<tr><td>Gemma&nbsp;3 1B / 4B</td><td>Google, Mar 2025 (honorary)</td><td>1&ndash;4B</td><td>5:1 local sliding-window : global attention, GQA</td><td>Schema gap (window pattern)</td><td>P1</td></tr>
+<tr><td>Gemma&nbsp;3 1B / 4B</td><td>Google, Mar 2025 (honorary)</td><td>1&ndash;4B</td><td>5:1 local sliding-window : global attention, GQA</td><td>Runs now (mapped, windowed) &mdash; <code>gemma_3_4b_inf.yaml</code></td><td>P1</td></tr>
 
 <tr><td>Gemma&nbsp;4 E2B / E4B</td><td>Google, 3 Apr 2026</td><td>E4B: 8B raw / 4.5B effective</td><td>42L, interleaved SWA-512 : global with the last layer always global, unified K/V on global layers, p-RoPE, Per-Layer Embeddings, ~150M vision + ~300M audio encoders</td><td>Schema gap + D2 boundary call</td><td>P2</td></tr>
 
@@ -234,10 +234,10 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 Granite-4.0-H-Tiny (36 Mamba-2 + 4 attention layers, MoE on all 40, 6.94B raw) is priced end to end on the
 mapped <code>fws_cim</code> path with a new <code>configs/hardware-config/fws_cim_granite_tiny.yaml</code>.
 Artifacts: <code>docs/qif/atlas/granite_4_0_h_tiny_report.json</code> (the <code>fws_qif_report/1</code> document,
-byte-equal to <code>run_perf</code>&#39;s own output and regenerated by a test) and
+regenerated by a test and compared BYTE for BYTE against <code>fws_eval.report_document</code>, the document <code>run_perf</code> serializes) and
 <code>docs/qif/atlas/granite_4_0_h_tiny.json</code> (the first PRICED <code>fws_atlas/1</code> export, clean through
 <code>atlas.html</code>&#39;s own validator). 5610 analog macros on 10 integer chips beside 10 shared digital chiplets;
-prefill 1.0795&nbsp;s, decode step 0.8917&nbsp;ms, 4485.9&nbsp;tok/s, 194.99&nbsp;&micro;J.</p>
+prefill 1.0795&nbsp;s, decode step 0.8917&nbsp;ms, 4485.9&nbsp;tok/s, 194.99&nbsp;mJ (analog arrays + link traffic; the shared-digital, reduction and KV terms are labelled UNCOVERED in the report&rsquo;s own components list). <em>(Unit corrected 2026-08-24: this line read &micro;J; the report&rsquo;s own total is 194,986,179,164&nbsp;pJ.)</em></p>
 <p><strong>The finding: prefill is scan-bound, not array-bound.</strong> One SSD prefill scan costs 23.82&nbsp;ms
 against 573&nbsp;&micro;s for the analog projection that feeds it &mdash; 40&times; &mdash; so the 36 Mamba layers own
 roughly 86&nbsp;% of the prefill critical path while the analog macros idle. That is D5&#39;s &ldquo;heavy digital
@@ -251,5 +251,49 @@ the full refusal, and <code>attention.output_gate</code>, <code>shared_weight_gr
 forced. 24 tests in <code>tests/test_qif_granite_e2e.py</code>, including hand-recomputed physics audits: no law exceeds
 its declared engine peak, and the analog M-law is checked by hand at three points.</p>
 <p><strong>Wave B audit fixes 2026-08-23</strong> &mdash; the Granite artifacts named the wrong model. <code>granite_4_0_h_tiny_inf.yaml</code> declares <code>model_type: llama</code> because the SwiGLU gated MLP is the pricing CARRIER, and that name reached the atlas title, the system label, <code>models[].id/label</code> and all 5610 tile owners &mdash; D21&rsquo;s named-owner invariant satisfied by a name that tells a reader the wrong model. <code>model_param.model_id</code> was added to the schema (optional, falling back to <code>model_type</code>, so nothing already shipped moves), the Granite YAML declares <code>granite_4_0_h_tiny</code>, and a <code>model_type_carrier</code> disclosure reconciles the two spellings instead of leaving them to contradict each other. The headline share was also wrong: the prefill is scan-bound, but the 36 SSD scans are <strong>0.8575 s = 79%</strong> of the 1.0795 s prefill (the whole Mamba chain 95%, the four attention layers 8.6%) &mdash; &ldquo;about 86%&rdquo; matched neither quantity. <code>attention.window</code>, which P1.5 un-rejected on the mapped path with only law-level and schema-level coverage, now has five end-to-end tests driving a mapped run through the local/global split (<code>(i+1) % local_global_interval == 0</code> plus <code>last_layer_global</code>), both sliding-window laws and the <code>sliding_window_layer_pattern</code> disclosure; the window is injected into a real config rather than shipped as a Gemma-3-class YAML, because those dims cannot be verified from this tree and inventing them is the ADJ-4 failure. Three Granite gates that <em>skipped</em> when the checked-in artifact was missing now assert it exists, and the priced atlas gained the regenerate-and-compare test the llama7b atlas already had.</p>
+<p><strong>Built 2026-08-24</strong> &mdash; Wave C, P1.6: the SECOND P0 model runs.
+Qwen3.5-4B (24 gated-DeltaNet + 8 gated-attention layers, dense SwiGLU FFN, 4.21B raw in the text backbone this YAML models) is priced
+end to end on the mapped path with a new <code>configs/hardware-config/fws_cim_qwen3_5_4b.yaml</code>.
+Artifacts: <code>docs/qif/atlas/qwen3_5_4b.json</code> (clean through <code>atlas.html</code>&rsquo;s own
+validator) and <code>qwen3_5_4b_report.json</code> (regenerated and compared byte for byte against <code>fws_eval.report_document</code>), both
+pinned by regenerate-and-compare tests. 729 macros on 8 integer chips beside 8 shared digital chiplets;
+prefill 1.2236&nbsp;s, decode step 2.4554&nbsp;ms, 1628.7&nbsp;tok/s, 410.7&nbsp;mJ (analog arrays 399.3&nbsp;mJ + link traffic 11.5&nbsp;mJ; the shared-digital, reduction and KV terms are labelled UNCOVERED in the report&rsquo;s own components list &mdash; on a run whose finding is that 89&nbsp;% of the path is shared-digital work).</p>
+<p><strong>The finding:</strong> prefill is shared-digital-bound <em>twice over</em>. The 24 delta-rule ops
+are <strong>0.6512 s = 53%</strong> of the 1.2236&nbsp;s prefill and the 8 full-attention layers another
+<strong>36%</strong> &mdash; so one gated-attention layer costs about <strong>twice</strong> what one
+delta-rule layer costs at 1792 context, even though the linear layers outnumber it three to one, while
+every weight matrix in the model sits in analog macros that account for under 40% of the path. That is
+D5&rsquo;s heavy-digital-co-compute prediction on a linear-attention stack, and the reason the row exists.</p>
+<p><code>attention.output_gate</code> is un-blocked on <strong>mapped fws_cim runs only</strong>. The
+adjudicated reading is the boring one: W<sub>g</sub> is an ordinary weight matrix, placed as an analog
+tile at <code>hidden &times; num_heads&middot;head_dim</code> = 2560&nbsp;&times;&nbsp;4096 &mdash;
+<code>llm_util</code>&rsquo;s own census term, so the placement and the parameter count stay ONE accounting
+&mdash; column-parallel so a tp shard gates the heads it owns, with the sigmoid and the multiply as
+per-macro pool work whose concurrency rides P4.5&rsquo;s pool sizing (ADJ-3 / D12). The GPU and unmapped
+paths keep refusing it by name. 22 tests in <code>tests/test_qif_qwen_e2e.py</code> hold it end to end,
+including hand-recomputed physics on the gate GEMM (7168&nbsp;&times;&nbsp;4&nbsp;&times;&nbsp;2 / 100&nbsp;MHz
+= 573.44&nbsp;&micro;s) and on the delta rule (26,394,755,072 ops), and no law exceeds its declared engine peak.</p>
+<p>The delta-rule law is <code>LAW_UNVALIDATED</code> and this is its first consumer, so the label now
+<em>rides the artifacts</em>: <code>cim_timing</code> labelled every priced digital op and the label stopped
+at the op&rsquo;s basis string, which left a reader of the report or the atlas holding a duration with no way
+to know no numeric reference exists behind it. It is now a disclosure, in both documents &mdash; which also
+adds <code>unvalidated_law:ssd_chunked_scan</code> to the Granite pair, whose two artifacts were regenerated
+for exactly that one line.</p>
+<p><strong>Wave C audit fixes 2026-08-24</strong> &mdash; two majors closed, and the table above was re-read against what actually runs. (1) The <code>delta_rule_chunk_size</code> disclosure claimed the recurrent form was &ldquo;the conservative direction&rdquo;. It is not established as one: this card declares no <code>state_bytes_per_cycle</code>, so <code>state_time_s</code> is 0.0 and the chunked form&rsquo;s only saving is priced at zero, while its retired-op count CROSSES the recurrent one at Q&nbsp;&asymp;&nbsp;34 (0.92&times; at Q=8, 1.12&times; at Q=64, 1.38&times; at Q=128 at these dims). The disclosure now states the measurement and claims no direction, and the durable fix landed with it: <code>model_param.linear_attention.chunk_size</code> is now a schema field &mdash; OPTIONAL, with NO default, because a default would be an invented Q (ADJ-4) and would move a shipped headline. Qwen3.5 publishes none, so every priced number is unchanged; the two Qwen artifacts were regenerated for the disclosure text alone. (2) The matrix Status cells now match the legend: Qwen3.5 and Granite-4.0-H-Tiny read <em>runs now (mapped)</em>, Gemma&nbsp;3 <em>runs now (mapped, windowed)</em>, and Falcon-H1 <em>new lowering</em> &mdash; the branch schema has existed since Wave A and the DAG lowering is the single thing missing. Also: the headline energies are now quoted with their coverage scope, and the report gate is described as what it is (regenerate-and-compare against <code>fws_eval.report_document</code>), not as a claim about <code>run_perf</code>&rsquo;s own bytes.</p>
+<p><strong>Carriers 2026-08-24</strong> &mdash; P1.3&rsquo;s recorded assumption is followed through.
+<code>falcon_h1_3b_inf.yaml</code> (3.15B) and <code>hunyuan_4b_inf.yaml</code> (4.22B) are the SUPPORTED
+carriers of the two families whose only shipped row was over the D2 cutoff, and
+<code>gemma_3_4b_inf.yaml</code> (3.88B text backbone) is the first windowed row &mdash; the sliding-window
+law had been priced since Wave B but the window had only ever been <em>injected</em> into another model&rsquo;s
+config. Each verdict is a test: Falcon-H1-3B stays REFUSED on fws_cim, and the refusal now names the right
+reason (<code>layer_plan.structure: parallel_branch</code> &mdash; every law its branches need exists, the
+DAG lowering does not, and it would otherwise have been priced as a deeper sequential model); Hunyuan-4B runs
+end to end on the A100 path; Gemma-3-4B runs mapped with both window laws live on its real 5 local : 1 global
+pattern (layers 5, 11, 17, 23, 29 global, 29 local). One gate moved to let them in: a DECLARED
+<code>attention.head_dim</code> is now authoritative on every path instead of having to equal
+<code>hidden_dim / num_heads</code> unless a hybrid plan was present. Gemma&nbsp;3 is 2560/8 with head_dim 256
+and Hunyuan-4B is 3072/32 with head_dim 128 &mdash; the rule refused the field on exactly the models it exists
+for, while every consumer already read the declared value; the guard is replaced by a test that the declared
+value is HONORED (Hunyuan&rsquo;s census matches its checkpoint at 128 and misses it by 6.7% at the derived 96).</p>
 </div>
 </main></body></html>
