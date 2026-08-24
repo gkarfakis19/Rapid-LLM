@@ -38,10 +38,10 @@ td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
 <h2>Mission context</h2>
 <p>The QIF core question, stated by George 2026-08-24: the hardware is FIXED
 (macros of one geometry, chips of one capacity); how you program and connect it
-is flexible. A K&times;N tensor on r&times;c macros with mux m admits a family
-of mappings from fully spatial (many macros, banks idle, parallel time) to
-fully temporal (few macros, banks full, folded time with shift-add
-accumulation). Choosing the folding per tensor, per model, is the project's
+is flexible. Under Invariant W every bank holds real weights, so the mapping
+freedom is WHICH tensors' blocks co-reside where (K-stacks with accumulators,
+cross-tensor bank sharing, chip locality) and how the system around the
+analog floor is provisioned. Choosing that, per model, is the project's
 center. The Wave D DSE proved the gap by construction: its Pareto front
 collapsed to one point and its own <code>front_shape</code> note said why &mdash;
 nothing swept traded silicon for speed. Folding is the missing axis.</p>
