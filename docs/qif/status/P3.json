@@ -6,43 +6,43 @@
   {
    "id": "P3.1",
    "title": "Mapping object + new mapping: config block + validation with named violations",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "FwsMapping plus the new mapping: config block (chips, macros_per_chip, shared_chiplets, parallelism, layers_per_chip, membership, decode_window) validate a DECLARED placement with named violations; the block is a claim the tool checks, not an input that wins, and it is refused at parse time on any device class but fws_cim. WAVE B FIX: A3/D10's core concept -- two OWNERS sharing one macro's stored columns -- was produced by no artifact and exercised by no test (only the refusal path was), so tests/test_qif_mapping.py now builds a co-sited point (column_sets_per_tile: 1 plus one assignment moving a 16-wide router onto free column sets of a qkv macro), asserts disjoint column sets, the held/claimed column accounting and the unowned-column reconciliation, and drives that export through the P5 loader so its overlap rule R13 actually fires instead of reporting 'nothing fired'. ASSUMPTION (was an escalation, now decided): tp KEEPS the user's declared layers_per_chip and REPORTS the gap rather than repacking -- D10 makes allocation user-specified now and automatic allocation a later search phase, so tp = 2 on llama7b enumerates 8 chips at 53-57% occupancy with 440 of 960 macro slots unowned, all printed in summary(); the occupancy figure is the reader's cue and repacking on the user's behalf would be the mapper overriding a declared claim.",
    "questions": []
   },
   {
    "id": "P3.2",
    "title": "Heterogeneous op-to-device placement on the program IR (DeviceCoord widening)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "program/fws_build.py is a NEW builder beside program/build.py -- it imports nothing from the GPU path, so the 221 goldens are untouched by construction -- and lowers prefill plus a bounded decode window into ComputeOp/TransferOp: weight GEMMs on analog macros at their tile placements, shift-add and row-block reductions plus norms/activations/residuals/short-conv on that macro's pool, attention and SSM scan and delta rule on shared chiplets, and explicit transfers for the chip boundary, the analog<->chiplet hop, tp all-reduces and MoE dispatch/combine. EVERY DURATION IS 0.0 and each op instead carries an FwsOpAnnotation naming the P4 pricing-table row that prices it (A1, D21); DeviceCoord is widened additively and no file under program/ was edited. Wave A's leftover is CLOSED: TileSite's row convention is pinned to 'a site's row range IS the owner matrix's K range' and validated on every placed tile, with allocation_sites' (0, rows) documented as a placeholder only the column-set capacity check consumes. CLOSED BY P6.3: the bridge found two lowering errors here and both are fixed with regression tests in tests/test_qif_bridge.py -- the ViT head was priced over the whole sequence instead of M = batch, and every routed MoE expert saw the full owner batch instead of moe_tokens_hot. ASSUMPTIONS: intra-chip activation movement is a dependency with annotated bytes and no link charge (no on-chip interconnect law is declared anywhere), disclosed as a relaxation; hybrid ssm / linear_attn / short_conv blocks lower structurally from llm_util's raw-parameter census while P1.4's run-path refusal stands wherever pricing has not landed.",
    "questions": []
   },
   {
    "id": "P3.3",
    "title": "tp/ep/pp shard-group annotations end to end",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Every chip, macro, device and op carries (tp, ep, pp). Membership is CONSTRUCTED, never re-inferred: FwsMapping.shard_layout is a RankLayout over (tp, ep, pp) and program.groups.CommunicatorFactory enumerates the sibling SHARD ids for an (axis, coords) anchor, which the mapping then resolves to devices by ROLE (chip position within its shard, macro slot, device class). The resulting GroupKeys are registered in Program.groups and carried on every op's annotation; a test asserts the members equal the factory's own enumeration and that members are sorted. primary_group (ADJ-7) is the first axis of tp, ep, pp with a degree above 1, else tp - a property of the file, not of what is on screen. pp is an INDEPENDENT annotation: mapping.parallelism.pp > 1 annotates chips while the hardware parallelism.pp stays 1, membership may be declared per chip, and a declared pp that leaves a stage empty is a named error. The chip chain is grouped by tp shard and not by the full coordinate, so the boundary between two pp stages is still a drawn boundary.",
    "questions": []
   },
   {
    "id": "P3.4",
    "title": "PD system pair + priced handoff (D16)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "build_pd_pair returns two independent FwsMapping inventories (own spec, own chips, own shared chiplets) and one PDHandoff priced as bytes over the declared p2p law: KV = batch x kv_bytes_per_stream(prefill context, tp = 1) plus state = batch x hidden x act (plus the SSM recurrent state when the model declares one). No precision conversion is modeled and the basis string says so. A test asserts equal specs reproduce the unified machine site-for-site (same chips, macro slots, tile sites and reservations as the unmapped-block build), and another asserts the halves may differ. mapping.pd requires BOTH halves by name. ASSUMPTION: the handoff carries the WHOLE KV of the request at tp = 1 - how each side shards it is that side's mapping, not the wire's.",
    "questions": []
   },
   {
    "id": "P3.5",
    "title": "Per-boundary byte-rate table with disclosures",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "FwsMapping.boundary_table() emits one row per boundary - chip-boundary activations (role act; ADJ-5 forbids calling a chip boundary pp), tp all-reduce volume, MoE dispatch/combine when ep moved the experts, and KV traffic - each with bytes, unit, a basis string naming the law (cim_timing.boundary_bytes / moe_dispatch_bytes / kv_read_bytes, so the bytes have ONE accounting), the declared link bandwidth and the time the link needs. A RATE needs a time base and P3 has no timeline, so period_s is an explicit input and boundary_table(period_s=...) without a period_basis is refused by name; without a period every rate field is None rather than invented. A violation names boundary id, required rate, available rate and ratio, and its disclosure states that D17 gives this model no congestion term so the excess is REPORTED and NOT priced and the DAG time is optimistic - which also appears as a relaxations() entry and in the text report. ASSUMPTION: KV crosses no p2p link in either KV story, so its row is checked against the KV tier's declared bandwidth and marked crosses_link = False rather than being drawn as a link; prefill charges the KV it WRITES over the prefill context and decode the KV it READS over the full context, and the label says which.",
    "questions": []
   },
   {
    "id": "P3.6",
    "title": "atlas.json export (fws_atlas/1)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "fws_atlas_export.export_atlas emits fws_atlas/1 from a real mapping; docs/qif/atlas/p3_llama7b_tp2.json and granite_4_0_h_tiny.json both validate with 0 errors and 0 warnings through atlas.html's own loader, and both are pinned by regenerate-and-compare tests. WAVE B FIXES, all in the priced path only (the placement-only export is byte-identical): the model label is now the model's id and never model_type; macros[].digital_pool carries P4.5's TIMELINE-MEASURED sizing when the export is priced, so the atlas and the report no longer print two different act_lanes for one macro under one field name; every pool block carries a basis that names a 0.0 area as UNCOVERED (an absent law) rather than a measured zero; P4's disclosures ride the document deduplicated by constraint key, so a windowed decode run discloses its window to an atlas reader; and a priced document retires the op_durations relaxation and stops claiming in provenance that it 'carries no time'. SCHEMA.md, atlas.html, the P5 fixture and index.html are untouched -- every change is a value inside the frozen contract.",
    "questions": []
   }
  ]

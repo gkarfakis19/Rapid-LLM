@@ -223,6 +223,34 @@ Attention outer-multiplier compensation (N_mult)
     ``None`` for them and the native tile/roofline machinery (priced against
     the stub tech_param, which must then describe the sidecar) continues.
 
+Digital op laws (QIF P2.6) — the shared chiplet's vector/scan engine
+    The chiplet card gains ENGINE CAPABILITY knobs (``vector_lanes``,
+    ``vector_clock_ghz``, ``vector_pipeline_depth``, ``state_bytes_per_cycle``)
+    and the laws for the op kinds P1 admitted are timed on them:
+    ``cycles = pipeline_depth + ceil(ops / lanes) - 1``. One lane retires ONE
+    scalar operation per cycle, so no law can exceed ``lanes * clock`` ops/s.
+    ``vector_lanes`` has NO default and refuses by name
+    (:class:`EngineCapabilityError`) — ADJ-4, no invented numbers.
+
+    - Mamba-2 SSD: :func:`ssm_recurrent_scan_work` (per-token recurrence, work
+      counts ported term-for-term from OPTIMA ``stage_m3_scan``) and
+      :func:`ssd_chunked_scan_work` (chunked; UNVALIDATED, OPTIMA has no
+      chunked reference — it prices prefill and decode alike).
+    - Mamba-1 selective scan: the unchunked subset, same law, one gate term.
+    - Delta rule / DeltaNet / RWKV-7: :func:`delta_rule_work`. UNVALIDATED.
+      RG-LRU (:func:`rg_lru_work`) is its strict subset at ``d_k = 1``.
+    - Short depthwise conv: NOT a chiplet op. ADJ-3 puts it on the per-macro
+      pool, absorbed into :meth:`CimDeviceModel.digital_pool_sizing`.
+    - Sliding-window attention: the SA law at ``n = min(context, window)`` —
+      a thin wrapper, never a second attention accounting.
+    - MLA (D6): the SA law at the MLA call dims with ``kv_heads = 1`` (the
+      latent is one shared rank, so tp buys nothing), plus
+      :meth:`CimDeviceModel.mla_kv_replication`, the replicated-weight area.
+
+    STANCE: OPTIMA SIZES an engine to a reuse target and its digital load can
+    only cost area, never time (AUDIT finding 6). We TIME declared work on a
+    declared engine. Only the work-count arithmetic is ported, never sizing.
+
 OPTIMA block-latency equivalence (recon note for validation)
     The recorded OPTIMA runs sum a sixth pipeline stage equal to exactly one
     analog stage time (their trailing peripherals stage), so OPTIMA's
@@ -304,6 +332,11 @@ class CimModelParams:
     top_k: int = 1
     moe_intermediate_size: int = 0     # 0 => use intermediate_size
     n_shared_experts: int = 0
+    #: Shared-expert FFN width (`model_param.ffn_dims.shared_expert`); 0 falls
+    #: back to the routed-expert width. llm_util's parameter census already
+    #: reads this field, so the array census must read the same one or the two
+    #: accountings of one model disagree (D21).
+    shared_intermediate_size: int = 0
     #: One-hot expert imbalance contract (MOE_ONE_HOT_EXPERT_MODEL.md):
     #: the hot expert carries factor alpha of a balanced share.
     expert_imbalance_factor: float = 1.0
@@ -371,6 +404,9 @@ class CimModelParams:
             top_k=max(1, int(top_k or 1)),
             moe_intermediate_size=int(getattr(model, "moe_intermediate_size", 0) or 0),
             n_shared_experts=int(getattr(model, "n_shared_experts", 0) or 0),
+            shared_intermediate_size=int(
+                dict(getattr(model, "ffn_dims", {}) or {}).get("shared_expert", 0) or 0
+            ),
             expert_imbalance_factor=float(getattr(model, "expert_imbalance_factor", 1.0) or 1.0),
             moe_layer_mask=tuple(bool(x) for x in mask_raw),
             vocab_size=int(getattr(model, "vocab_size", 0) or 0),
@@ -393,6 +429,21 @@ class CimModelParams:
     def moe_intermediate(self) -> int:
         """Per-class intermediate size for MoE layers (dense size when unset)."""
         return self.moe_intermediate_size if self.moe_intermediate_size > 0 else self.intermediate_size
+
+    @property
+    def shared_expert_intermediate(self) -> int:
+        """Shared-expert FFN width; the routed width when the model declares none.
+
+        Granite-4.0-H-Tiny is the case that needs it: 64 routed experts at 512
+        beside ONE always-on shared MLP at 1024. Falling back to the routed
+        width is the degenerate identity every existing MoE config takes, so
+        those array counts do not move.
+        """
+        return (
+            self.shared_intermediate_size
+            if self.shared_intermediate_size > 0
+            else self.moe_intermediate
+        )
 
     @property
     def layer_mask(self) -> Tuple[bool, ...]:
@@ -513,7 +564,25 @@ class TileOwner:
 
 @dataclass(frozen=True)
 class TileSite:
-    """Where a tile sits: macro id, row range, column-set (mux-slot) ids."""
+    """Where a tile sits: macro id, row range, column-set (mux-slot) ids.
+
+    **Row convention, pinned by the mapping consumer (QIF P3.2).** A site's
+    ``[row_start, row_end)`` is the half-open K range of the OWNER'S WEIGHT
+    MATRIX that this site holds — the range :meth:`CimDeviceModel.enumerate_tiles`
+    emits, so ``site.row_start == tile.k_start`` and ``site.row_end ==
+    tile.k_end``, and the span never exceeds the card's rows.
+    ``fws_mapping.validate_tile_row_convention`` enforces it on every tile the
+    mapper places.
+
+    One producer does NOT carry a K range and cannot:
+    :meth:`CimDeviceModel.allocation_sites` reads `cim.allocation` entries,
+    which declare a macro and a set of mux slots and nothing about rows, so it
+    fills ``(0, rows)`` as a placeholder. That output feeds
+    :meth:`CimDeviceModel._check_sites`, which reads column sets ONLY and never
+    looks at the row range. The mapper therefore never consumes it as one: a
+    user allocation reaches a tile through the enumerator, which supplies the
+    rows, and the config supplies only the macro and the column sets.
+    """
 
     macro_id: int
     row_start: int
@@ -625,6 +694,21 @@ class DigitalPoolSizing:
     area_share: float
     disclose: bool
     note: Optional[str]
+    #: --- short depthwise conv absorbed into the pool (ADJ-3, P2.6 4) ------
+    #: 0 everywhere means no conv was declared and every figure below is 0,
+    #: which reproduces the P2.5 sizing exactly.
+    conv_kernel: int = 0
+    conv_channels: int = 0
+    conv_ops_per_result: int = 0
+    conv_column_duty: float = 0.0
+    conv_ops_per_s: float = 0.0
+    conv_lanes: int = 0
+    conv_area_mm2: float = 0.0
+
+    @property
+    def total_lanes(self) -> int:
+        """Every lane the pool carries: shift-add lanes plus conv lanes."""
+        return int(self.lanes) + int(self.conv_lanes)
 
 
 #: ADJ-4: a per-macro pool this large stops being absorbed silently. It is a
@@ -663,6 +747,601 @@ def check_allocation_capacity(column_sets_per_macro: int, assignments) -> None:
                     f"{claimed[key]} and {label}. One column set holds one tile."
                 )
             claimed[key] = label
+
+
+# ---------------------------------------------------------------------------
+# Digital op laws (QIF P2.6): the shared digital chiplet's VECTOR/SCAN engine
+#
+# STANCE (the inversion this whole section exists to state): OPTIMA SIZES an
+# engine to hit a reuse target — `create_s3_scan_collection` derives unit
+# counts from a microcycle budget and `get_execution_cycles` then returns that
+# budget, ignoring its own arguments. Digital load can only cost area there,
+# never time (AUDIT finding 6). WE do the opposite: a law DECLARES the work of
+# a call and TIMES it on a DECLARED engine — `cycles(work; lanes) / clock`. So
+# the ported content is the WORK-COUNT arithmetic (state dims, groups, heads,
+# chunking), never the sizing logic.
+#
+# One lane retires ONE scalar arithmetic operation (a multiply OR an add) per
+# vector cycle. Every law is therefore bounded by `lanes * clock` ops/s BY
+# CONSTRUCTION (see :meth:`CimDeviceModel.price_vector_work`); the arithmetic
+# -peak test that pins this is the DESIGN2 section-8 erratum precedent.
+# ---------------------------------------------------------------------------
+
+
+class EngineCapabilityError(ValueError):
+    """The digital chiplet card declares no engine the requested law needs.
+
+    ADJ-4, no invented numbers: the systolic array is a MATMUL engine and the
+    softmax lanes are a softmax pipeline, so neither can stand in for a scan /
+    vector engine. A card that does not declare ``vector_lanes`` gets this
+    refusal instead of a number nobody can defend.
+    """
+
+
+#: Law provenance labels (D21: what is a reference and what is not).
+LAW_OPTIMA_M3 = "optima_m3_reference"
+"""Work counts reproduce OPTIMA `stages_mamba.stage_m3_scan` term for term."""
+LAW_OPTIMA_M3_SUBSET = "optima_m3_subset"
+"""The same term structure with a strictly smaller declared work set."""
+LAW_UNVALIDATED = "unvalidated"
+"""Derived from first principles. NO numeric reference exists anywhere."""
+
+
+@dataclass(frozen=True)
+class VectorWork:
+    """The DECLARED scalar arithmetic of one digital op call, itemized.
+
+    ``terms`` is ``(name, muls, adds)`` per algorithm step, so every operation
+    charged has exactly one named source (D21: one accounting per metric).
+    ``state_bytes`` is the recurrent-state traffic (reads + writes) the call
+    moves — reported always, priced only when the card declares a state
+    bandwidth.
+    """
+
+    law: str
+    validated: str
+    terms: Tuple[Tuple[str, float, float], ...]
+    state_bytes: float
+    detail: Tuple[Tuple[str, float], ...] = ()
+
+    @property
+    def muls(self) -> float:
+        return math.fsum(term[1] for term in self.terms)
+
+    @property
+    def adds(self) -> float:
+        return math.fsum(term[2] for term in self.terms)
+
+    @property
+    def ops(self) -> float:
+        """Scalar operations charged: muls + adds (one lane-cycle each)."""
+        return self.muls + self.adds
+
+    def term(self, name: str) -> Tuple[float, float]:
+        """(muls, adds) of one named term; KeyError-free lookup is not wanted."""
+        for term_name, muls, adds in self.terms:
+            if term_name == name:
+                return (muls, adds)
+        raise KeyError(f"{self.law}: no work term named {name!r}")
+
+
+@dataclass(frozen=True)
+class DigitalOpCost:
+    """One digital op priced on the declared vector engine.
+
+    ``time_s`` is ``max(arith_time_s, state_time_s)`` — the engine cannot
+    retire arithmetic faster than its lanes, nor state faster than its
+    declared state bandwidth. ``state_time_s`` is 0.0 when the card declares
+    no ``state_bytes_per_cycle``; that relaxation is named in ``disclosures``,
+    never silent.
+    """
+
+    law: str
+    validated: str
+    work: VectorWork
+    lanes: int
+    clock_hz: float
+    pipeline_depth: int
+    arith_cycles: int
+    arith_time_s: float
+    state_time_s: float
+    time_s: float
+    ops_per_s: float
+    disclosures: Tuple[str, ...]
+
+
+# --- Mamba2 SSD / Mamba1 selective scan ------------------------------------
+
+
+def ssm_recurrent_scan_work(
+    tokens: float,
+    *,
+    d_inner: int,
+    d_state: int,
+    n_groups: int = 1,
+    n_heads: int = 0,
+    variant: str = "mamba2",
+    act_bytes: float = 1.0,
+) -> VectorWork:
+    """Per-token recurrent SSM state update — the UNCHUNKED law (P2.6 1+2).
+
+    This is one law with two gate spellings, because Mamba-1 selective scan IS
+    the unchunked subset of Mamba-2 SSD:
+
+    ======================  ==========================================
+    term                    work per token (over the whole mixer)
+    ======================  ==========================================
+    ``state_decay``         ``d_inner * d_state`` muls  (S *= exp(dt A))
+    ``input_gate``          mamba2: ``n_heads * d_state`` muls (dt_h * B_g,
+                            one dt per head against the group's B);
+                            mamba1: ``d_inner`` muls (dt_i * x_i, no head
+                            structure — B is not per-channel)
+    ``outer_write``         ``d_inner * d_state`` muls  (rank-1 (dtB) (x) x)
+    ``state_combine``       ``d_inner * d_state`` adds
+    ``readout_mul``         ``d_inner * d_state`` muls  (y = S . C)
+    ``readout_reduce``      ``d_inner * d_state`` adds
+    ======================  ==========================================
+
+    OPTIMA EQUIVALENCE (D21 — this is the whole reference, stated exactly).
+    ``create_s3_scan_collection`` in naive (``dot_prod_trick=False``) mode
+    censuses, per group per MICROCYCLE, ``decay_muls = outer_muls =
+    combine_adds = readout_muls = readout_adds = L' * U`` and ``beta_muls =
+    g_h * U``, with ``L = d_inner/G``, ``g_h = n_heads/G``, ``L' =
+    ceil(L/T_L)``, ``U = ceil(N/T_N)`` and ``T_L * T_N ~ reuse`` microcycles
+    per token. Multiplying its per-microcycle census by its own ``reuse``:
+
+    * the decay / outer / combine / readout terms equal OURS times
+      ``(L'*T_L/L) * (U*T_N/N)`` — pure TILING CEIL, 1.0 when the tiles
+      divide. This is a term-for-term port. At the one RECORDED point
+      (``compiler_mamba_giant_22nm.md``, mux 16, digital clock 0.8 GHz read
+      off ``configs/digital_tile_config.yaml``) the tiles do divide: reuse
+      256, T_L 32, T_N 8, L' 16, U 16, so the ceil is EXACTLY 1.0 and the
+      port carries no residual at all.
+    * ``beta_muls * reuse = g_h * N * T_L`` — ``T_L`` times ours, because
+      OPTIMA recomputes ``dt * B`` inside every channel tile. That is an
+      artifact of ITS tiling of a SIZED engine, not per-token work, so we do
+      not charge it. Named here rather than quietly dropped.
+    * OPTIMA additionally instantiates ``y_acc_units = L' * U`` accumulators,
+      which its OWN ``adds_per_group_mc`` does not count. It is a hardware
+      census term, not a work term; we do not charge it either.
+
+    The trick (``dot_prod_trick=True``, OPTIMA's default) replaces the
+    streaming readout with projected-state math. It is a different ALGORITHM,
+    not a different accounting of this one, so it is not ported: this law is
+    the streaming form, and the streaming form is what the terms say.
+    """
+    variant = str(variant or "mamba2").strip().lower()
+    if variant not in ("mamba1", "mamba2"):
+        raise ValueError(
+            f"ssm_recurrent_scan_work: variant must be 'mamba1' or 'mamba2' (got {variant!r})"
+        )
+    tokens = float(tokens)
+    d_inner = int(d_inner)
+    d_state = int(d_state)
+    n_groups = int(n_groups)
+    n_heads = int(n_heads)
+    if tokens < 0:
+        raise ValueError("ssm_recurrent_scan_work: tokens must be >= 0")
+    if d_inner < 1 or d_state < 1:
+        raise ValueError("ssm_recurrent_scan_work: d_inner and d_state must be >= 1")
+    if n_groups < 1 or d_inner % n_groups != 0:
+        raise ValueError(
+            f"ssm_recurrent_scan_work: n_groups = {n_groups} must be >= 1 and divide "
+            f"d_inner = {d_inner} (OPTIMA asserts the same: a group owns whole channels)."
+        )
+    if variant == "mamba2":
+        if n_heads < 1 or n_heads % n_groups != 0:
+            raise ValueError(
+                f"ssm_recurrent_scan_work: mamba2 needs n_heads >= 1 divisible by "
+                f"n_groups = {n_groups} (got n_heads = {n_heads})."
+            )
+        gate_muls = tokens * n_heads * d_state
+        gate_name = "input_gate"
+    else:
+        if n_heads:
+            raise ValueError(
+                "ssm_recurrent_scan_work: mamba1 selective scan has no head structure; "
+                f"leave n_heads unset (got {n_heads})."
+            )
+        gate_muls = tokens * d_inner
+        gate_name = "input_gate"
+    state = tokens * d_inner * d_state
+    return VectorWork(
+        law=f"ssm_recurrent_scan[{variant}]",
+        validated=LAW_OPTIMA_M3 if variant == "mamba2" else LAW_OPTIMA_M3_SUBSET,
+        terms=(
+            ("state_decay", state, 0.0),
+            (gate_name, gate_muls, 0.0),
+            ("outer_write", state, 0.0),
+            ("state_combine", 0.0, state),
+            ("readout_mul", state, 0.0),
+            ("readout_reduce", 0.0, state),
+        ),
+        state_bytes=tokens * 2.0 * d_inner * d_state * float(act_bytes),
+        detail=(
+            ("tokens", tokens),
+            ("state_elements", float(d_inner * d_state)),
+            ("channels_per_group", float(d_inner // n_groups)),
+            ("heads_per_group", float(n_heads // n_groups) if n_groups and n_heads else 0.0),
+        ),
+    )
+
+
+def ssd_chunked_scan_work(
+    tokens: float,
+    *,
+    d_inner: int,
+    d_state: int,
+    n_groups: int,
+    n_heads: int,
+    chunk_size: int,
+    act_bytes: float = 1.0,
+) -> VectorWork:
+    """Mamba-2 SSD in its CHUNKED form (P2.6 1) — UNVALIDATED, no reference.
+
+    Honesty first: OPTIMA has NO chunked reference. Its Mamba model prices
+    prefill and decode with the same per-token recurrent stage time (RECON
+    section 1), so there is nothing to port here and nothing to check against.
+    Every term below is derived from the SSD chunk decomposition itself.
+
+    Per chunk of ``Q = chunk_size`` tokens, per group (``L = d_inner/G``,
+    ``N = d_state``, ``g_h = n_heads/G``):
+
+    ==========================  ==================================  ==========
+    term                        muls                                adds
+    ==========================  ==================================  ==========
+    ``decay_cumprod``           ``g_h * Q``                         --
+    ``intra_scores``            ``Q*Q*N``   (C_chunk B_chunk^T)     ``Q*Q*N``
+    ``intra_mask``              ``g_h*Q*Q`` (causal decay mask)     --
+    ``intra_output``            ``Q*Q*L``   (G X_chunk)             ``Q*Q*L``
+    ``chunk_state_scale``       ``Q*L``     (X * chunk decay)       --
+    ``chunk_state``             ``Q*N*L``   (B_chunk^T Xbar)        ``Q*N*L``
+    ``state_passing``           ``L*N``     (S = a S + S_chunk)     ``L*N``
+    ``inter_output``            ``Q*N*L``   (C_chunk S_prev)        ``Q*N*L``
+    ``combine_outputs``         --                                  ``Q*L``
+    ==========================  ==================================  ==========
+
+    The number of chunks is ``ceil(tokens / Q)`` and the TAIL CHUNK IS CHARGED
+    FULL — a disclosed relaxation (it over-charges by at most one chunk), not
+    a silent rounding.
+
+    Why chunking is worth modelling at all: the state is read and written ONCE
+    PER CHUNK, not once per token, so ``state_bytes`` falls by ``Q``. That is
+    the entire point of SSD and it is the term a per-token law cannot express.
+
+    CAUSAL STANCE (stated because the delta-rule law takes the OTHER one, and an
+    unexplained 2x between two blocks on one chiplet reads as an accident). This
+    law charges the intra-chunk terms DENSE: the full ``Q*Q`` for
+    ``intra_scores`` and ``intra_output``, plus an explicit ``intra_mask`` term
+    for applying the causal decay mask afterwards. That is what a vector engine
+    actually retires for SSD — the reference implementation forms the whole
+    ``Q x Q`` score block and masks it, because masking inside the product costs
+    more than the half it saves. :func:`delta_rule_work`'s chunked form charges
+    the STRICT LOWER TRIANGLE instead, because the UT transform it is built on
+    never materializes the upper half at all. Both are modelling choices, both
+    are LAW_UNVALIDATED, and the asymmetry is deliberate.
+    """
+    tokens = float(tokens)
+    d_inner = int(d_inner)
+    d_state = int(d_state)
+    n_groups = int(n_groups)
+    n_heads = int(n_heads)
+    q = int(chunk_size)
+    if q < 2:
+        raise ValueError(
+            f"ssd_chunked_scan_work: chunk_size = {q} is not chunked; call "
+            "ssm_recurrent_scan_work, which is the unchunked law (and the one with "
+            "an OPTIMA reference)."
+        )
+    if n_groups < 1 or d_inner % n_groups != 0:
+        raise ValueError(
+            f"ssd_chunked_scan_work: n_groups = {n_groups} must be >= 1 and divide "
+            f"d_inner = {d_inner}."
+        )
+    if n_heads < 1 or n_heads % n_groups != 0:
+        raise ValueError(
+            f"ssd_chunked_scan_work: n_heads = {n_heads} must be >= 1 and divisible by "
+            f"n_groups = {n_groups}."
+        )
+    groups = float(n_groups)
+    chunks = math.ceil(tokens / q) if tokens > 0 else 0
+    scale = float(chunks) * groups
+    ell = float(d_inner // n_groups)
+    n = float(d_state)
+    gh = float(n_heads // n_groups)
+    qf = float(q)
+    return VectorWork(
+        law="ssd_chunked_scan",
+        validated=LAW_UNVALIDATED,
+        terms=(
+            ("decay_cumprod", scale * gh * qf, 0.0),
+            ("intra_scores", scale * qf * qf * n, scale * qf * qf * n),
+            ("intra_mask", scale * gh * qf * qf, 0.0),
+            ("intra_output", scale * qf * qf * ell, scale * qf * qf * ell),
+            ("chunk_state_scale", scale * qf * ell, 0.0),
+            ("chunk_state", scale * qf * n * ell, scale * qf * n * ell),
+            ("state_passing", scale * ell * n, scale * ell * n),
+            ("inter_output", scale * qf * n * ell, scale * qf * n * ell),
+            ("combine_outputs", 0.0, scale * qf * ell),
+        ),
+        state_bytes=float(chunks) * 2.0 * d_inner * d_state * float(act_bytes),
+        detail=(
+            ("tokens", tokens),
+            ("chunks", float(chunks)),
+            ("tokens_charged", float(chunks) * qf),
+            ("chunk_size", qf),
+            ("state_elements", float(d_inner * d_state)),
+        ),
+    )
+
+
+# --- Delta rule (gated DeltaNet / RWKV-7 class) and RG-LRU -----------------
+
+
+def _delta_state_dims(
+    num_key_heads: int, key_head_dim: int, num_value_heads: int, value_head_dim: int
+) -> Tuple[int, int, int]:
+    """(key heads, d_k, effective d_v per key head) for a delta-rule mixer.
+
+    The fast-weight state is ``k_heads x d_k x d_v``. When value heads
+    outnumber key heads (Qwen3.5: 16 key x 128 against 32 value x 128) each
+    key head carries every value channel it serves, so the effective value
+    width per key head is ``value_dim / num_key_heads`` and the total state is
+    exactly ``key_head_dim * value_dim`` elements.
+    """
+    num_key_heads = int(num_key_heads)
+    num_value_heads = int(num_value_heads)
+    if num_key_heads < 1 or num_value_heads < 1:
+        raise ValueError("delta rule: num_key_heads and num_value_heads must be >= 1")
+    if num_value_heads % num_key_heads != 0:
+        raise ValueError(
+            f"delta rule: num_key_heads = {num_key_heads} must divide num_value_heads "
+            f"= {num_value_heads} (a key head carries whole value heads)."
+        )
+    value_dim = num_value_heads * int(value_head_dim)
+    return (num_key_heads, int(key_head_dim), value_dim // num_key_heads)
+
+
+def delta_rule_work(
+    tokens: float,
+    *,
+    num_key_heads: int,
+    key_head_dim: int,
+    num_value_heads: int,
+    value_head_dim: int,
+    chunk_size: int = 1,
+    output_gate: bool = True,
+    decay_gate: bool = True,
+    act_bytes: float = 1.0,
+) -> VectorWork:
+    """Gated delta rule / DeltaNet / RWKV-7-class fast-weight update (P2.6 3).
+
+    **UNVALIDATED. NO NUMERIC REFERENCE EXISTS ANYWHERE.** OPTIMA models no
+    linear-attention recurrence of any kind, so unlike the SSM scan there is
+    nothing to check these counts against. They are derived from the delta
+    rule itself and every term is named so a reader can dispute one term
+    instead of the whole law. The only hard guarantee is physics: the priced
+    result can never exceed ``lanes * clock`` ops/s (see
+    :meth:`CimDeviceModel.price_vector_work`), which is the DESIGN2 section-8
+    erratum precedent applied before the fact rather than after it.
+
+    State: ``k_heads x d_k x d_v`` (see :func:`_delta_state_dims`).
+
+    RECURRENT form (``chunk_size <= 1``), per token, per key head — the
+    gated delta rule ``S <- diag(a) S (I - b k k^T) + b v k^T`` executed as
+    read / correct / decay / write, plus the output read:
+
+    ============================  ============  ============
+    term                          muls          adds
+    ============================  ============  ============
+    ``read_old_value``  S^T k     ``d_k*d_v``   ``d_k*d_v``
+    ``delta_correct``   b(v-vold) ``d_v``       ``d_v``
+    ``state_decay``     S *= a    ``d_k*d_v``   --      (only with decay_gate)
+    ``rank1_write``     S += k(x)u ``d_k*d_v``  ``d_k*d_v``
+    ``output_read``     S^T q     ``d_k*d_v``   ``d_k*d_v``
+    ``output_gate``     o *= g    ``d_v``       --      (only with output_gate)
+    ============================  ============  ============
+
+    CHUNKED form (``chunk_size >= 2``), per chunk of ``Q`` tokens, per key
+    head — the standard UT-transform decomposition. ``T`` is the ``Q x Q``
+    unit-lower-triangular matrix whose inverse turns the sequential removals
+    into two matrix products:
+
+    ==========================  ======================================
+    term                        muls (adds equal unless noted)
+    ==========================  ======================================
+    ``decay_cumprod``           ``Q*d_k``            (no adds)
+    ``gate_scale``              ``2*Q*d_k``          (no adds)
+    ``kk_scores``               ``Q(Q-1)/2 * d_k``
+    ``ut_transform``            ``Q(Q-1)(Q-2)/6``    (unit-lower-tri inverse)
+    ``w_pseudo_value``          ``Q(Q+1)/2 * d_v``
+    ``u_pseudo_key``            ``Q(Q+1)/2 * d_k``
+    ``state_read``              ``Q*d_k*d_v``
+    ``state_write``             ``(Q+1)*d_k*d_v``    adds ``(Q+1)*d_k*d_v``
+    ``output_inter``            ``Q*d_k*d_v``
+    ``output_intra``            ``Q(Q-1)/2*(d_k+d_v)``
+    ``output_gate``             ``Q*d_v``            (no adds, if gated)
+    ==========================  ======================================
+
+    The tail chunk is charged FULL (disclosed, same rule as the SSD law), and
+    the state moves once per chunk instead of once per token.
+
+    CAUSAL STANCE (stated because the SSD law takes the OTHER one). The chunked
+    terms above are TRIANGLE ONLY — ``Q(Q-1)/2`` for ``kk_scores`` and
+    ``output_intra`` — because the UT-transform decomposition works on a
+    unit-lower-triangular matrix and never materializes the upper half.
+    :func:`ssd_chunked_scan_work` charges the dense ``Q*Q`` and then an explicit
+    causal-mask term, because that is what an SSD vector kernel retires. So the
+    two laws differ by roughly 2x on their causal terms BY CHOICE, not by
+    accident; both are LAW_UNVALIDATED and neither is wrong against a reference,
+    because no reference exists for either.
+    """
+    tokens = float(tokens)
+    heads, d_k, d_v = _delta_state_dims(
+        num_key_heads, key_head_dim, num_value_heads, value_head_dim
+    )
+    if d_k < 1 or d_v < 1:
+        raise ValueError("delta rule: key_head_dim and value_head_dim must be >= 1")
+    q = int(chunk_size)
+    state_elements = float(heads * d_k * d_v)
+    if q <= 1:
+        per = float(heads * d_k * d_v)
+        terms = [
+            ("read_old_value", tokens * per, tokens * per),
+            ("delta_correct", tokens * heads * d_v, tokens * heads * d_v),
+        ]
+        if decay_gate:
+            terms.append(("state_decay", tokens * per, 0.0))
+        terms.append(("rank1_write", tokens * per, tokens * per))
+        terms.append(("output_read", tokens * per, tokens * per))
+        if output_gate:
+            terms.append(("output_gate", tokens * heads * d_v, 0.0))
+        return VectorWork(
+            law="delta_rule_recurrent",
+            validated=LAW_UNVALIDATED,
+            terms=tuple(terms),
+            state_bytes=tokens * 2.0 * state_elements * float(act_bytes),
+            detail=(
+                ("tokens", tokens),
+                ("key_heads", float(heads)),
+                ("d_k", float(d_k)),
+                ("d_v_effective", float(d_v)),
+                ("state_elements", state_elements),
+            ),
+        )
+    chunks = math.ceil(tokens / q) if tokens > 0 else 0
+    scale = float(chunks) * float(heads)
+    qf = float(q)
+    tri = qf * (qf - 1.0) / 2.0            # strictly lower triangle of Q x Q
+    tri_incl = qf * (qf + 1.0) / 2.0       # lower triangle including diagonal
+    ut = qf * (qf - 1.0) * (qf - 2.0) / 6.0
+    kv = float(d_k * d_v)
+    terms = [
+        ("decay_cumprod", scale * qf * d_k, 0.0),
+        ("gate_scale", scale * 2.0 * qf * d_k, 0.0),
+        ("kk_scores", scale * tri * d_k, scale * tri * d_k),
+        ("ut_transform", scale * ut, scale * ut),
+        ("w_pseudo_value", scale * tri_incl * d_v, scale * tri_incl * d_v),
+        ("u_pseudo_key", scale * tri_incl * d_k, scale * tri_incl * d_k),
+        ("state_read", scale * qf * kv, scale * qf * kv),
+        ("state_write", scale * (qf + 1.0) * kv, scale * (qf + 1.0) * kv),
+        ("output_inter", scale * qf * kv, scale * qf * kv),
+        ("output_intra", scale * tri * (d_k + d_v), scale * tri * (d_k + d_v)),
+    ]
+    if not decay_gate:
+        terms = [term for term in terms if term[0] not in ("decay_cumprod", "gate_scale")]
+    if output_gate:
+        terms.append(("output_gate", scale * qf * d_v, 0.0))
+    return VectorWork(
+        law="delta_rule_chunked",
+        validated=LAW_UNVALIDATED,
+        terms=tuple(terms),
+        state_bytes=float(chunks) * 2.0 * state_elements * float(act_bytes),
+        detail=(
+            ("tokens", tokens),
+            ("chunks", float(chunks)),
+            ("tokens_charged", float(chunks) * qf),
+            ("chunk_size", qf),
+            ("key_heads", float(heads)),
+            ("d_k", float(d_k)),
+            ("d_v_effective", float(d_v)),
+            ("state_elements", state_elements),
+        ),
+    )
+
+
+def rg_lru_work(tokens: float, *, width: int, act_bytes: float = 1.0) -> VectorWork:
+    """RecurrentGemma / Griffin RG-LRU: the STRICT SUBSET of the delta rule.
+
+    **UNVALIDATED**, same standing as :func:`delta_rule_work`.
+
+    The state is DIAGONAL: ``d_k = 1``, one scalar per channel, so the delta
+    rule's outer-product write and its read-and-remove step both collapse.
+    What survives, per token per channel:
+
+    ==================  ====  ====
+    term                muls  adds
+    ==================  ====  ====
+    ``recurrence_gate``  2    --   (a = exp(c * log sigmoid(r)); the
+                                    transcendentals are charged one lane
+                                    operation each, which is the honest
+                                    floor and is disclosed as such)
+    ``input_gate``       1    --   (i (*) x)
+    ``state_decay``      1    --   (h *= a)
+    ``input_scale``      2    --   (sqrt(1 - a^2) * (i (*) x))
+    ``state_combine``   --     1
+    ==================  ====  ====
+
+    "Strict subset" is a checkable claim, not a slogan: at the same state size
+    this law charges strictly fewer operations than
+    ``delta_rule_work`` at ``d_k = 1``, and a test asserts it.
+    """
+    tokens = float(tokens)
+    width = int(width)
+    if width < 1:
+        raise ValueError("rg_lru_work: width must be >= 1")
+    per = tokens * width
+    return VectorWork(
+        law="rg_lru",
+        validated=LAW_UNVALIDATED,
+        terms=(
+            ("recurrence_gate", 2.0 * per, 0.0),
+            ("input_gate", per, 0.0),
+            ("state_decay", per, 0.0),
+            ("input_scale", 2.0 * per, 0.0),
+            ("state_combine", 0.0, per),
+        ),
+        state_bytes=tokens * 2.0 * width * float(act_bytes),
+        detail=(("tokens", tokens), ("width", float(width)), ("state_elements", float(width))),
+    )
+
+
+# --- Short depthwise conv (ADJ-3: the per-macro pool, absorbed) ------------
+
+
+def short_conv_ops_per_result(kernel_size: int) -> int:
+    """Scalar ops one causal depthwise-conv output costs: k muls + (k-1) adds.
+
+    Depthwise means one tap set per channel, so the work is ``k * channels``
+    multiplies and ``(k-1) * channels`` adds per token — there is no channel
+    mixing to amortize. ADJ-3 puts this on the PER-MACRO DIGITAL POOL, so it
+    is not a timed chiplet op: it is absorbed into the pool sizing derivation
+    (D12) by :meth:`CimDeviceModel.digital_pool_sizing`.
+    """
+    kernel_size = int(kernel_size)
+    if kernel_size < 1:
+        raise ValueError("short_conv_ops_per_result: kernel_size must be >= 1")
+    return 2 * kernel_size - 1
+
+
+# --- MLA (D6): the pricing seam and the KV-replication area consequence ----
+
+
+@dataclass(frozen=True)
+class MLAReplication:
+    """What MLA's shared KV latent costs in REPLICATED weights (D6, P1 finding 2).
+
+    MLA is TP-hostile: the KV latent is one shared rank, not a per-head slice,
+    so the tensors that read or write it cannot be split across a tp shard and
+    are stored on EVERY shard. Under FWS weights are cells, so this lands
+    directly on area — our weakest metric, which is exactly why D6 says show
+    how ugly it is.
+
+    Every figure is PER LAYER unless ``layers`` is passed. ``extra_*`` is what
+    replication COSTS relative to a single shard: ``(tp - 1)`` copies.
+    """
+
+    tp: int
+    layers: int
+    latent_bytes_per_shard: float
+    up_projection_bytes_per_shard: float
+    replicated_bytes_per_shard: float
+    extra_replicated_bytes: float
+    replicated_arrays_per_shard: int
+    extra_replicated_arrays: int
+    replicated_area_mm2_per_shard: float
+    extra_replicated_area_mm2: float
+    matrices: Tuple[Tuple[str, int, int, int], ...]   # (name, K, N, arrays)
 
 
 class CimDeviceModel:
@@ -998,8 +1677,11 @@ class CimDeviceModel:
         p = self.params
         dense = self.per_layer_stage_arrays()
         i_moe = p.moe_intermediate
+        i_shared = p.shared_expert_intermediate
         ffn1 = self.arrays(p.hidden_dim, p.ffn1_fold * i_moe)
         ffn2 = self.arrays(i_moe, p.hidden_dim)
+        ffn1_shared = self.arrays(p.hidden_dim, p.ffn1_fold * i_shared)
+        ffn2_shared = self.arrays(i_shared, p.hidden_dim)
         return OrderedDict(
             (
                 ("qkv", dense["qkv"]),
@@ -1007,8 +1689,8 @@ class CimDeviceModel:
                 ("router", self.router_arrays()),
                 ("ffn1_routed", p.num_experts * ffn1),
                 ("ffn2_routed", p.num_experts * ffn2),
-                ("ffn1_shared", p.n_shared_experts * ffn1),
-                ("ffn2_shared", p.n_shared_experts * ffn2),
+                ("ffn1_shared", p.n_shared_experts * ffn1_shared),
+                ("ffn2_shared", p.n_shared_experts * ffn2_shared),
             )
         )
 
@@ -2159,7 +2841,14 @@ class CimDeviceModel:
         self._check_sites((tile.owner, tile.site) for tile in tiles)
 
     def allocation_sites(self) -> Tuple[Tuple[TileOwner, TileSite], ...]:
-        """(owner, site) pairs the user wrote in `cim.allocation.assignments`."""
+        """(owner, site) pairs the user wrote in `cim.allocation.assignments`.
+
+        The row range is a PLACEHOLDER, not a claim: a config entry declares a
+        macro and a set of mux slots and says nothing about rows. Only
+        :meth:`_check_sites` consumes these pairs and it reads column sets
+        alone. See :class:`TileSite` for the pinned row convention and for how
+        a user allocation actually reaches a placed tile.
+        """
         allocation = self.allocation
         if allocation is None:
             return ()
@@ -2340,13 +3029,36 @@ class CimDeviceModel:
         )
 
     def digital_pool_sizing(
-        self, n_slices: Optional[int] = None
+        self,
+        n_slices: Optional[int] = None,
+        *,
+        conv_kernel: int = 0,
+        conv_channels: int = 0,
     ) -> DigitalPoolSizing:
         """Derive the per-macro pool from the card and its resident tiles.
 
         Sized never to block: enough lanes to consume the macro's peak result
         rate. The number is REPORTED, never a constraint (D12). Crossing the
         ADJ-4 disclosure share prints a note and changes nothing.
+
+        SHORT DEPTHWISE CONV (ADJ-3, P2.6 4). Mamba-2's ``d_conv = 4``, LFM2's
+        ``L = 3`` and the Qwen3.5 linear block's ``k = 4`` run HERE, on the
+        per-macro pool, not on the shared digital chiplet — so the conv is not
+        a timed op, it is absorbed into this derivation exactly as the
+        shift-add trees are. Its work is ``k`` muls and ``k - 1`` adds per
+        emitted channel per token (depthwise: one tap set per channel, no
+        channel mixing to amortize), so:
+
+            conv_column_duty = min(conv_channels, cols_adc * mux) / (cols_adc * mux)
+            conv_ops_per_s   = result_rate * conv_column_duty * (2k - 1)
+            conv_lanes       = ceil(conv_ops_per_s / pool_clock)
+
+        The duty is what makes ``conv_channels`` load-bearing rather than
+        decorative: a macro whose stored columns are only partly conv channels
+        does proportionally less conv work, and a block wider than one macro
+        saturates at 1.0 (the "every emitted result is a conv channel" worst
+        case). ``conv_kernel = 0`` leaves every conv figure at 0 and the
+        sizing bit-identical to P2.5.
         """
         card = self.card
         n_s = self.n_slices if n_slices is None else max(1, int(n_slices))
@@ -2356,7 +3068,26 @@ class CimDeviceModel:
         rate = self.macro_result_rate_per_s()
         lanes = max(1, math.ceil(rate / pool_clock_hz))
         adders = lanes * (n_s - 1)
-        area = adders * float(card.pool_area_mm2_per_adder)
+        conv_kernel = int(conv_kernel)
+        conv_channels = int(conv_channels)
+        conv_ops_per_result = 0
+        conv_duty = 0.0
+        conv_ops_per_s = 0.0
+        conv_lanes = 0
+        if conv_kernel > 0:
+            if conv_channels < 1:
+                raise ValueError(
+                    "digital_pool_sizing: conv_kernel was declared without conv_channels. "
+                    "A depthwise conv's work is k x channels; the channel count is not a "
+                    "number this model may invent (ADJ-4)."
+                )
+            conv_ops_per_result = short_conv_ops_per_result(conv_kernel)
+            stored_columns = int(card.stored_columns_per_set) * int(card.column_sets_per_macro)
+            conv_duty = min(conv_channels, stored_columns) / stored_columns
+            conv_ops_per_s = rate * conv_duty * conv_ops_per_result
+            conv_lanes = max(1, math.ceil(conv_ops_per_s / pool_clock_hz))
+        conv_area = conv_lanes * float(card.pool_area_mm2_per_adder)
+        area = (adders + conv_lanes) * float(card.pool_area_mm2_per_adder)
         footprint = self.macro_footprint_mm2()
         share = area / footprint if footprint > 0 else 0.0
         disclose = share >= POOL_DISCLOSURE_AREA_SHARE
@@ -2379,6 +3110,13 @@ class CimDeviceModel:
             area_share=share,
             disclose=disclose,
             note=note,
+            conv_kernel=conv_kernel,
+            conv_channels=conv_channels,
+            conv_ops_per_result=conv_ops_per_result,
+            conv_column_duty=conv_duty,
+            conv_ops_per_s=conv_ops_per_s,
+            conv_lanes=conv_lanes,
+            conv_area_mm2=conv_area,
         )
 
     def report_digital_pool(self, sizing: Optional[DigitalPoolSizing] = None) -> str:
@@ -2399,6 +3137,14 @@ class CimDeviceModel:
             f"{sizing.macro_footprint_mm2:.6g} mm2 macro footprint it serves. "
             "The pool constrains nothing (D12); this is the derived sizing, reported."
         )
+        if sizing.conv_kernel > 0:
+            line += (
+                f" Absorbed short depthwise conv (ADJ-3): k = {sizing.conv_kernel} over "
+                f"{sizing.conv_channels} channels costs {sizing.conv_ops_per_result} ops per "
+                f"result at column duty {sizing.conv_column_duty:.4g}, adding "
+                f"{sizing.conv_lanes} conv lanes ({sizing.conv_ops_per_s:.6g} ops/s) and "
+                f"{sizing.conv_area_mm2:.6g} mm2."
+            )
         digital_area = self.shared_digital_area_mm2()
         if digital_area > 0:
             line += (
@@ -2414,3 +3160,469 @@ class CimDeviceModel:
         if sizing.disclose:
             print(f"[NOTE]: {sizing.note}")
         return sizing.note
+
+    # ------------------------------------------------------------------
+    # Digital op laws (P2.6): the chiplet's vector/scan engine
+    # ------------------------------------------------------------------
+
+    @property
+    def vector_lanes(self) -> int:
+        """Declared scan/vector lanes on the shared digital chiplet card.
+
+        Raises :class:`EngineCapabilityError` when the card declares none.
+        There is no honest default (ADJ-4): the systolic array is a matmul
+        engine and the softmax lanes are a softmax pipeline, so neither can
+        be borrowed as a scan engine without inventing silicon.
+        """
+        card = self.digital_card
+        if not card.has_vector_engine:
+            raise EngineCapabilityError(
+                f"shared digital chiplet card '{card.name}' declares no vector engine: set "
+                "cim.cards.<card>.vector_lanes to the number of scan/elementwise lanes "
+                "(one lane retires one scalar operation per vector cycle). It has NO "
+                "default — the systolic array is a matmul engine and softmax_lanes is a "
+                "softmax pipeline, so deriving scan lanes from either would invent "
+                "silicon (ADJ-4). Every SSM scan, delta-rule and RG-LRU law needs it."
+            )
+        return int(card.vector_lanes)
+
+    @property
+    def vector_clock_hz(self) -> float:
+        """Vector-engine clock: the card's own, else the chiplet's clock."""
+        return float(self.digital_card.vector_clock_ghz_effective) * 1e9
+
+    @property
+    def vector_pipeline_depth(self) -> int:
+        """Vector-engine fill depth: the card's own, else the softmax depth."""
+        return int(self.digital_card.vector_pipeline_depth_effective)
+
+    def vector_engine_disclosures(self) -> Tuple[str, ...]:
+        """Every default and relaxation the vector engine is running under (D21).
+
+        Returned with each priced op so a report can print them; a knob that
+        was INHERITED rather than declared says so, and an undeclared state
+        bandwidth says that it bounds nothing.
+        """
+        card = self.digital_card
+        notes = []
+        if card.vector_clock_ghz <= 0:
+            notes.append(
+                f"vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = "
+                f"{card.fabric.clock_ghz} GHz (one chiplet declares one clock)."
+            )
+        if card.vector_pipeline_depth <= 0:
+            notes.append(
+                f"vector_pipeline_depth undeclared: inherited "
+                f"cim.fabric.softmax_pipeline_depth = {card.fabric.softmax_pipeline_depth}, "
+                "the only elementwise-pipeline depth this chiplet declares."
+            )
+        if float(card.state_bytes_per_cycle) <= 0:
+            notes.append(
+                "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED "
+                "and bounds nothing. A scan whose state does not fit the engine's "
+                "registers would be state-bound; this model cannot say so until a card "
+                "declares the number (disclosed relaxation, not a silent zero)."
+            )
+        return tuple(notes)
+
+    def price_vector_work(
+        self, work: VectorWork, *, extra_disclosures: Tuple[str, ...] = ()
+    ) -> DigitalOpCost:
+        """Time declared work on the declared engine — the P2.6 stance in one method.
+
+        ``arith_cycles = pipeline_depth + ceil(ops / lanes) - 1`` (the pipelined
+        shape this module already uses for softmax lanes and the shift-add
+        tree: one result per lane per cycle after fill).
+
+        PHYSICS INVARIANT, true by construction and pinned by a test: since
+        ``arith_cycles >= ceil(ops/lanes)``, the returned ``ops_per_s`` can
+        never exceed ``lanes * clock``. No law in this module can outrun the
+        silicon its card declares — the DESIGN2 section-8 erratum is the
+        precedent for making that a checked property rather than a hope.
+        """
+        lanes = self.vector_lanes
+        clock = self.vector_clock_hz
+        depth = self.vector_pipeline_depth
+        ops = work.ops
+        arith_cycles = depth + _ceil_div(math.ceil(ops), lanes) - 1
+        arith_time = arith_cycles / clock
+        state_bpc = float(self.digital_card.state_bytes_per_cycle)
+        if state_bpc > 0:
+            # Ceil on CYCLES, never on the declared bandwidth: rounding a
+            # fractional bytes/cycle figure up would hand the engine silicon
+            # the card never declared.
+            state_time = math.ceil(work.state_bytes / state_bpc) / clock
+        else:
+            state_time = 0.0
+        time_s = max(arith_time, state_time)
+        return DigitalOpCost(
+            law=work.law,
+            validated=work.validated,
+            work=work,
+            lanes=lanes,
+            clock_hz=clock,
+            pipeline_depth=depth,
+            arith_cycles=arith_cycles,
+            arith_time_s=arith_time,
+            state_time_s=state_time,
+            time_s=time_s,
+            ops_per_s=(ops / time_s) if time_s > 0 else 0.0,
+            disclosures=self.vector_engine_disclosures() + tuple(extra_disclosures),
+        )
+
+    # --- SSM scan (P2.6 1, 2) ------------------------------------------
+
+    def ssm_scan_work(
+        self,
+        tokens: float,
+        *,
+        d_inner: int,
+        d_state: int,
+        n_groups: int = 1,
+        n_heads: int = 0,
+        variant: str = "mamba2",
+        chunk_size: int = 1,
+        act_bytes: float = 1.0,
+    ) -> VectorWork:
+        """Pick the scan law: chunked SSD, or the per-token recurrence.
+
+        The recurrence wins whenever chunking cannot apply — Mamba-1 (which
+        has no chunked form), ``chunk_size <= 1``, or a single token (a DECODE
+        step is always recurrent, which is also OPTIMA's stance: it prices
+        prefill and decode with the same per-token stage time).
+        """
+        if variant == "mamba1" or int(chunk_size) <= 1 or float(tokens) <= 1:
+            return ssm_recurrent_scan_work(
+                tokens,
+                d_inner=d_inner,
+                d_state=d_state,
+                n_groups=n_groups,
+                n_heads=n_heads,
+                variant=variant,
+                act_bytes=act_bytes,
+            )
+        return ssd_chunked_scan_work(
+            tokens,
+            d_inner=d_inner,
+            d_state=d_state,
+            n_groups=n_groups,
+            n_heads=n_heads,
+            chunk_size=chunk_size,
+            act_bytes=act_bytes,
+        )
+
+    def price_ssm_scan(self, tokens: float, **kwargs) -> DigitalOpCost:
+        """Price one SSM scan call on the chiplet (D13: act x act goes here)."""
+        return self.price_vector_work(self.ssm_scan_work(tokens, **kwargs))
+
+    def price_ssm_block(
+        self,
+        ssm,
+        hidden_dim: int,
+        tokens: float,
+        *,
+        act_bytes: float = 1.0,
+        chunked: bool = True,
+    ) -> DigitalOpCost:
+        """Price a parsed ``model_param.ssm`` block's scan (config -> law seam).
+
+        Reads a :class:`config.SSMBlockConfig`: ``variant``, ``d_state``,
+        ``n_groups``, ``n_heads``, ``chunk_size`` and the resolved ``d_inner``
+        (explicit, else ``expand * hidden_dim``). This is the only place a
+        model config touches the scan laws, so P3/P4 get one seam, not five.
+        """
+        variant = str(getattr(ssm, "variant", "mamba2"))
+        d_inner = ssm.resolve_d_inner(int(hidden_dim))
+        n_groups = int(getattr(ssm, "n_groups", None) or 1)
+        n_heads = int(getattr(ssm, "n_heads", None) or 0)
+        chunk_size = int(getattr(ssm, "chunk_size", None) or 1) if chunked else 1
+        if variant == "mamba1":
+            n_heads = 0
+        return self.price_ssm_scan(
+            tokens,
+            d_inner=d_inner,
+            d_state=int(ssm.d_state),
+            n_groups=n_groups,
+            n_heads=n_heads,
+            variant=variant,
+            chunk_size=chunk_size,
+            act_bytes=act_bytes,
+        )
+
+    # --- Delta rule / RG-LRU (P2.6 3) -----------------------------------
+
+    def price_delta_rule(self, tokens: float, **kwargs) -> DigitalOpCost:
+        """Price one gated-delta-rule call. UNVALIDATED law — see the docstring
+        of :func:`delta_rule_work`; the cost carries ``validated ==
+        LAW_UNVALIDATED`` so a report can never present it as a checked number.
+        """
+        return self.price_vector_work(delta_rule_work(tokens, **kwargs))
+
+    def price_linear_attention_block(
+        self,
+        linear_attention,
+        tokens: float,
+        *,
+        chunk_size: int = 1,
+        act_bytes: float = 1.0,
+    ) -> DigitalOpCost:
+        """Price a parsed ``model_param.linear_attention`` block (config -> law seam)."""
+        return self.price_delta_rule(
+            tokens,
+            num_key_heads=int(linear_attention.num_key_heads),
+            key_head_dim=int(linear_attention.key_head_dim),
+            num_value_heads=int(linear_attention.num_value_heads),
+            value_head_dim=int(linear_attention.value_head_dim),
+            chunk_size=chunk_size,
+            output_gate=bool(getattr(linear_attention, "output_gate", True)),
+            decay_gate=bool(getattr(linear_attention, "decay_gate", True)),
+            act_bytes=act_bytes,
+        )
+
+    def price_rg_lru(self, tokens: float, *, width: int, act_bytes: float = 1.0) -> DigitalOpCost:
+        """Price one RG-LRU (Griffin / RecurrentGemma) call. UNVALIDATED."""
+        return self.price_vector_work(rg_lru_work(tokens, width=width, act_bytes=act_bytes))
+
+    # --- Sliding-window attention (P2.6 5) ------------------------------
+
+    @staticmethod
+    def window_context(context: int, window: Optional[int]) -> int:
+        """Context a sliding-window attention op actually sees: min(context, window).
+
+        ``window`` None or <= 0 means the layer is global and the full context
+        stands — the ``local_global_interval = 1`` case P1 calls inert.
+        """
+        context = int(context)
+        if window is None or int(window) <= 0:
+            return context
+        return min(context, int(window))
+
+    def sliding_window_decode_timing(
+        self,
+        context: int,
+        window: Optional[int],
+        batch_size: Optional[int] = None,
+        kv_heads: Optional[int] = None,
+        tp: int = 1,
+    ) -> AttentionTiming:
+        """SWA decode: the existing folded SA law at n = min(context, window).
+
+        A THIN WRAPPER on purpose (P2.6 5). Sliding-window attention is not a
+        new law — it is the same act x act attention on the same shared digital
+        chiplet (D13) reading a shorter context. The only new content is where
+        the context comes from, so the only new code is
+        :meth:`window_context`. Anything more would be a second accounting of
+        one metric.
+        """
+        return self.decode_attention_timing(
+            self.window_context(context, window),
+            batch_size=batch_size,
+            kv_heads=kv_heads,
+            tp=tp,
+        )
+
+    def sliding_window_prefill_timing(
+        self,
+        seq_len: Optional[int] = None,
+        window: Optional[int] = None,
+        tp: int = 1,
+        streams: int = 1,
+    ) -> AttentionTiming:
+        """SWA prefill: the folded prefill law at n = min(S, window).
+
+        RELAXATION, disclosed: the folded-K law prices ONE score block of
+        ``m = S * shared_heads`` query rows against ``n`` context columns, so
+        capping ``n`` at the window charges the band as a rectangle rather
+        than a diagonal band of width ``window``. It is an UPPER bound on the
+        banded work and a lower bound on the full-context work; it is the same
+        shape the pass-1 prefill law already uses, so it introduces no second
+        accounting.
+        """
+        p = self.params
+        s = int(p.seq_len if seq_len is None else seq_len)
+        return self.attention_call_timing(
+            m=s * p.shared_heads,
+            k=p.head_dim,
+            n=self.window_context(s, window),
+            tp=tp,
+            streams=streams,
+        )
+
+    # --- MLA (P2.6 6, D6) ------------------------------------------------
+
+    def mla_attention_timing(
+        self,
+        context: int,
+        *,
+        num_heads: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        batch_size: int = 1,
+        tp: int = 1,
+        query_rows: Optional[int] = None,
+        streams: Optional[int] = None,
+    ) -> AttentionTiming:
+        """Price MLA attention through the SA law at the MLA CALL DIMS (D6).
+
+        The absorbed MLA form is what a decode step actually runs: the query
+        is projected into the LATENT space, so the score call contracts over
+        ``kv_lora_rank + qk_rope_head_dim`` (the compressed KV plus the shared
+        decoupled RoPE key) against the context, and the output call reads the
+        latent back at width ``kv_lora_rank``. Both are act x act, so both run
+        on the shared digital chiplet (D13) under the SAME folded-K law as
+        MHA/GQA — no second attention accounting exists.
+
+        ``kv_heads = 1`` IS the modelling statement, not a shortcut: the KV
+        latent is ONE shared rank. ``heads_chip`` therefore stays 1 at every
+        tp, so tp buys no attention-side reduction at all. That is the D6
+        "show exactly how ugly" finding, expressed as a number the report can
+        print rather than a sentence in a plan.
+
+        ``query_rows`` defaults to ``num_heads`` (one decode step); a prefill
+        call passes ``S * num_heads``.
+        """
+        latent_k = int(kv_lora_rank) + int(qk_rope_head_dim)
+        m = int(num_heads) if query_rows is None else int(query_rows)
+        b = int(batch_size)
+        return self.attention_call_timing(
+            m=m,
+            k=latent_k,
+            n=int(context),
+            kv_heads=1,
+            tp=tp,
+            softmax_tokens=b * m,
+            streams=b if streams is None else int(streams),
+        )
+
+    def mla_attention_timing_from_config(
+        self, attention, context: int, *, batch_size: int = 1, tp: int = 1, seq_len: int = 1
+    ) -> AttentionTiming:
+        """MLA timing from a parsed ``model_param.attention`` block (config -> law seam)."""
+        if str(getattr(attention, "attention_type", "")).lower() != "mla":
+            raise ValueError(
+                "mla_attention_timing_from_config: attention_type must be 'mla' "
+                f"(got {getattr(attention, 'attention_type', None)!r})"
+            )
+        return self.mla_attention_timing(
+            context,
+            num_heads=int(attention.num_heads),
+            kv_lora_rank=int(attention.kv_lora_rank),
+            qk_rope_head_dim=int(attention.qk_rope_head_dim),
+            batch_size=batch_size,
+            tp=tp,
+            query_rows=int(seq_len) * int(attention.num_heads),
+        )
+
+    def mla_kv_replication(
+        self,
+        *,
+        hidden_dim: int,
+        num_heads: int,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int = 0,
+        tp: int = 1,
+        layers: int = 1,
+        weight_bytes: float = 1.0,
+    ) -> MLAReplication:
+        """The MLA KV-replication AREA consequence, computed (D6, P1 finding 2).
+
+        Which tensors are replicated, and why exactly those: every matrix
+        whose contraction dimension IS the shared latent rank reads or writes
+        the WHOLE latent, and the latent is not head-sliced, so a tp shard
+        cannot hold a slice of it. Those tensors sit on every shard:
+
+        * ``W_DKV`` — ``hidden x (kv_lora_rank + qk_rope_head_dim)``, the KV
+          down-projection that produces the latent.
+        * ``W_DQ`` — ``hidden x q_lora_rank``, the query down-projection, when
+          the model uses one.
+        * ``W_UK`` — ``kv_lora_rank x (num_heads * qk_nope_head_dim)``.
+        * ``W_UV`` — ``kv_lora_rank x (num_heads * v_head_dim)``.
+
+        The up-projections are the case P1 finding 2 names, and the stance is
+        kept here: they read the full latent on every shard, so the shard
+        stores them whole.
+
+        AREA is computed in OUR area law, not converted from bytes: weights
+        are cells, so the figure is ``arrays(K, N) * area_mm2_per_array``
+        summed over those matrices. Bytes are reported beside it because P4
+        wants both, and they are two named metrics with two definitions — not
+        two accountings of one (D21). ``extra_*`` is what tp actually PAYS:
+        ``(tp - 1)`` further copies of the same tensors.
+        """
+        tp = max(1, int(tp))
+        layers = max(1, int(layers))
+        hidden_dim = int(hidden_dim)
+        num_heads = int(num_heads)
+        kv_lora_rank = int(kv_lora_rank)
+        latent_in = kv_lora_rank + int(qk_rope_head_dim)
+        shapes = [("W_DKV", hidden_dim, latent_in)]
+        if int(q_lora_rank) > 0:
+            shapes.append(("W_DQ", hidden_dim, int(q_lora_rank)))
+        shapes.append(("W_UK", kv_lora_rank, num_heads * int(qk_nope_head_dim)))
+        shapes.append(("W_UV", kv_lora_rank, num_heads * int(v_head_dim)))
+        matrices = tuple(
+            (name, k, n, self.arrays(k, n)) for name, k, n in shapes
+        )
+        latent_names = ("W_DKV", "W_DQ")
+        latent_bytes = float(
+            sum(k * n for name, k, n, _ in matrices if name in latent_names)
+        ) * float(weight_bytes) * layers
+        up_bytes = float(
+            sum(k * n for name, k, n, _ in matrices if name not in latent_names)
+        ) * float(weight_bytes) * layers
+        arrays_per_shard = sum(a for _, _, _, a in matrices) * layers
+        area_per_shard = arrays_per_shard * float(self.analog.area_mm2_per_array)
+        replicated_bytes = latent_bytes + up_bytes
+        return MLAReplication(
+            tp=tp,
+            layers=layers,
+            latent_bytes_per_shard=latent_bytes,
+            up_projection_bytes_per_shard=up_bytes,
+            replicated_bytes_per_shard=replicated_bytes,
+            extra_replicated_bytes=(tp - 1) * replicated_bytes,
+            replicated_arrays_per_shard=arrays_per_shard,
+            extra_replicated_arrays=(tp - 1) * arrays_per_shard,
+            replicated_area_mm2_per_shard=area_per_shard,
+            extra_replicated_area_mm2=(tp - 1) * area_per_shard,
+            matrices=matrices,
+        )
+
+    def mla_kv_replication_from_config(
+        self, attention, hidden_dim: int, *, tp: int = 1, layers: int = 1, weight_bytes: float = 1.0
+    ) -> MLAReplication:
+        """MLA replication figures from a parsed ``model_param.attention`` block."""
+        if str(getattr(attention, "attention_type", "")).lower() != "mla":
+            raise ValueError(
+                "mla_kv_replication_from_config: attention_type must be 'mla' "
+                f"(got {getattr(attention, 'attention_type', None)!r})"
+            )
+        return self.mla_kv_replication(
+            hidden_dim=hidden_dim,
+            num_heads=int(attention.num_heads),
+            kv_lora_rank=int(attention.kv_lora_rank),
+            qk_nope_head_dim=int(attention.qk_nope_head_dim),
+            qk_rope_head_dim=int(attention.qk_rope_head_dim),
+            v_head_dim=int(attention.v_head_dim),
+            q_lora_rank=int(attention.q_lora_rank or 0),
+            tp=tp,
+            layers=layers,
+            weight_bytes=weight_bytes,
+        )
+
+    def report_mla_replication(self, replication: MLAReplication) -> str:
+        """The one-line D6 disclosure P4 prints: area paid to KV replication."""
+        names = ", ".join(name for name, _, _, _ in replication.matrices)
+        return (
+            f"[FWS-CIM] MLA KV replication (D6): tp = {replication.tp} stores {names} on "
+            f"EVERY shard because the KV latent is one shared rank, not a per-head slice. "
+            f"Per shard: {replication.replicated_arrays_per_shard} arrays = "
+            f"{replication.replicated_area_mm2_per_shard:.6g} mm2 "
+            f"({replication.replicated_bytes_per_shard:.6g} weight bytes, of which "
+            f"{replication.up_projection_bytes_per_shard:.6g} are the up-projections). "
+            f"Area PAID to replication: {replication.extra_replicated_area_mm2:.6g} mm2 "
+            f"({replication.extra_replicated_arrays} arrays) over "
+            f"{replication.layers} layer(s)."
+        )

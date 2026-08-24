@@ -1184,6 +1184,89 @@ def check_dse_moe_expert_parallel(table):
     )
 
 
+# ---------------------------------------------------------------------------
+# Pass-3 rows: the bridge gate (QIF P6.3, ADJ-8)
+# ---------------------------------------------------------------------------
+
+#: The degenerate points both paths express: one model, one owner per macro, no
+#: column sharing, no bit-slicing, no PD split, tp = 1. ADJ-8's set exactly —
+#: the three ViT tiers, the dense-LLM point and the MoE smoke.
+BRIDGE_POINTS = (
+    ("bridge T1", "fws_cim_optima_t1.yaml", "vit_huge_story_64_inf.yaml", "VIT"),
+    ("bridge T2", "fws_cim_optima_t2.yaml", "vit_g_64_inf.yaml", "VIT"),
+    ("bridge T3", "fws_cim_optima_t3.yaml", "vit_huge_story_196_inf.yaml", "VIT"),
+    ("bridge Llama7B", "fws_cim_llama7b.yaml", "llama2_7b_fws_inf.yaml", "LLM"),
+    ("bridge MoE", "fws_cim_moe.yaml", "moe_small_fws_inf.yaml", "LLM"),
+)
+
+
+def check_bridge_gate(table):
+    """Closed form vs placed DAG on the degenerate case, one config at a time.
+
+    The closed-form side is the REAL artifact: run_perf writes
+    ``fws_cim_report.json`` from the hardware YAML with no ``mapping:`` block.
+    The DAG side is built in-process from the SAME two YAMLs, so nothing but
+    the evaluation path differs. Every exclusion the gate makes is named in
+    ``fws_bridge.EXCLUSIONS`` and printed below the table.
+
+    These runs overwrite output/VIT and output/LLM, so they go LAST: every
+    earlier row has already read the artifact it needed.
+    """
+    sys.path.insert(0, REPO_ROOT)
+    import config as _config
+    import fws_bridge as _fws_bridge
+    import fws_eval as _fws_eval
+    import fws_mapping as _fws_mapping
+    from program.fws_build import build_fws_program as _build_fws_program
+
+    for label, hw_yaml, model_yaml, mode in BRIDGE_POINTS:
+        hw_path = os.path.join(HW_DIR, hw_yaml)
+        model_path = os.path.join(MODEL_DIR, model_yaml)
+        proc = run_perf(hw_path, model_path)
+        if not table.boolean(
+            "%s: closed-form run exit code" % label,
+            "0",
+            proc.returncode == 0,
+            str(proc.returncode),
+        ):
+            print(proc.stdout[-3000:])
+            continue
+        report_path = os.path.join(REPO_ROOT, "output", mode, "fws_cim_report.json")
+        if not table.boolean(
+            "%s: closed-form report written" % label, "exists", os.path.exists(report_path)
+        ):
+            continue
+        with open(report_path) as handle:
+            closed_form = json.load(handle)
+
+        raw = load_yaml(hw_path)
+        _config.convert(raw)
+        mapping = _fws_mapping.build_mapping(
+            _config.HWConfig.from_dict(raw), _config.parse_config(model_path, mode)
+        )
+        evaluation = _fws_eval.evaluate_fws(_build_fws_program(mapping))
+        for row in _fws_bridge.bridge_rows(evaluation, closed_form, label):
+            if row.kind == "exact":
+                table.exact(row.name, row.expected, row.measured)
+            elif row.kind == "close":
+                table.close(row.name, row.expected, row.measured)
+            else:
+                table.boolean(row.name, row.expected, row.ok, str(row.measured))
+
+    # D21: a relaxation that is not disclosed in the artifact is the AUDIT's
+    # finding 5. The gate's exclusions are part of its output, not a footnote.
+    table.boolean(
+        "bridge: exclusions are disclosed by name",
+        "%d named exclusions printed" % len(_fws_bridge.EXCLUSIONS),
+        len(_fws_bridge.EXCLUSIONS) > 0,
+        ", ".join(name for name, _reason in _fws_bridge.EXCLUSIONS),
+    )
+    print()
+    print("Bridge gate (P6.3 / ADJ-8) — what it deliberately does NOT compare:")
+    for name, reason in _fws_bridge.EXCLUSIONS:
+        print("  * %s: %s" % (name, reason))
+
+
 def main():
     table = CheckTable()
 
@@ -1250,6 +1333,13 @@ def main():
     check_dse_t1_sweep(t1_report, table)
     check_dse_llama_verify(table)
     check_dse_moe_expert_parallel(table)
+
+    # Pass-3 rows (QIF P6.3, ADJ-8): the bridge from the frozen closed form to
+    # the placed DAG. Appended last so the 152 rows above keep their order and
+    # their artifacts — these runs rewrite output/VIT and output/LLM.
+    print()
+    print("Running the bridge gate (five run_perf subprocesses + five DAG builds)...")
+    check_bridge_gate(table)
 
     print()
     print("FWS-CIM validation vs OPTIMA — DESIGN section 5")

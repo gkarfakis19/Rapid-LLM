@@ -1,0 +1,204 @@
+# FWS-CIM MAPPED run for Granite-4.0-H-Tiny — the QIF P1 HEADLINE model (ADJ-1).
+# Pair with configs/model-config/granite_4_0_h_tiny_inf.yaml at tp=1, pp=1.
+#
+# This is the first HYBRID end-to-end point: 36 Mamba-2 layers and 4 attention
+# layers, MoE on every layer. It runs ONLY on the mapped path — the `mapping:`
+# block at the bottom is what makes P3 place the model and P4 price it op by op
+# (ADJ-6 / A1). Drop that block and validate_model_config refuses the run by
+# name: the pass-1/2 closed-form report has no stage for a recurrence and would
+# price a Mamba layer as attention (P1.4, narrowed by P1.5).
+#
+# Analog point: rows = 1536 (K per array tile matches hidden_dim = 1536),
+# stored cols = cols_adc * adc_mux = 1536. Per-layer analog macros for
+# Granite-4.0-H-Tiny (H=1536, GQA q12/kv4 d=128, 64 routed experts at I=512,
+# one shared MLP at I=1024, gated MLP, router):
+#   MoE part, every layer: router 1 + 64*(ffn1 1 + ffn2 1) + shared
+#     (ffn1 ceil(2*1024/1536)=2 + ffn2 1) = 132
+#   Mamba-2 mixer (36 layers): in_proj ceil((2*3072 + 2*1*128 + 48)/1536) = 5,
+#     out_proj ceil(3072/1536) = 2 -> 7, so 139 macros/layer
+#   attention mixer (4 layers): QKV ceil((12+2*4)*128/1536) = 2, O 1 -> 3,
+#     so 135 macros/layer
+#   lm_head adds ceil(100352/1536) = 66 macros on the last chip.
+# layers_per_chip 4 -> 10 chips; worst chip 4*139 + 66 = 622.
+#
+# Energy/area per array are the T1 OPTIMA point scaled by cell count
+# (1536*1536 / 1280*1280 = 1.44), the same convention fws_cim_llama7b.yaml and
+# fws_cim_moe.yaml use. They are NOT measured Granite silicon.
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 1536               # array rows (K per array tile) = hidden_dim
+    cols_adc: 384            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 13730.312016  # T1 point scaled by cell count (x1.44)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 2.0204136    # T1 point scaled by cell count (x1.44)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 640     # worst chip: 4 layers * 139 + lm_head 66 = 622
+    layers_per_chip: 4       # 40 layers -> 10 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # routed experts of a layer stay on that layer's chip
+
+  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
+  # The shared digital chiplet card is what makes the SSD scan TIMEABLE: P2.6's
+  # laws refuse to run without a declared vector engine (ADJ-4 forbids deriving
+  # scan lanes from the systolic array or the softmax pipeline).
+  cards:
+    ctt:
+      kind: analog_macro
+      device: ctt
+    sa:
+      kind: digital_chiplet
+      # DECLARED DESIGN POINT, not measured silicon and not an OPTIMA port.
+      # 1024 lanes at the chiplet clock = 9.7e11 scalar ops/s, about an eighth
+      # of the same chiplet's systolic matmul peak (2 arrays x 32x64 MACs x 2
+      # x 0.95 GHz = 7.8e12 FLOP/s) — the ratio an elementwise/scan unit beside
+      # a matmul engine plausibly carries. Every SSD-scan number in this run
+      # scales inversely with it; replace it with Samyak's figure when it
+      # exists and re-run (P6 calibration seam: cards change, laws do not).
+      vector_lanes: 1024
+      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
+      # undeclared on purpose: the first two inherit the chiplet's own clock
+      # and softmax depth (disclosed per priced op), and an undeclared state
+      # bandwidth REPORTS recurrent-state traffic without bounding it.
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 8 GB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
+
+# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
+# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+mapping:
+  parallelism:
+    tp: 1
+  # ADJ-6: the decode series is a bounded window plus a disclosed
+  # extrapolation. Three steps give a first / median / last that are three
+  # different readings rather than one repeated.
+  decode_window: 3

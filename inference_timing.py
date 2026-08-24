@@ -717,10 +717,52 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         
         return total_energy
 
+    def _write_fws_dag_report(self, *, batch_size: int) -> None:
+        """The QIF P4 placed-DAG report: map, lower, price, evaluate, publish.
+
+        Reached only when the hardware config declares a ``mapping:`` block —
+        that is what "a mapped run" means. It writes
+        ``fws_qif_report.json`` into the output directory and stashes the text
+        section (RENDERED FROM THAT JSON, never recomputed) on
+        ``self.fws_cim_report_lines`` for run_perf to append.
+
+        The closed-form report is not produced for this run at all: A1 demotes
+        it to a legacy reference and ADJ-6 keeps it reachable from the
+        validation script only. Placement validity is the mapper's (P3's) job
+        here — ``cim.validate_capacity`` checks the pass-1/2 layers-per-chip
+        placement, which a mapped run does not use.
+        """
+        import json as _json
+
+        import fws_eval as _fws_eval
+        import fws_mapping as _fws_mapping
+        from program.fws_build import build_fws_program as _build_fws_program
+
+        mapping = _fws_mapping.build_mapping(
+            self.hw_config, getattr(self, "model_source_config", self.model)
+        )
+        evaluation = _fws_eval.evaluate_fws(_build_fws_program(mapping))
+        document = _fws_eval.report_document(evaluation)
+        report_path = os.path.join(self.output_dir, "fws_qif_report.json")
+        with open(report_path, "w", encoding="utf-8") as report_file:
+            _json.dump(document, report_file, indent=2)
+        # D12: the derived pool sizing is REPORTED. Here it is reported from
+        # the TIMELINE (P4.5), so it is a field of the artifact as well.
+        for sizing in document["evaluation"]["digital_pool"]["sizings"]:
+            print(sizing["report"])
+        self.fws_cim_report_lines = _fws_eval.render_report(document)
+
     def _write_fws_cim_report(
         self, *, seq_len: int, batch_size: int, sequential_time_s: float
     ) -> None:
         """FWS-CIM spatial pipeline report (consumer of the CimDeviceModel laws).
+
+        LEGACY (A1, ADJ-6). The placed-DAG evaluation supersedes this section
+        for a MAPPED run — see :meth:`_write_fws_dag_report`, which returns
+        before any of the code below runs. This path stays in the tree, frozen,
+        because the P6.2 bit-identity gates and
+        ``validation_scripts/validate_fws_cim_vs_optima.py`` hold the bridge
+        against it (ADJ-8).
 
         Modeling assumptions restated in the output: LN/GELU/adder helper lanes
         are absorbed into their stage (OPTIMA sizing contract, adopted as an
@@ -745,6 +787,16 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "device_class: fws_cim requires parallelism.pp = 1; chip placement "
                 f"comes from cim.chip.layers_per_chip (got pp={self.pp})."
             )
+
+        # ADJ-6 / A1: a MAPPED run publishes the placed-DAG evaluation and
+        # NOTHING ELSE. Two accountings of one metric must never share an
+        # artifact, so the closed-form section below is not written, not
+        # printed and not appended for such a run. It stays in the tree,
+        # frozen, as the legacy reference the validation script reaches
+        # (ADJ-8 holds the bridge against it).
+        if getattr(self.hw_config, "mapping_config", None) is not None:
+            self._write_fws_dag_report(batch_size=batch_size)
+            return
 
         # Capacity is a hard error before any report output.
         cim.validate_capacity()

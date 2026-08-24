@@ -245,5 +245,23 @@ relaxation to complete, the relaxation is disclosed.</p>
 
 <div class="status"><h2>Status &amp; notes</h2>
 <p><span class="tag">Drafted</span> 2026-08-23 &mdash; drafted by planning agent; awaiting George&#39;s review.</p>
+<p><span class="tag">Built</span> 2026-08-23 &mdash; Wave B: P3.1&ndash;P3.6 landed per ADJ-5.
+<code>fws_mapping.py</code> (mapping object, <code>mapping:</code> config block, tp/ep/pp
+groups, PD pair, boundary table), <code>program/fws_build.py</code> (the placed
+UNPRICED DAG, beside <code>build()</code>, never inside it), <code>fws_atlas_export.py</code> +
+<code>tools/fws_emit_atlas.py</code> (the <code>fws_atlas/1</code> export, checked in at
+<code>docs/qif/atlas/p3_llama7b_tp2.json</code> and validated by the P5 loader itself).
+Open questions 1&ndash;6 are closed by ADJ-5 and the build conforms to all six.
+72 tests in <code>tests/test_qif_mapping.py</code>; standing suites green.</p>
+<p><span class="tag">Closed by P6.3</span> 2026-08-23 &mdash; the bridge gate found two lowering errors in
+<code>program/fws_build.py</code> and both are fixed with tests. The ViT classification head was lowered over the whole
+sequence where P2&#39;s <code>endpoint_stage_times</code> prices it at <em>M = batch</em> (one pooled token per image), and
+every routed MoE expert was priced at the full owner batch instead of P2&#39;s <code>moe_tokens_hot</code> &mdash; a MoE layer
+was charged <em>E/top_k</em> times its analog work. The dispatch/combine bytes correctly stay on the aggregate.
+Separately, <code>_moe_stages</code> now sizes the SHARED expert at its own declared width (Granite&#39;s 1024-wide shared MLP
+beside 64 routed experts at 512), falling back to the routed width so no existing mapping moves, and
+<code>tools/fws_emit_atlas.py</code> gained an additive <code>--priced</code> flag that carries P4&#39;s duty cycles into the
+document (off by default; the checked-in placement-only export is byte-unchanged).</p>
+<p><strong>Wave B audit fixes 2026-08-23</strong> &mdash; A3/D10&rsquo;s core concept (different owners sharing one macro&rsquo;s stored columns) was produced by no shipped artifact and exercised by no test: every shipped card is sized so one matrix fills a macro, so the P5 loader&rsquo;s overlap rule R13 reported &ldquo;nothing fired&rdquo; against both P3 exports, and only the REFUSAL path (a doubly-claimed column set) had coverage. <code>tests/test_qif_mapping.py</code> now builds a co-sited point &mdash; <code>column_sets_per_tile: 1</code> plus one assignment moving a 16-wide router onto free column sets of a qkv macro &mdash; asserts the owners are two and their column sets disjoint, reconciles held vs claimed columns and the unowned-column total, and drives that export through the P5 loader so R13 actually fires. The priced atlas gained three honesty fixes: <code>macros[].digital_pool</code> carries P4.5&rsquo;s timeline-measured sizing (the atlas said 21 lanes on every macro while the report put 40 of them at 42 &mdash; one field name, two numbers, same run); every pool block carries a basis labelling a <code>0.0</code> area UNCOVERED rather than measured; and P4&rsquo;s disclosures ride the document deduplicated by constraint key, so an atlas reader of a windowed decode run can see the window. A priced document also stops carrying <code>op_durations</code> and stops claiming in provenance that it &ldquo;carries no time&rdquo;. The frozen P5 contract (<code>SCHEMA.md</code>, <code>atlas.html</code>, the fixture) is untouched; the placement-only export is byte-identical. P3.1&rsquo;s escalation is withdrawn and recorded as an assumption: a tp sweep KEEPS the user&rsquo;s declared split and reports the occupancy gap, because D10 makes automatic allocation a later phase and repacking on the user&rsquo;s behalf would be the mapper overriding a declared claim.</p>
 </div>
 </main></body></html>
