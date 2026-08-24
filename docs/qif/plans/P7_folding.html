@@ -73,7 +73,16 @@ analog m-pass time becomes co-bound with the digital side. THE OBJECTIVE:
 sweep the (total area = analog floor + digital silicon, decode tokens/s)
 frontier, with per-device utilization reported at every point so idle silicon
 is always visible. NO safety margins anywhere (George).</p>
-<p><strong>Fact 3 &mdash; decode sequentiality keeps co-residency free.</strong>
+<p><strong>SUPERSEDED 2026-08-24 (D29): the machine is a FILLED PIPELINE.</strong>
+All stages fire every beat (staggered streams, local batch 1, D = stage count);
+cross-stage bank sharing contends every beat and is priced by the timeline;
+within-stage sharing stays free. State/KV scales with D — a first-class
+constraint. Digital engine sizing is DERIVED to hold the beat (D31) and priced
+from the synthesis library (D32); it is not a sweep axis. The frontier axes
+become (area, tokens/s = 1/beat, resident-state capacity) swept over stage
+granularity, mux/bank depth and chip capacity. The paragraph below describes
+the retired lockstep regime, kept for history.</p>
+<p><strong>[RETIRED] Fact 3 &mdash; decode sequentiality keeps co-residency free.</strong>
 Layers execute sequentially within a decode step, so cross-tensor and
 cross-layer bank sharing never contends; the evaluator prices this correctly
 by construction. Prefill breaks this (concurrent layers, SSD chunking) and is

@@ -195,3 +195,30 @@ Process and scope:
   count, engine widths, pool widths) as first-class sweep axes — low
   utilization anywhere is a provisioning bug the DSE must expose, not a fact
   to accept.
+
+## Amendment (2026-08-24 evening, George — the filled-pipeline pivot)
+
+- **D29 (GEORGE, HARD): the pipeline is ALWAYS FULL.** Decode = independent
+  streams staggered across PP stages, one token exits per beat
+  (throughput = 1/beat; per-stream rate = 1/(D·beat)). LOCAL BATCH IS ALWAYS
+  1 — batch size does not exist as a concept; analog macros fire at M=1 and
+  attention/scan are per-stream. Resident streams D = stage count. EVERY
+  stage holds all D streams' state/KV for its layers: state memory scales
+  with D and is a first-class reported quantity and feasibility check.
+  Supersedes D15's batched-lockstep semantics for fws_cim. Consequence:
+  cross-STAGE bank sharing now contends every beat (priced by the timeline);
+  within-stage sharing stays serial-free.
+- **D30 (GEORGE): embedding and lm_head are DROPPED entirely** —
+  disable_embedding_unembedding is the standing default for all QIF runs;
+  no endpoint arrays, no endpoint stages, no notes.
+- **D31 (GEORGE): the scan/vector engine is NEVER a swept or declared free
+  knob.** Its sizing is DERIVED: start from the OPTIMA engine work model and
+  scale units to achieve full utilization at the pipeline beat; report the
+  derived size. vector_lanes as a design point is retired (an explicit
+  override stays possible but rides a disclosure).
+- **D32 (GEORGE): digital area/energy come from the measured OPTIMA
+  synthesis library** — cim_ctt_big_optima/perf_model/configs/
+  digital_hw_components_22nm.yaml (generated from rtl/reports_22nm_1000_efh):
+  FP_ADD/FP_MULT/BF16_EXP/RECIP/systolic/buffer/register blocks composed
+  into engine area and power, first-order. Declared placeholders are
+  replaced by block compositions.
