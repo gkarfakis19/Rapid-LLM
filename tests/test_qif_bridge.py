@@ -50,12 +50,16 @@ POINTS = (
 _POINT_BY_LABEL = {point[0]: point for point in POINTS}
 
 
-def _closed_form(hw_path, model_path, mode):
+def _closed_form(hw_path, model_path, mode, output_root):
     """The REAL closed-form artifact: run_perf, no ``mapping:`` block, one JSON.
 
     Deliberately a subprocess. Reading the number the evaluator would have
     produced in-process would compare the DAG to a re-derivation of itself,
     which is exactly the failure mode this gate exists to prevent.
+
+    ``output_root`` is a per-session temp dir handed to ``--output_dir``: the
+    repo's own ``output/`` tree is shared state, and a second pytest session in
+    the same checkout used to overwrite this gate's artifact mid-read.
     """
     proc = subprocess.run(
         [
@@ -65,6 +69,8 @@ def _closed_form(hw_path, model_path, mode):
             hw_path,
             "--model_config",
             model_path,
+            "--output_dir",
+            str(output_root),
         ],
         cwd=PROJECT_ROOT,
         stdout=subprocess.PIPE,
@@ -73,7 +79,7 @@ def _closed_form(hw_path, model_path, mode):
         timeout=600,
     )
     assert proc.returncode == 0, proc.stdout[-4000:]
-    report_path = os.path.join(PROJECT_ROOT, "output", mode, "fws_cim_report.json")
+    report_path = os.path.join(str(output_root), mode, "fws_cim_report.json")
     with open(report_path) as handle:
         return json.load(handle)
 
@@ -89,13 +95,14 @@ def _dag(hw_path, model_path, mode):
 
 
 @pytest.fixture(scope="module")
-def bridged():
+def bridged(tmp_path_factory):
     """Every point, run once: {label: (closed_form, evaluation, rows)}."""
     out = {}
+    output_root = tmp_path_factory.mktemp("bridge_run_perf")
     for label, hw_yaml, model_yaml, mode in POINTS:
         hw_path = os.path.join(HW_DIR, hw_yaml)
         model_path = os.path.join(MODEL_DIR, model_yaml)
-        closed_form = _closed_form(hw_path, model_path, mode)
+        closed_form = _closed_form(hw_path, model_path, mode, output_root)
         evaluation = _dag(hw_path, model_path, mode)
         out[label] = (
             closed_form,

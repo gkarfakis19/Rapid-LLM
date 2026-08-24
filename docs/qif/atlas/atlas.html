@@ -2185,8 +2185,7 @@ var ATLAS = (function () {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
   });
 
-  // Embedded blob first, so the page paints with no network at all. Then try the
-  // sibling file, which wins when the atlas is served over http next to it.
+  // Embedded blob first, so the page paints with no network at all.
   var embedded = null;
   try { embedded = JSON.parse($("atlas-embedded").textContent); } catch (e) { embedded = null; }
   if (embedded) adopt(embedded, "embedded blob");
@@ -2199,15 +2198,22 @@ var ATLAS = (function () {
   wanted = wanted ? decodeURIComponent(wanted) : null;
   if (wanted && /[\/\\]/.test(wanted)) wanted = null;
 
-  if (typeof fetch === "function") {
-    fetch(wanted || "fixture_llama7b_tp2.json", { cache: "no-store" })
+  // The fetch happens ONLY when the URL asked for a document, or when there is
+  // no embedded blob to draw. It used to run unconditionally and race the page:
+  // whoever embedded a document in this file meant it to be the one on screen,
+  // and a late sibling fetch would silently replace it with whatever else
+  // happens to sit in the directory. The embedded blob is a deliberate act, not
+  // a placeholder waiting to be upgraded.
+  var target = wanted || (embedded ? null : "fixture_llama7b_tp2.json");
+  if (target && typeof fetch === "function") {
+    fetch(target, { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
-        // Only ever replaces the embedded blob. A document the user dropped or
-        // picked while this was in flight stays authoritative: silently swapping
-        // it would show the wrong mapping under the right title.
-        if (j && j.schema && S.source === "embedded blob") {
-          adopt(j, (wanted || "fixture_llama7b_tp2.json") + " (sibling file)");
+        // And it still never replaces a document the user dropped or picked
+        // while it was in flight: that would show the wrong mapping under the
+        // right title.
+        if (j && j.schema && (S.source === "embedded blob" || S.source === "none")) {
+          adopt(j, target + " (sibling file)");
         }
       })
       .catch(function () { /* file:// blocks this; the embedded blob already drew */ });

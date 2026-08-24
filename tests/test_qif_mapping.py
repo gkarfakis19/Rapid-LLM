@@ -1145,3 +1145,132 @@ def test_a_co_sited_export_lets_the_loaders_overlap_rule_fire(tmp_path):
     unfired = {row.split(" ", 1)[0] for row in report["failed"]}
     assert "R13" not in unfired, report["failed"]
     assert unfired <= {"R22"}, report["failed"]
+
+
+# ---------------------------------------------------------------------------
+# cim.allocation.slice_index — parsed AND honored (Wave D minors sweep)
+# ---------------------------------------------------------------------------
+
+
+def _slice_entry(slice_index, macro):
+    """One `cim.allocation.assignments` entry, parsed by the real schema."""
+    entry = {"model": "vit", "layer": 0, "op": "qkv", "macro": macro, "column_sets": [0]}
+    if slice_index is not None:
+        entry["slice_index"] = slice_index
+    return config.CIMTileAssignment.from_dict(entry, 0)
+
+
+def _slice_tiles(count):
+    owner = cim_timing.TileOwner(model="vit", layer=0, op="qkv")
+    return tuple(
+        cim_timing.Tile(
+            owner=owner,
+            k_start=0,
+            k_end=64,
+            n_start=0,
+            n_end=64,
+            slice_index=s,
+            site=cim_timing.TileSite(macro_id=s, row_start=0, row_end=64, column_sets=(0,)),
+        )
+        for s in range(count)
+    )
+
+
+def test_allocation_slice_index_defaults_to_unconstrained():
+    # It used to default to 0, which made "absent" indistinguishable from a
+    # claim of slice 0 — and on a 4-slice card every entry would then have
+    # claimed the same slice.
+    assert _slice_entry(None, 7).slice_index is None
+    assert _slice_entry(3, 7).slice_index == 3
+
+
+def test_allocation_honors_a_declared_slice_index():
+    tiles = _slice_tiles(4)
+    entries = [_slice_entry(s, 10 + s) for s in range(4)]
+    placed = fws_mapping._apply_user_allocation(tiles, entries, "vit.L0.qkv.s0")
+    assert [tile.site.macro_id for tile in placed] == [10, 11, 12, 13]
+    assert [tile.slice_index for tile in placed] == [0, 1, 2, 3]
+
+
+def test_allocation_refuses_a_slice_index_declaration_order_contradicts():
+    # Declaration order is what places a tile. A declared slice that disagrees
+    # with it is a contradiction, not a preference: refuse it by name.
+    tiles = _slice_tiles(4)
+    entries = [_slice_entry(s, 10 + s) for s in range(4)]
+    entries[2] = _slice_entry(3, 12)
+    with pytest.raises(MappingError, match="slice_index = 3 but declaration order"):
+        fws_mapping._apply_user_allocation(tiles, entries, "vit.L0.qkv.s0")
+
+
+def test_allocation_without_a_slice_index_still_places_every_slice():
+    tiles = _slice_tiles(4)
+    entries = [_slice_entry(None, 20 + s) for s in range(4)]
+    placed = fws_mapping._apply_user_allocation(tiles, entries, "vit.L0.qkv.s0")
+    assert [tile.site.macro_id for tile in placed] == [20, 21, 22, 23]
+
+
+def _sliced_moe_mapping(assignments):
+    """A SLICING card plus a user allocation, driven through the real path.
+
+    The three tests above call the private placer with hand-built tiles. That
+    proves the rule but not that it is REACHABLE: every shipped card stores a
+    weight in one cell (`n_slices == 1`), so no shipped config ever produces a
+    multi-slice tile for an allocation entry to contradict. This fixture
+    declares a 2-bit cell on 8-bit weights, which slices every matrix four
+    ways, and then goes through `config.HWConfig.from_dict` +
+    `fws_mapping.build_mapping` like a user's file would.
+    """
+    raw = copy.deepcopy(yaml.safe_load(FWS_MOE.read_text()))
+    raw["cim"]["cards"] = {
+        "ctt": {
+            "kind": "analog_macro",
+            "device": "ctt",
+            "bits_per_cell": 2,
+            "weight_bits": 8,
+            "bank_depth": 1,
+        }
+    }
+    # Four slices of every matrix need four times the slots.
+    raw["cim"]["chip"]["arrays_per_chip"] = 1200
+    raw["cim"]["allocation"] = {"assignments": assignments}
+    config.convert(raw)
+    hw = config.HWConfig.from_dict(raw)
+    model = config.parse_config(str(MOE_SMALL_FWS_INF), "LLM")
+    return fws_mapping.build_mapping(hw, model)
+
+
+def _router_slice_assignments(macro=1100):
+    """Layer 1's router: a 16-wide matrix, so exactly one tile per slice."""
+    return [
+        {
+            "model": "llama",
+            "layer": 1,
+            "op": "router",
+            "expert": -1,
+            "shard": 0,
+            "slice_index": s,
+            "macro": macro,
+            "column_sets": [s],
+        }
+        for s in range(4)
+    ]
+
+
+def test_a_declared_slice_index_reaches_the_placer_through_a_real_config():
+    mapping = _sliced_moe_mapping(_router_slice_assignments())
+    assert mapping.device.n_slices == 4
+    placed = [
+        tile
+        for tile in mapping.tiles
+        if tile.owner.op == "router" and tile.owner.layer == 1
+    ]
+    assert [tile.slice_index for tile in placed] == [0, 1, 2, 3]
+    assert {tile.site.macro_id for tile in placed} == {1100}
+    assert [tile.site.column_sets for tile in placed] == [(0,), (1,), (2,), (3,)]
+
+
+def test_a_contradicting_slice_index_is_refused_through_a_real_config():
+    assignments = _router_slice_assignments()
+    assignments[2]["slice_index"] = 3
+    with pytest.raises(MappingError, match="slice_index = 3 but declaration order"):
+        _sliced_moe_mapping(assignments)

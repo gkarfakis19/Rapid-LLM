@@ -364,6 +364,124 @@ latency sums six stages (S1..S5 plus a trailing peripherals stage that costs
 one analog stage time). The report's `block_latency_us` is `sum(S1..S5)` per
 the design contract; add one analog stage time to reproduce OPTIMA's figure.
 
+## Mapped-path DSE (QIF P3.7)
+
+`tools/fws_qif_dse.py` is the SECOND DSE and the one D10 means by
+"allocation is swept by the DSE". It shares the conventions above and
+nothing else: every candidate is evaluated through the REAL mapped path —
+`fws_mapping.build_mapping` -> `program.fws_build.build_fws_program` ->
+`fws_eval.evaluate_fws` — so each candidate's headline is `tokens/s` at
+the decode terminal read off ITS OWN timeline (ADJ-6, A1). There is no
+closed form in it. The pass-2B tool above stays exactly as it is: its
+evaluator is `CimDeviceModel` laws, its schema names `period_us` and the
+ceiling/sustained pair ADJ-6 retired, and the validator reruns its sweeps
+to hold the ADJ-8 bridge — one evaluator per tool, one accounting per
+metric.
+
+The candidate space is a `mapping_dse:` block, a SIBLING of `mapping:`
+that the tool owns, strict-keys itself, and strips before the config
+parser sees the file (so a config carrying it still runs through
+`run_perf` as the single point its `cim:`/`mapping:` blocks declare).
+EXPLICIT candidate lists only: the sweep is the full cross product in
+declaration order, every point is evaluated, and nothing is sampled or
+capped. Six axes, each moving exactly one field:
+
+| axis | field it moves |
+|---|---|
+| `vector_lanes` | `cim.cards.<digital card>.vector_lanes` (D13) |
+| `bank_depth` | `cim.cards.<analog card>.bank_depth` (A3/D10 banking) |
+| `column_sets_per_tile` | `cim.allocation.column_sets_per_tile` (D10) |
+| `arrays_per_chip` | `cim.chip.arrays_per_chip` |
+| `layers_per_chip` | `mapping.layers_per_chip` (int, list or `auto`) |
+| `shared_chiplets` | `mapping.shared_chiplets` (ADJ-5) |
+
+`bank_depth` and `column_sets_per_tile` both set one law and
+`cim.allocation` WINS; a candidate declaring both records the EFFECTIVE
+granularity and the precedence. A card knob whose `cim.cards` block the
+config never declared is refused by name rather than invented.
+
+Stages, in order, each recorded with the refusal's own message:
+`config < mapping < budget < lowering < pricing < memory`. `budget` is
+`max_chips` / `max_silicon_mm2`; `memory` is P4.3's measured high-water
+mark against the declared tier. The Pareto front is headline tokens/s vs
+total silicon (enumerated analog macro slots x `macro_footprint_mm2` plus
+the declared shared-chiplet area, with any UNCOVERED term named; that
+footprint law divides by the card's `stack_3d_height`, so on a 3D card the
+axis ranks package footprint rather than silicon area), and the
+report states the front's SHAPE, read off the data: a one-point front on
+flat area means no swept axis trades silicon for speed.
+
+```bash
+.venv/bin/python tools/fws_qif_dse.py \
+  --hardware_config configs/hardware-config/fws_cim_granite_tiny_dse.yaml \
+  --model_config configs/model-config/granite_4_0_h_tiny_inf.yaml \
+  --model_id Granite-4.0-H-Tiny \
+  --output-dir docs/qif/dse/granite_lanes_banks \
+  --emit-config configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml \
+  --verify
+```
+
+### The checked-in demo sweep (real output)
+
+Granite-4.0-H-Tiny over `vector_lanes {512, 1024, 2048, 4096}` x
+`bank_depth {1, 2}` — 8 candidates, 8 valid, ~100 s of wall clock, every
+candidate placed and priced on its own timeline. Artifacts:
+`docs/qif/dse/granite_lanes_banks/dse_report.{json,md}`; the winner is
+`configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml`.
+`tests/test_qif_dse_allocation.py` regenerates the sweep and compares the
+artifact; the validator reads it for the selection rows and runs a live
+Llama sweep for the `--verify` round trip.
+
+| vector_lanes | bank_depth | tokens/s | silicon mm2 | tiles |
+|---|---|---|---|---|
+| 512 | 1 | 3432.12 | 12930.6 | 19566 |
+| 512 | 2 | 3414.40 | 12930.6 | 11103 |
+| 1024 | 1 | 4579.18 | 12930.6 | 19566 |
+| 1024 | 2 | 4547.69 | 12930.6 | 11103 |
+| 2048 | 1 | 5497.92 | 12930.6 | 19566 |
+| 2048 | 2 | 5452.59 | 12930.6 | 11103 |
+| 4096 | 1 | **6110.95** | 12930.6 | 19566 |
+| 4096 | 2 | 6055.00 | 12930.6 | 11103 |
+
+What the sweep found:
+
+- The headline scales with the declared scan-engine width, SUB-linearly:
+  8x the lanes buys 1.79x the tokens/s, because 36 Mamba-2 layers put the
+  Mamba-2 scan on the critical path but the analog GEMMs, the pool ops and
+  the chip-boundary transfers do not move with `vector_lanes`. The decode
+  steps the headline is read at are priced by the per-token recurrence
+  `ssm_recurrent_scan[mamba2]` (`validated = optima_m3_reference`); the
+  chunked `ssd_chunked_scan` form (UNVALIDATED) prices prefill only, since
+  `fws_eval` chunks on `phase == "prefill"` and the scan law falls back to
+  the recurrence at `tokens <= 1`. Both forms run on the same vector
+  engine. The declared 1024-lane point is the shipped config's, and every
+  scan number in it scales with a width no measured silicon has supplied.
+- Finer banking is faster and cheaper in energy (bank 1 vs bank 2:
+  +0.5 to +0.9 % tokens/s, -8.6 % energy at every lane count). The
+  mechanism is ADJ-4's active-column-set pricing, read off the report: the
+  WASTE does not move (`unowned_columns` is 2,671,424 and
+  `macros_holding_tiles` is 5610 in all eight rows), and the whole energy
+  delta sits in the `analog_arrays` component (1.6418e11 pJ at bank 1 vs
+  1.7998e11 pJ at bank 2, with `link_traffic` bit-identical) — a finer
+  bank cuts the ACTIVE column sets an evaluation lights up, not the stored
+  columns it strands. A finer bank therefore makes MORE tiles (19566 vs
+  11103), each narrower. It changes what is held INSIDE a macro, never how
+  many macros exist: the slot count, the chip count and the silicon are
+  identical across all eight rows.
+- The front is therefore ONE point (`flat_area`). That is the finding,
+  not a broken sweep, and the report DERIVES it rather than asserting it:
+  both terms of the silicon accounting are constant over the sweep (6400
+  ENUMERATED analog macro slots and 10 shared digital chiplets on every
+  candidate), because neither swept axis moves `arrays_per_chip`, the chip
+  count or the chiplet count. The shared digital chiplet's area is an
+  UNCOVERED term (the card declares no `area_mm2`; ADJ-4 forbids inventing
+  one), which the report names. A front spreads only once a swept knob has
+  a declared area law or a chip split trades silicon for capacity.
+- `--verify` re-ran the winner through `run_perf` from the emitted YAML:
+  tokens/s, prefill latency, the median decode step, the window latency,
+  the request rate and the chip / tile / slot counts all matched at
+  rel_err 0.0.
+
 ## Config reference
 
 Hardware YAML (see `configs/hardware-config/fws_cim_optima_t1.yaml` for a

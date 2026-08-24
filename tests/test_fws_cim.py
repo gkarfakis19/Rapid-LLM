@@ -620,8 +620,40 @@ def test_chip_layers_list_placement():
 # Stage 3: integration through the real entry point (run_perf.py subprocess)
 # ---------------------------------------------------------------------------
 
-RESULTS_TXT = PROJECT_ROOT / "output" / "VIT" / "LLM_inference_results.txt"
-FWS_REPORT_JSON = PROJECT_ROOT / "output" / "VIT" / "fws_cim_report.json"
+# Every run_perf subprocess writes into a PER-TEST artifact root, passed with
+# --output_dir. The repo's own output/ tree is shared state: two pytest sessions
+# in one checkout (or a session running beside a DSE sweep) used to overwrite
+# each other's run directory mid-assertion. Nothing else passes the flag, so an
+# ordinary user run still lands in <repo>/output/<MODE>, byte for byte.
+_PERF_OUT = {"factory": None, "root": None}
+
+
+@pytest.fixture(autouse=True)
+def _perf_output_root(tmp_path_factory):
+    _PERF_OUT["factory"] = tmp_path_factory
+    _PERF_OUT["root"] = None
+    yield
+    _PERF_OUT["factory"] = None
+    _PERF_OUT["root"] = None
+
+
+def _perf_root():
+    """This test's run_perf artifact root, created on first use."""
+    if _PERF_OUT["root"] is None:
+        assert _PERF_OUT["factory"] is not None, "the _perf_output_root fixture did not run"
+        _PERF_OUT["root"] = _PERF_OUT["factory"].mktemp("run_perf")
+    return _PERF_OUT["root"]
+
+
+def _perf_out(mode, *parts):
+    """A path inside this test's run_perf artifact root: <root>/<MODE>/..."""
+    root = _PERF_OUT["root"]
+    assert root is not None, (
+        "no run_perf subprocess has run in this test, so it has no artifact root"
+    )
+    return root.joinpath(mode, *parts)
+
+
 # Saved bit-identical baseline of a100_80GB.yaml + vit_base_inf.yaml
 # (DESIGN section 5 regression gate). Committed under tests/baselines so the
 # gate cannot silently rot; override with RAPID_A100_VIT_BASELINE to compare
@@ -635,7 +667,12 @@ BASELINE_A100_VIT = Path(
 
 
 def _run_perf_subprocess(hw_path, model_path):
-    """Run run_perf.py exactly as a user would (own process, repo cwd)."""
+    """Run run_perf.py exactly as a user would, into this test's own artifact root.
+
+    One root per TEST, not per call: the P6.2 byte-identity gate runs run_perf
+    twice and compares the second run's files against bytes read from the first.
+    """
+    _perf_root()
     return subprocess.run(
         [
             sys.executable,
@@ -644,6 +681,8 @@ def _run_perf_subprocess(hw_path, model_path):
             str(hw_path),
             "--model_config",
             str(model_path),
+            "--output_dir",
+            str(_PERF_OUT["root"]),
         ],
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
@@ -659,8 +698,8 @@ def test_run_perf_t1_end_to_end_smoke():
 
     # Machine-readable report: recorded OPTIMA T1 targets (cycle counts exact,
     # times <= 0.1% relative per DESIGN section 5).
-    assert FWS_REPORT_JSON.exists()
-    report = json.loads(FWS_REPORT_JSON.read_text())
+    assert _perf_out("VIT", "fws_cim_report.json").exists()
+    report = json.loads(_perf_out("VIT", "fws_cim_report.json").read_text())
     assert report["device_class"] == "fws_cim"
     assert report["qk_cycles"] == 2747
     assert report["sv_cycles"] == 4471
@@ -690,7 +729,7 @@ def test_run_perf_t1_end_to_end_smoke():
     assert "twice per layer" in report["sequential_latency_note"]
 
     # Readable section rides on the results txt.
-    results_text = RESULTS_TXT.read_text()
+    results_text = _perf_out("VIT", "LLM_inference_results.txt").read_text()
     assert "FWS-CIM spatial pipeline" in results_text
     assert "bottleneck: S1_qkv" in results_text
     assert "PARTIAL" in results_text  # energy is labeled partial
@@ -705,7 +744,7 @@ def test_run_perf_t1_tp2_variant_runs(tmp_path):
 
     proc = _run_perf_subprocess(hw_path, VIT_HUGE_64)
     assert proc.returncode == 0, proc.stdout[-4000:]
-    report = json.loads(FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("VIT", "fws_cim_report.json").read_text())
     assert report["tp"] == 2
     # heads_chip = ceil(16/2) = 8 folded into K: qk = 2*(8*80+94)-1.
     assert report["qk_cycles"] == 1467
@@ -728,11 +767,21 @@ def test_run_perf_gpu_results_unchanged_vs_baseline():
         f"saved A100 ViT baseline missing at {BASELINE_A100_VIT} "
         "(broken checkout, or a bad RAPID_A100_VIT_BASELINE override)"
     )
+    # SEED the run directory first. Every test now runs into its own root,
+    # so an unseeded "the CIM report is absent" assertion would hold on an
+    # empty tmp dir no matter what run_perf did — a gate that cannot fail.
+    # Planting a stale report makes the assertion prove what it names: that
+    # run_perf RECREATES exp_dir and a GPU run leaves no CIM report behind.
+    stale = _perf_root() / "VIT" / "fws_cim_report.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"device_class": "stale, from a previous run"}')
+
     proc = _run_perf_subprocess(A100, VIT_BASE)
     assert proc.returncode == 0, proc.stdout[-4000:]
-    assert RESULTS_TXT.read_bytes() == BASELINE_A100_VIT.read_bytes()
-    # GPU runs never emit the CIM report (exp_dir is recreated per run).
-    assert not FWS_REPORT_JSON.exists()
+    assert _perf_out("VIT", "LLM_inference_results.txt").read_bytes() == BASELINE_A100_VIT.read_bytes()
+    # GPU runs never emit the CIM report, and the stale one is GONE: run_perf
+    # recreates exp_dir rather than writing over whatever it finds.
+    assert not _perf_out("VIT", "fws_cim_report.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1729,11 +1778,6 @@ def test_decode_sustained_throughput_rejects_nonpositive_inputs(cim_llama):
 # Pass 2 stage 3: end-to-end smokes (DESIGN2 section 4; output/LLM run dir)
 # ---------------------------------------------------------------------------
 
-LLM_RESULTS_TXT = PROJECT_ROOT / "output" / "LLM" / "LLM_inference_results.txt"
-LLM_FWS_REPORT_JSON = PROJECT_ROOT / "output" / "LLM" / "fws_cim_report.json"
-LLM_MEM_CAPACITY_TXT = (
-    PROJECT_ROOT / "output" / "LLM" / "memory-summary" / "memory_capacity_comparison.txt"
-)
 
 
 def test_run_perf_llama7b_dense_llm_smoke():
@@ -1741,8 +1785,8 @@ def test_run_perf_llama7b_dense_llm_smoke():
     assert proc.returncode == 0, proc.stdout[-4000:]
 
     # The report writer must land in the LLM run dir, not output/VIT.
-    assert LLM_FWS_REPORT_JSON.exists()
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    assert _perf_out("LLM", "fws_cim_report.json").exists()
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     assert report["device_class"] == "fws_cim"
     assert report["layer_classes"] == {"dense": 32, "moe": 0}
     assert report["tokens_owner"] == 4 * 1792  # B * prefill_len
@@ -1806,7 +1850,7 @@ def test_run_perf_llama7b_dense_llm_smoke():
     assert "fabric ceiling" in decode["aggregate_note"].lower()
 
     # Readable section rides on the LLM results txt.
-    results_text = LLM_RESULTS_TXT.read_text()
+    results_text = _perf_out("LLM", "LLM_inference_results.txt").read_text()
     assert "FWS-CIM spatial pipeline" in results_text
     assert "KV cache (story: cim_sram)" in results_text
     assert "Decode (direct law evaluation" in results_text
@@ -1817,7 +1861,7 @@ def test_run_perf_llama7b_dense_llm_smoke():
     assert "[limited by kv_capacity]" in results_text
     assert "twice per layer" in results_text
     # cim_sram: the activation-feasibility label says KV is included.
-    mem_text = LLM_MEM_CAPACITY_TXT.read_text()
+    mem_text = _perf_out("LLM", "memory-summary", "memory_capacity_comparison.txt").read_text()
     assert "includes the KV cache under kvcache_type: cim_sram" in mem_text
 
 
@@ -1825,7 +1869,7 @@ def test_run_perf_llama7b_kvdram_variant_side_check():
     proc = _run_perf_subprocess(FWS_LLAMA7B_KVDRAM, LLAMA2_7B_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
 
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     kv = report["kv"]
     assert kv["story"] == "cim_dram"
     assert kv["capacity_bytes"] == 8589934592.0
@@ -1843,13 +1887,13 @@ def test_run_perf_llama7b_kvdram_variant_side_check():
     assert report["decode"]["sustained_tokens_per_s"] == pytest.approx(
         1e11 / report["kv"]["bytes_per_stream"], rel=1e-9
     )
-    assert "[limited by kv_bandwidth]" in LLM_RESULTS_TXT.read_text()
+    assert "[limited by kv_bandwidth]" in _perf_out("LLM", "LLM_inference_results.txt").read_text()
     # cim_dram KV traffic energy joins the PARTIAL figure.
     assert report["energy_partial_pj"]["kv_dram_traffic"] > 0
 
     # Side capacity check surfaces in the capacity report text (WARN path
     # never raises; this config has headroom).
-    mem_text = LLM_MEM_CAPACITY_TXT.read_text()
+    mem_text = _perf_out("LLM", "memory-summary", "memory_capacity_comparison.txt").read_text()
     assert "KV DRAM tier (kvcache_type: cim_dram)" in mem_text
     assert "KV DRAM headroom" in mem_text
     assert "excluded here" in mem_text  # SRAM check stays activations-only
@@ -1866,7 +1910,7 @@ def test_run_perf_llama7b_kvdram_overflow_warns_never_raises(tmp_path):
     proc = _run_perf_subprocess(hw_path, LLAMA2_7B_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
     assert "[WARNING]: fws_cim: KV cache at the final context does not fit" in proc.stdout
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     assert report["kv"]["fits"] is False
     assert report["kv"]["max_streams"] == 1  # floor(1 GiB / 1 GiB per stream)
     # Sustained reconciliation on the overflow path: 1 stream < B=4 means
@@ -1875,9 +1919,9 @@ def test_run_perf_llama7b_kvdram_overflow_warns_never_raises(tmp_path):
     assert report["decode"]["wavefronts_kv"] == 0
     assert report["decode"]["decode_throughput_limit"] == "infeasible"
     assert report["decode"]["sustained_tokens_per_s"] == 0.0
-    mem_text = LLM_MEM_CAPACITY_TXT.read_text()
+    mem_text = _perf_out("LLM", "memory-summary", "memory_capacity_comparison.txt").read_text()
     assert "[WARN] KV DRAM capacity exceeded by 3.00 GiB" in mem_text
-    results_text = LLM_RESULTS_TXT.read_text()
+    results_text = _perf_out("LLM", "LLM_inference_results.txt").read_text()
     assert "[WARNING] KV capacity exceeded" in results_text
     assert "[infeasible: KV holds no full wavefront of B]" in results_text
 
@@ -1886,7 +1930,7 @@ def test_run_perf_moe_smoke():
     proc = _run_perf_subprocess(FWS_MOE, MOE_SMALL_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
 
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     assert report["layer_classes"] == {"dense": 1, "moe": 11}
 
     # Expert arrays in the capacity census.
@@ -1934,7 +1978,7 @@ def test_run_perf_moe_smoke():
     assert "serialized" in report["sequential_latency_note"]
     assert "twice per layer" in report["sequential_latency_note"]
 
-    results_text = LLM_RESULTS_TXT.read_text()
+    results_text = _perf_out("LLM", "LLM_inference_results.txt").read_text()
     assert "MoE layer stages" in results_text
     assert "MoE dispatch/combine (p2p over the ep link)" in results_text
     assert "serialized" in results_text
@@ -1948,14 +1992,14 @@ def test_run_perf_moe_expert_parallel_pool_accounting(tmp_path):
 
     proc = _run_perf_subprocess(hw_path, MOE_SMALL_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     pool = report["moe"]["expert_pool"]
     # 11 MoE layers x 4 chips; ceil(32 routed arrays / 4) = 8 per chip; the
     # layer chips keep 38 - 32 = 6 arrays per MoE layer.
     assert pool["chips"] == 44
     assert pool["arrays_used_per_chip"] == 8
     assert [c["arrays_used"] for c in report["chips"]] == [9 + 5 * 6, 6 * 6 + 32]
-    assert "MoE expert pool: 44 dedicated chips" in LLM_RESULTS_TXT.read_text()
+    assert "MoE expert pool: 44 dedicated chips" in _perf_out("LLM", "LLM_inference_results.txt").read_text()
 
 
 def test_run_perf_llama7b_auto_placement(tmp_path):
@@ -1966,11 +2010,11 @@ def test_run_perf_llama7b_auto_placement(tmp_path):
 
     proc = _run_perf_subprocess(hw_path, LLAMA2_7B_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     assert report["placement"] == "auto"
     assert report["derived_layers_per_chip"] == [9, 9, 9, 5]
     assert [c["arrays_used"] for c in report["chips"]] == [117, 117, 117, 73]
-    assert "auto -> derived [9, 9, 9, 5]" in LLM_RESULTS_TXT.read_text()
+    assert "auto -> derived [9, 9, 9, 5]" in _perf_out("LLM", "LLM_inference_results.txt").read_text()
 
 
 def test_run_perf_gpu_native_llm_decode_runs(tmp_path):
@@ -1984,7 +2028,7 @@ def test_run_perf_gpu_native_llm_decode_runs(tmp_path):
 
     proc = _run_perf_subprocess(hw_path, LLAMA2_7B_FWS_INF)
     assert proc.returncode == 0, proc.stdout[-4000:]
-    report = json.loads(LLM_FWS_REPORT_JSON.read_text())
+    report = json.loads(_perf_out("LLM", "fws_cim_report.json").read_text())
     assert report["fabric_model"] == "gpu_native"
     assert report["decode"] is not None
     # No folded-run double count under gpu_native, and no MoE here: the
@@ -2615,6 +2659,54 @@ def test_empty_device_slots_ship_no_numbers(device):
     assert card.params is not cim.analog  # its own parameter set, nothing inherited
 
 
+def test_custom_device_family_is_admitted_and_inherits_nothing():
+    # D14 says device CARDS, not device rewrites — but an open `device` field
+    # cannot tell a new device from a typo. 'custom' is the explicit escape
+    # hatch: it is admitted by name and pays the empty-slot price.
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"second": {"kind": "analog_macro", "device": "custom"}}
+    with pytest.raises(ValueError, match="must supply a complete 'params' block"):
+        _hw_from_dict(hw_dict)
+
+    hw_dict["cim"]["cards"]["second"]["params"] = {
+        "rows": 256,
+        "cols_adc": 64,
+        "adc_mux": 4,
+        "slice_cycles": 2,
+        "analog_clock_mhz": 150,
+        "energy_per_vec_pj": 2.0,
+        "area_mm2_per_array": 0.25,
+    }
+    cim = _hw_from_dict(hw_dict).cim_config
+    card = cim.analog_card
+    assert card.device == "custom"
+    assert card.params.rows == 256 and card.params.adc_mux == 4
+    assert card.params is not cim.analog  # nothing inherited under another name
+
+
+def test_a_typo_device_is_still_refused_and_names_the_escape_hatch():
+    hw_dict = _load_yaml(FWS_T1)
+    hw_dict["cim"]["cards"] = {"c": {"kind": "analog_macro", "device": "crt"}}
+    with pytest.raises(ValueError, match="device: 'custom'"):
+        _hw_from_dict(hw_dict)
+
+
+def test_card_properties_refuse_a_hand_built_config_by_name():
+    # cards=None is unreachable through from_dict (it always synthesizes a
+    # library); it is reachable by assembling the dataclass by hand, and used
+    # to surface as a bare NoneType AttributeError.
+    hw = config.parse_config(str(FWS_T1), "hardware")
+    cim = hw.cim_config
+    bare = config.CIMConfig(analog=cim.analog, fabric=cim.fabric, chip=cim.chip)
+    assert bare.cards is None
+    for name in ("analog_card", "digital_card"):
+        with pytest.raises(config.MissingCardLibraryError, match="carries no card library"):
+            getattr(bare, name)
+    # AttributeError is one of its bases, so the one optional probe on the card
+    # path keeps its default instead of turning into a traceback.
+    assert getattr(bare, "analog_card", None) is None
+
+
 def test_unknown_card_kind_and_device_rejected():
     hw_dict = _load_yaml(FWS_T1)
     hw_dict["cim"]["cards"] = {"c": {"kind": "quantum"}}
@@ -3174,12 +3266,10 @@ def _inert_p2_blocks(hw_dict):
 def test_p6_2_degenerate_reduction_reproduces_today_bit_identically(
     hw_path, model_path, mode, tmp_path
 ):
-    out_dir = PROJECT_ROOT / "output" / mode
-    report_path = out_dir / "fws_cim_report.json"
-    results_path = out_dir / "LLM_inference_results.txt"
-
     proc = _run_perf_subprocess(hw_path, model_path)
     assert proc.returncode == 0, proc.stdout[-4000:]
+    report_path = _perf_out(mode, "fws_cim_report.json")
+    results_path = _perf_out(mode, "LLM_inference_results.txt")
     baseline_report = report_path.read_bytes()
     baseline_results = results_path.read_bytes()
 

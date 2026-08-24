@@ -275,5 +275,32 @@ REFUSED by name on fws_cim: every law its branches need exists, but <code>_layer
 layer&rsquo;s mixers in order and chains them without ever summing the branches, so the model would have
 been priced as a deeper sequential one &mdash; a wrong number, which is the failure P1.4&rsquo;s rule
 exists to prevent.</p>
+<p><span class="tag">Wave D close</span> 2026-08-24 &mdash; cross-wave minors swept. The only P3 change is that <code>_apply_user_allocation</code> now HONORS a declared <code>cim.allocation.slice_index</code>: declaration order still places the tile, and a declared slice that contradicts it is refused by name rather than silently overruled. P3.1&ndash;P3.6 all read done.</p>
+<p><strong>Built 2026-08-24</strong> &mdash; Wave D: P3.7, the MAPPED-PATH DSE, closes D10&rsquo;s
+&ldquo;swept by the DSE&rdquo;. <code>tools/fws_qif_dse.py</code> is a SECOND tool beside the frozen
+closed-form <code>tools/fws_cim_dse.py</code> (whose evaluator, schema and validator rows hold the ADJ-8
+bridge and must not fork): every candidate is placed by P3, lowered, and priced by P4 on ITS OWN timeline,
+so the ADJ-6 headline in each row is a timeline reading and never a period. The candidate space is a
+tool-owned <code>mapping_dse:</code> block &mdash; explicit candidate lists only, no search (D19) &mdash;
+with six axes that each move exactly one field: shared-chiplet <code>vector_lanes</code>, analog
+<code>bank_depth</code>, <code>column_sets_per_tile</code>, <code>arrays_per_chip</code>,
+<code>layers_per_chip</code> and <code>shared_chiplets</code>. The established conventions all hold:
+stage-tagged infeasibility (<code>config &lt; mapping &lt; budget &lt; lowering &lt; pricing &lt;
+memory</code>) carrying each refusal&rsquo;s own message, a Pareto front of headline throughput vs total
+silicon, a printed lexicographic pick, <code>dse_report.md</code>/<code>.json</code>,
+<code>--emit-config</code> and a <code>--verify</code> run_perf round trip that matched at rel_err 0.0.
+THE DEMO: Granite-4.0-H-Tiny over vector_lanes {512, 1024, 2048, 4096} &times; bank_depth {1, 2}, 8 of 8
+valid, checked in under <code>docs/qif/dse/granite_lanes_banks/</code> with a regenerate-and-compare gate.
+It found the headline rising SUB-linearly with the declared scan width (8&times; the lanes buys 1.79&times;
+the tokens/s, because only the Mamba-2 scan moves with the lane count &mdash; a decode step is priced by
+the per-token recurrence <code>ssm_recurrent_scan[mamba2]</code>, which is
+<code>optima_m3_reference</code>-validated, while the UNVALIDATED chunked <code>ssd_chunked_scan</code>
+form prices prefill only) and finer banking worth +0.5&ndash;0.9% throughput and &minus;8.6% energy, all
+of it in the <code>analog_arrays</code> energy term (ADJ-4 active column sets) with
+<code>unowned_columns</code> unmoved. The front is ONE point and the report DERIVES why in a computed
+<code>front_shape</code>: both terms of the silicon accounting are constant across the sweep (6400
+enumerated analog slots, 10 chiplets on every candidate), and the digital card&rsquo;s area is a NAMED
+uncovered term (ADJ-4 forbids inventing one), so nothing swept here trades silicon for speed.</p>
+<p><span class="tag">Wave D audit fix</span> 2026-08-24 &mdash; the D1 audit found PROSE THAT WAS NOT DERIVED FROM THE DATA BESIDE IT, and no metric moved. The <code>flat_area</code> front note was a constant string claiming &ldquo;the analog term is the model&rsquo;s weights (the same tiles are placed either way)&rdquo; while the table two sections above it showed 19566 tiles at bank 1 and 11103 at bank 2, and while the same payload&rsquo;s <code>silicon.basis</code> said the analog term is the SLOTS the machine has; the note is now derived from the candidates &mdash; it names the swept axes and the two counts that are actually constant (6400 enumerated slots, 10 chiplets) and reads its uncovered terms off the accounting. The README credited the banking win to &ldquo;wasted stored columns&rdquo;, but <code>unowned_columns</code> (2,671,424) and <code>macros_holding_tiles</code> (5610) are identical in all eight rows and the whole delta sits in the <code>analog_arrays</code> energy term &mdash; ADJ-4 active column sets, now the stated mechanism. The decode headline is priced by <code>ssm_recurrent_scan[mamba2]</code> (<code>optima_m3_reference</code>), not by the UNVALIDATED chunked SSD form, which prices prefill only; four places said otherwise. Also: a mixed-headline sweep now RECORDS the conflict, writes both reports and exits 2 instead of raising after every candidate was priced; <code>dse_report.md</code> carries the silicon accounting&rsquo;s coverage on every front shape; per-candidate and sweep-level disclosures are one entry per constraint and name their candidates; the demo config is pinned equal to the shipped Granite point plus the sweep block; and the regenerate gate no longer depends on the process cwd. +6 tests (33 in <code>tests/test_qif_dse_allocation.py</code>), +8 validator rows (40 P3.7 rows, 423/423).</p>
 </div>
 </main></body></html>

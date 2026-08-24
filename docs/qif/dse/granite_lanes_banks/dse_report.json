@@ -1,0 +1,4067 @@
+{
+  "tool": "fws_qif_dse",
+  "schema": "fws_qif_dse/1",
+  "hardware_config": "configs/hardware-config/fws_cim_granite_tiny_dse.yaml",
+  "model_config": "configs/model-config/granite_4_0_h_tiny_inf.yaml",
+  "model_id": "Granite-4.0-H-Tiny",
+  "mode": "LLM",
+  "objective": "throughput",
+  "headline_metric": "tokens_per_s",
+  "headline_conflict": null,
+  "selection_rule": "lexicographic: max headline tokens/s (ADJ-6, off each candidate's own timeline), then min total silicon, then min analog chips, then min placed tiles, then first in declaration order",
+  "evaluation_path": "fws_mapping.build_mapping -> program.fws_build.build_fws_program -> fws_eval.evaluate_fws, per candidate. No closed form, no period, no shared timeline (A1, ADJ-6).",
+  "sweep": {
+    "block": "mapping_dse",
+    "label": "Granite-4.0-H-Tiny: shared-chiplet vector lanes x analog banking",
+    "objective": "throughput",
+    "max_chips": 0,
+    "max_silicon_mm2": 0.0,
+    "axes": {
+      "vector_lanes": [
+        512,
+        1024,
+        2048,
+        4096
+      ],
+      "bank_depth": [
+        1,
+        2
+      ]
+    },
+    "axis_targets": {
+      "vector_lanes": "cim.cards.<digital card>.vector_lanes",
+      "bank_depth": "cim.cards.<analog card>.bank_depth"
+    },
+    "enumeration": "full cross product in declaration order; explicit candidate lists only, no search and no sampling (D19, D10)"
+  },
+  "stages": [
+    "config",
+    "mapping",
+    "budget",
+    "lowering",
+    "pricing",
+    "memory"
+  ],
+  "num_candidates": 8,
+  "num_valid": 8,
+  "candidates": [
+    {
+      "id": "c000",
+      "knobs": {
+        "vector_lanes": 512,
+        "bank_depth": 1
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 90972,
+        "makespan_s": 1.9079786656632052,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 1.9044822860197548,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0011653251443080048,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0011654598811501327,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0011655946179922605,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 1.9079786656632052,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 3432.1215725183133,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00349638 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 2.0964595003003437,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 3432.1215725183133,
+        "prefill_latency_s": 1.9044822860197548,
+        "decode_step_median_s": 0.0011654598811501327,
+        "request_latency_s": 1.9079786656632052,
+        "requests_per_s": 2.0964595003003437,
+        "total_energy_pj": 167645558058.99426,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 164175263018.99426,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0011654598811501327,
+          "extrapolated_request_latency_s": 2.2028400155941887,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 19566,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 1,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4579010009765625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 15.61635684967041
+    },
+    {
+      "id": "c001",
+      "knobs": {
+        "vector_lanes": 512,
+        "bank_depth": 2
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 56496,
+        "makespan_s": 1.918844633163453,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 1.9153301093421171,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0011713732036031654,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0011715079404452933,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.001171642677287421,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 1.918844633163453,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 3414.4028067616764,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00351452 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 2.0845877414293335,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 3414.4028067616764,
+        "prefill_latency_s": 1.9153301093421171,
+        "decode_step_median_s": 0.0011715079404452933,
+        "request_latency_s": 1.918844633163453,
+        "requests_per_s": 2.0845877414293335,
+        "total_energy_pj": 183451893251.81345,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 179981598211.81345,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0011715079404452933,
+          "extrapolated_request_latency_s": 2.215236142096112,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 11103,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 2,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4655914306640625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 9.607145071029663
+    },
+    {
+      "id": "c002",
+      "knobs": {
+        "vector_lanes": 1024,
+        "bank_depth": 1
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 90972,
+        "makespan_s": 1.0495558614526805,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 1.0469353049671157,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0008733840916794744,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0008735188285216022,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0008736535653637301,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 1.0495558614526805,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 4579.180058167549,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00262056 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 3.811135878431127,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 4579.180058167549,
+        "prefill_latency_s": 1.0469353049671157,
+        "decode_step_median_s": 0.0008735188285216022,
+        "request_latency_s": 1.0495558614526805,
+        "requests_per_s": 3.811135878431127,
+        "total_energy_pj": 167645558058.99426,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 164175263018.99426,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0008735188285216022,
+          "extrapolated_request_latency_s": 1.270556125068646,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 19566,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 1,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4579010009765625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 15.661448955535889
+    },
+    {
+      "id": "c003",
+      "knobs": {
+        "vector_lanes": 1024,
+        "bank_depth": 2
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 56496,
+        "makespan_s": 1.0604218289529208,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 1.0577831282894705,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.000879432150974635,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0008795668878167628,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0008797016246588907,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 1.0604218289529208,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 4547.692796768069,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.0026387 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 3.772083797963373,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 4547.692796768069,
+        "prefill_latency_s": 1.0577831282894705,
+        "decode_step_median_s": 0.0008795668878167628,
+        "request_latency_s": 1.0604218289529208,
+        "requests_per_s": 3.772083797963373,
+        "total_energy_pj": 183451893251.81345,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 179981598211.81345,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0008795668878167628,
+          "extrapolated_request_latency_s": 1.2829522515705618,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 11103,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 2,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4655914306640625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 9.853114366531372
+    },
+    {
+      "id": "c004",
+      "knobs": {
+        "vector_lanes": 2048,
+        "bank_depth": 1
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 90972,
+        "makespan_s": 0.620344459347398,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.6181618144407907,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0007274135653603242,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.000727548302202452,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0007276830390445799,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 0.620344459347398,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 5497.916753968228,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00218264 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 6.448030509062654,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 5497.916753968228,
+        "prefill_latency_s": 0.6181618144407907,
+        "decode_step_median_s": 0.000727548302202452,
+        "request_latency_s": 0.620344459347398,
+        "requests_per_s": 6.448030509062654,
+        "total_energy_pj": 167645558058.99426,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 164175263018.99426,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.000727548302202452,
+          "extrapolated_request_latency_s": 0.8044141798046184,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 19566,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 1,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4579010009765625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 15.548823833465576
+    },
+    {
+      "id": "c005",
+      "knobs": {
+        "vector_lanes": 2048,
+        "bank_depth": 2
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 56496,
+        "makespan_s": 0.6312104268477834,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.6290096377631567,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0007334616247001158,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0007335963615422436,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0007337310983843714,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 0.6312104268477834,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 5452.589747842776,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00220079 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 6.3370309327361625,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 5452.589747842776,
+        "prefill_latency_s": 0.6290096377631567,
+        "decode_step_median_s": 0.0007335963615422436,
+        "request_latency_s": 0.6312104268477834,
+        "requests_per_s": 6.3370309327361625,
+        "total_energy_pj": 183451893251.81345,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 179981598211.81345,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0007335963615422436,
+          "extrapolated_request_latency_s": 0.816810306317971,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 11103,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 2,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4655914306640625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 9.62639307975769
+    },
+    {
+      "id": "c006",
+      "knobs": {
+        "vector_lanes": 4096,
+        "bank_depth": 1
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 90972,
+        "makespan_s": 0.4057387582948782,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.40377506917762834,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0006544283022411612,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0006545630390832891,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0006546977759254169,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 0.4057387582948782,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 6110.946938895255,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00196369 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 9.858560263776736,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 6110.946938895255,
+        "prefill_latency_s": 0.40377506917762834,
+        "decode_step_median_s": 0.0006545630390832891,
+        "request_latency_s": 0.4057387582948782,
+        "requests_per_s": 9.858560263776736,
+        "total_energy_pj": 167645558058.99426,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 164175263018.99426,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0006545630390832891,
+          "extrapolated_request_latency_s": 0.5713432071829503,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 19566,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 1,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4579010009765625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 15.289700031280518
+    },
+    {
+      "id": "c007",
+      "knobs": {
+        "vector_lanes": 4096,
+        "bank_depth": 2
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 56496,
+        "makespan_s": 0.4166047257951627,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.4146228925000014,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.decode_step_first",
+            "label": "decode step time, first lowered step",
+            "value": 0.0006604763615449816,
+            "unit": "s",
+            "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+          },
+          {
+            "key": "sys.fws.decode_step_median",
+            "label": "decode step time, median of the lowered window",
+            "value": 0.0006606110983871094,
+            "unit": "s",
+            "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+          },
+          {
+            "key": "sys.fws.decode_step_last",
+            "label": "decode step time, last lowered step",
+            "value": 0.0006607458352292372,
+            "unit": "s",
+            "basis": "finish(last step) - finish(previous step) on this timeline."
+          },
+          {
+            "key": "sys.fws.lowered_window_latency",
+            "label": "prefill + lowered decode window span (NOT a full request)",
+            "value": 0.4166047257951627,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+          },
+          {
+            "key": "sys.fws.tokens_per_s",
+            "label": "steady throughput at the decode terminal (HEADLINE)",
+            "value": 6054.9996961390025,
+            "unit": "tokens/s",
+            "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00198183 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+          },
+          {
+            "key": "sys.fws.requests_per_s_lowered_window",
+            "label": "batch over the lowered window (NOT a completed-request rate)",
+            "value": 9.601427329863585,
+            "unit": "requests/s",
+            "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+          }
+        ],
+        "tokens_per_s": 6054.9996961390025,
+        "prefill_latency_s": 0.4146228925000014,
+        "decode_step_median_s": 0.0006606110983871094,
+        "request_latency_s": 0.4166047257951627,
+        "requests_per_s": 9.601427329863585,
+        "total_energy_pj": 183451893251.81345,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 179981598211.81345,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 3470295040.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 3,
+          "declared_decode_steps": 256,
+          "extrapolated": true,
+          "remaining_steps": 253,
+          "median_step_s": 0.0006606110983871094,
+          "extrapolated_request_latency_s": 0.5837393336871014,
+          "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "placement": {
+        "analog_chips": 10,
+        "shared_digital_chiplets": 10,
+        "shared_digital_suggestion": 10,
+        "analog_macro_slots": 6400,
+        "macros_holding_tiles": 5610,
+        "unowned_macro_slots": 790,
+        "unowned_columns": 2671424,
+        "tiles": 11103,
+        "owners": 5321,
+        "devices": 12810,
+        "decode_window": 3
+      },
+      "silicon": {
+        "analog_macro_slots": 6400,
+        "macro_footprint_mm2": 2.0204136,
+        "analog_macro_silicon_mm2": 12930.64704,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 12930.64704,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2)"
+        ],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+      },
+      "effective_column_sets_per_tile": 2,
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+          "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "decode_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+          "value": "declared relaxation",
+          "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+        },
+        {
+          "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+          "value": "declared relaxation",
+          "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+        },
+        {
+          "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+          "value": "declared relaxation",
+          "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+        },
+        {
+          "constraint": "unvalidated_law:ssd_chunked_scan",
+          "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+          "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "8.58993e+09 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "kv_shares_the_activation_tier",
+          "value": "cim_sram: one tier, two tenants",
+          "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+        },
+        {
+          "constraint": "decode_series_window",
+          "value": "3 of 256 steps lowered",
+          "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 20,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4655914306640625
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 12288.0,
+          "unit": "decode_step",
+          "required_time_s": 1.1144409179687498e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "kv.c0",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c1",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c2",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c3",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c4",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c5",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c6",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c7",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c8",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        },
+        {
+          "boundary_id": "kv.c9",
+          "role": "act",
+          "bytes_per_unit": 67108864.0,
+          "unit": "decode_step",
+          "required_time_s": 1.52587890625e-05,
+          "crosses_link": false
+        }
+      ],
+      "wall_s": 9.814858198165894
+    }
+  ],
+  "front_ids": [
+    "c006"
+  ],
+  "front_shape": "flat_area",
+  "front_note": "every valid candidate carries the SAME total silicon (12930.6 mm2), so the front collapses to the fastest one. Both terms of the silicon accounting are CONSTANT over this sweep: the ENUMERATED analog macro slot count is 6400 and the shared digital chiplet count is 10 on every candidate, so no axis on this sweep (vector_lanes, bank_depth) moved a term of the accounting. The axes move TIME only. UNCOVERED in that accounting (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2).",
+  "selected_id": "c006",
+  "selected": {
+    "id": "c006",
+    "knobs": {
+      "vector_lanes": 4096,
+      "bank_depth": 1
+    },
+    "ok": true,
+    "fail_stage": null,
+    "fail_message": null,
+    "stages": {
+      "config": {
+        "ok": true
+      },
+      "mapping": {
+        "ok": true
+      },
+      "budget": {
+        "ok": true
+      },
+      "lowering": {
+        "ok": true
+      },
+      "pricing": {
+        "ok": true
+      },
+      "memory": {
+        "ok": true
+      }
+    },
+    "metrics": {
+      "ops_priced": 90972,
+      "makespan_s": 0.4057387582948782,
+      "entries": [
+        {
+          "key": "sys.fws.prefill_latency",
+          "label": "prefill latency",
+          "value": 0.40377506917762834,
+          "unit": "s",
+          "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+        },
+        {
+          "key": "sys.fws.decode_step_first",
+          "label": "decode step time, first lowered step",
+          "value": 0.0006544283022411612,
+          "unit": "s",
+          "basis": "finish(step 0 terminal op) minus the decode window's start (the prefill terminal). A difference of two timeline finishes, never a period."
+        },
+        {
+          "key": "sys.fws.decode_step_median",
+          "label": "decode step time, median of the lowered window",
+          "value": 0.0006545630390832891,
+          "unit": "s",
+          "basis": "median of the 3 step differences finish(step k) - finish(step k-1) on this timeline (ADJ-6: the series is reported first / median / last)."
+        },
+        {
+          "key": "sys.fws.decode_step_last",
+          "label": "decode step time, last lowered step",
+          "value": 0.0006546977759254169,
+          "unit": "s",
+          "basis": "finish(last step) - finish(previous step) on this timeline."
+        },
+        {
+          "key": "sys.fws.lowered_window_latency",
+          "label": "prefill + lowered decode window span (NOT a full request)",
+          "value": 0.4057387582948782,
+          "unit": "s",
+          "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73). This timeline lowers 3 of the 256 declared decode steps, so it is the span of the LOWERED WINDOW and not a request's end-to-end latency; the only request-scale figure is extrapolation.extrapolated_request_latency_s, which is labeled an extrapolation and never a metric."
+        },
+        {
+          "key": "sys.fws.tokens_per_s",
+          "label": "steady throughput at the decode terminal (HEADLINE)",
+          "value": 6110.946938895255,
+          "unit": "tokens/s",
+          "basis": "12 generated tokens (batch 4 x 3 lowered decode steps) divided by the OBSERVED span of the same timeline (0.00196369 s, decode terminal minus decode start). ADJ-6 makes this the headline; it is a division of two timeline readings, not 1 / period, and the fabric-ceiling / sustained pair retired with the closed form."
+        },
+        {
+          "key": "sys.fws.requests_per_s_lowered_window",
+          "label": "batch over the lowered window (NOT a completed-request rate)",
+          "value": 9.858560263776736,
+          "unit": "requests/s",
+          "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency \u2014 that would be a period times a count, which P4 \u00a73 forbids in metrics[]."
+        }
+      ],
+      "tokens_per_s": 6110.946938895255,
+      "prefill_latency_s": 0.40377506917762834,
+      "decode_step_median_s": 0.0006545630390832891,
+      "request_latency_s": 0.4057387582948782,
+      "requests_per_s": 9.858560263776736,
+      "total_energy_pj": 167645558058.99426,
+      "energy_components": [
+        {
+          "component": "analog_arrays",
+          "energy_pj": 164175263018.99426,
+          "coverage": "covered"
+        },
+        {
+          "component": "link_traffic",
+          "energy_pj": 3470295040.0,
+          "coverage": "partial"
+        },
+        {
+          "component": "digital_reduction",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        },
+        {
+          "component": "macro_pool_helpers",
+          "energy_pj": 0.0,
+          "coverage": "partial"
+        },
+        {
+          "component": "shared_digital_chiplet",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        },
+        {
+          "component": "kv_traffic",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        }
+      ],
+      "extrapolation": {
+        "lowered_decode_steps": 3,
+        "declared_decode_steps": 256,
+        "extrapolated": true,
+        "remaining_steps": 253,
+        "median_step_s": 0.0006545630390832891,
+        "extrapolated_request_latency_s": 0.5713432071829503,
+        "basis": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+      },
+      "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+    },
+    "notes": [],
+    "placement": {
+      "analog_chips": 10,
+      "shared_digital_chiplets": 10,
+      "shared_digital_suggestion": 10,
+      "analog_macro_slots": 6400,
+      "macros_holding_tiles": 5610,
+      "unowned_macro_slots": 790,
+      "unowned_columns": 2671424,
+      "tiles": 19566,
+      "owners": 5321,
+      "devices": 12810,
+      "decode_window": 3
+    },
+    "silicon": {
+      "analog_macro_slots": 6400,
+      "macro_footprint_mm2": 2.0204136,
+      "analog_macro_silicon_mm2": 12930.64704,
+      "shared_digital_area_mm2_per_chiplet": 0.0,
+      "shared_digital_silicon_mm2": 0.0,
+      "total_silicon_mm2": 12930.64704,
+      "uncovered_terms": [
+        "shared digital chiplet area (the card declares no area_mm2)"
+      ],
+      "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)"
+    },
+    "effective_column_sets_per_tile": 1,
+    "disclosures": [
+      {
+        "constraint": "network_congestion",
+        "value": "not modeled",
+        "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+      },
+      {
+        "constraint": "intra_chip_activation_movement",
+        "value": "a dependency, not priced bytes",
+        "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+      },
+      {
+        "constraint": "model_type_carrier",
+        "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+        "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+      },
+      {
+        "constraint": "decode_window",
+        "value": "3 of 256 steps lowered",
+        "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
+      },
+      {
+        "constraint": "macro_pool_helper_ops",
+        "value": "absorbed: 0 s, 0 pJ",
+        "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+      },
+      {
+        "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+        "value": "declared relaxation",
+        "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock)."
+      },
+      {
+        "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+        "value": "declared relaxation",
+        "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares."
+      },
+      {
+        "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+        "value": "declared relaxation",
+        "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero)."
+      },
+      {
+        "constraint": "unvalidated_law:ssd_chunked_scan",
+        "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+        "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does."
+      },
+      {
+        "constraint": "shared_digital_energy",
+        "value": "0 pJ: no law",
+        "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+      },
+      {
+        "constraint": "row_block_partial_sum_law",
+        "value": "priced with the shift-and-add tree law",
+        "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+      },
+      {
+        "constraint": "reduction_energy",
+        "value": "0 pJ: no card knob declared",
+        "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+      },
+      {
+        "constraint": "attention_op_folding",
+        "value": "three serial DAG ops, not one folded stage",
+        "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+      },
+      {
+        "constraint": "activation_tier_is_per_chip",
+        "value": "8.58993e+09 B applied to EVERY chip",
+        "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+      },
+      {
+        "constraint": "kv_shares_the_activation_tier",
+        "value": "cim_sram: one tier, two tenants",
+        "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+      },
+      {
+        "constraint": "decode_series_window",
+        "value": "3 of 256 steps lowered",
+        "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
+      },
+      {
+        "constraint": "op_durations",
+        "value": "unpriced (0.0)",
+        "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+      }
+    ],
+    "memory": {
+      "verdicts": 20,
+      "violated": 0,
+      "undeclared": 0,
+      "worst_ratio": 0.4579010009765625
+    },
+    "boundaries": [
+      {
+        "boundary_id": "act.c0->c1",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c1->c2",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c2->c3",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c3->c4",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c4->c5",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c5->c6",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c6->c7",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c7->c8",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "act.c8->c9",
+        "role": "act",
+        "bytes_per_unit": 12288.0,
+        "unit": "decode_step",
+        "required_time_s": 1.1144409179687498e-06,
+        "crosses_link": true
+      },
+      {
+        "boundary_id": "kv.c0",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c1",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c2",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c3",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c4",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c5",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c6",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c7",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c8",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      },
+      {
+        "boundary_id": "kv.c9",
+        "role": "act",
+        "bytes_per_unit": 67108864.0,
+        "unit": "decode_step",
+        "required_time_s": 1.52587890625e-05,
+        "crosses_link": false
+      }
+    ],
+    "wall_s": 15.289700031280518
+  },
+  "best_violation": null,
+  "disclosures": [
+    {
+      "constraint": "network_congestion",
+      "value": "not modeled",
+      "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "intra_chip_activation_movement",
+      "value": "a dependency, not priced bytes",
+      "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "model_type_carrier",
+      "value": "model_id 'Granite-4.0-H-Tiny', model_param.model_type 'llama'",
+      "reason": "This model is priced through the 'llama' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'Granite-4.0-H-Tiny'; the carrier is named here so the two spellings are reconciled and not read as a contradiction.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "decode_window",
+      "value": "3 of 256 steps lowered",
+      "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "macro_pool_helper_ops",
+      "value": "absorbed: 0 s, 0 pJ",
+      "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
+      "value": "declared relaxation",
+      "reason": "vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = 0.95 GHz (one chiplet declares one clock).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "vector_engine:vector_pipeline_depth undeclared: inherited cim.",
+      "value": "declared relaxation",
+      "reason": "vector_pipeline_depth undeclared: inherited cim.fabric.softmax_pipeline_depth = 20, the only elementwise-pipeline depth this chiplet declares.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "vector_engine:state_bytes_per_cycle undeclared: recurrent-stat",
+      "value": "declared relaxation",
+      "reason": "state_bytes_per_cycle undeclared: recurrent-state traffic is REPORTED and bounds nothing. A scan whose state does not fit the engine's registers would be state-bound; this model cannot say so until a card declares the number (disclosed relaxation, not a silent zero).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "unvalidated_law:ssd_chunked_scan",
+      "value": "ssm_scan: law ssd_chunked_scan is UNVALIDATED",
+      "reason": "CimDeviceModel prices this op with 'ssd_chunked_scan', which carries validated == 'unvalidated': the work counts are derived from first principles and NO numeric reference exists to check them against anywhere (D21). Every number this op contributes to \u2014 the makespan, the headline throughput, this device's occupancy \u2014 inherits that status. The law is not a guess about the hardware card, which is declared; it is an unchecked count of the arithmetic the algorithm does.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "shared_digital_energy",
+      "value": "0 pJ: no law",
+      "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "row_block_partial_sum_law",
+      "value": "priced with the shift-and-add tree law",
+      "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "reduction_energy",
+      "value": "0 pJ: no card knob declared",
+      "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "attention_op_folding",
+      "value": "three serial DAG ops, not one folded stage",
+      "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "activation_tier_is_per_chip",
+      "value": "8.58993e+09 B applied to EVERY chip",
+      "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "kv_shares_the_activation_tier",
+      "value": "cim_sram: one tier, two tenants",
+      "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "decode_series_window",
+      "value": "3 of 256 steps lowered",
+      "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    },
+    {
+      "constraint": "op_durations",
+      "value": "unpriced (0.0)",
+      "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ]
+    }
+  ],
+  "silicon_coverage": {
+    "basis_from": "c006",
+    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's declared area_mm2 0. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2)",
+    "uncovered_terms": [
+      "shared digital chiplet area (the card declares no area_mm2)"
+    ]
+  },
+  "total_wall_s": 101.48406386375427,
+  "verify": {
+    "ran": true,
+    "emitted_config": "configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml",
+    "report_path": "output/LLM/fws_qif_report.json",
+    "pass": true,
+    "checks": [
+      {
+        "name": "analog_chips",
+        "dse": 10,
+        "simulator": 10,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "tiles",
+        "dse": 19566,
+        "simulator": 19566,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "analog_macro_slots",
+        "dse": 6400,
+        "simulator": 6400,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "tokens_per_s",
+        "dse": 6110.946938895255,
+        "simulator": 6110.946938895255,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "prefill_latency",
+        "dse": 0.40377506917762834,
+        "simulator": 0.40377506917762834,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "decode_step_median",
+        "dse": 0.0006545630390832891,
+        "simulator": 0.0006545630390832891,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "lowered_window_latency",
+        "dse": 0.4057387582948782,
+        "simulator": 0.4057387582948782,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "requests_per_s_lowered_window",
+        "dse": 9.858560263776736,
+        "simulator": 9.858560263776736,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      }
+    ],
+    "message": null
+  },
+  "emitted_config": "configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml"
+}

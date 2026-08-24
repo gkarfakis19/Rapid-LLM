@@ -19,6 +19,11 @@ provenance:
   # MTP head, neither of which this YAML models — so the text backbone cannot be
   # read off either figure exactly. The P6.1 tolerance is widened for this row.
   published_total_params_tolerance: 0.06
+  published_total_params_tolerance_reason: >-
+    The published 4B is the card's one-significant-figure rounding of a
+    4,659,868,928-param checkpoint that also carries the vision tower and the
+    MTP head, neither of which this YAML models; 6% covers the text backbone
+    against the rounded figure and nothing wider.
   d2_status: supported
 
 model_param:

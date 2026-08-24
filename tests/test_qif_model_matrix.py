@@ -607,6 +607,25 @@ def test_falcon_h1_is_a_parallel_branch_model():
     assert model.ssm.resolve_d_inner(model.hidden_dim) == 3072
 
 
+def test_attention_only_properties_refuse_a_pure_recurrence_config_by_name():
+    # A pure-recurrence stack legally has attention = None, so num_heads and
+    # head_dim have no answer. They used to raise a bare
+    # "'NoneType' object has no attribute 'num_heads'", which names neither the
+    # config nor the reason.
+    model = config.parse_config(str(_matrix_yaml_path("falcon_mamba_7b")), "LLM").model_config
+    assert model.attention is None
+    for name in ("num_heads", "head_dim"):
+        with pytest.raises(config.NoAttentionBlockError, match="has no attention block"):
+            getattr(model, name)
+    # AttributeError is one of its bases ON PURPOSE: every getattr/hasattr probe
+    # in the legacy timing path keeps swallowing it, so no priced number moves.
+    assert getattr(model, "head_dim", None) is None
+    assert not hasattr(model, "num_heads")
+    # And a model that HAS attention is untouched.
+    attentive = config.parse_config(str(_matrix_yaml_path("falcon_h1_7b")), "LLM").model_config
+    assert attentive.num_heads > 0 and attentive.head_dim == 128
+
+
 def test_falcon_mamba_is_pure_ssm():
     model = config.parse_config(str(_matrix_yaml_path("falcon_mamba_7b")), "LLM").model_config
     assert model.attention is None
@@ -629,6 +648,41 @@ def test_minicpm3_is_the_mla_carrier():
 # ---------------------------------------------------------------------------
 
 
+#: The P6.1 gate: the census must land within this of the published total.
+PARAM_TOLERANCE_DEFAULT = 0.03
+#: And no row may widen it past this. The widened rows exist because a
+#: published figure counts parts this repo does not model (a vision tower, an
+#: MTP head) — a bounded, ARITHMETIC discrepancy. Past ~15% the check stops
+#: distinguishing "the census is right and the card counts more" from "the
+#: census is wrong", so a row needing more is a modeling bug, not a tolerance.
+PARAM_TOLERANCE_CAP = 0.15
+
+
+def _published_tolerance(name, provenance):
+    """The row's P6.1 tolerance, capped, and justified above the default."""
+    raw = provenance.get("published_total_params_tolerance")
+    if raw is None:
+        return PARAM_TOLERANCE_DEFAULT
+    tolerance = float(raw)
+    assert tolerance >= PARAM_TOLERANCE_DEFAULT, (
+        f"{name}: published_total_params_tolerance = {tolerance} is TIGHTER than the "
+        f"{PARAM_TOLERANCE_DEFAULT:.0%} default; drop the field instead of restating it"
+    )
+    assert tolerance <= PARAM_TOLERANCE_CAP, (
+        f"{name}: published_total_params_tolerance = {tolerance:.0%} exceeds the "
+        f"{PARAM_TOLERANCE_CAP:.0%} cap. A gap that wide is a census defect, not a "
+        "tolerance"
+    )
+    reason = provenance.get("published_total_params_tolerance_reason")
+    assert isinstance(reason, str) and len(reason.strip()) >= 40, (
+        f"{name}: a tolerance above the {PARAM_TOLERANCE_DEFAULT:.0%} default is a "
+        "DISCLOSED RELAXATION (D21), so provenance must carry a "
+        "published_total_params_tolerance_reason saying what the published figure "
+        f"counts that this YAML does not (got {reason!r})"
+    )
+    return tolerance
+
+
 @pytest.mark.parametrize("name", sorted(MATRIX_YAMLS))
 def test_param_total_matches_published_figure(name):
     path = _matrix_yaml_path(name)
@@ -637,13 +691,36 @@ def test_param_total_matches_published_figure(name):
     computed = llm_util.model_raw_param_count(model)
     published = int(provenance["published_total_params"])
     # The default gate is 3%; a row may widen it only by recording the
-    # relaxation in its own provenance block (honesty rule, AUDIT_optima).
-    tolerance = float(provenance.get("published_total_params_tolerance", 0.03))
+    # relaxation in its own provenance block (honesty rule, AUDIT_optima),
+    # and only up to a cap.
+    tolerance = _published_tolerance(name, provenance)
     relative_error = abs(computed - published) / published
     assert relative_error <= tolerance, (
         f"{name}: census {computed:,} vs published {published:,} "
         f"({relative_error:.2%} > {tolerance:.0%})"
     )
+
+
+def test_the_published_total_tolerance_is_capped_and_justified():
+    # The field itself is the thing under test: it used to be an uncapped,
+    # unexplained float that any row could set to 1.0 and pass forever.
+    good = {"published_total_params_tolerance": 0.06, "published_total_params_tolerance_reason": "x" * 40}
+    assert _published_tolerance("row", good) == 0.06
+    assert _published_tolerance("row", {}) == PARAM_TOLERANCE_DEFAULT
+    with pytest.raises(AssertionError, match="exceeds the"):
+        _published_tolerance("row", dict(good, published_total_params_tolerance=0.5))
+    with pytest.raises(AssertionError, match="tolerance_reason"):
+        _published_tolerance("row", {"published_total_params_tolerance": 0.06})
+    with pytest.raises(AssertionError, match="tolerance_reason"):
+        _published_tolerance("row", dict(good, published_total_params_tolerance_reason="too short"))
+    with pytest.raises(AssertionError, match="TIGHTER"):
+        _published_tolerance("row", dict(good, published_total_params_tolerance=0.01))
+
+
+@pytest.mark.parametrize("name", sorted(MATRIX_YAMLS))
+def test_every_widened_tolerance_row_is_disclosed(name):
+    # Every shipped row, not just the two that widen today.
+    _published_tolerance(name, _load_yaml(_matrix_yaml_path(name))["provenance"])
 
 
 @pytest.mark.parametrize("name", sorted(MATRIX_YAMLS))
@@ -788,6 +865,37 @@ GRANITE_H_TINY_HF = {
     "shared_intermediate_size": 1024,
     "num_local_experts": 64,
     "num_experts_per_tok": 6,
+    "vocab_size": 100352,
+    "tie_word_embeddings": True,
+    "mamba_d_state": 128,
+    "mamba_n_groups": 1,
+    "mamba_n_heads": 48,
+    "mamba_d_head": 64,
+    "mamba_expand": 2,
+    "mamba_d_conv": 4,
+    "mamba_chunk_size": 256,
+    "max_position_embeddings": 131072,
+    "layer_types": (
+        ["mamba"] * 5 + ["attention"] + ["mamba"] * 9 + ["attention"]
+        + ["mamba"] * 9 + ["attention"] + ["mamba"] * 9 + ["attention"] + ["mamba"] * 4
+    ),
+}
+
+#: Granite-4.0-H-1B — the DENSE twin of the headline model, and the only place
+#: the importer's num_local_experts == 0 branch is exercised: no routed experts,
+#: no shared-expert ffn_dims entry, first_k_dense_replace forced to num_layers.
+#: Verbatim from the published config.json (2026-08-24), minus the fields the
+#: importer does not read.
+GRANITE_H_1B_HF = {
+    "model_type": "granitemoehybrid",
+    "hidden_size": 1536,
+    "num_hidden_layers": 40,
+    "num_attention_heads": 12,
+    "num_key_value_heads": 4,
+    "intermediate_size": 4096,
+    "shared_intermediate_size": 4096,
+    "num_local_experts": 0,
+    "num_experts_per_tok": 0,
     "vocab_size": 100352,
     "tie_word_embeddings": True,
     "mamba_d_state": 128,
@@ -977,6 +1085,7 @@ GEMMA_3_4B_HF = {
 
 HF_FIXTURES = {
     "granite_4_0_h_tiny": GRANITE_H_TINY_HF,
+    "granite_4_0_h_1b": GRANITE_H_1B_HF,
     "falcon_h1_3b": FALCON_H1_3B_HF,
     "hunyuan_4b": HUNYUAN_4B_HF,
     "qwen3_5_4b": QWEN3_5_4B_HF,
@@ -1010,6 +1119,21 @@ def test_hf_ingestion_reproduces_the_checked_in_yaml(name):
     assert imported.short_conv == checked_in.short_conv
     assert imported.attention == checked_in.attention
     assert llm_util.model_raw_param_count(imported) == llm_util.model_raw_param_count(checked_in)
+
+
+def test_hf_ingestion_of_the_dense_granite_leaves_no_moe_behind():
+    # The dense branch: HF publishes num_local_experts: 0, so the import must
+    # come out dense — one expert, every layer dense, and NO shared-expert
+    # ffn_dims entry, which only belongs beside routed experts.
+    imported = _import_hf_fixture(GRANITE_H_1B_HF)
+    assert imported.num_experts == 1
+    assert not imported.use_moe
+    assert imported.moe.first_k_dense_replace == imported.num_layers
+    assert "shared_expert" not in imported.ffn_dims
+    assert imported.intermediate_size == 4096
+    checked_in = config.parse_config(str(_matrix_yaml_path("granite_4_0_h_1b")), "LLM").model_config
+    assert imported.moe.first_k_dense_replace == checked_in.moe.first_k_dense_replace
+    assert imported.ffn_dims == checked_in.ffn_dims
 
 
 def test_hf_ingestion_copies_layer_types_verbatim():
