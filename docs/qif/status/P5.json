@@ -1,7 +1,7 @@
 {
  "plan": "P5",
  "title": "The System Atlas",
- "updated": "2026-08-23",
+ "updated": "2026-08-24",
  "deliverables": [
   {
    "id": "P5.1",
@@ -14,28 +14,28 @@
    "id": "P5.2",
    "title": "Phase-1 renderer: package/chip views, group hues, occupancy, hover, file-drop + embedded blob",
    "status": "done",
-   "report": "docs/qif/atlas/atlas.html is one self-contained file (inline JS + SVG, no external asset, no network). Package view clusters chips by pool with links weighted by sqrt(bytes) and dashed by role; chip view draws the macro grid ordered by id with hue = parallelism group, occupancy as a single-hue fill ramp, dashed outline = shared digital chiplet, hatch = reserved/unknown/over-palette, and a per-macro column strip showing tile spans and the gaps between them. Hover gives macro, chip, link and metric cards (click to pin); the legend is always on screen. Data arrives three ways: the embedded application/json blob (default, works from a USB stick), an optional sibling-file fetch when served over http, and file input or drag-and-drop. The four group hues (#108ca0 #a63931 #714ba8 #808402) were chosen by search and pass the dataviz validator all-pairs on surface #f7f9fa (CVD dE 9.3 deutan, normal-vision dE 17.8, contrast >= 3:1); the board accent #176778 is below the chroma floor and stays chrome. Verified by rendering package, chip and self-test views headlessly in Firefox and reading the screenshots.",
+   "report": "docs/qif/atlas/atlas.html is one self-contained file -- inline JS and SVG, no external asset, no network. Package view clusters chips by pool with links weighted by sqrt(bytes) and dashed by role; chip view draws the macro grid ordered by id, hue = parallelism group, occupancy as a single-hue fill ramp, dashed outline = shared digital chiplet, hatch = reserved or over-palette, plus a per-macro column strip. Data arrives three ways: the embedded blob (default, works off a USB stick), a sibling-file fetch over http, and file drop. The four group hues pass the dataviz validator all-pairs on surface #f7f9fa (CVD dE 9.3 deutan, contrast >= 3:1).",
    "questions": []
   },
   {
    "id": "P5.3",
    "title": "Loader conformance refusals + validation panel",
    "status": "done",
-   "report": "27 rules: referential integrity in both directions (chips<->macros<->tiles, links, cards, systems, models), integer enumerated chips (slot count must equal the enumerated macros; any *_per_chip / chip_count style quotient is refused by name, and the sweep now reaches macros[], tiles[], links[] and metrics[] — the placement tables a half-ported area-division producer would decorate), named owners, column spans inside capacity and non-overlapping with shape.N == columns.count and shape.K <= rows, declared occupancy checked against the enumerated spans at both macro and chip level, one labeled accounting per metric with a finite numeric value, and every relaxation carrying constraint/value/reason. Audit fix: the rules SCHEMA.md declared but validate() never enforced are now enforced — R1 requires title and a provenance object with authored/author/invented_fields (without it every fixture_invented mark silently disappears), R24 checks card kind, weight_bits, stored_cols == cols_adc x mux and the ADJ-4 slicing law, R25 refuses a tile slice role on a non-slicing card, R26 checks the systems role/phase enums, R27 bounds duty_cycle to [0,1], and links now require per and basis. R23 (the draw-budget warning) is documented. Any error refuses to draw and lists rule + field path + what is wrong. The self-test corrupts a copy of the loaded document once per corruption: 34/34 cases fire and name the right field. Audit fix: tests/test_qif_atlas.py runs that self-test headlessly in node (skipped when node is absent, the test_webui_browser.py precedent), asserts the fixture validates clean, asserts the embedded blob equals the sibling fixture byte-for-byte, asserts every rule id the loader can emit appears in SCHEMA.md, and re-proves each new rule one mutation at a time — so an atlas regression fails the suite instead of a screenshot. Suites: tests/test_qif_atlas.py 14 passed, full suite 1872 passed / 0 failed (baseline 1845 / 0), validator 152/152.",
+   "report": "29 loader rules: referential integrity in both directions, integer enumerated chips with any *_per_chip quotient refused by name, named owners, column spans inside capacity and non-overlapping, declared occupancy checked against the enumerated spans, one labeled accounting per metric, every relaxation carrying constraint/value/reason, and R28/R29 carrying those rules across a two-system PD document. Any error refuses to draw and prints rule + field path + what is wrong. The self-test corrupts a copy of the loaded document once per corruption: 36 corruptions, 37 self-test rows, each naming the right field, run headlessly in node by tests/test_qif_atlas.py (skipped when node is absent). ASSUMPTION: a corruption a document cannot construct reports n/a, not a miss.",
    "questions": []
   },
   {
    "id": "P5.4",
    "title": "Duty cycle + PD two-system view (needs P3/P4)",
-   "status": "todo",
-   "report": "",
+   "status": "done",
+   "report": "Duty cycle got its own channel: a neutral-ink bar (#3d4f5c, never a group hue) on each macro's top edge and in the macro card, on the absolute 0-1 scale, with view rule V3 asserting it never moves the occupancy fill. docs/qif/atlas/pd_llama7b.json is a real PD pair (D16) from the new --pd path of tools/fws_emit_atlas.py, each half placed by P3 and priced by P4 on its OWN timeline, pinned by a regenerate-and-compare test. R28 and R29 carry the honesty rules across systems. ASSUMPTIONS: the duty scale stays absolute; the pair keeps model id 'llama'; disclosures now merge across systems; the unpriced --pd path discloses the whole-MODEL fact only, since an unpriced document lowers no request.",
    "questions": []
   },
   {
    "id": "P5.5",
    "title": "Phase 2: drill-down with breadcrumbs, filters, owner search, macro column map with slice brackets",
-   "status": "todo",
-   "report": "UNBLOCKED and deferred by choice, not waiting on P3/P4. The plan page's Implement-now column and its build-phases table both put phase 2 behind phase 1 only. Phase 1 ships a chip view with a per-macro column strip and a hover tile table, and a chip dblclick descend; it ships no breadcrumbs, no filter-by-model/layer/group/pool, no owner search and no standalone Macro view with slice brackets. Recorded so the board does not read P5 as done bar external blockers.",
+   "status": "done",
+   "report": "Phase 2 shipped in the one file: click-to-descend package -> chip -> macro with breadcrumbs, a Macro view drawing the column map with one bracket per owner tuple (D11), filters by model / layer / group / pool, an owner search over the owner vocabulary only, and deep links so a screenshot is one URL. Filters DIM and never remove, so no figure moves when a filter does. The toolbar prints the 10,000-RECT draw budget and what the view draws, now COUNTED in rects rather than macro slots (audit fix: the slot count undercounted by ~5x, so R23 and V4 tested the wrong quantity). Verified in node (tests/test_qif_atlas.py, 38 tests) and in browsers; the PD / duty / filter / self-test views were shot on chromium because playwright's Firefox build cannot launch on this host.",
    "questions": []
   }
  ]

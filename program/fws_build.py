@@ -749,6 +749,11 @@ class _Lowering:
         qkv = self._run_stage(layer, "qkv", tp_idx, deps, phase, step, tokens)
         if not qkv:
             return list(deps)
+        # Gated attention (Qwen3.5): W_g reads the SAME block input the qkv
+        # projection reads, so it runs beside it on its own macros. It is an
+        # ordinary analog weight stage; only the sigmoid and the multiply are
+        # pool work, and they wait for the attention output below.
+        gate = self._run_stage(layer, "attn_gate_proj", tp_idx, deps, phase, step, tokens)
         p = mapping.device.params
         # analog -> shared digital hop: the act x act work leaves the macro (D13)
         heads = max(1, p.num_heads // max(1, int(mapping.degrees.get("tp", 1))))
@@ -780,19 +785,51 @@ class _Lowering:
         back: List[int] = [pv]
         if o_owners:
             sink = mapping.macro(self._owner_tiles[o_owners[0]][0].site.macro_id)
+            # With a gate the attention output lands on the pool that holds the
+            # gate, because that is where both operands of the multiply are.
+            gate_macro = self.annotations[gate[-1]].macro_id if gate else -1
+            sink_device = (
+                mapping.macro(gate_macro).pool_device if gate else sink.analog_device
+            )
             back = [
                 self.transfer(
-                    f"{phase}{step}.L{layer}.fabric->o_proj",
+                    f"{phase}{step}.L{layer}.fabric->{'gate' if gate else 'o_proj'}",
                     pv,
-                    sink.analog_device,
+                    sink_device,
                     tokens * heads * p.head_dim * self.act_bytes,
-                    boundary_id=f"act.L{layer}.fabric_to_o_proj",
+                    boundary_id=(
+                        f"act.L{layer}.fabric_to_gate" if gate
+                        else f"act.L{layer}.fabric_to_o_proj"
+                    ),
                     phase=phase,
                     step=step,
                     layer=layer,
                     block="o_proj",
                     tokens=tokens,
-                    note="shared-digital -> analog hop returning the attention output (D13)",
+                    note=(
+                        "shared-digital -> macro-pool hop returning the attention "
+                        "output to the pool that holds its gate (D13)"
+                        if gate else
+                        "shared-digital -> analog hop returning the attention output (D13)"
+                    ),
+                )
+            ]
+        if gate:
+            # sigmoid(W_g x) * attention_out: elementwise over the owned query
+            # channels, on the per-macro pool that already holds W_g's output
+            # (ADJ-3 / D12). Its CONCURRENCY is what sizes that pool (P4.5).
+            back = [
+                self._pool_op(
+                    f"{phase}{step}.L{layer}.attn.output_gate",
+                    self.annotations[gate[-1]].macro_id,
+                    list(back) + list(gate),
+                    block="attn_output_gate",
+                    note=(
+                        "gated attention output: sigmoid of the gate projection times "
+                        "the attention output, elementwise on the per-macro pool "
+                        "(ADJ-3 / D12)"
+                    ),
+                    **common,
                 )
             ]
         out = self._run_stage(layer, "o_proj", tp_idx, back, phase, step, tokens)

@@ -1785,6 +1785,14 @@ class LinearAttentionBlockConfig:
 
     Key and value head counts and dims are independent: Qwen3.5 carries 16
     key heads x 128 next to 32 value heads x 128.
+
+    ``chunk_size`` is the linear-attention counterpart of ``ssm.chunk_size``:
+    the Q of the chunked UT-transform kernel. It is OPTIONAL and has NO
+    DEFAULT. Absent means the recurrent (token-by-token) form is priced, which
+    is what every published gated-DeltaNet config forces today -- none of them
+    publishes a chunk size. A default would be an invented number (ADJ-4), and
+    it would not be a free one: the two forms differ by up to 1.38x in retired
+    ops at this model's dims, in EITHER direction depending on Q.
     """
 
     num_key_heads: int
@@ -1794,6 +1802,7 @@ class LinearAttentionBlockConfig:
     conv_kernel: int
     output_gate: bool = True
     decay_gate: bool = True
+    chunk_size: Optional[int] = None
 
     @property
     def key_dim(self) -> int:
@@ -1809,7 +1818,7 @@ class LinearAttentionBlockConfig:
         la_dict = _require_mapping(context, la_dict)
         allowed = (
             "num_key_heads", "key_head_dim", "num_value_heads", "value_head_dim",
-            "conv_kernel", "output_gate", "decay_gate",
+            "conv_kernel", "output_gate", "decay_gate", "chunk_size",
         )
         _reject_unknown_keys(context, la_dict, allowed)
 
@@ -1825,6 +1834,14 @@ class LinearAttentionBlockConfig:
             )
         output_gate = _coerce_bool(la_dict.get("output_gate", True), f"{context}.output_gate")
         decay_gate = _coerce_bool(la_dict.get("decay_gate", True), f"{context}.decay_gate")
+        chunk_size = None
+        if la_dict.get("chunk_size") is not None:
+            chunk_size = _parse_int_field(context, la_dict, "chunk_size")
+            if chunk_size < 1:
+                raise ValueError(
+                    f"{context}.chunk_size={chunk_size} must be >= 1. 1 declares the "
+                    "recurrent form explicitly; omit the field to leave it undeclared."
+                )
         return cls(
             num_key_heads=num_key_heads,
             key_head_dim=key_head_dim,
@@ -1833,6 +1850,7 @@ class LinearAttentionBlockConfig:
             conv_kernel=conv_kernel,
             output_gate=output_gate,
             decay_gate=decay_gate,
+            chunk_size=chunk_size,
         )
 
 
@@ -2512,28 +2530,24 @@ class LLMConfig:
                 raise ValueError(
                     "model_param.attention.head_dim must be specified when model_type is 'glm4_moe'"
                 )
-        elif (
-            layer_plan is not None
-            and layer_plan.hybrid_block_kinds
-            and attention.head_dim is not None
-        ):
-            # A HYBRID model may decouple head_dim from hidden_dim/num_heads
-            # (Qwen3.5 gated attention: 2560/16 != 256; Falcon-H1: 3072/12 != 128).
-            # An attention-only plan is a plain transformer that still runs, so
-            # it keeps the guard: plan presence is not the reason to relax it.
-            pass
         elif attention.head_dim is not None:
-            if hidden_dim % attention.num_heads != 0:
-                raise ValueError(
-                    "model_param.hidden_dim must be divisible by attention.num_heads when "
-                    "model_param.attention.head_dim is provided for non-GLM models"
-                )
-            expected_head_dim = hidden_dim // attention.num_heads
-            if attention.head_dim != expected_head_dim:
-                raise ValueError(
-                    "model_param.attention.head_dim must match hidden_dim/num_heads for non-GLM models "
-                    f"(expected {expected_head_dim}, got {attention.head_dim})"
-                )
+            # A DECLARED head_dim is authoritative. It used to have to equal
+            # hidden_dim // num_heads unless the model declared a hybrid layer
+            # plan, and the model window D3 covers made that rule wrong for
+            # plain transformers too: Gemma 3 4B is 2560 / 8 heads with
+            # head_dim 256, Hunyuan-4B is 3072 / 32 heads with head_dim 128,
+            # and neither declares a layer plan of any kind. The field was
+            # therefore refusable on exactly the models it exists for, while
+            # every CONSUMER of it — llm_util.attention_dim_sizes and the GEMM
+            # descriptors, memory_estimation, train_timing and
+            # CimDeviceModel.per_layer_stage_shapes — already reads the
+            # declared value and sizes q / k / v / o from num_heads * head_dim.
+            # The guard is replaced by proof that the declared value is HONORED
+            # (tests/test_qif_model_matrix.py), which is what it was standing in
+            # for. hidden_dim // num_heads is not computed here at all, so the
+            # divisibility requirement below applies only when head_dim is
+            # absent and the value has to be derived.
+            pass
         else:
             if hidden_dim % attention.num_heads != 0:
                 raise ValueError(
@@ -4451,6 +4465,26 @@ def _validate_fws_cim_model(model: object, *, mapped: bool = False) -> None:
                 "stage for them."
             )
         )
+    # A PARALLEL-BRANCH layer template (Falcon-H1: attention || Mamba2 || MLP
+    # inside one layer) has every law it needs — the block kinds are all on the
+    # mapped list — and no LOWERING. program/fws_build._layer walks a layer's
+    # mixers in order and CHAINS them, feeding each branch the previous one's
+    # output, and it never sums the branch outputs. A parallel model lowered
+    # that way is priced as a deeper sequential model with the wrong dataflow:
+    # a wrong number, not a missing one, which is exactly what P1.4's rule
+    # exists to prevent. Refused by name until the DAG builder can express a
+    # branch.
+    layer_plan = getattr(model, "layer_plan", None)
+    if layer_plan is not None and str(getattr(layer_plan, "structure", "")) == "parallel_branch":
+        raise ValueError(
+            "device_class: fws_cim does not support model_param.layer_plan.structure: "
+            "parallel_branch — every LAW the branches need exists (the block kinds are "
+            "priced), but the DAG lowering does not: program/fws_build lowers a layer's "
+            "mixers SEQUENTIALLY, chaining each branch onto the previous branch's output "
+            "and never summing them, so a parallel-branch model would be priced as a "
+            "deeper sequential one. Pricing lands when the builder can express a branch; "
+            "until then only sequential layer plans run."
+        )
     attention_type = str(
         getattr(getattr(model, "attention", None), "attention_type", "mha")
     ).lower()
@@ -4504,7 +4538,16 @@ def _unpriced_model_inputs(model: "LLMConfig", *, mapped_fws: bool = False) -> T
             "model_param.attention.window (every attention op is priced against "
             "the full KV context, so a local layer would be charged as global)"
         )
-    if bool(getattr(attention, "output_gate", False)):
+    if bool(getattr(attention, "output_gate", False)) and not mapped_fws:
+        # PRICED on the mapped path (QIF C1): the gate projection is an
+        # ORDINARY weight matrix, so P3 places it as an analog tile beside the
+        # qkv/o_proj pair (hidden x num_heads*head_dim — llm_util's own census
+        # term, so the placement and the parameter count stay ONE accounting)
+        # and P4 prices it with the same analog law every other weight matrix
+        # gets. The sigmoid and the elementwise multiply are per-macro pool
+        # work (ADJ-3 / D12), sized from the timeline like every other pool op.
+        # The closed-form and GPU paths have no stage for the matrix and keep
+        # refusing it by name.
         unpriced.append(
             "model_param.attention.output_gate (no stage prices the gate projection)"
         )

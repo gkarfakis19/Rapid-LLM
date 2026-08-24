@@ -201,12 +201,27 @@ class StageShape:
         return replace(self, k=dim // tp)
 
 
-def _attention_stages(device: CimDeviceModel) -> Tuple[StageShape, ...]:
+def _attention_stages(device: CimDeviceModel, model=None) -> Tuple[StageShape, ...]:
     shapes = device.per_layer_stage_shapes()
-    return (
+    stages = [
         StageShape("qkv", *shapes["qkv"], shard_axis="n"),
         StageShape("o_proj", *shapes["o_proj"], shard_axis="k"),
-    )
+    ]
+    attention = getattr(model, "attention", None) if model is not None else None
+    if attention is not None and bool(getattr(attention, "output_gate", False)):
+        # Gated attention (Qwen3.5). The output gate is an ORDINARY weight
+        # matrix: W_g maps the block input to one scalar per attention output
+        # channel, so its shape is (hidden, num_heads * head_dim) — exactly the
+        # extra `hidden_dim * q_size` term llm_util's attention census already
+        # counts for `output_gate`, read at (K, N) instead of as a scalar. It
+        # is COLUMN-parallel, which splits the query heads exactly the way the
+        # o_proj's row split does, so a tp shard holds the gate of the heads it
+        # owns and the multiply needs no extra reduction.
+        p = device.params
+        stages.insert(1, StageShape(
+            "attn_gate_proj", p.hidden_dim, p.num_heads * p.head_dim, shard_axis="n"
+        ))
+    return tuple(stages)
 
 
 def _ffn_stages(device: CimDeviceModel) -> Tuple[StageShape, ...]:
@@ -1090,7 +1105,7 @@ def _shard_shapes(device: CimDeviceModel, model, layer_idx: int, tp: int) -> Tup
     stages: List[StageShape] = []
     for kind in kinds:
         if kind == "attention":
-            stages.extend(_attention_stages(device))
+            stages.extend(_attention_stages(device, model))
         elif kind in ("ffn", "moe"):
             pass  # handled by the FFN half below
         else:

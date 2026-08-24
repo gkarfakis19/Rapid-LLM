@@ -443,14 +443,27 @@ def _build_yaml_config(
             raise SystemExit(
                 f"Invalid head_dim value for model_type 'glm4_moe': {head_dim!r}."
             )
-    elif layer_plan is not None and head_dim is not None:
-        # A block-typed model may decouple head_dim from hidden_dim/num_heads
-        # (Qwen3.5 head_dim 256 at hidden 2560 / 16 heads), so it is emitted
-        # verbatim instead of being re-derived by the schema.
+    elif head_dim is not None:
+        # A published head_dim is emitted whenever the SCHEMA CANNOT DERIVE IT,
+        # on any model. It used to be emitted only for a block-typed one, which
+        # mirrored a config guard that no longer exists: a plain transformer may
+        # decouple too (Gemma 3 4B is 2560 / 8 heads with head_dim 256,
+        # Hunyuan-4B is 3072 / 32 heads with head_dim 128), and dropping the
+        # published value would have re-derived a different q / k / v width.
+        # A head_dim that IS hidden_dim // num_heads stays out of the YAML, so
+        # no config restates a number the schema already computes.
         try:
-            attention_block["head_dim"] = int(head_dim)
+            head_dim_value = int(head_dim)
         except (TypeError, ValueError):
             raise SystemExit(f"Invalid head_dim value in config.json: {head_dim!r}.")
+        heads = int(num_heads) if num_heads else 0
+        derivable = (
+            heads > 0
+            and int(hidden_dim) % heads == 0
+            and head_dim_value == int(hidden_dim) // heads
+        )
+        if not derivable:
+            attention_block["head_dim"] = head_dim_value
 
     if _is_truthy_flag(
         _first(cfg, "attn_output_gate", default=_first(lang_cfg, "attn_output_gate", default=False))
