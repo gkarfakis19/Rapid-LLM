@@ -1,7 +1,7 @@
 {
  "plan": "P4",
  "title": "Evaluation",
- "updated": "2026-08-23",
+ "updated": "2026-08-24",
  "deliverables": [
   {
    "id": "P4.1",
@@ -21,7 +21,7 @@
    "id": "P4.3",
    "title": "Memory feasibility verdicts with named violations",
    "status": "done",
-   "report": "Activation high-water is replayed over the same timeline (alloc at the producer's finish, release at the last consumer's finish, the memory_sim shape), recurrent state is resident per layer on the chiplet that runs its scan, and KV bytes come from P2's kv_bytes_per_stream_layer at the context the LOWERED window actually reached. Verdicts are per chip with a named owner, the contributors itemized, and status fits / VIOLATED / undeclared — an absent capacity field is NOT a pass. Two relaxations are disclosed: the config declares one activation tier size and no per-chip field, and cim_sram makes KV and activations share one tier so the verdict is on the sum. Tests pin a real violation (the Llama2-7B point overruns 8 GiB) with owner and quantity, the undeclared-capacity verdict, and that KV lands on the shared digital chiplets (D13) and totals P2's own law. ASSUMPTION: attention score blocks are NOT counted resident — the systolic array streams them into the softmax lanes — so only the attention output is; stated in the basis string.",
+   "report": "Activation high-water is replayed over the same timeline (alloc at the producer's finish, release at the last consumer's finish, the memory_sim shape), recurrent state is resident per layer on the chiplet that runs its scan, and KV bytes come from P2's kv_bytes_per_stream_layer at the context the LOWERED window actually reached. Verdicts are per chip with a named owner, the contributors itemized, and status fits / VIOLATED / undeclared - an absent capacity field is NOT a pass; two relaxations are disclosed, that the config declares one activation tier size and no per-chip field, and that cim_sram makes KV and activations share one tier so the verdict is on the sum. Tests pin a real violation (the Llama2-7B point overruns 8 GiB) with owner and quantity, the undeclared-capacity verdict, and that KV lands on the shared digital chiplets (D13) and totals P2's own law. ASSUMPTION: attention score blocks are NOT counted resident - the systolic array streams them into the softmax lanes - so only the attention output is; stated in the basis string.",
    "questions": []
   },
   {

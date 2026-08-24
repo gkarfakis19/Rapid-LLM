@@ -672,6 +672,38 @@ def test_schema_md_documents_the_contract_the_renderer_now_reads():
         assert token in schema, token
 
 
+def test_the_sibling_fetch_never_silently_replaces_an_embedded_document():
+    """The boot block is the one part of the page no headless run reaches.
+
+    It touches location, document, fetch and the live state object, so this is
+    a SOURCE-level assertion and says so: the fetch must be conditional on
+    ?data= or on there being no embedded blob. It used to fire unconditionally
+    and race the page — whoever embedded a document in this file meant it to be
+    the one on screen, and the late fetch would swap it for whatever else
+    happens to sit in the directory.
+    """
+    html = _html()
+    assert 'var target = wanted || (embedded ? null : "fixture_llama7b_tp2.json");' in html
+    assert 'if (target && typeof fetch === "function") {' in html
+    # The unconditional form is gone, not merely guarded downstream.
+    assert 'fetch(wanted || "fixture_llama7b_tp2.json"' not in html
+    # And a dropped or picked document still outranks an in-flight fetch.
+    assert 'S.source === "embedded blob" || S.source === "none"' in html
+    schema = SCHEMA_MD.read_text(encoding="utf-8")
+    assert "the sibling fetch runs only when this parameter asks for one" in schema
+
+
+def test_the_quotient_scan_covers_every_placement_table():
+    """R9 reads the placement tables too, not just the document root.
+
+    A half-ported area-division producer would put per-chip arithmetic exactly
+    there, and the self-test proves it by corrupting a macros[] row.
+    """
+    html = _html()
+    assert '["macros", "tiles", "links", "metrics"].forEach(function (k) {' in html
+    assert "d.macros[0].arrays_per_chip = 3.7" in html
+
+
 def test_a_bit_sliced_group_shares_one_bracket(tmp_path):
     """D11's own sentence, drawn: no shipped card slices today, so the case is
     built on a copy of the fixture — two tiles of ONE weight matrix on ONE

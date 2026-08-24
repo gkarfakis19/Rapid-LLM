@@ -32,6 +32,11 @@ provenance:
   # the 4B text model (675M embedding + 3,209M non-embedding) agrees with the
   # census's 3.880B to ~0.1%.
   published_total_params_tolerance: 0.10
+  published_total_params_tolerance_reason: >-
+    The published total is the WHOLE checkpoint: text backbone + SigLIP vision
+    tower + projector. This YAML models the text backbone only (D8), so the
+    unmodeled vision half is ~0.420B = 9.8% of the published figure; 10% covers
+    exactly that arithmetic split and nothing wider.
   d2_status: supported
 
 model_param:

@@ -306,7 +306,7 @@ picture.
 
 | Parameter | Effect |
 |---|---|
-| `?data=<file>` | Load a sibling document from the atlas's own directory instead of the embedded fixture. A bare basename; a path is ignored. Needs http (a `file://` page cannot fetch). |
+| `?data=<file>` | Load a sibling document from the atlas's own directory instead of the embedded fixture. A bare basename; a path is ignored. Needs http (a `file://` page cannot fetch). Without it the page keeps the EMBEDDED document: the sibling fetch runs only when this parameter asks for one, or when the file carries no embedded blob at all, so an embedded document is never silently replaced by whatever else sits in the directory. A dropped or picked file always wins over an in-flight fetch. |
 | `?view=package\|chip\|macro` | Open at that level. |
 | `?chip=<chip id>`, `?macro=<macro id>` | Which chip or macro to open. A macro implies its own chip. |
 | `?duty=1` | Turn the duty-cycle overlay on. |

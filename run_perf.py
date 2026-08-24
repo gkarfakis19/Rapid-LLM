@@ -80,6 +80,18 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Run performance analysis for GEMM (sanity) or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
+    # Artifact root. ABSENT is the historical behaviour byte for byte: artifacts
+    # land in <repo>/output/<MODE>. Present, they land in <output_dir>/<MODE>,
+    # which is what lets concurrent runs (two pytest sessions, a DSE sweep) stop
+    # overwriting each other's run directory.
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        help=(
+            "Root directory for emitted artifacts (default: '%s'). The run "
+            "directory is <output_dir>/<MODE>." % DEFAULT_OUTPUT_DIR
+        ),
+    )
     return parser.parse_args()
 
 def get_mode_from_config(model_config_path):
@@ -355,7 +367,7 @@ if __name__ == "__main__":
     # Load configurations
     config_hardware_path = args.hardware_config
     config_model_path = args.model_config
-    output_dir = DEFAULT_OUTPUT_DIR
+    output_dir = args.output_dir if args.output_dir else DEFAULT_OUTPUT_DIR
 
     # Read mode from the model configuration file
     mode = get_mode_from_config(config_model_path)

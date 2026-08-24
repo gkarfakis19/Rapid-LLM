@@ -856,6 +856,18 @@ def check_law_spot_checks(table):
 DSE_TOOL = os.path.join(REPO_ROOT, "tools", "fws_cim_dse.py")
 DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_cim_dse")
 
+# QIF P3.7: the MAPPED-path sweep is a DIFFERENT tool with a different
+# evaluator (fws_mapping -> fws_build -> fws_eval, never a closed form), so it
+# gets its own tool path and its own output root.
+QIF_DSE_TOOL = os.path.join(REPO_ROOT, "tools", "fws_qif_dse.py")
+QIF_DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_qif_dse")
+QIF_DSE_DEMO = os.path.join(
+    REPO_ROOT, "docs", "qif", "dse", "granite_lanes_banks", "dse_report.json"
+)
+QIF_DSE_DEMO_SELECTED = os.path.join(
+    HW_DIR, "fws_cim_granite_tiny_dse_selected.yaml"
+)
+
 # The recorded OPTIMA T1 and T3 array points as cim.dse.variants entries
 # (rows / slice_cycles / analog_clock_mhz inherit cim.analog = the T1 point).
 DSE_T1_VARIANT = {
@@ -1267,6 +1279,357 @@ def check_bridge_gate(table):
         print("  * %s: %s" % (name, reason))
 
 
+def _run_qif_dse_tool(hw_yaml_path, model_yaml_name, out_dir, extra_args=()):
+    """Run tools/fws_qif_dse.py as a subprocess; return (proc, payload|None).
+
+    Like the closed-form rows, the tool writes only under out_dir (and
+    --verify runs run_perf with cwd = out_dir), so output/VIT and output/LLM
+    stay untouched.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            QIF_DSE_TOOL,
+            "--hardware_config",
+            hw_yaml_path,
+            "--model_config",
+            os.path.join(MODEL_DIR, model_yaml_name),
+            "--output-dir",
+            out_dir,
+            "--quiet",
+        ]
+        + list(extra_args),
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        timeout=1800,
+    )
+    report_path = os.path.join(out_dir, "dse_report.json")
+    payload = None
+    if os.path.exists(report_path):
+        with open(report_path) as handle:
+            payload = json.load(handle)
+    return proc, payload
+
+
+def check_qif_dse_selection(table):
+    """(P3.7 a) The CHECKED-IN demo sweep: Granite-4.0-H-Tiny over
+    vector_lanes {512,1024,2048,4096} x bank_depth {1,2}.
+
+    Read, not rerun: `tests/test_qif_dse_allocation.py` regenerates this
+    artifact and compares it, so the rows here are about WHAT THE SWEEP
+    FOUND — the headline scaling with the declared design point, the pick,
+    and the front.
+    """
+    name = "P3.7 demo sweep"
+    if not table.boolean(
+        "%s: checked-in artifact exists" % name,
+        "docs/qif/dse/granite_lanes_banks/dse_report.json",
+        os.path.exists(QIF_DSE_DEMO),
+    ):
+        return
+    with open(QIF_DSE_DEMO) as handle:
+        payload = json.load(handle)
+
+    table.exact(
+        "%s: axes swept" % name,
+        {"vector_lanes": [512, 1024, 2048, 4096], "bank_depth": [1, 2]},
+        payload["sweep"]["axes"],
+    )
+    table.exact("%s: candidates" % name, 8, payload["num_candidates"])
+    table.exact("%s: valid candidates" % name, 8, payload["num_valid"])
+    table.boolean(
+        "%s: every candidate priced on the mapped path" % name,
+        "fws_mapping -> fws_build -> fws_eval",
+        payload["evaluation_path"].startswith("fws_mapping.build_mapping"),
+        payload["evaluation_path"][:60],
+    )
+
+    # THE FINDING: at a fixed bank depth the headline rises with every
+    # doubling of the declared vector-lane count.
+    for bank in (1, 2):
+        series = [
+            c["metrics"]["tokens_per_s"]
+            for c in payload["candidates"]
+            if c["knobs"]["bank_depth"] == bank
+        ]
+        table.boolean(
+            "%s: headline rises with vector_lanes (bank_depth %d)" % (name, bank),
+            "strictly increasing over 512/1024/2048/4096",
+            len(series) == 4 and all(b > a for a, b in zip(series, series[1:])),
+            ", ".join("%.1f" % value for value in series),
+        )
+    fastest = max(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
+    slowest = min(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
+    table.boolean(
+        "%s: 8x the lanes is SUB-linear in the headline" % name,
+        "1 < fastest/slowest < 8 (the analog GEMMs do not move)",
+        1.0 < fastest / slowest < 8.0,
+        "%.3f" % (fastest / slowest),
+    )
+
+    selected = payload["selected"]
+    table.exact(
+        "%s: selected knobs" % name,
+        {"vector_lanes": 4096, "bank_depth": 1},
+        selected["knobs"],
+    )
+    table.boolean(
+        "%s: selection sits on the Pareto front" % name,
+        "selected_id in front_ids",
+        payload["selected_id"] in payload["front_ids"],
+        "front=%s (%s)" % (payload["front_ids"], payload["front_shape"]),
+    )
+    table.boolean(
+        "%s: the front's shape is read off the data" % name,
+        "flat_area: every valid candidate carries the same silicon",
+        payload["front_shape"] == "flat_area"
+        and len({round(c["silicon"]["total_silicon_mm2"], 9) for c in payload["candidates"]}) == 1,
+        payload["front_shape"],
+    )
+    table.boolean(
+        "%s: infeasible candidates recorded, not dropped" % name,
+        "len(candidates) == num_candidates",
+        len(payload["candidates"]) == payload["num_candidates"],
+        "%d rows" % len(payload["candidates"]),
+    )
+
+    # WAVE D AUDIT: the front's NOTE must be derived from these candidates,
+    # not a constant string. The two counts the silicon accounting multiplies
+    # are what is actually constant here; the TILE count is not, so a note
+    # crediting the flat front to the same tiles being placed either way
+    # would be refuted by the table above it in its own report.
+    valid_rows = [c for c in payload["candidates"] if c["ok"]]
+    note = payload["front_note"]
+    slots = {c["silicon"]["analog_macro_slots"] for c in valid_rows}
+    chiplets = {c["placement"]["shared_digital_chiplets"] for c in valid_rows}
+    table.boolean(
+        "%s: the front's note names the CONSTANT terms" % name,
+        "the enumerated slot count and the chiplet count, both read off the rows",
+        len(slots) == 1
+        and len(chiplets) == 1
+        and ("slot count is %d" % list(slots)[0]) in note
+        and ("chiplet count is %d" % list(chiplets)[0]) in note,
+        "slots=%s chiplets=%s" % (sorted(slots), sorted(chiplets)),
+    )
+    tile_counts = {c["placement"]["tiles"] for c in valid_rows}
+    table.boolean(
+        "%s: the front's note claims no mechanism the rows refute" % name,
+        "tiles differ across candidates, so the note must not claim they do not",
+        len(tile_counts) > 1
+        and "same tiles are placed either way" not in note
+        and "the model's weights" not in note,
+        "tiles=%s" % sorted(tile_counts),
+    )
+
+    # WAVE D AUDIT: what banking actually moves. ADJ-4 prices ACTIVE column
+    # sets; the STRANDED columns do not move at all, so any account of the
+    # banking win that credits wasted columns is wrong.
+    table.boolean(
+        "%s: unowned columns are IDENTICAL across the sweep" % name,
+        "banking changes active column sets, not stranded ones (ADJ-4)",
+        len({c["placement"]["unowned_columns"] for c in valid_rows}) == 1
+        and len({c["placement"]["macros_holding_tiles"] for c in valid_rows}) == 1,
+        "unowned=%s macros=%s"
+        % (
+            sorted({c["placement"]["unowned_columns"] for c in valid_rows}),
+            sorted({c["placement"]["macros_holding_tiles"] for c in valid_rows}),
+        ),
+    )
+
+    def _component(candidate, key):
+        for entry in candidate["metrics"]["energy_components"]:
+            if entry["component"] == key:
+                return entry["energy_pj"]
+        return None
+
+    bank1 = [c for c in valid_rows if c["knobs"]["bank_depth"] == 1]
+    bank2 = [c for c in valid_rows if c["knobs"]["bank_depth"] == 2]
+    if bank1 and bank2:
+        total_delta = bank2[0]["metrics"]["total_energy_pj"] - bank1[0]["metrics"]["total_energy_pj"]
+        array_delta = _component(bank2[0], "analog_arrays") - _component(bank1[0], "analog_arrays")
+        table.boolean(
+            "%s: the whole banking energy delta is analog_arrays" % name,
+            "total delta == analog_arrays delta; link_traffic unmoved",
+            abs(total_delta - array_delta) < 1e-3
+            and _component(bank1[0], "link_traffic") == _component(bank2[0], "link_traffic"),
+            "total %.6g pJ vs arrays %.6g pJ" % (total_delta, array_delta),
+        )
+
+    # WAVE D AUDIT: D21 wants the relaxation disclosed in the ARTIFACT, and
+    # the MD is the artifact a human reads.
+    coverage = payload.get("silicon_coverage") or {}
+    table.boolean(
+        "%s: the silicon accounting names its uncovered terms" % name,
+        "silicon_coverage.uncovered_terms is non-empty and named",
+        bool(coverage.get("uncovered_terms")),
+        "; ".join(coverage.get("uncovered_terms", [])) or "(none)",
+    )
+    demo_md = os.path.join(os.path.dirname(QIF_DSE_DEMO), "dse_report.md")
+    if os.path.exists(demo_md):
+        with open(demo_md) as handle:
+            md_text = handle.read()
+        table.boolean(
+            "%s: the MD carries the coverage, not only the JSON" % name,
+            "silicon_accounting + silicon_uncovered in the Disclosures section",
+            "silicon_accounting" in md_text
+            and "silicon_uncovered" in md_text
+            and all(term in md_text for term in coverage.get("uncovered_terms", ["-"])),
+            "%d chars" % len(md_text),
+        )
+
+    # WAVE D AUDIT: one constraint, one row — per candidate and for the sweep.
+    dup_free = all(
+        len({d["constraint"] for d in c["disclosures"]}) == len(c["disclosures"])
+        for c in payload["candidates"]
+    )
+    union_keys = [d["constraint"] for d in payload["disclosures"]]
+    table.boolean(
+        "%s: disclosures are one entry per constraint" % name,
+        "no repeated constraint key on a candidate or in the sweep union",
+        dup_free and len(union_keys) == len(set(union_keys)),
+        "%d union rows" % len(union_keys),
+    )
+    table.boolean(
+        "%s: every sweep disclosure names the candidates that carried it" % name,
+        "each union entry lists its candidates and flags any disagreement",
+        all(d.get("candidates") for d in payload["disclosures"])
+        and not any("varies_by_candidate" in d for d in payload["disclosures"]),
+        "%d rows labelled" % len(payload["disclosures"]),
+    )
+
+    # The emitted machine IS the selection.
+    if table.boolean(
+        "%s: emitted config exists" % name,
+        "configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml",
+        os.path.exists(QIF_DSE_DEMO_SELECTED),
+    ):
+        emitted = load_yaml(QIF_DSE_DEMO_SELECTED)
+        table.exact(
+            "%s: emitted vector_lanes" % name,
+            4096,
+            emitted["cim"]["cards"]["sa"]["vector_lanes"],
+        )
+        table.exact(
+            "%s: emitted bank_depth" % name, 1, emitted["cim"]["cards"]["ctt"]["bank_depth"]
+        )
+        table.boolean(
+            "%s: emitted config carries no sweep block" % name,
+            "mapping_dse stripped (a machine, not a candidate space)",
+            "mapping_dse" not in emitted,
+        )
+        table.boolean(
+            "%s: emitted config is a MAPPED config" % name,
+            "mapping: block present (ADJ-6 DAG report, not the closed form)",
+            "mapping" in emitted,
+        )
+
+
+def check_qif_dse_verify(table):
+    """(P3.7 b) A LIVE mapped sweep with --emit-config --verify.
+
+    Llama2-7B on the mapped config: bank_depth {4, 1} x arrays_per_chip
+    {120, 8}. The 8-slot chip cannot hold a layer, so two candidates die in
+    the MAPPER and carry its own message; the two that survive are ranked,
+    and the winner is re-run through run_perf from the emitted YAML.
+    """
+    name = "P3.7 verify"
+    out_dir = os.path.join(QIF_DSE_OUT_ROOT, "validation_llama7b_mapped")
+    os.makedirs(out_dir, exist_ok=True)
+    hw_dict = load_yaml(os.path.join(HW_DIR, "fws_cim_llama7b_mapped.yaml"))
+    # Two declarations the shipped file does not carry: the CARDS a card axis
+    # needs (the shipped config synthesizes them, and the tool refuses to
+    # invent a card block), and an activation tier that holds this workload —
+    # the shipped 8 GB tier is VIOLATED by P4.3 on chips 0-3, which the sweep
+    # would (correctly) record as infeasible.
+    hw_dict["cim"]["cards"] = {
+        "ctt": {"kind": "analog_macro", "device": "ctt"},
+        "sa": {"kind": "digital_chiplet", "vector_lanes": 1024},
+    }
+    hw_dict["tech_param"]["DRAM"]["size"] = "32 GB"
+    hw_dict["mapping_dse"] = {
+        "label": "P3.7 validator: banking x chip slot budget",
+        "objective": "throughput",
+        "axes": {"bank_depth": [4, 1], "arrays_per_chip": [120, 8]},
+    }
+    hw_path = os.path.join(out_dir, "fws_cim_llama7b_mapped_dse.yaml")
+    with open(hw_path, "w") as handle:
+        yaml.safe_dump(hw_dict, handle, sort_keys=False)
+    emitted_path = os.path.join(out_dir, "selected_config.yaml")
+    proc, payload = _run_qif_dse_tool(
+        hw_path,
+        "llama2_7b_fws_inf.yaml",
+        out_dir,
+        extra_args=["--emit-config", emitted_path, "--verify"],
+    )
+    if not table.boolean(
+        "%s: dse exit code" % name, "0", proc.returncode == 0, str(proc.returncode)
+    ):
+        print(proc.stdout[-3000:])
+        return
+    if not table.boolean(
+        "%s: dse_report.json written" % name, "exists", payload is not None
+    ):
+        return
+
+    table.exact("%s: candidates swept" % name, 4, payload["num_candidates"])
+    table.exact("%s: valid candidates" % name, 2, payload["num_valid"])
+    failed = [c for c in payload["candidates"] if not c["ok"]]
+    table.boolean(
+        "%s: every infeasible candidate carries a stage + message" % name,
+        "stage tag and a non-empty message on each",
+        len(failed) == 2
+        and all(c["fail_stage"] == "mapping" and c["fail_message"] for c in failed),
+        ", ".join("%s[%s]" % (c["id"], c["fail_stage"]) for c in failed),
+    )
+    selected = payload["selected"]
+    table.exact(
+        "%s: selected knobs" % name,
+        {"bank_depth": 1, "arrays_per_chip": 120},
+        selected["knobs"],
+    )
+    table.boolean(
+        "%s: selection sits on the Pareto front" % name,
+        "selected_id in front_ids",
+        payload["selected_id"] in payload["front_ids"],
+        "front=%s" % payload["front_ids"],
+    )
+
+    verify = payload.get("verify")
+    if not table.boolean(
+        "%s: --verify ran" % name, "verify block present", verify is not None
+    ):
+        return
+    table.boolean(
+        "%s: emitted config reproduces the selection" % name,
+        "every check within 0.1% (counts exact)",
+        verify["pass"],
+        verify.get("message") or "PASS",
+    )
+    by_name = {check["name"]: check for check in verify["checks"]}
+    for metric in ("tokens_per_s", "prefill_latency"):
+        check = by_name.get(metric)
+        if check is None:
+            table.boolean("%s: %s round trip" % (name, metric), "checked", False, "absent")
+            continue
+        table.close(
+            "%s: %s == run_perf" % (name, metric), check["simulator"], check["dse"]
+        )
+    for count in ("analog_chips", "tiles", "analog_macro_slots"):
+        check = by_name.get(count)
+        table.exact(
+            "%s: %s == run_perf (exact)" % (name, count),
+            None if check is None else check["simulator"],
+            None if check is None else check["dse"],
+        )
+    table.boolean(
+        "%s: the verify run wrote the MAPPED report" % name,
+        "output/LLM/fws_qif_report.json under the sweep's own output dir",
+        os.path.exists(os.path.join(out_dir, "output", "LLM", "fws_qif_report.json")),
+    )
+
+
 def main():
     table = CheckTable()
 
@@ -1340,6 +1703,16 @@ def main():
     print()
     print("Running the bridge gate (five run_perf subprocesses + five DAG builds)...")
     check_bridge_gate(table)
+
+    # QIF P3.7 rows: the MAPPED-path sweep (D10's "swept by the DSE"). The
+    # demo rows read the checked-in artifact (the pytest suite regenerates and
+    # compares it); the verify rows run a live sweep whose run_perf executes
+    # with cwd inside output/fws_qif_dse, so output/VIT and output/LLM stay as
+    # the rows above left them.
+    print()
+    print("Running the QIF P3.7 mapped-DSE rows (one live sweep + one --verify run_perf)...")
+    check_qif_dse_selection(table)
+    check_qif_dse_verify(table)
 
     print()
     print("FWS-CIM validation vs OPTIMA — DESIGN section 5")

@@ -1152,7 +1152,21 @@ def _apply_user_allocation(
             "match exactly.",
         )
     placed = []
-    for tile, entry in zip(tiles, entries):
+    for index, (tile, entry) in enumerate(zip(tiles, entries)):
+        declared_slice = getattr(entry, "slice_index", None)
+        if declared_slice is not None and int(declared_slice) != int(tile.slice_index):
+            # A DECLARED slice is a claim about which tile this entry places, and
+            # declaration order is what actually decides. When the two disagree
+            # the user's intent is unknowable, so it is refused rather than
+            # silently overruled (the field used to be parsed and dropped).
+            raise MappingError(
+                "residency",
+                f"cim.allocation entry {index} for {owner_label} declares "
+                f"slice_index = {int(declared_slice)} but declaration order places it on "
+                f"slice {int(tile.slice_index)}. Entries for one owner are consumed in "
+                "declaration order against the enumerator's block order; reorder the "
+                "entries or drop slice_index, which is unconstrained when absent.",
+            )
         placed.append(
             replace(
                 tile,

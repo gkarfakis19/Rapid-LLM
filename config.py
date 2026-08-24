@@ -2161,6 +2161,23 @@ def _validate_block_schema(
                 )
 
 
+class NoAttentionBlockError(AttributeError, ValueError):
+    """Asked for an attention-only quantity on a model that has no attention.
+
+    A pure-recurrence stack (Falcon-Mamba, and any layer plan whose block kinds
+    exclude ``attention``) legally carries ``attention = None``, so
+    ``LLMConfig.num_heads`` and ``LLMConfig.head_dim`` have no answer to give.
+    They used to fail with a bare ``AttributeError: 'NoneType' object has no
+    attribute 'num_heads'``, which names neither the config nor the reason.
+
+    It subclasses BOTH ``AttributeError`` and ``ValueError`` on purpose: every
+    ``getattr(model, "head_dim", None)`` / ``hasattr`` probe in the legacy
+    timing path keeps swallowing it exactly as before (no priced number moves),
+    while a caller that wants the refusal can catch it by name and a user sees
+    a sentence instead of a NoneType.
+    """
+
+
 @dataclass
 class LLMConfig:
     mode: str
@@ -2199,6 +2216,13 @@ class LLMConfig:
 
     @property
     def num_heads(self) -> int:
+        if self.attention is None:
+            raise NoAttentionBlockError(
+                "model_param.attention.num_heads was asked for, but this model has no "
+                "attention block: its layer plan declares only "
+                f"{list(self.block_kinds)}. A pure-recurrence stack has no heads; price "
+                "its mixer through the ssm / linear_attention block instead."
+            )
         return self.attention.num_heads
 
     @property
@@ -2240,7 +2264,14 @@ class LLMConfig:
 
     @property
     def head_dim(self) -> int:
-        if getattr(self.attention, "head_dim", None) is not None:
+        if self.attention is None:
+            raise NoAttentionBlockError(
+                "model_param.attention.head_dim was asked for, but this model has no "
+                "attention block: its layer plan declares only "
+                f"{list(self.block_kinds)}. A pure-recurrence stack has no heads; the "
+                "recurrent state width lives in the ssm / linear_attention block."
+            )
+        if self.attention.head_dim is not None:
             return int(self.attention.head_dim)
         return self.hidden_dim // self.num_heads
 
@@ -3257,7 +3288,16 @@ class CIMDseConfig:
 #: `reram` / `mram` are NAMED EMPTY SLOTS (ADJ-4) — the schema exists and no
 #: parameters are shipped, so a card on those families must supply its own
 #: `params` block in full. Nothing is ever inherited into an empty slot.
-CIM_DEVICE_FAMILIES = ("ctt", "reram", "mram")
+#:
+#: `custom` is the ESCAPE HATCH, and it is explicit on purpose. D14 says device
+#: cards, not device rewrites — a family the list has never heard of is a real
+#: card the tool should be able to price. But an OPEN field cannot tell a new
+#: device from a typo, and silently admitting `crt` as a device would be the
+#: worse failure. So a caller declares `device: custom` deliberately, and pays
+#: for it: a custom card inherits NOTHING and must state every parameter itself,
+#: exactly like an empty slot. Anything else is still refused by name.
+CIM_CUSTOM_DEVICE_FAMILY = "custom"
+CIM_DEVICE_FAMILIES = ("ctt", "reram", "mram", CIM_CUSTOM_DEVICE_FAMILY)
 CIM_EMPTY_CARD_SLOTS = ("reram", "mram")
 #: Where the bit slices of one weight word live (P2.4).
 CIM_SLICING_ARRANGEMENTS = ("column_sets", "chained_macros")
@@ -3387,10 +3427,20 @@ class CIMAnalogCardConfig:
         if device not in CIM_DEVICE_FAMILIES:
             raise ValueError(
                 f"{context}.device must be one of {list(CIM_DEVICE_FAMILIES)} "
-                f"(got {card_dict.get('device')!r})"
+                f"(got {card_dict.get('device')!r}). An unlisted family is refused so a "
+                "typo cannot become a device; a genuinely new device declares "
+                "device: 'custom' and supplies a complete 'params' block."
             )
         params_dict = card_dict.get("params")
         if params_dict is None:
+            if device == CIM_CUSTOM_DEVICE_FAMILY:
+                raise ValueError(
+                    f"{context}: device 'custom' names a device this tool ships no "
+                    "parameters for, so the card must supply a complete 'params' block "
+                    "of its own. Nothing is inherited into a custom card — inheriting "
+                    "CTT numbers under another device's name is exactly the silent "
+                    "mis-pricing the family list exists to prevent."
+                )
             if device in CIM_EMPTY_CARD_SLOTS:
                 raise ValueError(
                     f"{context}: device '{device}' is a NAMED EMPTY CARD SLOT — the schema "
@@ -3703,7 +3753,15 @@ class CIMTileAssignment:
     op: str
     expert: int
     shard: int
-    slice_index: int
+    #: The bit slice this entry places, or None when the entry does not say.
+    #: DECLARED means CHECKED: entries for one owner are consumed in declaration
+    #: order against the enumerator's block order, so a declared slice_index is
+    #: verified against the tile the entry lands on and a mismatch is refused by
+    #: name (fws_mapping._apply_user_allocation). It was parsed and then dropped
+    #: on the floor before, which let a user write slice 3 and silently place
+    #: slice 0. Absent is the unconstrained default; it was never a claim of
+    #: slice 0, which is why the default is None and not 0.
+    slice_index: Optional[int]
     macro: int
     column_sets: Tuple[int, ...]
 
@@ -3728,8 +3786,10 @@ class CIMTileAssignment:
             op=str(_require_field(context, entry, "op")),
             expert=_coerce_int(entry.get("expert", -1), f"{context}.expert", min_value=-1),
             shard=_coerce_int(entry.get("shard", 0), f"{context}.shard", min_value=0),
-            slice_index=_coerce_int(
-                entry.get("slice_index", 0), f"{context}.slice_index", min_value=0
+            slice_index=(
+                None
+                if entry.get("slice_index") is None
+                else _coerce_int(entry["slice_index"], f"{context}.slice_index", min_value=0)
             ),
             macro=_coerce_int(_require_field(context, entry, "macro"), f"{context}.macro", min_value=0),
             column_sets=tuple(sorted(column_sets)),
@@ -3772,6 +3832,21 @@ class CIMAllocationConfig:
         )
 
 
+class MissingCardLibraryError(AttributeError, ValueError):
+    """Asked for the active device card on a :class:`CIMConfig` with no library.
+
+    ``CIMConfig.from_dict`` ALWAYS builds one (synthesized from `cim.analog` +
+    `cim.fabric` when `cim.cards` is absent), so this can only be reached by
+    constructing ``CIMConfig`` directly and leaving ``cards=None`` — a test
+    double or a caller assembling the dataclass by hand. It used to surface as
+    a bare ``AttributeError: 'NoneType' object has no attribute 'analog_card'``.
+
+    It subclasses AttributeError as well as ValueError so the one `getattr`
+    probe on the card path (fws_atlas_export's optional area) keeps its default
+    instead of turning a hand-built config into a traceback.
+    """
+
+
 @dataclass
 class CIMConfig:
     """Top-level `cim:` block for device_class: fws_cim hardware configs."""
@@ -3789,15 +3864,26 @@ class CIMConfig:
     #: User-specified tile allocation (P2.2, D10). None = dedicated per matrix.
     allocation: Optional[CIMAllocationConfig] = None
 
+    def _require_cards(self, which: str) -> CIMCardLibrary:
+        if self.cards is None:
+            raise MissingCardLibraryError(
+                f"cim.{which} was asked for, but this CIMConfig carries no card library "
+                "(cards=None). CIMConfig.from_dict always builds one — synthesizing it "
+                "from cim.analog and cim.fabric when the cim.cards block is absent — so "
+                "a None library means the object was assembled by hand; pass "
+                "CIMCardLibrary.synthesized(analog, fabric)."
+            )
+        return self.cards
+
     @property
     def analog_card(self) -> CIMAnalogCardConfig:
         """The active analog-macro card (the synthesized one when none is named)."""
-        return self.cards.analog_card
+        return self._require_cards("analog_card").analog_card
 
     @property
     def digital_card(self) -> CIMDigitalChipletCardConfig:
         """The active shared-digital-chiplet card."""
-        return self.cards.digital_card
+        return self._require_cards("digital_card").digital_card
 
     @classmethod
     def from_dict(cls, cim_dict: Optional[Dict[str, object]]) -> "CIMConfig":

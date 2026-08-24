@@ -295,5 +295,6 @@ pattern (layers 5, 11, 17, 23, 29 global, 29 local). One gate moved to let them 
 and Hunyuan-4B is 3072/32 with head_dim 128 &mdash; the rule refused the field on exactly the models it exists
 for, while every consumer already read the declared value; the guard is replaced by a test that the declared
 value is HONORED (Hunyuan&rsquo;s census matches its checkpoint at 128 and misses it by 6.7% at the derived 96).</p>
+<p><span class="tag">Wave D close</span> 2026-08-24 &mdash; cross-wave minors swept. <code>LLMConfig.num_heads</code> / <code>head_dim</code> on a pure-recurrence config now raise the named <code>config.NoAttentionBlockError</code> instead of a bare <code>NoneType</code> <code>AttributeError</code> (it subclasses <code>AttributeError</code> as well as <code>ValueError</code>, so every legacy <code>getattr</code>/<code>hasattr</code> probe still swallows it and no priced number moves), and the missing <code>granite_4_0_h_1b</code> HF importer fixture landed &mdash; the dense-Granite branch (<code>num_local_experts: 0</code>) was the last untested path in the round trip. P1.1&ndash;P1.6 all read done.</p>
 </div>
 </main></body></html>
