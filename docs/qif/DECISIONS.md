@@ -170,3 +170,17 @@ Process and scope:
   (discrete quantities exact); on disagreement the DAG wins and the closed
   form is annotated; the closed-form path stays in tree, frozen, to hold
   the bridge.
+
+## Amendment (2026-08-24, George — the folding pivot)
+
+- **D24 (GEORGE, HARD): Folding is the core.** Spatial-vs-temporal folding of
+  tensors onto fixed macros is a per-tensor MAPPING decision, and choosing it
+  per model is the project's center. This promotes the mapping optimizer from
+  "future search" to NOW, amending D10's "automatic allocation later" and
+  D19's "objectives simple" for this scope only. Plan: `plans/P7_folding.html`.
+- **D25 (GEORGE, HARD): Decode only for P7.** Prefill folding is out (SSD /
+  concurrent-layer interplay); every P7 artifact states the decode-only
+  assumption. Serving regime stays D15.
+- **D26: The DOA register binds.** P7's dead-fold list (slicing x folding,
+  replication, non-canonical walks, prefill folds) is refused BY NAME in
+  code — machinery for a dead fold is a conformance violation, not initiative.

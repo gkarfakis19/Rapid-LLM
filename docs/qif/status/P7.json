@@ -1,0 +1,49 @@
+{
+ "plan": "P7",
+ "title": "Folding & the Mapping Optimizer",
+ "updated": "2026-08-24",
+ "deliverables": [
+  {
+   "id": "P7.1",
+   "title": "Fold taxonomy + DOA register (decode-only; dead folds refused by name)",
+   "status": "done",
+   "report": "The pruning analysis is the plan page itself: cell-floor fact + decode headroom fact collapse the space to {N-fold, K-fold(K-inner), cross-layer bank sharing}; prefill, slicing x folding, replication, non-canonical walks are DOA/refused.",
+   "questions": []
+  },
+  {
+   "id": "P7.2",
+   "title": "Fold vector + K-fold arrangement + accumulator pricing; (1,1) bit-exact identity",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P7.3",
+   "title": "Per-tensor folds in mapping:; cross-layer bank sharing in decode",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P7.4",
+   "title": "Headroom law + min-area optimizer + Pareto trace (DAG-verified per point)",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P7.5",
+   "title": "Fold axis in fws_qif_dse; Granite + Qwen decode knee curves with regenerate gates",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  },
+  {
+   "id": "P7.6",
+   "title": "Folding card + macro time-lane view + knee explorer in the atlas",
+   "status": "todo",
+   "report": "",
+   "questions": []
+  }
+ ]
+}

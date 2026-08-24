@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P7 · Folding &amp; the Mapping Optimizer</title>
+<style>
+:root{--ink:#1c2a33;--muted:#5f7280;--accent:#176778;--line:#dde5e9;--bg:#f7f9fa;--card:#ffffff;--code:#eef2f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Georgia,"Times New Roman",serif}
+main{max-width:46rem;margin:0 auto;padding:2.5rem 1.25rem 5rem}
+nav{font:13px/1 "Segoe UI",system-ui,sans-serif;margin-bottom:2rem}
+nav a{color:var(--muted);text-decoration:none;letter-spacing:.04em;text-transform:uppercase}
+nav a:hover{color:var(--accent)}
+.pid{font:700 12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.12em;color:var(--accent);text-transform:uppercase}
+h1{font-size:2rem;line-height:1.2;margin:.35rem 0 .3rem;text-wrap:balance}
+.mission{color:var(--muted);font-style:italic;margin:0 0 1.5rem}
+h2{font:600 1.05rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .7rem;padding-top:1rem;border-top:1px solid var(--line)}
+h3{font:600 .95rem/1.3 "Segoe UI",system-ui,sans-serif;margin:1.4rem 0 .4rem}
+p{margin:.55rem 0}
+ul,ol{padding-left:1.3rem}li{margin:.3rem 0}
+code{font:.86em/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:.08em .35em;border-radius:3px}
+table{border-collapse:collapse;width:100%;font:14px/1.5 "Segoe UI",system-ui,sans-serif;margin:.8rem 0}
+th{text-align:left;border-bottom:2px solid var(--ink);padding:.35rem .5rem;font-weight:600}
+td{border-bottom:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}
+.overflow{overflow-x:auto}
+.status{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1rem 1.2rem;margin-top:2.5rem;font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+.status h2{border:0;margin:0 0 .5rem;padding:0}
+.tag{display:inline-block;font:600 11px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;padding:.3em .6em;border-radius:999px;background:var(--code);color:var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="../index.html">&larr; Plan of Plans</a></nav>
+<div class="pid">Plan P7</div>
+<h1>Folding &amp; the Mapping Optimizer</h1>
+<p class="mission">Make spatial-vs-temporal folding a per-tensor mapping decision, and choose it optimally per model &mdash; decode only, with the dead folds refused by name before any machinery exists for them.</p>
+
+<h2>Mission context</h2>
+<p>The QIF core question, stated by George 2026-08-24: the hardware is FIXED
+(macros of one geometry, chips of one capacity); how you program and connect it
+is flexible. A K&times;N tensor on r&times;c macros with mux m admits a family
+of mappings from fully spatial (many macros, banks idle, parallel time) to
+fully temporal (few macros, banks full, folded time with shift-add
+accumulation). Choosing the folding per tensor, per model, is the project's
+center. The Wave D DSE proved the gap by construction: its Pareto front
+collapsed to one point and its own <code>front_shape</code> note said why &mdash;
+nothing swept traded silicon for speed. Folding is the missing axis.</p>
+
+<h2>The two facts that prune the space</h2>
+<p><strong>Fact 1 &mdash; folding never changes cell count.</strong> Weights own
+cells (D2): a 1024&times;1024 tensor needs 2<sup>20</sup> cells whether it maps
+to 4 macros or 1. A "2&times;2 spatial" mapping buys 4 fixed macros and leaves
+their mux banks IDLE to buy parallel time; folding fills the banks the spatial
+mapping wastes. Therefore <code>min_macros(tensor) = ceil(tensor_cells /
+cells_per_macro)</code> &mdash; the CELL FLOOR &mdash; and the whole per-tensor
+mapping space is one small integer: how far between the floor and full-spatial
+the tensor sits. Area = macros bought; time multiplier = temporal folds walked;
+there is no separate taxonomy of folds to build machinery for.</p>
+<p><strong>Fact 2 &mdash; decode makes the optimizer nearly analytic.</strong>
+In the Granite decode timeline the analog macros run at ~0.06% duty: the step
+is bound by the shared digital chiplet (scan for hybrids, attention/KV for
+transformers). And within one decode step the layers execute SEQUENTIALLY, so
+tiles of different layers sharing one macro's banks NEVER contend &mdash; the
+evaluator already prices this as zero by construction. Consequence: fold
+depth is limited only by each tensor's FOLD HEADROOM (fold until its analog
+time approaches the binding step time), and cross-layer bank sharing is a pure
+area win. The decode optimizer is headroom computation plus bank packing, not
+search. Prefill is where folding gets hard (all layers fire concurrently,
+SSD chunking interacts with fold walks) &mdash; which is exactly why it is out.</p>
+
+<h2>Scope &amp; exclusions &mdash; the DOA register</h2>
+<div class="overflow"><table>
+<tr><th>Fold / feature</th><th>Verdict</th><th>Why</th></tr>
+<tr><td>N-temporal fold (walk output banks across mux passes)</td><td><b>ALIVE</b></td><td>Already the mux law (active-column-set charging); needs per-tensor freedom, not new physics.</td></tr>
+<tr><td>K-temporal fold (partials accumulated across passes in a shift-add buffer)</td><td><b>ALIVE</b></td><td>The one genuinely new arrangement. K-INNER canonical walk only: one accumulator per output bank, minimal buffer.</td></tr>
+<tr><td>Cross-tensor / cross-layer bank sharing</td><td><b>ALIVE</b></td><td>Machinery exists (A3); decode sequentiality makes it contention-free; the optimizer's main packing lever.</td></tr>
+<tr><td>PREFILL folding</td><td><b>OUT (George, 2026-08-24)</b></td><td>Concurrent layers + SSD chunk interplay; refused by name; the decode-only assumption is stamped on every P7 artifact.</td></tr>
+<tr><td>Non-canonical walk orders (N-inner under K-folds, interleaves)</td><td><b>DOA</b></td><td>Larger buffers for no modeled gain; refused by name until a physics reason exists.</td></tr>
+<tr><td>Slicing &times; folding product</td><td><b>DOA for pass one</b></td><td>CTT cells hold W4/W5 unsliced; the product multiplies arrangements for no live card. Refused by name when both are requested.</td></tr>
+<tr><td>Weight replication (spatial &gt; natural census)</td><td><b>DOA in decode</b></td><td>Buys parallel M-throughput the decode regime cannot use (analog is 0.06% busy). No machinery.</td></tr>
+<tr><td>Folding the digital side (scan/attention engines)</td><td><b>OUT</b></td><td>The shared chiplet is already time-multiplexed by construction.</td></tr>
+</table></div>
+
+<h2>Where we stand</h2>
+<div class="overflow"><table>
+<tr><th>Asset</th><th>What it gives P7</th></tr>
+<tr><td><code>cim_timing.py</code> tile layer</td><td>Tiles with owners/sites, active-column-set pricing (the N-fold law), <code>chained_macros</code> partial transport (the sibling of K-fold accumulation), bank_depth, priced shift-add trees.</td></tr>
+<tr><td><code>fws_mapping.py</code> + <code>program/fws_build.py</code></td><td>Placement + the placed DAG; co-residency legal; capacity/ownership invariants.</td></tr>
+<tr><td><code>fws_eval.py</code> timeline</td><td>Contention priced by construction; decode window (ADJ-6); duty cycles &mdash; the headroom inputs.</td></tr>
+<tr><td><code>tools/fws_qif_dse.py</code></td><td>The mapped-path sweep harness the fold axis plugs into; the flat front it will un-flatten.</td></tr>
+<tr><td>Atlas + <code>fws_atlas/1</code></td><td>The macro/tile views the folding visualization extends.</td></tr>
+</table></div>
+
+<h2>The investigation</h2>
+<h3>1. The fold vector (P7's one new object)</h3>
+<p>Per tensor: <code>fold = (f_K, f_N)</code> with <code>f_K &le; ceil(K/r)</code>,
+<code>f_N &le; ceil(N/c)</code>, and the bank-capacity constraint
+<code>(blocks / (f_K &middot; f_N)) &middot; banks_per_block &le; mux</code> per
+macro. <code>(1,1)</code> = today's fully spatial mapping (degenerate identity:
+bit-exact reproduction of current numbers, gated). Area = macros bought; time
+= analog M-law &times; <code>f_K &middot; f_N</code>; energy adds the
+accumulator term for <code>f_K &gt; 1</code>. New card parameters (Samyak
+seam, honest defaults): accumulator width/energy per fold, input re-drive
+cost, bank-switch cycles (knob exists, default 0 disclosed).</p>
+<h3>2. The decode headroom law</h3>
+<p><code>headroom(tensor) = binding_step_time &times; safety /
+analog_time_at_(1,1)</code>, read off the existing decode timeline. Fold to
+<code>min(cell-floor-fold, headroom)</code>. On Granite the aggregate analog
+time is ~12.8 &micro;s of a ~892 &micro;s step &mdash; headroom O(70&times;)
+&mdash; so the cell floor, not time, binds almost everywhere. The knee where
+folded analog time meets the scan bound is the deliverable figure.</p>
+<h3>3. The optimizer (deliberately not a search)</h3>
+<p>Objective pass one: MIN AREA at a declared tokens/s target; the Pareto
+traced by sweeping the target. Per-tensor folds from the headroom law, then
+first-fit-decreasing bank packing with cross-layer sharing (contention-free in
+decode; the evaluator re-verifies every chosen point &mdash; the two-speed
+pattern). Every chosen mapping is emitted as a normal <code>mapping:</code> +
+<code>cim.allocation</code> config: the optimizer WRITES configs, the existing
+machinery validates, prices and draws them. No new evaluator, no ML.</p>
+<h3>4. The visualization (the part George asked for by name)</h3>
+<ul>
+<li><b>Folding card</b>: one tensor, the mapping family side by side &mdash; spatial boxes, time-lanes stacked inside a box, the accumulator drawn where K-partials meet; area/time/energy under each.</li>
+<li><b>Macro time-lane view</b> (atlas drill-in): a macro's mux slots as time lanes showing which (K,N) block or which other tensor occupies each pass.</li>
+<li><b>The knee explorer</b>: area vs tokens/s per model, every point a complete fold assignment, clickable through to its atlas.</li>
+</ul>
+
+<h2>Seams</h2>
+<ul>
+<li><b>Imports:</b> P2 (tile/bank laws, card knobs), P3 (mapping object, allocation config), P4 (timeline, duty cycles, decode window), P5 (atlas views), P6 (degenerate identity + physics-audit obligations), P1 (the decode-relevant tensor inventory per model).</li>
+<li><b>Exports:</b> the fold vector in the mapping schema; the headroom law; optimizer-emitted configs; the fold axis for the DSE; the three visualizations; D24 (below).</li>
+</ul>
+
+<h2>Implement now vs address only</h2>
+<div class="overflow"><table>
+<tr><th>Now</th><th>Address only (named, empty)</th></tr>
+<tr><td>Fold vector + K-inner K-fold arrangement + accumulator pricing, with the (1,1) bit-exact identity</td><td>Prefill folding (per George; SSD interplay)</td></tr>
+<tr><td>Per-tensor folds in <code>mapping:</code>; cross-layer bank sharing in decode</td><td>Slicing &times; folding; replication; non-canonical walks (all refused by name)</td></tr>
+<tr><td>Headroom law + min-area optimizer + Pareto trace, DAG-verified per point</td><td>Multi-tenant folding (same machinery, later per D8)</td></tr>
+<tr><td>Fold axis in fws_qif_dse; Granite + Qwen decode knee curves, checked in with regenerate gates</td><td>Pipelined/overlapped decode steps beyond D15's batched-synchronous regime</td></tr>
+<tr><td>Folding card + time-lane view + knee explorer in the atlas</td><td>&mdash;</td></tr>
+</table></div>
+
+<h2>Open questions for George</h2>
+<ul>
+<li>Safety margin for the headroom law (how close folded analog time may come to the binding step time): propose 80%. Confirm or set.</li>
+<li>Samyak parameter asks (priced with honest defaults until then): accumulator energy/width per fold, input re-drive cost, real bank-switch cycles, practical max bank depth.</li>
+<li>Objective confirmation: min-area @ tokens/s target as the tool, Pareto trace as the figure &mdash; both, or one first?</li>
+</ul>
+
+<div class="status"><h2>Status &amp; notes</h2>
+<p><span class="tag">Drafted</span> 2026-08-24 &mdash; drafted by the orchestrator from George's folding discussion; awaiting George's review before any implementation wave. Decode-only per George; DOA register above is binding on implementers.</p>
+</div>
+</main></body></html>

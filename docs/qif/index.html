@@ -95,6 +95,10 @@ one self-contained HTML file. Also the mapper's honesty enforcer &mdash; it only
 <p>The stance table (target / reference / provisional / never), the closed-form&rarr;DAG bridge
 check, per-plan obligations, honesty invariants, the silicon calibration seam.</p>
 <div class="foot"><span class="tag">Drafted</span> 2026-08-23 &middot; awaiting review</div></div>
+<div class="card"><h3><a href="plans/P7_folding.html">P7 &middot; Folding &amp; the Mapping Optimizer</a></h3>
+<p>THE CORE (promoted 2026-08-24): spatial-vs-temporal folding as a per-tensor mapping decision, decode-only,
+with the dead folds refused by name and a min-area optimizer that writes ordinary mapping configs.</p>
+<div class="foot"><span class="tag">Drafted</span> 2026-08-24 &middot; awaiting George's review</div></div>
 </div>
 
 <h2>Live status</h2>
@@ -143,8 +147,8 @@ all declared divergences reviewed and legitimate, each flagged on its page.</li>
 served from <code>docs/qif/</code>. Statuses: Drafted &rarr; Reviewed (George) &rarr; Building &rarr; Done.</p>
 <script>
 (function(){
-  var PLANS=['P1','P2','P3','P4','P5','P6'];
-  var PAGES={P1:'plans/P1_model_matrix.html',P2:'plans/P2_macro_resource_model.html',P3:'plans/P3_mapping.html',P4:'plans/P4_evaluation.html',P5:'plans/P5_system_atlas.html',P6:'plans/P6_validation.html'};
+  var PLANS=['P1','P2','P3','P4','P5','P6','P7'];
+  var PAGES={P1:'plans/P1_model_matrix.html',P2:'plans/P2_macro_resource_model.html',P3:'plans/P3_mapping.html',P4:'plans/P4_evaluation.html',P5:'plans/P5_system_atlas.html',P6:'plans/P6_validation.html',P7:'plans/P7_folding.html'};
   function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
   function render(data){
     var el=document.getElementById('live-status');var html='';var done=0,total=0;
