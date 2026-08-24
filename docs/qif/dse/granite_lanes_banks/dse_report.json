@@ -281,6 +281,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.004% mean / 0.030% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.029% peak (3684 of 6400 idle), shared_digital 9.444% mean / 9.998% peak (0 of 10 idle), link 0.013% mean / 0.019% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.998% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -451,7 +456,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 15.61635684967041
+      "wall_s": 15.394978523254395
     },
     {
       "id": "c001",
@@ -689,6 +694,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.004% mean / 0.030% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.029% peak (3684 of 6400 idle), shared_digital 9.390% mean / 9.941% peak (0 of 10 idle), link 0.013% mean / 0.019% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.941% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -859,7 +869,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 9.607145071029663
+      "wall_s": 9.412088394165039
     },
     {
       "id": "c002",
@@ -1097,6 +1107,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.007% mean / 0.055% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.053% peak (3684 of 6400 idle), shared_digital 8.989% mean / 9.088% peak (0 of 10 idle), link 0.024% mean / 0.035% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.088% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -1267,7 +1282,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 15.661448955535889
+      "wall_s": 15.934240818023682
     },
     {
       "id": "c003",
@@ -1505,6 +1520,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.008% mean / 0.054% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.052% peak (3684 of 6400 idle), shared_digital 8.897% mean / 8.995% peak (0 of 10 idle), link 0.023% mean / 0.034% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 8.995% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -1675,7 +1695,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 9.853114366531372
+      "wall_s": 9.564472198486328
     },
     {
       "id": "c004",
@@ -1913,6 +1933,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.012% mean / 0.093% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.089% peak (3684 of 6400 idle), shared_digital 8.289% mean / 9.191% peak (0 of 10 idle), link 0.040% mean / 0.060% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.191% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -2083,7 +2108,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 15.548823833465576
+      "wall_s": 15.535787582397461
     },
     {
       "id": "c005",
@@ -2321,6 +2346,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.013% mean / 0.091% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.088% peak (3684 of 6400 idle), shared_digital 8.146% mean / 9.033% peak (0 of 10 idle), link 0.039% mean / 0.057% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.033% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -2491,7 +2521,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 9.62639307975769
+      "wall_s": 9.414893627166748
     },
     {
       "id": "c006",
@@ -2729,6 +2759,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.018% mean / 0.142% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.136% peak (3684 of 6400 idle), shared_digital 7.384% mean / 9.645% peak (0 of 10 idle), link 0.061% mean / 0.091% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.645% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -2899,7 +2934,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 15.289700031280518
+      "wall_s": 15.722815990447998
     },
     {
       "id": "c007",
@@ -3137,6 +3172,11 @@
           "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
         },
         {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.020% mean / 0.138% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.133% peak (3684 of 6400 idle), shared_digital 7.192% mean / 9.393% peak (0 of 10 idle), link 0.059% mean / 0.086% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.393% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
           "constraint": "decode_series_window",
           "value": "3 of 256 steps lowered",
           "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -3307,7 +3347,7 @@
           "crosses_link": false
         }
       ],
-      "wall_s": 9.814858198165894
+      "wall_s": 10.067060470581055
     }
   ],
   "front_ids": [
@@ -3552,6 +3592,11 @@
         "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
       },
       {
+        "constraint": "device_class_utilization",
+        "value": "analog_macro 0.018% mean / 0.142% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.136% peak (3684 of 6400 idle), shared_digital 7.384% mean / 9.645% peak (0 of 10 idle), link 0.061% mean / 0.091% peak (0 of 17 idle)",
+        "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.645% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+      },
+      {
         "constraint": "decode_series_window",
         "value": "3 of 256 steps lowered",
         "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure."
@@ -3722,7 +3767,7 @@
         "crosses_link": false
       }
     ],
-    "wall_s": 15.289700031280518
+    "wall_s": 15.722815990447998
   },
   "best_violation": null,
   "disclosures": [
@@ -3952,6 +3997,58 @@
       ]
     },
     {
+      "constraint": "device_class_utilization",
+      "value": "analog_macro 0.004% mean / 0.030% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.029% peak (3684 of 6400 idle), shared_digital 9.444% mean / 9.998% peak (0 of 10 idle), link 0.013% mean / 0.019% peak (0 of 17 idle)",
+      "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.998% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+        "c005",
+        "c006",
+        "c007"
+      ],
+      "varies_by_candidate": [
+        {
+          "id": "c001",
+          "value": "analog_macro 0.004% mean / 0.030% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.029% peak (3684 of 6400 idle), shared_digital 9.390% mean / 9.941% peak (0 of 10 idle), link 0.013% mean / 0.019% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.941% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c002",
+          "value": "analog_macro 0.007% mean / 0.055% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.053% peak (3684 of 6400 idle), shared_digital 8.989% mean / 9.088% peak (0 of 10 idle), link 0.024% mean / 0.035% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.088% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c003",
+          "value": "analog_macro 0.008% mean / 0.054% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.052% peak (3684 of 6400 idle), shared_digital 8.897% mean / 8.995% peak (0 of 10 idle), link 0.023% mean / 0.034% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 8.995% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c004",
+          "value": "analog_macro 0.012% mean / 0.093% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.089% peak (3684 of 6400 idle), shared_digital 8.289% mean / 9.191% peak (0 of 10 idle), link 0.040% mean / 0.060% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.191% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c005",
+          "value": "analog_macro 0.013% mean / 0.091% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.088% peak (3684 of 6400 idle), shared_digital 8.146% mean / 9.033% peak (0 of 10 idle), link 0.039% mean / 0.057% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.033% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c006",
+          "value": "analog_macro 0.018% mean / 0.142% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.136% peak (3684 of 6400 idle), shared_digital 7.384% mean / 9.645% peak (0 of 10 idle), link 0.061% mean / 0.091% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.645% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c007",
+          "value": "analog_macro 0.020% mean / 0.138% peak (790 of 6400 idle), macro_pool 0.001% mean / 0.133% peak (3684 of 6400 idle), shared_digital 7.192% mean / 9.393% peak (0 of 10 idle), link 0.059% mean / 0.086% peak (0 of 17 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 9.393% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        }
+      ]
+    },
+    {
       "constraint": "decode_series_window",
       "value": "3 of 256 steps lowered",
       "reason": "MEDIAN LOWERED STEP x 253 REMAINING STEPS. This is an EXTRAPOLATION, not a metric: it is a period times a count, which P4 \u00a73 forbids for any published metric, so it lives here, labeled, and never enters metrics[]. ADJ-6 allows the window plus a disclosed extrapolation; this field IS the disclosure.",
@@ -3989,7 +4086,7 @@
       "shared digital chiplet area (the card declares no area_mm2)"
     ]
   },
-  "total_wall_s": 101.48406386375427,
+  "total_wall_s": 101.43959093093872,
   "verify": {
     "ran": true,
     "emitted_config": "configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml",

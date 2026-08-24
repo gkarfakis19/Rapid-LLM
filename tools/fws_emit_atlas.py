@@ -99,6 +99,11 @@ def _override_spec(spec, *, shared_chiplets=None, macros_per_chip=None, layers_p
         layers_per_chip=spec.layers_per_chip if layers_per_chip is None else layers_per_chip,
         membership=spec.membership,
         decode_window=spec.decode_window if decode_window is None else int(decode_window),
+        # P7.3: the declared PLACEMENT LAW is carried, never re-defaulted. A
+        # --layers_per_chip override that quietly turned a dense packing back
+        # into the dedicated one would draw a different machine under the same
+        # title.
+        packing=spec.packing,
     )
 
 

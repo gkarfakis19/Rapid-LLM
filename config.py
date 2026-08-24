@@ -4018,6 +4018,19 @@ class MappingSystemConfig:
     #: Decode steps the DAG builder lowers (ADJ-6's bounded window). None
     #: leaves the builder's default; the truncation is always disclosed.
     decode_window: Optional[int] = None
+    #: The PLACEMENT LAW for this system's weights (P7.3, D27).
+    #:
+    #: ``dedicated`` (the default, so no shipped config moves) is today's
+    #: per-tensor placement: each weight matrix starts on a fresh macro and the
+    #: remainder of its last macro stays empty. ``dense`` is INVARIANT W: one
+    #: contiguous bank stream per chip, so a bank idles only when the stream
+    #: runs out, cross-tensor and cross-layer bank sharing is legal (decode
+    #: layers are sequential — P7 Fact 3), and the waste that remains is the
+    #: dimension-mismatch remainder, which the run REPORTS.
+    #:
+    #: The modes themselves live in :data:`fws_mapping.PACKING_MODES`; this
+    #: block spells the name, the mapper owns the law (D21).
+    packing: str = "dedicated"
 
     _KEYS = (
         "chips",
@@ -4027,6 +4040,7 @@ class MappingSystemConfig:
         "layers_per_chip",
         "membership",
         "decode_window",
+        "packing",
     )
 
     @classmethod
@@ -4102,7 +4116,36 @@ class MappingSystemConfig:
                 if raw.get("decode_window") is None
                 else _coerce_int(raw["decode_window"], f"{context}.decode_window", min_value=1)
             ),
+            packing=_parse_packing(raw.get("packing"), f"{context}.packing"),
         )
+
+
+def _parse_packing(raw: object, context: str) -> str:
+    """`mapping.packing` -> one of the mapper's placement laws (P7.3).
+
+    The list of laws is NOT restated here: it is imported from the module that
+    implements them, so a mode can never be spelled in the config surface and
+    be missing from the mapper (D21). The import is deferred because
+    ``fws_mapping`` imports this module.
+    """
+    from fws_mapping import PACKING_DEDICATED, PACKING_MODES
+
+    if raw is None:
+        return PACKING_DEDICATED
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"{context} must be one of {PACKING_MODES} (got {raw!r}): the packing is a "
+            "placement LAW, named, not a number"
+        )
+    value = raw.strip().lower()
+    if value not in PACKING_MODES:
+        raise ValueError(
+            f"{context} = {raw!r} is not a placement law this mapper has. The modes are "
+            f"{PACKING_MODES}: '{PACKING_DEDICATED}' places each weight matrix on fresh "
+            "macros (today's placement), 'dense' packs one contiguous bank stream so "
+            "every bank holds real weights (Invariant W, D27)."
+        )
+    return value
 
 
 @dataclass(frozen=True)

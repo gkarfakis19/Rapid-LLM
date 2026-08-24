@@ -81,6 +81,7 @@ from fws_mapping import FwsMapping, MappingError, Relaxation
 from program.analytic_sim import CoarseEvalResult, DeviceResource, evaluate_detailed
 from program.fws_build import (
     LAW_ANALOG_GEMM,
+    LAW_K_ACCUMULATION,
     LAW_PD_LINK,
     LAW_SLICE_REDUCTION,
     FwsOpAnnotation,
@@ -93,16 +94,19 @@ __all__ = [
     "COVERAGE_COVERED",
     "COVERAGE_PARTIAL",
     "COVERAGE_UNCOVERED",
+    "ClassUtilization",
     "EnergyComponent",
     "FwsEvaluation",
     "MemoryVerdict",
     "Metric",
     "OpCost",
+    "PACKING_COMPARISON_SCHEMA",
     "PoolSizingReport",
     "PricingResult",
     "REPORT_SCHEMA",
     "device_resources",
     "evaluate_fws",
+    "packing_comparison_document",
     "price_program",
     "render_report",
     "report_document",
@@ -362,6 +366,8 @@ class _Pricer:
     def price(self, annotation: FwsOpAnnotation) -> OpCost:
         if annotation.law == LAW_ANALOG_GEMM:
             return self._weight_gemm(annotation)
+        if annotation.law == LAW_K_ACCUMULATION:
+            return self._accumulation(annotation)
         if annotation.law in (LAW_SLICE_REDUCTION,) or annotation.kind == "reduction":
             return self._reduction(annotation)
         if annotation.kind == "pool":
@@ -396,6 +402,75 @@ class _Pricer:
                     ("active_column_sets", float(cost.active_column_sets)),
                     ("macros", float(cost.macros)),
                     ("total_active_column_sets", float(cost.total_active_column_sets)),
+                )
+            ),
+        )
+
+    def _accumulation(self, a: FwsOpAnnotation) -> OpCost:
+        """One in-macro K stack, priced by P7.2's accumulator law.
+
+        The DAG carries the PACKER's descriptor, so nothing about the stack is
+        re-derived here: depth, width and sink macro are the packing's own
+        numbers. A spread stack never reaches this row — the row-block
+        partial-sum law prices that shape end to end (D21).
+        """
+        if a.k_stack is None:
+            raise MappingError(
+                "execution",
+                f"op {a.uid} is a placed K-stack accumulation carrying no descriptor. "
+                "P4 prices this row FROM the packer's KStack; without it there is "
+                "nothing to price, and a zero would be an invented number.",
+            )
+        pool = self.device.digital_pool_sizing()
+        cost = self.device.price_accumulation(
+            a.k_stack, a.tokens, act_bytes=self.act_bytes, pool=pool
+        )
+        if not cost.priced_here:
+            raise MappingError(
+                "execution",
+                f"op {a.uid} accumulates a K stack that SPANS macros "
+                f"({a.k_stack.macro_ids}). That shape is already priced end to end by "
+                "the row-block partial-sum law, so an accumulation op for it would be "
+                "a second accounting of one metric (D21).",
+            )
+        for note in cost.disclosures:
+            if "pool_energy_per_add_pj" in note:
+                # The same statement as the accumulator_energy banner below;
+                # two banners for one gap would be two accountings (D21).
+                continue
+            self._disclose(
+                "k_stack_accumulator_stall",
+                "the pool cannot drain one pass before the next lands",
+                note,
+            )
+        covered = float(self.device.card.pool_energy_per_add_pj) > 0
+        if not covered:
+            self._disclose(
+                "accumulator_energy",
+                "0 pJ: no card knob declared",
+                "cim.cards.<card>.pool_energy_per_add_pj is 0, so the K-stack "
+                "accumulators report zero energy rather than an invented per-add "
+                "figure. The accumulator TIME is fully priced (P7.2).",
+            )
+        return self._cost(
+            a,
+            duration_s=cost.time_s,
+            basis=(
+                f"CimDeviceModel.price_accumulation over a depth-{cost.depth} K stack "
+                f"{cost.width} columns wide on macro {a.k_stack.sink_macro_id}: "
+                f"{cost.law}"
+            ),
+            energy_pj=cost.energy_pj,
+            energy_component="digital_accumulation",
+            coverage=COVERAGE_COVERED if covered else COVERAGE_UNCOVERED,
+            detail=OrderedDict(
+                (
+                    ("depth", float(cost.depth)),
+                    ("width", float(cost.width)),
+                    ("partial_adds", float(cost.partial_adds)),
+                    ("hidden_adds", float(cost.hidden_adds)),
+                    ("drain_cycles", float(cost.drain_cycles)),
+                    ("stall_s", float(cost.stall_s)),
                 )
             ),
         )
@@ -977,6 +1052,13 @@ class FwsEvaluation:
     metrics: Tuple[Metric, ...]
     occupancy: Tuple[DeviceOccupancy, ...]
     duty_cycles: Mapping[int, float]
+    #: Per-device-class utilization (P7.3, D28) — a REQUIRED output, printed
+    #: whether it flatters the provisioning or not.
+    utilization: Tuple[ClassUtilization, ...]
+    #: The decode step's bank-pass accounting (P7 Fact 1), measured.
+    bank_passes: Mapping[str, object]
+    #: What co-residency in a bank costs on a decode step (P7 Fact 3), measured.
+    bank_sharing: Mapping[str, object]
     energy: Tuple[EnergyComponent, ...]
     memory: Tuple[MemoryVerdict, ...]
     pools: Tuple[PoolSizingReport, ...]
@@ -1005,13 +1087,60 @@ class FwsEvaluation:
         """``{macro_id: duty cycle}`` for the P5 atlas (P4 §3, D20)."""
         return dict(self.duty_cycles)
 
+    def atlas_utilization(self) -> List["OrderedDict[str, object]"]:
+        """Per-device-class utilization for the atlas (P7.3 item 3, D28).
+
+        The atlas colors macros by duty cycle, which answers "which macro" and
+        never "how much of each device CLASS is idle". This is that second
+        question, in the same record shape the report prints, so an atlas and a
+        report cannot disagree about it (D21).
+        """
+        return [row.as_dict() for row in self.utilization]
+
+    def atlas_packing(self) -> "OrderedDict[str, object]":
+        """The packing law and, under dense packing, its waste accounting."""
+        return _packing_block(self.mapping)
+
+    def utilization_of(self, device_class: str) -> ClassUtilization:
+        for row in self.utilization:
+            if row.device_class == device_class:
+                return row
+        raise KeyError(
+            f"no utilization row for {device_class!r}; have "
+            f"{[row.device_class for row in self.utilization]}"
+        )
+
     def atlas_metrics(self) -> List["OrderedDict[str, object]"]:
-        """The labeled metrics the atlas prints beside the placement figures."""
-        return [
+        """The labeled metrics the atlas prints beside the placement figures.
+
+        The per-device-class utilization rides here too (P7.3 item 3, D28), in
+        the metric shape the atlas already renders, so an exported atlas can
+        never show a placement whose idle silicon is invisible. The values are
+        the ClassUtilization rows themselves — the report and the atlas print
+        one number, not two derivations of it (D21).
+        """
+        system = self.mapping.system_id
+        out = [
             entry.as_dict()
             for entry in self.metrics
             if not isinstance(entry.value, (list, tuple))
         ]
+        for row in self.utilization:
+            out.append(
+                Metric(
+                    key=f"{system}.utilization.{row.device_class}",
+                    label=f"{row.device_class} utilization (mean over the class)",
+                    value=float(row.mean_occupancy),
+                    unit="fraction of the makespan",
+                    basis=(
+                        f"{row.devices_used} of {row.devices} devices ran ops "
+                        f"({row.idle_devices} idle, and idle devices are INSIDE this "
+                        f"mean); peak {row.max_occupancy:.6g}, median "
+                        f"{row.median_occupancy:.6g}. {row.basis}"
+                    ),
+                ).as_dict()
+            )
+        return out
 
     def atlas_pool_sizing(self) -> Dict[int, "OrderedDict[str, object]"]:
         """``{macro_id: macros[].digital_pool}`` sized FROM THIS TIMELINE.
@@ -1064,6 +1193,479 @@ class FwsEvaluation:
             )
             for item in self.disclosures
         ]
+
+
+@dataclass(frozen=True)
+class ClassUtilization:
+    """How much of ONE device class actually worked (P7.3, D28).
+
+    D28 makes low utilization a provisioning finding the report must SURFACE,
+    so this row exists for every class the mapping instantiated, including the
+    classes that did nothing: an idle class with no row would be invisible
+    exactly when it matters most.
+
+    The occupancies are taken over EVERY device of the class, idle devices
+    included. A mean over the busy ones only would report a machine's silicon
+    as well used by leaving the unused silicon out of the average, which is the
+    number that hides the finding.
+    """
+
+    device_class: str
+    devices: int
+    devices_used: int
+    idle_devices: int
+    ops: int
+    busy_s: float
+    mean_occupancy: float
+    median_occupancy: float
+    max_occupancy: float
+    min_occupancy: float
+    basis: str
+
+    @property
+    def idle_share(self) -> float:
+        """Devices of this class that ran NOTHING, as a share of the class."""
+        return (self.idle_devices / self.devices) if self.devices else 0.0
+
+    def as_dict(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("device_class", self.device_class),
+                ("devices", int(self.devices)),
+                ("devices_used", int(self.devices_used)),
+                ("idle_devices", int(self.idle_devices)),
+                ("idle_share", float(self.idle_share)),
+                ("ops", int(self.ops)),
+                ("busy_s", float(self.busy_s)),
+                ("mean_occupancy", float(self.mean_occupancy)),
+                ("median_occupancy", float(self.median_occupancy)),
+                ("max_occupancy", float(self.max_occupancy)),
+                ("min_occupancy", float(self.min_occupancy)),
+                ("basis", self.basis),
+            )
+        )
+
+
+_UTILIZATION_BASIS = (
+    "per DEVICE CLASS, over every device of the class the mapping instantiated "
+    "(idle devices included in the average, which is what makes idle silicon "
+    "visible — D28). A device's occupancy is its busy union over the makespan, "
+    "the same projection the per-device occupancy table prints, so the two are "
+    "one accounting (D21)."
+)
+
+_LINK_UTILIZATION_BASIS = (
+    "links are NOT devices: D17 fixes the fabric at fully-connected p2p with no "
+    "congestion model, so a link occupies no resource on the timeline. This row "
+    "is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip "
+    "link over the makespan — and a value above 1.0 would mean the link is "
+    "oversubscribed rather than that it was busy that long."
+)
+
+
+def _build_utilization(
+    mapping: FwsMapping,
+    pricing: PricingResult,
+    occupancy: Sequence[DeviceOccupancy],
+    annotations: Sequence[FwsOpAnnotation],
+    makespan: float,
+) -> Tuple[ClassUtilization, ...]:
+    """One row per device class, plus the link row (P7.3 item 3, D28)."""
+    by_class: "OrderedDict[str, List[DeviceOccupancy]]" = OrderedDict()
+    for device in mapping.devices:
+        by_class.setdefault(device.device_class, [])
+    rows_by_id = {row.device_id: row for row in occupancy}
+    for device in mapping.devices:
+        row = rows_by_id.get(device.device_id)
+        if row is not None:
+            by_class[device.device_class].append(row)
+    out: List[ClassUtilization] = []
+    for device_class, rows in by_class.items():
+        values = [float(row.occupancy) for row in rows]
+        used = sum(1 for row in rows if row.ops)
+        out.append(
+            ClassUtilization(
+                device_class=device_class,
+                devices=len(rows),
+                devices_used=used,
+                idle_devices=len(rows) - used,
+                ops=sum(int(row.ops) for row in rows),
+                busy_s=math.fsum(float(row.busy_s) for row in rows),
+                mean_occupancy=(math.fsum(values) / len(values)) if values else 0.0,
+                median_occupancy=_median(values),
+                max_occupancy=max(values) if values else 0.0,
+                min_occupancy=min(values) if values else 0.0,
+                basis=_UTILIZATION_BASIS,
+            )
+        )
+    # The link row. One "device" is one ORDERED chip pair, which is what the
+    # p2p law prices; intra-chip movement is not a link (D17) and is excluded
+    # here exactly as it is excluded from the link energy term.
+    per_link: "OrderedDict[Tuple[int, int], List[float]]" = OrderedDict()
+    for cost in pricing.costs:
+        if cost.kind != "transfer":
+            continue
+        annotation = annotations[cost.uid]
+        if not annotation.crosses_chip:
+            continue
+        src = mapping.device_record(annotation.src_device).chip_id
+        dst = mapping.device_record(annotation.dst_device).chip_id
+        per_link.setdefault((int(src), int(dst)), []).append(float(cost.duration_s))
+    if per_link:
+        shares = [
+            (math.fsum(times) / makespan) if makespan > 0 else 0.0
+            for times in per_link.values()
+        ]
+        out.append(
+            ClassUtilization(
+                device_class="link",
+                devices=len(per_link),
+                devices_used=sum(1 for times in per_link.values() if times),
+                idle_devices=0,
+                ops=sum(len(times) for times in per_link.values()),
+                busy_s=math.fsum(math.fsum(times) for times in per_link.values()),
+                mean_occupancy=math.fsum(shares) / len(shares),
+                median_occupancy=_median(shares),
+                max_occupancy=max(shares),
+                min_occupancy=min(shares),
+                basis=_LINK_UTILIZATION_BASIS,
+            )
+        )
+    return tuple(out)
+
+
+def _build_bank_sharing(
+    mapping: FwsMapping,
+    program: Program,
+    pricing: PricingResult,
+    timeline: CoarseEvalResult,
+    annotations: Sequence[FwsOpAnnotation],
+    serving: ServingPoint,
+) -> "OrderedDict[str, object]":
+    """What co-residency in a bank actually COSTS on a decode step (P7 Fact 3).
+
+    Dense packing puts several tensors — and several layers — in one macro, so
+    the question a reader will ask is whether the strangers get in each other's
+    way. This block answers it by MEASUREMENT, not by assertion: every op that
+    started later than it was ready is charged to whatever else was running on
+    its device at the time, split three ways.
+
+      * ``same_owner_delay_s`` — one tensor's own blocks waiting for one
+        another. That is the macro walking its banks, not co-residency.
+      * ``cross_layer_delay_s`` — a resident of ANOTHER LAYER in the way.
+        Decode runs layers strictly in sequence (D15's batched-synchronous
+        regime), so this is 0.0 and Fact 3 is the reason.
+      * ``cross_tensor_same_layer_delay_s`` — a resident of the SAME layer in
+        the way. Two tensors of one layer CAN be concurrent (a routed expert
+        and a shared expert, a router and a projection), and when the packer
+        puts them in one macro they serialize. This is real, the timeline
+        already prices it, and it is reported rather than assumed away.
+    """
+    if serving.decode_steps <= 0:
+        return OrderedDict(
+            (
+                ("measured", False),
+                (
+                    "basis",
+                    "no decode step is lowered, and P7 is DECODE ONLY (D25): "
+                    "co-residency in prefill is a different question (concurrent "
+                    "layers) and this block does not answer it.",
+                ),
+            )
+        )
+    step = int(serving.decode_steps) - 1
+    ready = _ready_times(program, timeline)
+    by_device: "OrderedDict[int, List[int]]" = OrderedDict()
+    for cost in pricing.costs:
+        # ANALOG MACROS ONLY: this block is about BANK sharing, so the resource
+        # in question is the macro's ADC/mux path and nothing else. A pool op
+        # queueing behind a norm is a pool question (P4.5 sizes that) and
+        # putting it in this sum would answer a different question under this
+        # name.
+        if cost.device_class != "analog_macro":
+            continue
+        if timeline.finish_times[cost.uid] < 0:
+            continue
+        by_device.setdefault(int(cost.device_id), []).append(int(cost.uid))
+    same_owner = 0.0
+    cross_layer = 0.0
+    cross_tensor = 0.0
+    delayed = 0
+    for uids in by_device.values():
+        for uid in uids:
+            annotation = annotations[uid]
+            if annotation.phase != "decode" or int(annotation.step) != step:
+                continue
+            gap_start = float(ready[uid])
+            gap_end = float(timeline.start_times[uid])
+            if gap_end <= gap_start:
+                continue
+            delayed += 1
+            for other in uids:
+                if other == uid:
+                    continue
+                overlap = min(float(timeline.finish_times[other]), gap_end) - max(
+                    float(timeline.start_times[other]), gap_start
+                )
+                if overlap <= 0:
+                    continue
+                blocker = annotations[other]
+                if blocker.owner == annotation.owner:
+                    same_owner += overlap
+                elif blocker.layer != annotation.layer:
+                    cross_layer += overlap
+                else:
+                    cross_tensor += overlap
+    sharing_owners = 0
+    sharing_layers = 0
+    for macro in mapping.macros:
+        if not macro.tiles:
+            continue
+        if len({tile.owner for tile in macro.tiles}) > 1:
+            sharing_owners += 1
+        if len({tile.owner.layer for tile in macro.tiles}) > 1:
+            sharing_layers += 1
+    return OrderedDict(
+        (
+            ("measured", True),
+            ("decode_step", step),
+            ("macros_sharing_banks_across_tensors", sharing_owners),
+            ("macros_sharing_banks_across_layers", sharing_layers),
+            ("delayed_ops", delayed),
+            ("same_owner_delay_s", same_owner),
+            ("cross_layer_delay_s", cross_layer),
+            ("cross_tensor_same_layer_delay_s", cross_tensor),
+            (
+                "basis",
+                "for every ANALOG op of the lowered decode step that started later "
+                "than its last dependency finished, the waiting interval is attributed "
+                "to the ops that occupied the same macro during it, split by whose "
+                "weights they are. cross_layer_delay_s == 0 IS Fact 3, measured on this timeline: "
+                "decode runs layers in sequence, so a resident of another layer is "
+                "never in the way. A non-zero same-layer term is two concurrent "
+                "tensors of ONE layer sharing a macro; the timeline already prices it "
+                "and this line is where a reader sees it.",
+            ),
+        )
+    )
+
+
+def _utilization_disclosures(
+    mapping: FwsMapping,
+    utilization: Sequence[ClassUtilization],
+    bank_passes: Mapping[str, object],
+    bank_sharing: Mapping[str, object],
+    program: Program,
+) -> List[Relaxation]:
+    """The findings D28 forbids hiding, as banners rather than footnotes.
+
+    The first one is UNCONDITIONAL. A "low utilization" banner that only fires
+    below some threshold would make the threshold the finding; every run states
+    what every class did, and a reader compares the numbers themselves.
+    """
+    out: List[Relaxation] = []
+    if utilization:
+        binding = max(utilization, key=lambda row: row.max_occupancy)
+        summary = ", ".join(
+            f"{row.device_class} {row.mean_occupancy * 100:.3f}% mean"
+            f" / {row.max_occupancy * 100:.3f}% peak"
+            f" ({row.idle_devices} of {row.devices} idle)"
+            for row in utilization
+        )
+        out.append(
+            Relaxation(
+                constraint="device_class_utilization",
+                value=summary,
+                reason=(
+                    f"D28: idle silicon is a provisioning finding, never a fact to "
+                    f"accept, so every device class prints its utilization on every "
+                    f"run. The BINDING class here is {binding.device_class} at "
+                    f"{binding.max_occupancy * 100:.3f}% peak occupancy; a class far "
+                    "below it is silicon this provisioning does not need, and the "
+                    "system-sizing sweep is where that is fixed. No threshold decides "
+                    "when this banner appears — it always appears."
+                ),
+            )
+        )
+    if bank_passes.get("measured") and float(bank_passes.get("column_sets_never_read", 0)) > 0:
+        out.append(
+            Relaxation(
+                constraint="idle_weight_space_in_decode",
+                value=(
+                    f"{bank_passes['column_sets_never_read']:.0f} of "
+                    f"{bank_passes['column_sets_occupied']:.0f} occupied column sets "
+                    f"were not read in decode step {bank_passes['decode_step']}"
+                ),
+                reason=(
+                    "Invariant W (D27) says every bank holds real weights and decode "
+                    "reads each weight once per token, so a column set the step never "
+                    "activated is either weight space the decode path does not use or "
+                    "an op the DAG does not lower. It is reported here rather than "
+                    "averaged away."
+                ),
+            )
+        )
+    sharing = bank_sharing or {}
+    if sharing.get("measured") and float(
+        sharing.get("cross_tensor_same_layer_delay_s", 0)
+    ) > 0:
+        out.append(
+            Relaxation(
+                constraint="same_layer_bank_sharing_serializes",
+                value=(
+                    f"{float(sharing['cross_tensor_same_layer_delay_s']) * 1e6:.3f} us "
+                    f"in decode step {sharing['decode_step']}"
+                ),
+                reason=(
+                    "P7 Fact 3 covers CROSS-LAYER co-residency: decode runs layers in "
+                    "sequence, so residents of different layers never wait for each "
+                    "other, and this timeline measures that delay as exactly 0. Two "
+                    "tensors of the SAME layer can be concurrent (a routed expert "
+                    "beside a shared expert, a router beside a projection), and when "
+                    "the packer lands them in one macro they serialize on its ADC "
+                    "path. The timeline prices that; this banner is where a reader "
+                    "sees which kind of sharing cost time."
+                ),
+            )
+        )
+    undescribed = int(program.meta.misc.get("fws_undescribed_local_k_stacks", 0) or 0)
+    if undescribed:
+        out.append(
+            Relaxation(
+                constraint="unpriced_local_k_stack",
+                value=f"{undescribed} local K stack(s) carry no accumulator op",
+                reason=(
+                    "A macro holds several K blocks of one output block, so their "
+                    "partials must be summed, but the placement that produced them is "
+                    f"{mapping.packing!r} and only the dense packer emits the KStack "
+                    "descriptor P7.2's accumulator law prices. The adds are therefore "
+                    "NOT in this timeline. Pack densely (mapping.packing: dense) to "
+                    "price them; the gap is disclosed rather than silently absorbed."
+                ),
+            )
+        )
+    return out
+
+
+def _packing_block(mapping: FwsMapping) -> "OrderedDict[str, object]":
+    """The mapping's placement law and, under dense packing, its waste (D27).
+
+    Under the dedicated law there is no packer and therefore no waste figure:
+    the block says which law ran and stops. Printing a waste% for a placement
+    no packer produced would be an invented number.
+    """
+    summary = mapping.packing_summary()
+    if not summary:
+        return OrderedDict(
+            (
+                ("packing", mapping.packing),
+                ("waste_reported", False),
+                (
+                    "basis",
+                    "the dedicated placement law: each weight matrix starts on a fresh "
+                    "macro. No packer ran, so this run has no waste accounting — "
+                    "Invariant W's waste% is the DENSE packer's metric (D27) and a "
+                    "number here would be invented. Set mapping.packing: dense to get "
+                    "it.",
+                ),
+            )
+        )
+    block = OrderedDict((("packing", mapping.packing), ("waste_reported", True)))
+    block.update(summary)
+    block["basis"] = (
+        "cim_timing.dense_pack per chip (Invariant W, D27): real + remainder + tail == "
+        "committed, against the GLOBAL cell floor ceil(real_cells / cells_per_macro). "
+        "dedicated_macros is what the same tensors reach under the per-tensor "
+        "placement, so macros_saved == 0 IS the degenerate identity."
+    )
+    return block
+
+
+def _build_bank_passes(
+    mapping: FwsMapping,
+    pricing: PricingResult,
+    annotations: Sequence[FwsOpAnnotation],
+    serving: ServingPoint,
+) -> "OrderedDict[str, object]":
+    """Does one decode step read every stored bank exactly once? (P7 Fact 1)
+
+    Invariant W says every bank holds real weights; decode reads every weight
+    once per token. The two together say that ONE decode step charges each
+    macro exactly its occupied column sets — no more (nothing is read twice)
+    and no less (no bank sits out the step). This block MEASURES that on the
+    priced timeline instead of asserting it: it sums the active column sets the
+    analog law charged each macro during one lowered decode step and compares
+    them with the column sets the placement actually claimed on that macro.
+
+    A macro that comes up short is idle weight space and the block says so.
+    """
+    if serving.decode_steps <= 0:
+        return OrderedDict(
+            (
+                ("measured", False),
+                (
+                    "basis",
+                    "the run lowers no decode step, so there is no step to walk. "
+                    "P7 is DECODE ONLY (D25) and this block reports nothing rather "
+                    "than measuring a prefill pass it does not describe.",
+                ),
+            )
+        )
+    step = int(serving.decode_steps) - 1
+    charged: Dict[int, float] = {}
+    for cost in pricing.costs:
+        annotation = annotations[cost.uid]
+        if annotation.law != LAW_ANALOG_GEMM:
+            continue
+        if annotation.phase != "decode" or int(annotation.step) != step:
+            continue
+        macros = {tile.site.macro_id for tile in annotation.tiles}
+        if len(macros) != 1:
+            raise MappingError(
+                "execution",
+                f"analog op {annotation.uid} holds tiles on {len(macros)} macros. The "
+                "bank-pass accounting reads the per-op charge as ONE macro's column "
+                "sets, which is what the builder emits; an op spanning macros would "
+                "make that reading wrong rather than approximate.",
+            )
+        macro_id = int(next(iter(macros)))
+        charged[macro_id] = charged.get(macro_id, 0.0) + float(
+            cost.detail.get("active_column_sets", 0.0)
+        )
+    owned = {
+        int(macro.macro_id): int(macro.claimed_column_sets)
+        for macro in mapping.macros
+        if macro.tiles
+    }
+    matching = sum(
+        1 for macro_id, sets in owned.items() if charged.get(macro_id, 0.0) == sets
+    )
+    unread = math.fsum(
+        max(0.0, sets - charged.get(macro_id, 0.0)) for macro_id, sets in owned.items()
+    )
+    reread = math.fsum(
+        max(0.0, charged.get(macro_id, 0.0) - sets) for macro_id, sets in owned.items()
+    )
+    return OrderedDict(
+        (
+            ("measured", True),
+            ("decode_step", step),
+            ("macros_holding_tiles", len(owned)),
+            ("macros_walked_exactly_once", int(matching)),
+            ("column_set_passes_charged", math.fsum(charged.values())),
+            ("column_sets_occupied", float(sum(owned.values()))),
+            ("column_sets_never_read", float(unread)),
+            ("column_sets_read_more_than_once", float(reread)),
+            (
+                "basis",
+                "sum of the active-column-set charge (ADJ-4) over every analog op of "
+                f"lowered decode step {step}, per macro, against the column sets the "
+                "placement claimed on that macro. Equality per macro is Fact 1: each "
+                "macro walks its occupied banks once per decode step, whichever "
+                "tensors co-reside there.",
+            ),
+        )
+    )
 
 
 def _busy_intervals(
@@ -1442,6 +2044,7 @@ _ENERGY_LABELS: Mapping[str, str] = {
     "analog_arrays": "analog arrays (weight GEMM)",
     "link_traffic": "boundary and link traffic, PD handoff included",
     "digital_reduction": "priced shift-and-add reduction (D11)",
+    "digital_accumulation": "in-macro K-stack accumulation (P7.2)",
     "macro_pool_helpers": "per-macro pool helpers (norm, activation, residual, short conv)",
     "shared_digital_chiplet": "shared digital chiplet (attention, scan, state update)",
     "kv_traffic": "KV cache traffic",
@@ -1451,6 +2054,7 @@ _ENERGY_ORDER = (
     "analog_arrays",
     "link_traffic",
     "digital_reduction",
+    "digital_accumulation",
     "macro_pool_helpers",
     "shared_digital_chiplet",
     "kv_traffic",
@@ -1484,6 +2088,13 @@ def _build_energy(pricing: PricingResult) -> Tuple[EnergyComponent, ...]:
         "digital_reduction": (
             "sum of CimDeviceModel.price_reduction energies: adds x "
             "cim.cards.<card>.pool_energy_per_add_pj (0 when the card declares none)."
+        ),
+        "digital_accumulation": (
+            "sum of CimDeviceModel.price_accumulation energies over the K stacks the "
+            "packer put in ONE macro: (depth - 1) adds per output x "
+            "cim.cards.<card>.pool_energy_per_add_pj (0 when the card declares none). "
+            "A stack spread across macros contributes nothing here — the row-block "
+            "partial-sum law prices that shape (D21)."
         ),
         "macro_pool_helpers": (
             "no law prices a norm, an activation, a residual add or a short depthwise "
@@ -1907,6 +2518,14 @@ def evaluate_fws(
         mapping, serving, pricing.costs, timeline
     )
     occupancy, duty = _build_occupancy(mapping, pricing, timeline, program)
+    annotations = annotations_of(program)
+    utilization = _build_utilization(
+        mapping, pricing, occupancy, annotations, makespan_of(timeline)
+    )
+    bank_passes = _build_bank_passes(mapping, pricing, annotations, serving)
+    bank_sharing = _build_bank_sharing(
+        mapping, program, pricing, timeline, annotations, serving
+    )
     energy = _build_energy(pricing)
     memory, memory_disclosures = _build_memory(
         mapping, serving, program, pricing, timeline
@@ -1919,6 +2538,11 @@ def evaluate_fws(
     disclosures = [item for item in disclosures if item.constraint != "op_durations"]
     disclosures.extend(pricing.disclosures)
     disclosures.extend(memory_disclosures)
+    disclosures.extend(
+        _utilization_disclosures(
+            mapping, utilization, bank_passes, bank_sharing, program
+        )
+    )
     if extrapolation.get("extrapolated"):
         disclosures.append(
             Relaxation(
@@ -1939,6 +2563,9 @@ def evaluate_fws(
         metrics=metrics,
         occupancy=occupancy,
         duty_cycles=duty,
+        utilization=utilization,
+        bank_passes=bank_passes,
+        bank_sharing=bank_sharing,
         energy=energy,
         memory=memory,
         pools=pools,
@@ -2077,6 +2704,20 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
                 "named owner (D21). Transfers occupy no device (D17).",
             ),
             (
+                "utilization",
+                [row.as_dict() for row in evaluation.utilization],
+            ),
+            (
+                "utilization_basis",
+                "per-device-class utilization is a REQUIRED output of every run "
+                "(P7.3, D28): low utilization is a provisioning finding the report "
+                "surfaces, never a number it leaves out. Idle devices are inside the "
+                "averages, and the classes with no ops still get a row.",
+            ),
+            ("bank_passes", OrderedDict(evaluation.bank_passes)),
+            ("bank_sharing", OrderedDict(evaluation.bank_sharing)),
+            ("packing", _packing_block(mapping)),
+            (
                 "duty_cycles",
                 OrderedDict(
                     (str(macro_id), float(value))
@@ -2191,6 +2832,184 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
             (
                 "disclosures",
                 merge_disclosures(tuple(evaluation.disclosures) + (_RESULTS_FILE_NOTE,)),
+            ),
+        )
+    )
+
+
+#: The packing-comparison artifact's schema id (P7.3 item 4).
+PACKING_COMPARISON_SCHEMA = "fws_packing_comparison/1"
+
+
+def _packing_point(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
+    """One placement law, as the four numbers P7.3 asks for and their inputs."""
+    mapping = evaluation.mapping
+    summary = mapping.summary()
+    steps = list(evaluation.decode_step_times_s)
+    tokens = [
+        metric for metric in evaluation.metrics if metric.key.endswith(".tokens_per_s")
+    ]
+    return OrderedDict(
+        (
+            ("packing", mapping.packing),
+            ("analog_macro_slots", int(summary["analog_macro_slots"])),
+            ("macros_holding_tiles", int(summary["macros_holding_tiles"])),
+            ("unowned_macro_slots", int(summary["unowned_macro_slots"])),
+            ("tiles", int(summary["tiles"])),
+            ("packing_accounting", _packing_block(mapping)),
+            ("makespan_s", float(evaluation.makespan_s)),
+            ("decode_step_times_s", [float(value) for value in steps]),
+            ("median_decode_step_s", _median(steps)),
+            ("tokens_per_s", float(tokens[0].value) if tokens else None),
+            ("bank_passes", OrderedDict(evaluation.bank_passes)),
+            ("bank_sharing", OrderedDict(evaluation.bank_sharing)),
+            ("utilization", [row.as_dict() for row in evaluation.utilization]),
+            (
+                "accumulator_ops",
+                sum(
+                    1
+                    for cost in evaluation.pricing.costs
+                    if cost.energy_component == "digital_accumulation"
+                ),
+            ),
+        )
+    )
+
+
+def packing_comparison_document(
+    dedicated: FwsEvaluation,
+    dense: FwsEvaluation,
+    *,
+    hardware_config: str,
+    model_config: str,
+) -> "OrderedDict[str, object]":
+    """ONE model, ONE machine, two placement laws, side by side (P7.3 item 4).
+
+    Both halves are complete evaluations of the same hardware and the same
+    model — the ONLY difference is the packing law — so the deltas below are
+    the law's, and nothing else's. The function refuses two evaluations that
+    do not meet that condition by name, because a comparison of two different
+    machines would answer a question nobody asked.
+
+    Every field is read off the two evaluations. Nothing is recomputed and no
+    clock, path or hash enters the document, which is what lets a test
+    regenerate it and compare BYTES.
+    """
+    if dedicated.mapping.packing != "dedicated" or dense.mapping.packing != "dense":
+        raise MappingError(
+            "assembly",
+            "packing_comparison_document takes the DEDICATED evaluation first and the "
+            f"DENSE one second (got {dedicated.mapping.packing!r} and "
+            f"{dense.mapping.packing!r}). The argument order is the comparison's "
+            "meaning, so it is checked rather than assumed.",
+        )
+    left, right = dedicated.mapping, dense.mapping
+    if left.model_id != right.model_id or left.phase != right.phase:
+        raise MappingError(
+            "assembly",
+            f"the two halves run different workloads ({left.model_id}/{left.phase} vs "
+            f"{right.model_id}/{right.phase}). Only the packing law may differ.",
+        )
+    if dedicated.serving != dense.serving:
+        raise MappingError(
+            "assembly",
+            "the two halves serve different points (D15). Only the packing law may "
+            "differ, or the step times below compare two workloads.",
+        )
+    left_point = _packing_point(dedicated)
+    right_point = _packing_point(dense)
+    left_step = float(left_point["median_decode_step_s"])
+    right_step = float(right_point["median_decode_step_s"])
+    accounting = right_point["packing_accounting"]
+    delta = OrderedDict(
+        (
+            (
+                "macros_saved",
+                int(left_point["macros_holding_tiles"])
+                - int(right_point["macros_holding_tiles"]),
+            ),
+            ("cell_floor_macros", int(accounting["cell_floor_macros"])),
+            (
+                "macros_above_floor",
+                int(right_point["macros_holding_tiles"])
+                - int(accounting["cell_floor_macros"]),
+            ),
+            ("waste_pct", float(accounting["waste_pct"])),
+            ("median_decode_step_delta_s", right_step - left_step),
+            (
+                "median_decode_step_delta_pct",
+                (100.0 * (right_step - left_step) / left_step) if left_step else 0.0,
+            ),
+            (
+                "basis",
+                "macros_saved is dense against the SAME tensors under the per-tensor "
+                "placement, measured on both mappings rather than predicted. "
+                "macros_above_floor is what dense packing still costs over the global "
+                "cell floor: the floor is a whole-model quantity and this packing is "
+                "per chip, so the difference is chip granularity plus the "
+                "dimension-mismatch remainder, which waste_pct itemizes. The step "
+                "delta is the two timelines' median lowered decode steps, and it is "
+                "the accumulator/partial-transport trade (P7 Fact 1), not an analog "
+                "speed-up: both laws charge the same column-set passes per step.",
+            ),
+        )
+    )
+    return OrderedDict(
+        (
+            ("schema", PACKING_COMPARISON_SCHEMA),
+            (
+                "note",
+                "DECODE ONLY (D25). Dense packing is Invariant W in the mapper (D27): "
+                "one contiguous bank stream per chip, cross-tensor and cross-layer "
+                "bank sharing legal because decode layers are sequential (P7 Fact 3). "
+                "Both halves below are full placed-DAG evaluations, not estimates.",
+            ),
+            (
+                "provenance",
+                OrderedDict(
+                    (
+                        ("producer", "fws_eval.packing_comparison_document (QIF P7.3)"),
+                        ("hardware_config", hardware_config),
+                        ("model_config", model_config),
+                        (
+                            "regenerate",
+                            ".venv/bin/python -m pytest -q tests/test_qif_folding_mapping.py "
+                            "-k regenerate  (the test rebuilds this document from the two "
+                            "configs above and compares BYTES; run it with "
+                            "FWS_WRITE_PACKING_ARTIFACT=1 to rewrite the file)",
+                        ),
+                        ("invented_fields", []),
+                    )
+                ),
+            ),
+            (
+                "model",
+                OrderedDict(
+                    (
+                        ("model_id", str(left.model_id)),
+                        ("phase", str(left.phase)),
+                        ("num_layers", int(left.device.params.num_layers)),
+                    )
+                ),
+            ),
+            (
+                "serving",
+                OrderedDict(
+                    (
+                        ("batch", int(dedicated.serving.batch)),
+                        ("prefill_len", int(dedicated.serving.prefill_len)),
+                        ("decode_len", int(dedicated.serving.decode_len)),
+                        ("decode_steps_lowered", int(dedicated.serving.decode_steps)),
+                    )
+                ),
+            ),
+            ("points", [left_point, right_point]),
+            ("delta", delta),
+            (
+                "disclosures",
+                merge_disclosures(
+                    tuple(dedicated.disclosures) + tuple(dense.disclosures)
+                ),
             ),
         )
     )
@@ -2329,6 +3148,97 @@ def render_report(document: Mapping[str, object]) -> List[str]:
                 f"{row['occupancy'] * 100:>7.3f}%  {row['ops']:>5} ops  owner: {row['owner'][:64]}"
             )
         lines.append(f"  basis: {evaluation['occupancy_basis']}")
+
+    utilization = evaluation.get("utilization") or []
+    if utilization:
+        lines.extend(
+            [
+                "",
+                "Utilization by device class (D28 — idle silicon is a finding, not a footnote):",
+                f"  {'class':<16}{'devices':>9}{'idle':>7}{'ops':>9}"
+                f"{'mean':>10}{'median':>10}{'peak':>10}",
+            ]
+        )
+        for row in utilization:
+            lines.append(
+                f"  {row['device_class']:<16}{row['devices']:>9}{row['idle_devices']:>7}"
+                f"{row['ops']:>9}{row['mean_occupancy'] * 100:>9.3f}%"
+                f"{row['median_occupancy'] * 100:>9.3f}%{row['max_occupancy'] * 100:>9.3f}%"
+            )
+        lines.append(f"  basis: {evaluation['utilization_basis']}")
+        link = [row for row in utilization if row["device_class"] == "link"]
+        if link:
+            lines.append(f"  link row: {link[0]['basis']}")
+
+    packing = evaluation.get("packing") or {}
+    if packing:
+        lines.extend(["", "Packing (Invariant W, D27):"])
+        if packing.get("waste_reported"):
+            lines.append(
+                f"  {packing['packing']} ({packing['walk']} walk): {packing['macros']} macros "
+                f"vs {packing['dedicated_macros']} dedicated ({packing['macros_saved']} saved), "
+                f"global cell floor {packing['cell_floor_macros']}"
+            )
+            lines.append(
+                f"  waste {packing['waste_pct']:.3f}% = remainder {packing['remainder_cells']} "
+                f"+ tail {packing['tail_cells']} cells of {packing['committed_cells']} committed"
+            )
+            lines.append(
+                f"  K stacks: {packing['local_k_stacks']} in-macro (accumulator priced), "
+                f"{packing['spread_k_stacks']} spread (row-block law)"
+            )
+        else:
+            lines.append(f"  {packing['packing']}: no packer ran, so no waste is reported")
+        lines.append(f"  basis: {packing['basis']}")
+
+    bank_passes = evaluation.get("bank_passes") or {}
+    if bank_passes.get("measured"):
+        lines.extend(
+            [
+                "",
+                (
+                    f"Bank passes in decode step {bank_passes['decode_step']} (P7 Fact 1 — "
+                    "each macro walks its occupied banks once):"
+                ),
+                (
+                    f"  {bank_passes['macros_walked_exactly_once']} of "
+                    f"{bank_passes['macros_holding_tiles']} macros walked exactly once; "
+                    f"{bank_passes['column_set_passes_charged']:.0f} column-set passes "
+                    f"charged against {bank_passes['column_sets_occupied']:.0f} occupied"
+                ),
+                (
+                    f"  never read {bank_passes['column_sets_never_read']:.0f}, "
+                    f"read again {bank_passes['column_sets_read_more_than_once']:.0f}"
+                ),
+                f"  basis: {bank_passes['basis']}",
+            ]
+        )
+
+    sharing = evaluation.get("bank_sharing") or {}
+    if sharing.get("measured"):
+        lines.extend(
+            [
+                "",
+                (
+                    "Bank sharing in decode step "
+                    f"{sharing['decode_step']} (P7 Fact 3 — what co-residency costs):"
+                ),
+                (
+                    f"  {sharing['macros_sharing_banks_across_tensors']} macros hold "
+                    f"more than one tensor, {sharing['macros_sharing_banks_across_layers']}"
+                    " hold more than one layer"
+                ),
+                (
+                    f"  delay from ANOTHER LAYER's residents "
+                    f"{sharing['cross_layer_delay_s'] * 1e6:.3f} us; from the SAME "
+                    f"layer's other tensors "
+                    f"{sharing['cross_tensor_same_layer_delay_s'] * 1e6:.3f} us; from "
+                    f"the tensor's own blocks "
+                    f"{sharing['same_owner_delay_s'] * 1e6:.3f} us"
+                ),
+                f"  basis: {sharing['basis']}",
+            ]
+        )
 
     pool = evaluation["digital_pool"]
     lines.extend(["", "Derived per-macro digital pool (D12, sized FROM the timeline):"])

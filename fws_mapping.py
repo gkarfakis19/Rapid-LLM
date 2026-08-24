@@ -84,7 +84,16 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cim_timing
-from cim_timing import CimDeviceModel, Tile, TileOwner, TileSite
+from cim_timing import (
+    CANONICAL_WALK,
+    CimDeviceModel,
+    DensePacking,
+    PackRequest,
+    Tile,
+    TileOwner,
+    TileSite,
+    refuse_dead_fold,
+)
 from program.groups import CommunicatorFactory, canonical_axis_label
 from program.ir import GroupKey
 from program.layout import RankLayout
@@ -146,6 +155,19 @@ _LOCAL_BASE_STRIDE = 1_000_000
 #: ADJ-6: decode steps the DAG lowers by default. A longer run is a window
 #: plus a DISCLOSED extrapolation, never a silent truncation.
 DEFAULT_DECODE_WINDOW = 2
+
+#: The two packing laws a mapping can be built under (P7.2).
+#:
+#: ``dedicated`` is what every shipped config gets and what P3 has always
+#: done: each weight matrix starts on a fresh macro, so a tensor that does not
+#: fill its last macro leaves the remainder idle.
+#:
+#: ``dense`` is INVARIANT W (D27): one contiguous bank stream across the
+#: chip's tensors, so a bank idles only when the stream runs out. It is opt-in
+#: at this seam and changes no shipped number until a caller asks for it.
+PACKING_DEDICATED = "dedicated"
+PACKING_DENSE = "dense"
+PACKING_MODES: Tuple[str, ...] = (PACKING_DEDICATED, PACKING_DENSE)
 
 
 @dataclass(frozen=True)
@@ -502,6 +524,8 @@ class FwsMapping:
         decode_window: int,
         notes: Sequence[str],
         relaxations: Sequence[Relaxation],
+        packing: str = PACKING_DEDICATED,
+        packings: Mapping[int, DensePacking] = (),
     ) -> None:
         self.device = device
         self.hw = hw_config
@@ -523,6 +547,13 @@ class FwsMapping:
         self.decode_window = int(decode_window)
         self.notes = tuple(notes)
         self._relaxations = tuple(relaxations)
+        #: P7.2: which packing law placed these tiles, and the per-chip
+        #: packings when it was the dense one. "dedicated" leaves ``packings``
+        #: empty, which is what every shipped config still gets.
+        self.packing = str(packing)
+        self.packings = OrderedDict(
+            (int(chip_id), value) for chip_id, value in dict(packings).items()
+        )
 
         sizes = {axis: max(1, int(self.degrees[axis])) for axis in MAPPING_AXES}
         strides: Dict[str, int] = {}
@@ -684,6 +715,83 @@ class FwsMapping:
             total += self._stored_columns(macro) - macro.held_columns
         return int(total)
 
+    def packing_summary(self) -> "OrderedDict[str, object]":
+        """The Invariant W accounting for the WHOLE system (P7.2, D27).
+
+        The per-chip packings are streams; this is their sum, plus the two
+        numbers only the system level can state:
+
+          * ``cell_floor_macros`` — the GLOBAL cell floor,
+            ``ceil(total_model_cells / cells_per_macro)``. Analog silicon is
+            determined by the model, not chosen by the mapper (D27), and this
+            is that quantity.
+          * ``dedicated_macros`` / ``macros_saved`` — what the SAME tensors
+            reach under today's per-tensor placement, and the difference. The
+            delta is computed and disclosed here rather than left implicit
+            (P7.2 item 3): ``macros_saved == 0`` is the degenerate identity.
+
+        Returns an empty mapping under the dedicated packing: a summary of a
+        packing that was never run would be an invented number.
+        """
+        if not self.packings:
+            return OrderedDict()
+        device = self.device
+        card = device.card
+        cells_per_macro = (
+            int(card.params.rows)
+            * int(card.stored_columns_per_set)
+            * int(card.column_sets_per_macro)
+        )
+        packings = tuple(self.packings.values())
+        real = sum(p.real_cells for p in packings)
+        block = sum(p.block_cells for p in packings)
+        committed = sum(p.committed_cells for p in packings)
+        macros = sum(p.macro_count for p in packings)
+        dedicated = sum(self._dedicated_macros(chip_id) for chip_id in self.packings)
+        waste = committed - real
+        return OrderedDict(
+            (
+                ("packing", self.packing),
+                ("walk", packings[0].walk),
+                ("chips_packed", len(packings)),
+                ("macros", int(macros)),
+                ("dedicated_macros", int(dedicated)),
+                ("macros_saved", int(dedicated - macros)),
+                ("cell_floor_macros", int(-(-real // cells_per_macro)) if real else 0),
+                ("banks_used", sum(p.banks_used for p in packings)),
+                ("real_cells", int(real)),
+                ("committed_cells", int(committed)),
+                ("remainder_cells", int(block - real)),
+                ("tail_cells", int(committed - block)),
+                ("waste_cells", int(waste)),
+                ("waste_pct", (100.0 * waste / committed) if committed else 0.0),
+                ("k_stacks", sum(len(p.k_stacks) for p in packings)),
+                ("local_k_stacks", sum(len(p.local_k_stacks) for p in packings)),
+                ("spread_k_stacks", sum(len(p.spread_k_stacks) for p in packings)),
+            )
+        )
+
+    def _dedicated_macros(self, chip_id: int) -> int:
+        """Macros this chip's tensors reach under the PER-TENSOR placement.
+
+        The comparison term for the delta: ``tile_macro_count`` is exactly the
+        reach ``build_mapping`` advances its cursor by, so summing it over the
+        chip's owners reproduces the dedicated placement's macro count without
+        building it.
+        """
+        packing = self.packings[int(chip_id)]
+        device = self.device
+        seen: "OrderedDict[TileOwner, Tuple[int, int]]" = OrderedDict()
+        for tile in packing.tiles:
+            k, n = seen.get(tile.owner, (0, 0))
+            seen[tile.owner] = (max(k, tile.k_end), max(n, tile.n_end))
+        return sum(
+            device.tile_macro_count(
+                k, n, column_sets_per_tile=packing.column_sets_per_bank
+            )
+            for k, n in seen.values()
+        )
+
     def summary(self) -> Dict[str, object]:
         analog = self.analog_chips()
         return OrderedDict(
@@ -705,6 +813,10 @@ class FwsMapping:
                 ("devices", len(self.devices)),
                 ("owners", len(self._tiles_by_owner)),
                 ("decode_window", self.decode_window),
+                # P7.3: the placement LAW these numbers came out of. Two
+                # mappings of one model can differ only by this word, so a
+                # summary that omitted it would make them look identical.
+                ("packing", self.packing),
             )
         )
 
@@ -1027,6 +1139,19 @@ class FwsMapping:
             "the suggestion is one chiplet per analog chip, which is the concurrency "
             "the closed-form spatial pipeline assumes)",
         ]
+        packing = self.packing_summary()
+        if packing:
+            # Invariant W is a REPORTED metric (D27), so it gets its own line
+            # rather than living only in a relaxation banner.
+            lines.append(
+                f"[FWS-CIM]   packing: {packing['packing']} ({packing['walk']} walk) — "
+                f"{packing['macros']} macros vs {packing['dedicated_macros']} dedicated "
+                f"({packing['macros_saved']} saved), global cell floor "
+                f"{packing['cell_floor_macros']}; waste {packing['waste_pct']:.3f}% "
+                f"= remainder {packing['remainder_cells']} + tail {packing['tail_cells']} "
+                f"cells; K stacks {packing['local_k_stacks']} in-macro / "
+                f"{packing['spread_k_stacks']} spread"
+            )
         for note in self.notes:
             lines.append(f"[FWS-CIM]   note: {note}")
         for chip in self.analog_chips():
@@ -1191,6 +1316,7 @@ def build_mapping(
     phase: Optional[str] = None,
     label: Optional[str] = None,
     model_id: Optional[str] = None,
+    packing: Optional[str] = None,
 ) -> FwsMapping:
     """``(workload, platform) -> mapping`` — the seam P3 fixes now.
 
@@ -1201,6 +1327,16 @@ def build_mapping(
     the ``layers_per_chip: auto`` packer is the second; automatic search is a
     later third (D10). The workload argument is a single model today and the
     signature takes a platform, never a count.
+
+    ``packing`` selects the placement law (P7.2): ``"dedicated"`` is today's
+    per-tensor placement and the DEFAULT, so no shipped number moves; ``"dense"``
+    is Invariant W (D27) — one contiguous bank stream per chip, so a bank idles
+    only when the stream runs out.
+
+    ``None`` (P7.3) reads it from the spec's ``mapping.packing`` field, which is
+    where a run DECLARES its placement law; an explicit keyword overrides the
+    config for a caller that wants both laws out of one machine (the packing
+    comparison is exactly that caller). One law reaches the packer either way.
     """
     import config as _config
 
@@ -1219,6 +1355,23 @@ def build_mapping(
         phase = "decode" if decode_len > 0 else "prefill"
     if phase not in ("prefill", "decode"):
         raise MappingError("execution", f"phase must be 'prefill' or 'decode' (got {phase!r})")
+    # The config declares the law; an explicit keyword overrides it. There is
+    # no third source and no precedence rule beyond that one sentence (D21).
+    packing = str(getattr(spec, "packing", PACKING_DEDICATED) if packing is None else packing)
+    if packing not in PACKING_MODES:
+        raise MappingError(
+            "residency",
+            f"packing = {packing!r} is not a placement law this mapper has. The modes "
+            f"are {PACKING_MODES}: 'dedicated' places each weight matrix on fresh "
+            "macros, 'dense' packs one contiguous bank stream (Invariant W, D27).",
+        )
+    dense = packing == PACKING_DENSE
+    if dense and phase == "prefill":
+        # D25 / D26: the refusal IS the implementation.
+        refuse_dead_fold(
+            "prefill_folding",
+            context=f"build_mapping(packing='dense', phase='prefill') for {system_id!r}",
+        )
     # The model's own name wins, then the config's declared name, then the
     # PRICING CARRIER as the last resort (which is what this was before a model
     # could declare a name, so nothing already shipped moves).
@@ -1370,6 +1523,13 @@ def build_mapping(
     card = device.card
     rows = int(card.params.rows)
     allocation_entries = _allocation_by_owner(device)
+    if dense and allocation_entries:
+        raise MappingError(
+            "residency",
+            "cim.allocation declares where tiles go and packing = 'dense' computes it. "
+            "Two placements of one tile is two accountings of one fact (D21): drop the "
+            "allocation block to pack densely, or keep it and pack 'dedicated'.",
+        )
     if allocation_entries and macro_slots <= 0:
         raise MappingError(
             "residency",
@@ -1385,6 +1545,8 @@ def build_mapping(
     next_chip_id = 0
     macro_usage: Dict[int, int] = {}
     auto_cursor: Dict[int, int] = {}
+    chip_requests: Dict[int, List[PackRequest]] = {}
+    packings: "OrderedDict[int, DensePacking]" = OrderedDict()
 
     def _place(owner: TileOwner, stage: StageShape, chip_id: int, chip_macro_base: int):
         """Enumerate one matrix's tiles onto the chip's next free macros.
@@ -1396,6 +1558,20 @@ def build_mapping(
         tiles landing on one column set is caught by P2's capacity check with
         its own named error, which is where that failure belongs.
         """
+        if dense:
+            # Invariant W: nothing is placed per tensor. The chip's tensors are
+            # collected in offer order and packed as ONE bank stream once the
+            # chip is complete, which is what keeps a layer's tensors adjacent
+            # (and therefore on one chip) without the packer reordering them.
+            chip_requests.setdefault(chip_id, []).append(
+                PackRequest(
+                    owner=owner,
+                    k=stage.k,
+                    n=stage.n,
+                    group=f"{owner.model}.L{owner.layer}",
+                )
+            )
+            return ()
         used = auto_cursor.get(chip_id, 0)
         tiles = device.enumerate_tiles(
             stage.k, stage.n, owner, first_macro_id=chip_macro_base + used
@@ -1486,6 +1662,21 @@ def build_mapping(
                     continue
                 owner = TileOwner(model_id, layer, stage.op, stage.expert, shard_index)
                 tiles_by_chip[chip_id].extend(_place(owner, stage, chip_id, chip_macro_base))
+        if dense:
+            # The chip is complete: pack its tensors as one stream (D27). The
+            # K-INNER walk is the only one on offer (D26), so a tensor's K
+            # blocks stay in one macro whenever the bank granularity lets them.
+            chip_packing = device.dense_pack(
+                chip_requests.get(chip_id, ()),
+                first_macro_id=chip_macro_base,
+                walk=CANONICAL_WALK,
+            )
+            packings[chip_id] = chip_packing
+            validate_tile_row_convention(chip_packing.tiles, rows)
+            tiles_by_chip[chip_id] = list(chip_packing.tiles)
+            all_tiles.extend(chip_packing.tiles)
+            macro_usage[chip_id] = chip_packing.macro_count
+            auto_cursor[chip_id] = chip_packing.macro_count
 
     # macro slots: derive when the config declares none, and disclose it.
     peak_usage = max(macro_usage.values()) if macro_usage else 0
@@ -1508,10 +1699,22 @@ def build_mapping(
         for chip_index, (chip_id, _label, _shard, _layers, _role) in enumerate(chip_specs):
             delta = chip_index * macro_slots - macro_base_of_chip[chip_id]
             macro_base_of_chip[chip_id] = chip_index * macro_slots
-            moved = [
-                replace(tile, site=replace(tile.site, macro_id=tile.site.macro_id + delta))
-                for tile in tiles_by_chip[chip_id]
-            ]
+            if dense:
+                # A packing is a bank STREAM from a base, so it is re-packed at
+                # the enumerated base rather than shifted: the same stream, with
+                # its fills and K stacks naming the ids the mapping ships.
+                chip_packing = device.dense_pack(
+                    chip_requests.get(chip_id, ()),
+                    first_macro_id=chip_index * macro_slots,
+                    walk=CANONICAL_WALK,
+                )
+                packings[chip_id] = chip_packing
+                moved = list(chip_packing.tiles)
+            else:
+                moved = [
+                    replace(tile, site=replace(tile.site, macro_id=tile.site.macro_id + delta))
+                    for tile in tiles_by_chip[chip_id]
+                ]
             tiles_by_chip[chip_id] = moved
             shifted.extend(moved)
         all_tiles = shifted
@@ -1696,7 +1899,7 @@ def build_mapping(
 
     blocks = sorted({tile.owner.op for tile in all_tiles})
     endpoint_blocks = sorted({stage.op for _, stage in endpoints})
-    return FwsMapping(
+    mapping = FwsMapping(
         device=device,
         hw_config=hw_config,
         model_config=model,
@@ -1717,7 +1920,50 @@ def build_mapping(
         decode_window=decode_window,
         notes=notes,
         relaxations=relaxations,
+        packing=packing,
+        packings=packings,
     )
+    if dense:
+        summary = mapping.packing_summary()
+        seen: List[str] = []
+        for chip_packing in packings.values():
+            for disclosure in chip_packing.disclosures:
+                if disclosure not in seen:
+                    seen.append(disclosure)
+        identity = (
+            "This packing IS the dedicated placement (0 macros saved): the degenerate "
+            "identity holds and every number downstream is the one today's placement "
+            "produces."
+            if summary["macros_saved"] == 0
+            else (
+                f"Dense packing reaches {summary['macros']} analog macros where the "
+                f"per-tensor placement reaches {summary['dedicated_macros']}: "
+                f"{summary['macros_saved']} macros of analog silicon that held no "
+                "weights now hold some. The delta is stated here rather than left for a "
+                "reader to notice."
+            )
+        )
+        mapping._relaxations = mapping._relaxations + (
+            Relaxation(
+                constraint="packing",
+                value=(
+                    f"dense (Invariant W, D27): {summary['macros']} macros, "
+                    f"global cell floor {summary['cell_floor_macros']}, waste "
+                    f"{summary['waste_pct']:.3f}%"
+                ),
+                reason=(
+                    "Every bank of every macro holds real weights; waste is the "
+                    f"dimension-mismatch remainder ({summary['remainder_cells']} cells) "
+                    f"plus the unfilled tail of a last macro ({summary['tail_cells']} "
+                    f"cells), and nothing else. {identity} K stacks: "
+                    f"{summary['local_k_stacks']} in-macro (one accumulator per macro "
+                    f"under the k_inner walk) and {summary['spread_k_stacks']} spread "
+                    "across macros (priced by the existing row-block partial-sum law)."
+                ),
+            ),
+        )
+        mapping.notes = mapping.notes + tuple(seen)
+    return mapping
 
 
 def _linearize(degrees: Mapping[str, int], shard: ShardCoord) -> int:

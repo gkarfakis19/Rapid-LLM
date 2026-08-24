@@ -1,0 +1,2612 @@
+{
+ "schema": "fws_atlas/1",
+ "title": "Granite-4.0-H-Tiny layer-0 folding excerpt",
+ "subtitle": "P7.6 fixture: 8 real macro slots of the shipped Granite atlas, plus the folding and decode-pass extension blocks the folding card and the macro time-lane view read. Decode only (D25).",
+ "provenance": {
+  "authored": "2026-08-24",
+  "author": "P7.6 hand fixture. chips[], macros[], tiles[], cards[] and the link byte law are copied VERBATIM from granite_4_0_h_tiny.json (emitted by fws_atlas_export from a real mapping and priced by P4); folding[] and passes[] are hand-authored against those rows because no producer emits them yet.",
+  "reference_run": {
+   "command": "tools/fws_emit_atlas.py --hardware_config configs/hardware-config/fws_cim_granite_tiny.yaml --model_config configs/model-config/granite_4_0_h_tiny_inf.yaml --priced",
+   "report": "docs/qif/atlas/granite_4_0_h_tiny.json (the excerpt's source document)",
+   "parallelism": "tp = 1, ep = 1, pp = 1"
+  },
+  "grounded": [
+   "chips[], macros[], tiles[] and cards[] are copied row for row from granite_4_0_h_tiny.json",
+   "macros[].duty_cycle and macros[].digital_pool are P4's measured values, copied",
+   "the folding cards' K, N and cell counts are read off those copied tiles",
+   "passes[].boxes[] enumerate the mux banks of the copied macros and name the copied tile each pass drives",
+   "metrics[] prefixed run. are quoted from granite_4_0_h_tiny.json and say so in their basis"
+  ],
+  "invented_fields": [
+   "passes.pass_time_s",
+   "folding.cards[].variants[].time.value"
+  ],
+  "note": "Two kinds of number live here. Everything copied from granite_4_0_h_tiny.json is a measured placement or a measured time. Everything the folding block adds is a MAPPING the packer has not written yet (P7.2/P7.3 are open): the enumerated blocks, banks and pass counts are exact arithmetic on the copied shapes, the seconds are a marked placeholder, and every energy is reported as UNCOVERED because no card declares the law. The chip here is an 8-slot EXCERPT of a 640-slot chiplet: its slot count and occupancy are facts about the excerpt."
+ },
+ "cards": {
+  "analog_1536x384x4": {
+   "label": "analog macro, 1536 x (384 ADC x 4 mux)",
+   "kind": "analog_macro",
+   "capacity": {
+    "rows": 1536,
+    "cols_adc": 384,
+    "mux": 4,
+    "stored_cols": 1536
+   },
+   "area_mm2": 2.0204136,
+   "bits_per_cell": null,
+   "weight_bits": 16,
+   "slicing": false,
+   "basis": "cim.analog / cim.cards of the hardware config; area_mm2 = CimDeviceModel.macro_footprint_mm2() (P2.5: area per array divided by the card's 3D height); weight_bits is undeclared on this card and falls back to sw_param.precision.parameters"
+  },
+  "digital_sa_32x64": {
+   "label": "shared digital chiplet, 32 x 64 sa engine",
+   "kind": "digital_engine",
+   "capacity": {
+    "rows": 32,
+    "cols_adc": 64,
+    "mux": 1,
+    "stored_cols": 64
+   },
+   "area_mm2": null,
+   "bits_per_cell": null,
+   "weight_bits": 16,
+   "slicing": false,
+   "basis": "cim.fabric / cim.cards of the hardware config. It stores no weights: weight_bits is the activation width it computes on, and area_mm2 is null when the card declares none — the atlas draws the unknown hatch rather than a guess"
+  }
+ },
+ "systems": [
+  {
+   "id": "sys.fws",
+   "role": "unified",
+   "phase": "decode",
+   "label": "granite_4_0_h_tiny decode mapping, layer-0 excerpt",
+   "parallelism": {
+    "tp": 1,
+    "ep": 1,
+    "pp": 1
+   },
+   "models": [
+    {
+     "id": "granite_4_0_h_tiny",
+     "label": "granite_4_0_h_tiny",
+     "layers": 40,
+     "hidden_dim": 1536,
+     "intermediate_size": 512,
+     "vocab_size": 100352,
+     "attention": {
+      "type": "gqa",
+      "num_heads": 12,
+      "head_dim": 128
+     },
+     "precision": "2.0",
+     "blocks": [
+      "ffn1_routed",
+      "ffn1_shared",
+      "ffn2_routed",
+      "ffn2_shared",
+      "lm_head",
+      "o_proj",
+      "qkv",
+      "router",
+      "ssm_in_proj",
+      "ssm_out_proj"
+     ],
+     "endpoint_blocks": [
+      "lm_head"
+     ],
+     "serving": {
+      "batch": 4,
+      "prefill_len": 1792,
+      "decode_len": 256,
+      "seq_len": 2048
+     }
+    }
+   ]
+  }
+ ],
+ "chips": [
+  {
+   "id": "sys.fws.chip.000",
+   "system": "sys.fws",
+   "pool": "analog",
+   "label": "analog chiplet 0 (excerpt: the first 8 macro slots, layer 0)",
+   "capacity": {
+    "macro_slots": 8
+   },
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "occupancy": 1.0,
+   "macros": [
+    "sys.fws.mac.000000",
+    "sys.fws.mac.000001",
+    "sys.fws.mac.000002",
+    "sys.fws.mac.000003",
+    "sys.fws.mac.000004",
+    "sys.fws.mac.000005",
+    "sys.fws.mac.000006",
+    "sys.fws.mac.000007"
+   ]
+  },
+  {
+   "id": "sys.fws.chip.010",
+   "system": "sys.fws",
+   "pool": "digital",
+   "label": "shared digital chiplet 0",
+   "capacity": {
+    "macro_slots": 2
+   },
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "occupancy": 0.0,
+   "macros": [
+    "sys.fws.mac.006400",
+    "sys.fws.mac.006401"
+   ]
+  }
+ ],
+ "macros": [
+  {
+   "id": "sys.fws.mac.000000",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000000"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881269,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 42,
+    "area_mm2": 0.0,
+    "basis": "sized from the timeline (P4.5): peak concurrent digital demand 2 x P2.5's per-unit derivation. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000001",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000001"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881269,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000002",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000002"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881269,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000003",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000003"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881269,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000004",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000004"
+   ],
+   "occupancy": 0.19791666666666666,
+   "duty_cycle": 0.0005307693409881269,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000005",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000005"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881282,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "sized from the timeline (P4.5): peak concurrent digital demand 1 x P2.5's per-unit derivation. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000006",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000006"
+   ],
+   "occupancy": 1.0,
+   "duty_cycle": 0.0005307693409881282,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.000007",
+   "chip": "sys.fws.chip.000",
+   "card": "analog_1536x384x4",
+   "tiles": [
+    "sys.fws.tile.000007"
+   ],
+   "occupancy": 0.041666666666666664,
+   "duty_cycle": 0.0005307693409881282,
+   "digital_pool": {
+    "shift_add_units": 0,
+    "act_lanes": 21,
+    "area_mm2": 0.0,
+    "basis": "P2.5's per-unit derivation (D12): the width that keeps the pool non-blocking for ONE concurrent op. area_mm2 is 0.0 = UNCOVERED: no card declares a pool area law, so this is an absent law and not a measured zero"
+   },
+   "reserved": null
+  },
+  {
+   "id": "sys.fws.mac.006400",
+   "chip": "sys.fws.chip.010",
+   "card": "digital_sa_32x64",
+   "tiles": [],
+   "occupancy": 0.0,
+   "duty_cycle": null,
+   "digital_pool": null,
+   "reserved": "shared digital chiplet engine: act x act GEMM, softmax, scan and state update (D13). It stores no weights, so its stored-column occupancy is 0."
+  },
+  {
+   "id": "sys.fws.mac.006401",
+   "chip": "sys.fws.chip.010",
+   "card": "digital_sa_32x64",
+   "tiles": [],
+   "occupancy": 0.0,
+   "duty_cycle": null,
+   "digital_pool": null,
+   "reserved": "shared digital chiplet engine: act x act GEMM, softmax, scan and state update (D13). It stores no weights, so its stored-column occupancy is 0."
+  }
+ ],
+ "tiles": [
+  {
+   "id": "sys.fws.tile.000000",
+   "macro": "sys.fws.mac.000000",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_in_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000001",
+   "macro": "sys.fws.mac.000001",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_in_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000002",
+   "macro": "sys.fws.mac.000002",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_in_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000003",
+   "macro": "sys.fws.mac.000003",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_in_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000004",
+   "macro": "sys.fws.mac.000004",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_in_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 304
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 304
+   }
+  },
+  {
+   "id": "sys.fws.tile.000005",
+   "macro": "sys.fws.mac.000005",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_out_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000006",
+   "macro": "sys.fws.mac.000006",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "ssm_out_proj",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 1536
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 1536
+   }
+  },
+  {
+   "id": "sys.fws.tile.000007",
+   "macro": "sys.fws.mac.000007",
+   "owner": {
+    "model": "granite_4_0_h_tiny",
+    "layer": 0,
+    "block": "router",
+    "expert": null
+   },
+   "shape": {
+    "K": 1536,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  }
+ ],
+ "links": [
+  {
+   "id": "fix.link.act.c0->d0",
+   "from": "sys.fws.chip.000",
+   "to": "sys.fws.chip.010",
+   "role": "act",
+   "bytes": 12288.0,
+   "per": "decode_step",
+   "label": "activation handoff from the analog chiplet to the shared digital chiplet",
+   "basis": "cim_timing.boundary_bytes(tokens = 4, act_bytes = 2.0) = tokens x hidden 1536 x act (the byte law of granite_4_0_h_tiny.json; the excerpt redirects the handoff to the shared digital chiplet because it holds only one analog chip)"
+  }
+ ],
+ "metrics": [
+  {
+   "key": "excerpt.macro_slots",
+   "label": "enumerated analog macro slots in this excerpt",
+   "value": 8,
+   "unit": "slots",
+   "basis": "the first 8 slots of sys.fws.chip.000 of granite_4_0_h_tiny.json, copied verbatim."
+  },
+  {
+   "key": "excerpt.tiles",
+   "label": "placed tiles in this excerpt",
+   "value": 8,
+   "unit": "tiles",
+   "basis": "the tiles those 8 slots hold in granite_4_0_h_tiny.json, copied verbatim."
+  },
+  {
+   "key": "excerpt.unowned_columns",
+   "label": "stored columns no tile holds, in this excerpt",
+   "value": 2704,
+   "unit": "columns",
+   "basis": "(1536 - 304) on macro 000004 + (1536 - 64) on macro 000007, from the copied column spans. It is a fact about the EXCERPT, not about the run."
+  },
+  {
+   "key": "excerpt.enumerated_macro_silicon",
+   "label": "silicon of the 8 enumerated slots",
+   "value": 16.1633088,
+   "unit": "mm2",
+   "basis": "8 slots x macro_footprint_mm2 2.0204136 (the P2 card). A fact about the EXCERPT."
+  },
+  {
+   "key": "run.decode_step_median",
+   "label": "decode step time of the WHOLE-model run",
+   "value": 0.0008916902543063543,
+   "unit": "s",
+   "basis": "sys.fws.decode_step_median of granite_4_0_h_tiny.json, quoted as the time base the folding card's per-pass placeholder is derived from. It measures the whole 40-layer run, NOT this 8-macro excerpt."
+  },
+  {
+   "key": "run.tokens_per_s",
+   "label": "decode throughput of the WHOLE-model run",
+   "value": 4485.862641968201,
+   "unit": "tokens/s",
+   "basis": "sys.fws.tokens_per_s of granite_4_0_h_tiny.json. It measures the whole 40-layer run, NOT this 8-macro excerpt, and no figure on this page is an excerpt throughput."
+  }
+ ],
+ "relaxations": [
+  {
+   "constraint": "excerpt_is_not_the_run",
+   "value": "8 of 6400 analog macro slots, layer 0 only",
+   "reason": "this document is an EXCERPT built to exercise the folding views. Every excerpt. metric is a fact about the excerpt and every run. metric names the whole-model run it was quoted from. No figure here is an excerpt throughput."
+  },
+  {
+   "constraint": "folding_variants_are_a_projection",
+   "value": "P7.2 (dense packer) and P7.3 (per-tensor folds) are open",
+   "reason": "the variants enumerate what a fold WOULD place, computed exactly from the copied tile shapes. No mapper has emitted them, so the seconds carry the fixture_invented mark and the areas state which accounting they use."
+  },
+  {
+   "constraint": "per_pass_time_is_a_placeholder",
+   "value": "1.1832046216093002e-07 s per ADC pass",
+   "reason": "derived as the measured macro duty share of the measured decode step divided by the card's 4 banks. It is the right shape, not a priced law; P7.2's packer replaces it."
+  },
+  {
+   "constraint": "fold_energy_uncovered",
+   "value": "0 laws price a reduction, a partial-sum transport or a per-bank ADC pass",
+   "reason": "the reference run discloses reduction_energy and shared_digital_energy as ABSENT laws. Every variant therefore reports energy as uncovered instead of printing a zero that would read as a measurement (D21)."
+  }
+ ],
+ "folding": {
+  "schema": "fws_fold/1",
+  "decode_only": "Decode only (D25). Every variant on this page is one decode step of the batched-synchronous regime (D15); prefill folding is refused by name below.",
+  "invariant_w": "Weight space is never wasted (D27): a fold moves a tensor's cells between banks and macros, it never changes how many cells there are, and every variant reports the remainder it leaves.",
+  "refused": [
+   {
+    "fold": "slicing_x_folding",
+    "reason": "no shipped card slices (bits_per_cell is null on both P2 cards, ADJ-4), so a slice x fold product has nothing to be about.",
+    "decision": "D26 (P7 DOA register)"
+   },
+   {
+    "fold": "replication",
+    "reason": "a second copy of a tensor idles or duplicates weight space that decode cannot use; Invariant W forbids it.",
+    "decision": "D26, D27"
+   },
+   {
+    "fold": "non_canonical_walk",
+    "reason": "splitting K when K <= the card's rows costs one extra pass and an accumulator and buys nothing: one column already holds the whole K.",
+    "decision": "D26"
+   },
+   {
+    "fold": "prefill_folding",
+    "reason": "prefill runs concurrent layers and SSD chunking; P7 is decode only.",
+    "decision": "D25, D26"
+   },
+   {
+    "fold": "multi_tenant_fold",
+    "reason": "a second model's tiles sharing these banks is the same machinery later, named and empty today.",
+    "decision": "D8, D26"
+   },
+   {
+    "fold": "pipelined_decode_fold",
+    "reason": "overlapping decode steps leaves D15's batched-synchronous regime.",
+    "decision": "D26"
+   },
+   {
+    "fold": "idle_spread",
+    "reason": "spreading a tensor over more macros than the cell floor idles banks; weight space is never wasted.",
+    "decision": "D27"
+   }
+  ],
+  "cards": [
+   {
+    "id": "fold.ssm_out_proj.l0",
+    "label": "ssm_out_proj, layer 0 - where the K partials meet",
+    "tensor": {
+     "owner": {
+      "model": "granite_4_0_h_tiny",
+      "layer": 0,
+      "block": "ssm_out_proj",
+      "expert": null
+     },
+     "label": "granite_4_0_h_tiny L0 ssm_out_proj (d_inner 3072 -> hidden 1536)",
+     "K": 3072,
+     "N": 1536,
+     "cells": 4718592,
+     "basis": "the two tiles sys.fws.tile.000005 and sys.fws.tile.000006 of granite_4_0_h_tiny.json share one owner tuple and carry K = 1536 each: they are the row partitions of one 3072 x 1536 matrix (SCHEMA.md, tiles[] row partitions). N = 6448 on the sibling ssm_in_proj fixes d_inner = 3072 (2 x 3072 + 2 x 1 x 128 + 48)."
+    },
+    "card": "analog_1536x384x4",
+    "floor_macros": 2,
+    "floor_basis": "cells / (rows x stored_cols) = 4718592 / 2359296 = 2 macro slots exactly, the global cell floor for this tensor (D27).",
+    "variants": [
+     {
+      "id": "v.k_spread",
+      "kind": "k_spread",
+      "label": "K blocks spread across macros (as placed)",
+      "note": "Today's placement: one K block per macro, the two partial vectors meet in a cross-macro adder tree.",
+      "boxes": [
+       {
+        "id": "v.k_spread.box0",
+        "label": "macro 000005 - K block 0",
+        "macro": "sys.fws.mac.000005",
+        "card": "analog_1536x384x4",
+        "passes": 4,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "K block 0, N 0..383",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000005",
+            "k_block": 0,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 1,
+            "label": "K block 0, N 384..767",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000005",
+            "k_block": 0,
+            "n_block": 1,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 384,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 2,
+            "label": "K block 0, N 768..1151",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000005",
+            "k_block": 0,
+            "n_block": 2,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 768,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 3,
+            "label": "K block 0, N 1152..1535",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000005",
+            "k_block": 0,
+            "n_block": 3,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 1152,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "v.k_spread.box1",
+        "label": "macro 000006 - K block 1",
+        "macro": "sys.fws.mac.000006",
+        "card": "analog_1536x384x4",
+        "passes": 4,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "K block 1, N 0..383",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000006",
+            "k_block": 1,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 1,
+            "label": "K block 1, N 384..767",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000006",
+            "k_block": 1,
+            "n_block": 1,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 384,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 2,
+            "label": "K block 1, N 768..1151",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000006",
+            "k_block": 1,
+            "n_block": 2,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 768,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 3,
+            "label": "K block 1, N 1152..1535",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000006",
+            "k_block": 1,
+            "n_block": 3,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 1152,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "accumulator": {
+       "where": "cross_macro",
+       "operands": 2,
+       "sites": [
+        "v.k_spread.box0"
+       ],
+       "transport_bytes": 12288.0,
+       "per": "decode_step",
+       "basis": "one partial vector leaves macro 000006 per step: N 1536 x batch 4 x act 2.0 B = 12288 B, the same byte law links[].basis states for the activation handoff. It is priced by the shift-and-add tree law on the per-macro pool (the reference run's row_block_partial_sum_law disclosure)."
+      },
+      "waste": {
+       "cells": 0,
+       "denominator_cells": 4718592,
+       "pct": 0.0,
+       "terms": {
+        "remainder_cells": 0,
+        "tail_cells": 0
+       },
+       "basis": "two macro slots hold 4718592 of 4718592 committed cells: this tensor sits exactly on its floor and wastes nothing. Itemized as cim_timing.dense_pack itemizes it (P7.2): remainder + tail."
+      },
+      "area": {
+       "basis_kind": "slots",
+       "slots": 2,
+       "value": 4.0408272,
+       "unit": "mm2",
+       "basis": "2 enumerated macro slots x macro_footprint_mm2 2.0204136 (the P2 card). Under Invariant W a fold never frees a slot for nothing: the saving from packing is global and the frontier reports it, not this card.",
+       "terms": {
+        "analog_mm2": 4.0408272,
+        "accumulator_mm2": null
+       },
+       "uncovered": [
+        "accumulator_mm2: no card declares an accumulator or partial-sum-buffer area law (absent law, not a measured zero)"
+       ]
+      },
+      "time": {
+       "passes": 8,
+       "value": 9.465636972874402e-07,
+       "unit": "s",
+       "per": "decode_step",
+       "basis": "8 enumerated ADC passes x the placeholder per-pass time 1.1832046216093002e-07 s (passes[].pass_time_basis). The pass COUNT is exact; the seconds are the placeholder.",
+       "fixture_invented": [
+        "value"
+       ]
+      },
+      "energy": {
+       "value": null,
+       "unit": "pJ",
+       "uncovered": "no card knob prices a reduction or a partial-sum transport: the reference run discloses reduction_energy 0 pJ as an ABSENT law, so this variant reports no energy rather than a zero."
+      }
+     },
+     {
+      "id": "v.k_stack",
+      "kind": "k_stack",
+      "label": "K blocks stacked in one macro (N split in half)",
+      "note": "The same two K blocks, both resident in one macro's banks, with N cut in half so each macro owns half the output columns. The partials meet in the macro's own pool and nothing crosses the boundary.",
+      "boxes": [
+       {
+        "id": "v.k_stack.box0",
+        "label": "macro slot 0 - N half 0, both K blocks",
+        "macro": null,
+        "card": "analog_1536x384x4",
+        "passes": 4,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "K block 0, N 0..383",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 1,
+            "label": "K block 0, N 384..767",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 1,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 384,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 2,
+            "label": "K block 1, N 0..383",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 1,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 768,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 3,
+            "label": "K block 1, N 384..767",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 1,
+            "n_block": 1,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 1152,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": "v.k_stack.box1",
+        "label": "macro slot 1 - N half 1, both K blocks",
+        "macro": null,
+        "card": "analog_1536x384x4",
+        "passes": 4,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "K block 0, N 768..1151",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 2,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 1,
+            "label": "K block 0, N 1152..1535",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 3,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 384,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 2,
+            "label": "K block 1, N 768..1151",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 1,
+            "n_block": 2,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 768,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 3,
+            "label": "K block 1, N 1152..1535",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 1,
+            "n_block": 3,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 1152,
+             "count": 384
+            },
+            "co_tenant": false
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "accumulator": {
+       "where": "in_macro",
+       "operands": 2,
+       "sites": [
+        "v.k_stack.box0",
+        "v.k_stack.box1"
+       ],
+       "transport_bytes": 0.0,
+       "per": "decode_step",
+       "basis": "an in-macro accumulator moves no partial off the macro: the transport term is 0 by construction, and the adder tree is priced on the per-macro pool by the same law (D12, P2 price_reduction)."
+      },
+      "waste": {
+       "cells": 0,
+       "denominator_cells": 4718592,
+       "pct": 0.0,
+       "terms": {
+        "remainder_cells": 0,
+        "tail_cells": 0
+       },
+       "basis": "the same two macro slots hold the same 4718592 cells: a fold moves the cells, it never changes how many there are (D27)."
+      },
+      "area": {
+       "basis_kind": "slots",
+       "slots": 2,
+       "value": 4.0408272,
+       "unit": "mm2",
+       "basis": "2 enumerated macro slots x macro_footprint_mm2 2.0204136 - IDENTICAL to the spread variant. Analog silicon is the cell floor and the fold does not move it (P7 Fact 1).",
+       "terms": {
+        "analog_mm2": 4.0408272,
+        "accumulator_mm2": null
+       },
+       "uncovered": [
+        "accumulator_mm2: no card declares an accumulator or partial-sum-buffer area law (absent law, not a measured zero). This is the term that would separate the two variants, and it is the Samyak parameter ask P7 names."
+       ]
+      },
+      "time": {
+       "passes": 8,
+       "value": 9.465636972874402e-07,
+       "unit": "s",
+       "per": "decode_step",
+       "basis": "8 enumerated ADC passes, the same count as the spread variant: at the floor every bank still fires once per step (P7 Fact 1). Seconds carry the same placeholder per-pass time.",
+       "fixture_invented": [
+        "value"
+       ]
+      },
+      "energy": {
+       "value": null,
+       "unit": "pJ",
+       "uncovered": "no card knob prices a reduction; the 12288 B/step this variant does NOT send is a byte count, not a joule count, until a card declares a transport energy law."
+      }
+     }
+    ]
+   },
+   {
+    "id": "fold.router.l0",
+    "label": "router, layer 0 - the waste card",
+    "tensor": {
+     "owner": {
+      "model": "granite_4_0_h_tiny",
+      "layer": 0,
+      "block": "router",
+      "expert": null
+     },
+     "label": "granite_4_0_h_tiny L0 router (hidden 1536 -> 64 experts)",
+     "K": 1536,
+     "N": 64,
+     "cells": 98304,
+     "basis": "sys.fws.tile.000007 of granite_4_0_h_tiny.json, verbatim: K 1536, N 64."
+    },
+    "card": "analog_1536x384x4",
+    "floor_macros": 1,
+    "floor_basis": "98304 cells is 4.17% of one macro slot's 2359296 cells: this tensor cannot fill a slot and must share one (D27).",
+    "variants": [
+     {
+      "id": "v.router.n_spread",
+      "kind": "n_spread",
+      "label": "one tensor, one macro (as placed)",
+      "note": "Today's placement gives a 64-column tensor a whole macro slot. Three of the four banks fire on no pass and hold no weights: this is the waste Invariant W exists to remove, drawn.",
+      "boxes": [
+       {
+        "id": "v.router.n_spread.box0",
+        "label": "macro 000007",
+        "macro": "sys.fws.mac.000007",
+        "card": "analog_1536x384x4",
+        "passes": 1,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "router L0, N 0..63",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "router",
+             "expert": null
+            },
+            "tile": "sys.fws.tile.000007",
+            "k_block": 0,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 64
+            },
+            "co_tenant": false
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": []
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": []
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": []
+         }
+        ]
+       }
+      ],
+      "accumulator": {
+       "where": "none",
+       "operands": 0,
+       "sites": [],
+       "transport_bytes": 0.0,
+       "per": "decode_step",
+       "basis": "K 1536 equals the card's rows: one column already holds the whole K, so there is no partial to meet. Splitting it anyway is the non_canonical_walk this register refuses."
+      },
+      "waste": {
+       "cells": 2260992,
+       "denominator_cells": 2359296,
+       "pct": 95.83333333333334,
+       "terms": {
+        "remainder_cells": 491520,
+        "tail_cells": 1769472
+       },
+       "basis": "(1536 - 64) unowned columns x 1536 rows of the one slot this tensor holds, itemized as P7.2 itemizes it: remainder 491520 cells inside the committed bank + tail 1769472 cells in the three banks the stream never reached. macros[].occupancy prints 0.0417 for the same macro and measures COLUMNS; waste is CELLS (D27)."
+      },
+      "area": {
+       "basis_kind": "slots",
+       "slots": 1,
+       "value": 2.0204136,
+       "unit": "mm2",
+       "basis": "1 enumerated macro slot x macro_footprint_mm2 2.0204136: the whole slot is spent on this tensor because nothing else is placed beside it.",
+       "terms": {
+        "analog_mm2": 2.0204136,
+        "accumulator_mm2": null
+       },
+       "uncovered": [
+        "accumulator_mm2: this variant has no accumulator; the term is null because no card declares the law, not because it is zero"
+       ]
+      },
+      "time": {
+       "passes": 1,
+       "value": 1.1832046216093002e-07,
+       "unit": "s",
+       "per": "decode_step",
+       "basis": "1 enumerated ADC pass x the placeholder per-pass time. The other three bank passes of this macro drive nothing and are not this tensor's time.",
+       "fixture_invented": [
+        "value"
+       ]
+      },
+      "energy": {
+       "value": null,
+       "unit": "pJ",
+       "uncovered": "no card knob prices an ADC pass's energy per bank; the reference run's energy total is a whole-timeline figure and splitting it per tensor would be a second accounting (D21)."
+      }
+     },
+     {
+      "id": "v.router.dense",
+      "kind": "dense_share",
+      "label": "dense packing: the tensor shares its bank (Invariant W)",
+      "note": "The router's 64 columns and ssm_in_proj's real 304-column remainder are 368 of one bank's 384 columns; the other three banks carry ssm_out_proj blocks. Two passes now fire on bank 0 because two tensors live there - co-residency is free in decode, where layers run in sequence (P7 Fact 3).",
+      "boxes": [
+       {
+        "id": "v.router.dense.box0",
+        "label": "one shared macro slot",
+        "macro": null,
+        "card": "analog_1536x384x4",
+        "passes": 5,
+        "lanes": [
+         {
+          "bank": 0,
+          "columns": {
+           "start": 0,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 0,
+            "label": "router L0, N 0..63",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "router",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 0,
+             "count": 64
+            },
+            "co_tenant": false
+           },
+           {
+            "pass": 1,
+            "label": "ssm_in_proj L0, N block 16 (the 304-column remainder)",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_in_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 16,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 64,
+             "count": 304
+            },
+            "co_tenant": true
+           }
+          ]
+         },
+         {
+          "bank": 1,
+          "columns": {
+           "start": 384,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 1,
+            "label": "ssm_out_proj L0, K block 0, N 0..383",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 0,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 384,
+             "count": 384
+            },
+            "co_tenant": true
+           }
+          ]
+         },
+         {
+          "bank": 2,
+          "columns": {
+           "start": 768,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 2,
+            "label": "ssm_out_proj L0, K block 0, N 384..767",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 1,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 768,
+             "count": 384
+            },
+            "co_tenant": true
+           }
+          ]
+         },
+         {
+          "bank": 3,
+          "columns": {
+           "start": 1152,
+           "count": 384
+          },
+          "passes": [
+           {
+            "pass": 3,
+            "label": "ssm_out_proj L0, K block 0, N 768..1151",
+            "owner": {
+             "model": "granite_4_0_h_tiny",
+             "layer": 0,
+             "block": "ssm_out_proj",
+             "expert": null
+            },
+            "tile": null,
+            "k_block": 0,
+            "n_block": 2,
+            "rows": {
+             "start": 0,
+             "count": 1536
+            },
+            "columns": {
+             "start": 1152,
+             "count": 384
+            },
+            "co_tenant": true
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "accumulator": {
+       "where": "none",
+       "operands": 0,
+       "sites": [],
+       "transport_bytes": 0.0,
+       "per": "decode_step",
+       "basis": "co-tenants produce different outputs: there is no partial to accumulate, only a second pass on the shared bank."
+      },
+      "waste": {
+       "cells": 24576,
+       "denominator_cells": 589824,
+       "pct": 4.166666666666666,
+       "terms": {
+        "remainder_cells": 24576,
+        "tail_cells": 0
+       },
+       "basis": "64 + 304 = 368 of the bank's 384 columns are held; the 16-column remainder x 1536 rows is a DIMENSION-MISMATCH remainder, which is the only waste D27 admits, and it is reported here.",
+       "fixture_invented": [
+        "cells",
+        "pct"
+       ]
+      },
+      "area": {
+       "basis_kind": "cell_share",
+       "cells": 98304,
+       "value": 0.08418389999999999,
+       "unit": "mm2",
+       "basis": "the tensor's cell share of one macro slot: 98304 / 2359296 x macro_footprint_mm2 2.0204136. Dense packing means the slot is not spent on this tensor alone, so its cost to the floor is its cells, not a slot.",
+       "terms": {
+        "analog_mm2": 0.08418389999999999,
+        "accumulator_mm2": null
+       },
+       "uncovered": [
+        "accumulator_mm2: no accumulator in this variant and no card law for one"
+       ],
+       "fixture_invented": [
+        "value",
+        "terms"
+       ]
+      },
+      "time": {
+       "passes": 1,
+       "value": 1.1832046216093002e-07,
+       "unit": "s",
+       "per": "decode_step",
+       "basis": "1 enumerated ADC pass for THIS tensor - unchanged. The co-tenant on the same bank pays its own pass, which is why dense packing costs passes only where two tensors share one bank.",
+       "fixture_invented": [
+        "value"
+       ]
+      },
+      "energy": {
+       "value": null,
+       "unit": "pJ",
+       "uncovered": "no card knob prices an ADC pass's energy per bank."
+      }
+     }
+    ]
+   }
+  ],
+  "fixture_invented": [
+   "cards[].variants[].time.value"
+  ]
+ },
+ "passes": {
+  "schema": "fws_pass/1",
+  "phase": "decode",
+  "label": "one decode step of the layer-0 excerpt, as placed",
+  "step": {
+   "index": 0,
+   "of": 3,
+   "basis": "the first lowered decode step of the reference run (granite_4_0_h_tiny.json discloses a 3-of-256-step window). Decode only (D25): no prefill schedule is carried here."
+  },
+  "pass_time_s": 1.1832046216093002e-07,
+  "pass_time_basis": "PLACEHOLDER: macros[].duty_cycle 0.0005307693409881282 of the reference run x the run's median decode step 0.0008916902543063543 s = 4.732818486437201e-07 s of analog activity per macro per step, divided by this card's 4 mux banks. No producer emits a per-pass law yet; P7.2 replaces this number.",
+  "boxes": [
+   {
+    "id": "box.mac.000000",
+    "label": "macro 000000",
+    "macro": "sys.fws.mac.000000",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_in_proj L0, N block 0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000000",
+        "k_block": 0,
+        "n_block": 0,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_in_proj L0, N block 1",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000000",
+        "k_block": 0,
+        "n_block": 1,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_in_proj L0, N block 2",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000000",
+        "k_block": 0,
+        "n_block": 2,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_in_proj L0, N block 3",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000000",
+        "k_block": 0,
+        "n_block": 3,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000001",
+    "label": "macro 000001",
+    "macro": "sys.fws.mac.000001",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_in_proj L0, N block 4",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000001",
+        "k_block": 0,
+        "n_block": 4,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_in_proj L0, N block 5",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000001",
+        "k_block": 0,
+        "n_block": 5,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_in_proj L0, N block 6",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000001",
+        "k_block": 0,
+        "n_block": 6,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_in_proj L0, N block 7",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000001",
+        "k_block": 0,
+        "n_block": 7,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000002",
+    "label": "macro 000002",
+    "macro": "sys.fws.mac.000002",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_in_proj L0, N block 8",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000002",
+        "k_block": 0,
+        "n_block": 8,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_in_proj L0, N block 9",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000002",
+        "k_block": 0,
+        "n_block": 9,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_in_proj L0, N block 10",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000002",
+        "k_block": 0,
+        "n_block": 10,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_in_proj L0, N block 11",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000002",
+        "k_block": 0,
+        "n_block": 11,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000003",
+    "label": "macro 000003",
+    "macro": "sys.fws.mac.000003",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_in_proj L0, N block 12",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000003",
+        "k_block": 0,
+        "n_block": 12,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_in_proj L0, N block 13",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000003",
+        "k_block": 0,
+        "n_block": 13,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_in_proj L0, N block 14",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000003",
+        "k_block": 0,
+        "n_block": 14,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_in_proj L0, N block 15",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000003",
+        "k_block": 0,
+        "n_block": 15,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000004",
+    "label": "macro 000004",
+    "macro": "sys.fws.mac.000004",
+    "card": "analog_1536x384x4",
+    "passes": 1,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_in_proj L0, N block 16",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_in_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000004",
+        "k_block": 0,
+        "n_block": 16,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 304
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": []
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": []
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": []
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000005",
+    "label": "macro 000005",
+    "macro": "sys.fws.mac.000005",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_out_proj L0, K block 0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000005",
+        "k_block": 0,
+        "n_block": 0,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_out_proj L0, K block 0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000005",
+        "k_block": 0,
+        "n_block": 1,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_out_proj L0, K block 0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000005",
+        "k_block": 0,
+        "n_block": 2,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_out_proj L0, K block 0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000005",
+        "k_block": 0,
+        "n_block": 3,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000006",
+    "label": "macro 000006",
+    "macro": "sys.fws.mac.000006",
+    "card": "analog_1536x384x4",
+    "passes": 4,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "ssm_out_proj L0, K block 1",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000006",
+        "k_block": 1,
+        "n_block": 0,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 1,
+        "label": "ssm_out_proj L0, K block 1",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000006",
+        "k_block": 1,
+        "n_block": 1,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 384,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 2,
+        "label": "ssm_out_proj L0, K block 1",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000006",
+        "k_block": 1,
+        "n_block": 2,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 768,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 3,
+        "label": "ssm_out_proj L0, K block 1",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "ssm_out_proj",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000006",
+        "k_block": 1,
+        "n_block": 3,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 1152,
+         "count": 384
+        },
+        "co_tenant": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "box.mac.000007",
+    "label": "macro 000007",
+    "macro": "sys.fws.mac.000007",
+    "card": "analog_1536x384x4",
+    "passes": 1,
+    "lanes": [
+     {
+      "bank": 0,
+      "columns": {
+       "start": 0,
+       "count": 384
+      },
+      "passes": [
+       {
+        "pass": 0,
+        "label": "router L0",
+        "owner": {
+         "model": "granite_4_0_h_tiny",
+         "layer": 0,
+         "block": "router",
+         "expert": null
+        },
+        "tile": "sys.fws.tile.000007",
+        "k_block": 0,
+        "n_block": 0,
+        "rows": {
+         "start": 0,
+         "count": 1536
+        },
+        "columns": {
+         "start": 0,
+         "count": 64
+        },
+        "co_tenant": false
+       }
+      ]
+     },
+     {
+      "bank": 1,
+      "columns": {
+       "start": 384,
+       "count": 384
+      },
+      "passes": []
+     },
+     {
+      "bank": 2,
+      "columns": {
+       "start": 768,
+       "count": 384
+      },
+      "passes": []
+     },
+     {
+      "bank": 3,
+      "columns": {
+       "start": 1152,
+       "count": 384
+      },
+      "passes": []
+     }
+    ]
+   }
+  ],
+  "fixture_invented": [
+   "pass_time_s"
+  ]
+ }
+}

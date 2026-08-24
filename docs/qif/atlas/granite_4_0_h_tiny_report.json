@@ -40,7 +40,8 @@
     "tiles": 5610,
     "devices": 12810,
     "owners": 5321,
-    "decode_window": 3
+    "decode_window": 3,
+    "packing": "dedicated"
   },
   "evaluation": {
     "producer": "fws_eval.evaluate_fws (QIF P4)",
@@ -83479,6 +83480,92 @@
       }
     ],
     "occupancy_basis": "busy time / makespan per device, where busy time is the UNION of the op intervals the timeline scheduled on it, attributed to the device's named owner (D21). Transfers occupy no device (D17).",
+    "utilization": [
+      {
+        "device_class": "analog_macro",
+        "devices": 6400,
+        "devices_used": 5610,
+        "idle_devices": 790,
+        "idle_share": 0.1234375,
+        "ops": 22440,
+        "busy_s": 0.5579359999994516,
+        "mean_occupancy": 8.055561320322771e-05,
+        "median_occupancy": 4.989823191728951e-05,
+        "max_occupancy": 0.0005307693409881603,
+        "min_occupancy": 0.0,
+        "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+      },
+      {
+        "device_class": "macro_pool",
+        "devices": 6400,
+        "devices_used": 2716,
+        "idle_devices": 3684,
+        "idle_share": 0.575625,
+        "ops": 11344,
+        "busy_s": 0.019901065263164697,
+        "mean_occupancy": 2.87334482032574e-06,
+        "median_occupancy": 0.0,
+        "max_occupancy": 0.0005108168569468868,
+        "min_occupancy": 0.0,
+        "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+      },
+      {
+        "device_class": "shared_digital",
+        "devices": 10,
+        "devices_used": 10,
+        "idle_devices": 0,
+        "idle_share": 0.0,
+        "ops": 192,
+        "busy_s": 0.9434239915789504,
+        "mean_occupancy": 0.08717627616340659,
+        "median_occupancy": 0.08813564583247745,
+        "max_occupancy": 0.08813564583247775,
+        "min_occupancy": 0.08573722165980004,
+        "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+      },
+      {
+        "device_class": "link",
+        "devices": 17,
+        "devices_used": 17,
+        "idle_devices": 0,
+        "idle_share": 0.0,
+        "ops": 84,
+        "busy_s": 0.004123955139160156,
+        "mean_occupancy": 0.00022415911759339895,
+        "median_occupancy": 0.00019351407349075405,
+        "max_occupancy": 0.00032375551092699484,
+        "min_occupancy": 0.00019351407349075405,
+        "basis": "links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio \u2014 the priced transfer time on one chip-to-chip link over the makespan \u2014 and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
+      }
+    ],
+    "utilization_basis": "per-device-class utilization is a REQUIRED output of every run (P7.3, D28): low utilization is a provisioning finding the report surfaces, never a number it leaves out. Idle devices are inside the averages, and the classes with no ops still get a row.",
+    "bank_passes": {
+      "measured": true,
+      "decode_step": 2,
+      "macros_holding_tiles": 5610,
+      "macros_walked_exactly_once": 5610,
+      "column_set_passes_charged": 22440.0,
+      "column_sets_occupied": 22440.0,
+      "column_sets_never_read": 0.0,
+      "column_sets_read_more_than_once": 0.0,
+      "basis": "sum of the active-column-set charge (ADJ-4) over every analog op of lowered decode step 2, per macro, against the column sets the placement claimed on that macro. Equality per macro is Fact 1: each macro walks its occupied banks once per decode step, whichever tensors co-reside there."
+    },
+    "bank_sharing": {
+      "measured": true,
+      "decode_step": 2,
+      "macros_sharing_banks_across_tensors": 0,
+      "macros_sharing_banks_across_layers": 0,
+      "delayed_ops": 0,
+      "same_owner_delay_s": 0.0,
+      "cross_layer_delay_s": 0.0,
+      "cross_tensor_same_layer_delay_s": 0.0,
+      "basis": "for every ANALOG op of the lowered decode step that started later than its last dependency finished, the waiting interval is attributed to the ops that occupied the same macro during it, split by whose weights they are. cross_layer_delay_s == 0 IS Fact 3, measured on this timeline: decode runs layers in sequence, so a resident of another layer is never in the way. A non-zero same-layer term is two concurrent tensors of ONE layer sharing a macro; the timeline already prices it and this line is where a reader sees it."
+    },
+    "packing": {
+      "packing": "dedicated",
+      "waste_reported": false,
+      "basis": "the dedicated placement law: each weight matrix starts on a fresh macro. No packer ran, so this run has no waste accounting \u2014 Invariant W's waste% is the DENSE packer's metric (D27) and a number here would be invented. Set mapping.packing: dense to get it."
+    },
     "duty_cycles": {
       "0": 0.0005307693409881269,
       "1": 0.0005307693409881269,
@@ -90342,6 +90429,11 @@
       "constraint": "kv_shares_the_activation_tier",
       "value": "cim_sram: one tier, two tenants",
       "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+    },
+    {
+      "constraint": "device_class_utilization",
+      "value": "analog_macro 0.008% mean / 0.053% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.051% peak (3684 of 6400 idle), shared_digital 8.718% mean / 8.814% peak (0 of 10 idle), link 0.022% mean / 0.032% peak (0 of 17 idle)",
+      "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 8.814% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
     },
     {
       "constraint": "decode_series_window",

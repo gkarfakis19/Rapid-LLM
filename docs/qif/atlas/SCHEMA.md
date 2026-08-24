@@ -34,6 +34,8 @@ Two rules govern everything below.
 | `links[]` | array | yes | Traffic-bearing links only (D17). |
 | `metrics[]` | array | yes | Labeled headline figures. |
 | `relaxations[]` | array | yes | Disclosed relaxations; may be empty. |
+| `folding` | object | no | The P7.6 folding card's contract, `fws_fold/1`. See "The P7.6 folding extensions". |
+| `passes` | object | no | The P7.6 macro time-lane view's contract, `fws_pass/1`. See the same section. |
 
 `chips[]`, `macros[]`, `tiles[]` and `links[]` are flat tables joined by id.
 Containment is stated twice — `chips[].macros` holds macro ids and
@@ -311,7 +313,12 @@ picture.
 | `?chip=<chip id>`, `?macro=<macro id>` | Which chip or macro to open. A macro implies its own chip. |
 | `?duty=1` | Turn the duty-cycle overlay on. |
 | `?model=`, `?layer=`, `?group=`, `?pool=`, `?q=` | Pre-set the filters and the owner search. |
-| `?selftest=1` | Open the self-test panel: refusals and view rules. |
+| `?selftest=1` | Open the self-test panel: refusals and view rules, for every contract this page loads. |
+| `?view=fold` | Open the folding card. Enabled only for a document that carries a `folding` block. |
+| `?fold=<card id>` | Which folding card to open. |
+| `?lanes=1` | In the macro view, draw the time lanes instead of the column map. Enabled only where a `passes` block covers that macro. |
+| `?view=frontier` | Open the frontier explorer. |
+| `?frontier=<file>` | Load a sibling `fws_frontier/1` document instead of the embedded frontier fixture. A bare basename, same rule as `?data=`. The frontier NEVER displaces the atlas: they are two documents and the page holds both. |
 
 ## The encoding law
 
@@ -349,6 +356,9 @@ an absent measurement is never a zero.
 | Package | One lane per system — two of them is the PD picture (D16) — chips clustered by pool inside it, traffic-bearing links across them, the handoff labelled with its bytes | Chip |
 | Chip | The chip's macros as a deterministic grid: hue = group, fill = occupancy, bottom strip = column spans, top bar = duty cycle when the overlay is on | Macro |
 | Macro | The column map: every stored column of the macro, one band per resident tile at its own offset, hatch where no tile holds, brackets above (D11), and the column axis below | Tile card |
+| Macro · time lanes | The same macro as a decode step: one lane per mux bank, x = ADC pass order, each pass naming the (K, N) block and the tensor that fires on it (P7.6) | Pass card |
+| Folding card | One tensor, its mapping family side by side: spatial blocks as boxes, bank passes as time lanes inside a box, the accumulator drawn where the K partials meet, area/time/energy and waste under each variant (P7.6) | Pass card |
+| Frontier | Total area vs decode tokens/s, one mark per complete provisioning, the declared front as a staircase, the knee ringed, and per-point utilization and waste in the table beside it (P7.6, D28) | Point card, and its atlas where one exists |
 
 Breadcrumbs are containment and nothing else: `Package › chip › macro`. Click
 descends; a breadcrumb ascends; the card of the object you descended into
@@ -424,6 +434,8 @@ The four below are the ones `tests/test_qif_atlas.py` holds to the schema.
 | `fixture_llama7b_tp2.json` | The P5.1 phase-0 fixture: a hand-authored Llama2-7B tp = 2 decode placement with its invented fields marked. It is what `atlas.html` embeds and what the loader self-test is proved against. |
 | `p3_llama7b_tp2.json` | The same model emitted by the real producer, placement only (P3.6). |
 | `granite_4_0_h_tiny.json` | The ADJ-1 headline artifact: Granite-4.0-H-Tiny, placed and priced (`--priced`). |
+| `fixture_granite_folding.json` | The P7.6 folding fixture: a real Granite excerpt carrying the `folding` and `passes` blocks. |
+| `fixture_frontier_granite.json` | The P7.6 frontier fixture (`fws_frontier/1`, not an atlas document). |
 | `pd_llama7b.json` | The PD pair (D16): a prefill inventory and a decode inventory with different layer packings and chiplet counts, one priced handoff, both halves priced on their OWN timeline. It is the two-system picture. |
 
 Each exported document names in `provenance.reference_run.command` the exact
@@ -438,3 +450,255 @@ be handed to someone with its mapping already inside. When the fixture
 changes, re-embed it — the header prints which source loaded and the
 document's `provenance.authored` date, so a stale copy is visible rather than
 silent.
+
+# The P7.6 folding extensions
+
+Three views were added for P7 (folding): the **folding card**, the **macro
+time-lane view**, and the **frontier explorer**. They read three contracts.
+Two of them are OPTIONAL blocks inside an `fws_atlas/1` document — a document
+without them loads and draws exactly as before — and the third is a document of
+its own, because a frontier is many provisionings and an atlas is one.
+
+| Contract | Where it lives | What it draws |
+|---|---|---|
+| `fws_fold/1` | `folding` — an optional top-level block of an `fws_atlas/1` document | The folding card: one tensor, its mapping family side by side |
+| `fws_pass/1` | `passes` — an optional top-level block of an `fws_atlas/1` document | The macro drill-in: a macro's banks as time lanes of one decode step |
+| `fws_frontier/1` | Its own document | The frontier explorer: total area vs decode tokens/s |
+
+Every one of them is **decode only (D25)** and says so in its own text, and the
+loader refuses an artifact that does not. The two rules that govern the atlas
+govern these too: the loader **computes only to refuse**, and a fold that
+cannot be drawn is not a fold. An error in an extension block stops the whole
+page drawing, exactly as an error in the placement tables does — the picture
+is one artifact and it is right or it is refused.
+
+## The `folding` block (`fws_fold/1`)
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `schema` | string | yes | Must be `"fws_fold/1"`. |
+| `decode_only` | string | yes | The decode-only assumption, in words (D25). |
+| `invariant_w` | string | no | The Invariant W statement the card is drawn under (D27). |
+| `refused[]` | array | yes | The DOA register, carried IN the artifact: `{fold, reason, decision}`. Every name in the register below must appear. |
+| `cards[]` | array | yes | One folding card each. |
+| `fixture_invented` | bool \| string[] | no | The usual mark. |
+
+### The DOA register (D26)
+
+`refused[]` must name all seven by name. D26 makes the register binding, so an
+artifact that quietly drops an entry is the one place a dead fold could come
+back.
+
+| `fold` | Why it is dead |
+|---|---|
+| `slicing_x_folding` | No shipped card slices (`bits_per_cell` is null), so the product has nothing to be about. |
+| `replication` | A second copy idles or duplicates weight space decode cannot use (D27). |
+| `non_canonical_walk` | Splitting K when K ≤ the card's rows buys nothing: one column already holds the whole K. |
+| `prefill_folding` | Prefill is out of P7 (D25). |
+| `multi_tenant_fold` | The same machinery later, named and empty today (D8). |
+| `pipelined_decode_fold` | Overlapping decode steps leaves D15's regime. |
+| `idle_spread` | Spreading past the cell floor idles banks (D27). |
+
+A variant whose `kind` is any of these is refused BY NAME. The kinds that are
+alive in decode are `n_spread`, `k_spread`, `k_stack`, `dense_share` and
+`row_band`.
+
+### `folding.cards[]`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id`, `label` | string | Identity. |
+| `tensor` | object | `{owner, label, K, N, cells, basis}`. `owner` is the atlas owner tuple `{model, layer, block, expert}` and must exist in the document's owner vocabulary. `cells` must equal `K × N`. |
+| `card` | string | The device card the fold is drawn on; must exist in `cards`. |
+| `floor_macros` | int | `ceil(cells / (rows × stored_cols))` — the tensor's share of the GLOBAL cell floor (D27). Checked. |
+| `floor_basis` | string | The arithmetic behind it. |
+| `variants[]` | array | At least two: a card draws the mapping FAMILY, not one mapping. |
+
+### `folding.cards[].variants[]`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id`, `label`, `note` | string | Identity and the sentence under the drawing. |
+| `kind` | string | One of the five live folds; a DOA name is refused. |
+| `boxes[]` | array | The spatial blocks. See `box` below. |
+| `accumulator` | object | `{where, operands, sites[], transport_bytes, per, basis}`. `where` is `none` \| `in_macro` \| `cross_macro`. A variant that places more than one K block of its tensor and declares `none` is refused: K partials have to meet somewhere. `sites[]` name boxes OF THIS VARIANT. `transport_bytes` must be 0 when `where` is `in_macro`. |
+| `waste` | object | `{cells, denominator_cells, pct, terms, basis}`. `denominator_cells` is the committed cells the percentage is taken over and `pct` must equal `cells / denominator_cells × 100`. `terms` is optional and, when present, is P7.2's own itemization — `{remainder_cells, tail_cells}`, which must sum to `cells` and have no third term, exactly as `cim_timing.dense_pack` reports it. D27 makes waste a REPORTED metric and this is where it is reported. |
+| `area` | object | `{basis_kind, value, unit, basis, terms, uncovered[]}`. `basis_kind` is `slots` (with an integer `slots`) or `cell_share` (with an integer `cells`). `value` is checked against that accounting: `slots × card.area_mm2`, or `cells / (rows × stored_cols) × card.area_mm2`. When the card declares no `area_mm2` the value must be `null` and draws as the unknown hatch. |
+| `time` | object | `{passes, value, unit, per, basis}`. `passes` counts THIS tensor's ADC passes — a co-tenant sharing a bank pays its own pass — and is checked against the enumerated lanes. `value` may be `null`. |
+| `energy` | object | `{value, unit, uncovered}`. `value` may be `null`, and then `uncovered` must name the ABSENT law. A silent zero is refused: an uncovered term and a measured zero are not the same statement. |
+
+### The `box` (shared by both blocks)
+
+A box is one macro — real or, in a fold that no mapper has placed, hypothetical
+— drawn as its card's mux banks.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id`, `label` | string | Identity. |
+| `macro` | string \| null | The macro this box IS. `null` means the box is a fold, not a placement, and it draws with a dashed outline. |
+| `card` | string | Must exist in `cards`; in a `passes` box it must equal the macro's own card. |
+| `passes` | int | The enumerated pass count of this box. Checked. |
+| `lanes[]` | array | **Every** bank of the card, whether it fires or not — so weight space a schedule leaves uncovered is visible rather than omitted (D27). |
+
+`lanes[]` entries are `{bank, columns, passes[]}`. `bank` is an index in
+`[0, mux)`, drawn once; `columns` must be exactly that bank's span,
+`{start: bank × cols_adc, count: cols_adc}`.
+
+`lanes[].passes[]` entries:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `pass` | int | The pass index inside ONE decode step. Unique within its lane: one bank does one thing at one moment. |
+| `label` | string | What fires. |
+| `owner` | object | The tensor's owner tuple. |
+| `tile` | string \| null | The placed tile. Required in a `passes` box, where it must be a tile the macro holds and must contain the pass's columns. `null` in a fold box. |
+| `k_block`, `n_block` | int | Which block of the tensor fires. The pair identifies a block within a variant, so two passes claiming the same pair are the same weights stored twice — which is replication, and refused (F7). |
+| `rows`, `columns` | object | Real spans: `rows` inside the card's rows, `columns` inside the lane's own bank. |
+| `co_tenant` | bool | True when the owner is not the card's tensor. |
+
+## The `passes` block (`fws_pass/1`)
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `schema` | string | yes | Must be `"fws_pass/1"`. |
+| `phase` | string | yes | Must be `"decode"`. A prefill schedule is refused by name (D25). |
+| `label` | string | no | One line. |
+| `step` | object | yes | `{index, of, basis}` — which decode step, out of what lowered window. |
+| `pass_time_s` | number | no | Seconds per ADC pass. |
+| `pass_time_basis` | string | with the above | Where that number came from. |
+| `boxes[]` | array | yes | One box per macro, in the shape above, each naming a macro this document places. |
+
+## The frontier document (`fws_frontier/1`)
+
+The contract P7.4/P7.5 emit and the frontier explorer reads. It is a separate
+file: `?frontier=<basename>` loads one, and dropping one on the page adds it
+without displacing the atlas.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `schema` | string | yes | Must be `"fws_frontier/1"`. |
+| `title`, `subtitle` | string | title yes | One line each. |
+| `provenance` | object | yes | Same shape as the atlas's: `authored`, `author`, `reference_run`, `grounded[]`, `invented_fields[]`, `note`. |
+| `decode_only` | string | yes | The decode-only assumption, in words (D25). |
+| `provisioning_stance` | string | no | The no-margins statement (D28). |
+| `model` | object | yes | `{id, label, basis}`. |
+| `axes` | object | yes | `x` and `y`, each `{key, label, unit, basis}`. |
+| `device_classes[]` | array | yes | `{id, label, basis}`. Every point reports utilization for every one of them (D28). |
+| `knobs[]` | array | no | `{id, label, basis}` — the sizing axes swept. |
+| `points[]` | array | yes | The provisionings. |
+| `knee` | object | yes | `{point, basis, caveat}` — which point is the knee and the law that picked it. |
+| `relaxations[]` | array | yes | `{constraint, value, reason}`, as in the atlas. |
+
+### `points[]`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id`, `label` | string | Identity. |
+| `in_sweep` | bool | Whether the point came from the swept cross product. |
+| `knobs` | object | The sizing values this point is. |
+| `provisioning` | object | `{analog_chips, shared_chiplets, analog_macro_slots, placed_tiles, basis}`. Integers: a per-chip quotient here is refused (D21). |
+| `area` | object | `{total_mm2, terms, uncovered[], basis}`. The finite terms must sum to `total_mm2`; a term with no law is `null` and contributes nothing, and says so. |
+| `throughput` | object | `{tokens_per_s, decode_step_s, basis}` — read off this point's OWN timeline (ADJ-6). |
+| `utilization[]` | array | One entry per declared device class: `{device_class, value, uncovered, basis}`. `value` is a fraction in `[0, 1]`, or `null` with `uncovered` naming the absent measurement. D28 makes this mandatory at every point, so idle silicon is always visible. |
+| `packing` | object | `{waste_pct, basis_kind, basis}` — the weight space this packing wastes (D27). Mandatory. |
+| `atlas` | object \| null | `{document, exists, basis}`. `document` is a bare basename in the atlas's own directory; a point with `exists: false` names none. Only a point whose artifact exists is clickable. |
+| `pareto`, `knee` | bool | Declared flags. The loader checks them against the enumerated points and never invents them. |
+
+**No safety margins, by name (D28).** Any field anywhere in the document whose
+name matches `margin`, `derate`, `guard_band` or `safety` is refused. The
+frontier itself is the statement of how close a point runs; a margin would hide
+it.
+
+## What the extension loaders refuse to draw
+
+Same discipline, separate rule series so the two contracts stay legible. F and
+T rules are emitted by `ATLAS.validateExt`; X rules by
+`ATLAS.validateFrontier`.
+
+| # | Check | Refuses when |
+|---|---|---|
+| F1 | `folding.schema` / shape | The schema id is not `fws_fold/1`, or a card draws fewer than two variants, or a variant draws no boxes. |
+| F2 | `folding.decode_only` | The artifact does not state the decode-only assumption (D25). |
+| F3 | `folding.refused[]` | The DOA register is missing, an entry lacks `fold`/`reason`/`decision`, or one of the seven dead folds is not refused by name (D26). |
+| F4 | `variants[].kind` | The kind is a DOA fold — refused BY NAME — or is not one of the five live folds. |
+| F5 | `cards[].tensor` | The owner names a model or block this document does not have, `K`/`N` are not positive integers, `cells ≠ K × N`, the tensor states no basis, or the device card does not exist. |
+| F6 | `cards[].floor_macros` | It disagrees with `ceil(cells / (rows × stored_cols))`. Analog silicon is the model's floor, not the fold's (D27). |
+| F7 | `variants[].boxes` | The enumerated blocks do not cover the tensor's cells exactly once — including the case where one `(k, n)` block is placed twice, which IS replication. |
+| F8 | `variants[].area` | `basis_kind` is outside `slots`/`cell_share`, the value disagrees with that accounting, or a number is declared where the card declares no `area_mm2`. |
+| F9 | `variants[].time.passes` / `boxes[].passes` | A declared pass count is not what the variant or the box draws. |
+| F10 | `variants[].energy` | A null energy names no absent law, or a value is not finite. |
+| F11 | `variants[].waste` | The waste block is missing or malformed, `pct` is not `cells / denominator_cells × 100`, or an itemization is carried whose `remainder_cells + tail_cells` is not the waste (D27, P7.2). |
+| F12 | `variants[].boxes[].lanes` | The lanes are not the card's banks, a bank is drawn twice, a lane's columns are not its bank's span, two passes share a pass index, or a pass's rows/columns fall outside its card or its own bank or its own tile. |
+| F13 | `variants[].accumulator` | `where` is outside the vocabulary, a multi-K variant declares no accumulator or fewer than two operands, a site names a box the variant does not draw, or an `in_macro` accumulator claims transport bytes. |
+| T1 | `passes.schema` / shape | The schema id is not `fws_pass/1`, or the block draws no boxes. |
+| T2 | `passes.phase` | The phase is not `decode`. A prefill schedule is refused by name (D25). |
+| T3 | `passes.step` | The schedule does not say which decode step it is and out of what window, or a per-pass time arrives with no basis. |
+| T4 | `passes.boxes[].macro` | The macro does not exist, or the box's card is not the macro's card. |
+| T5 | `passes.boxes[].lanes` | Same lane law as F12: every bank is drawn, once, as its own span. |
+| T6 | `passes.boxes[].lanes[].passes[].tile` | The pass names no tile the macro holds, or drives columns its own tile does not own. |
+| T7 | `passes.boxes[].lanes[].passes[].pass` | Two blocks fire on one bank at one pass. |
+| T8 | `passes.boxes[].passes` | The declared pass count is not what the box draws. |
+| T9 | *(warning)* | A bank of a macro fires on no pass of this step. Under Invariant W every bank holds real weights and fires once per step, so this is WASTE — reported, never refused (D27). |
+| X1 | `schema` / `title` / `provenance` | The schema id is not `fws_frontier/1`, or the document has no title, no provenance, or a provenance without `authored`, `author` and `invented_fields[]`. |
+| X2 | `decode_only` | The frontier does not state the decode-only assumption (D25). |
+| X3 | `axes.x` / `axes.y` | An axis does not name its key, its label and its unit. |
+| X4 | `device_classes[]` | The document reports no device classes, or one has no id/label (D28). |
+| X5 | `points[].area` | A point states no total or no basis, a term is neither finite nor null, or the terms do not sum to the total. |
+| X6 | `points[].throughput` | The throughput is missing, not positive, or states no basis. |
+| X7 | `points[].utilization` | A point reports no utilization for a declared class, names a class that is not declared, gives a value outside `[0, 1]`, or leaves an absent one silent instead of naming the missing measurement (D28). |
+| X8 | `points[].packing` | A point does not report the weight space its packing wastes, as a percentage with a basis (D27). |
+| X9 | `points[].pareto` | A flagged point is dominated by another, or an unflagged point is dominated by none. |
+| X10 | `points[].knee` / `knee` | There is not exactly one knee, the knee is not on the front, or the document's `knee.point` names a different one. |
+| X11 | *(any field)* | A safety margin appears under any of its names (D28). |
+| X12 | `points[].atlas` | The link is malformed, names a path instead of a sibling basename, or claims a document while declaring `exists: false`. |
+| X13 | `points[].provisioning` | A provisioning arrives as a per-chip quotient (D21). |
+| X14 | `relaxations[]` | An entry is missing `constraint`, `value` or `reason`. |
+
+`atlas.html` carries a self-test for each series, on the same terms as the
+atlas's own: corrupt a copy of the loaded document once per rule and assert the
+refusal fires and names the right field. The folding self-test runs 24 cases
+(the document as loaded plus one per corruption) and the frontier self-test
+runs 17. Both are reachable from the same **Self-test** button and the same
+`?selftest=1`, and `tests/test_qif_atlas.py` runs both headlessly, so a rule
+that stops firing fails the suite rather than a screenshot. A document that
+carries no `folding` or `passes` block reports all 23 folding cases as `n/a`,
+"not constructible on this document" — which is the honest reading, and it is
+why `fixture_granite_folding.json` exists.
+
+## The extension view rules
+
+| # | The renderer promises |
+|---|---|
+| V10 | A folding variant carries no colour of its own. Hue stays the tensor's parallelism group, and the mapping family is told apart by position and label. |
+| V11 | A time lane is one bank and its x axis is pass order inside ONE decode step: nothing fires twice at one moment and no pass spills out of its own bank. |
+| V12 | Every drawn frontier point carries its own per-device utilization and its own waste, and the front and the knee are flags the explorer DRAWS, never values it computes. |
+| V13 | A frontier point is clickable only when its artifact exists; a point with none is drawn as unavailable and says why. |
+
+V10 and V11 are emitted by `ATLAS.viewTest` only for a document that carries
+the blocks — a rule with nothing to judge would be a pass that proved nothing.
+V12 and V13 are emitted by `ATLAS.frontierViewTest` on a frontier document.
+
+## The encoding law in the folding views
+
+The law does not change. Hue is still the parallelism group and nothing else;
+these views add channels rather than borrowing that one, and the frontier uses
+one channel FEWER.
+
+| Channel | Carries |
+|---|---|
+| Lane (a row inside a box) | One mux bank of the card. Every bank gets a lane, whether it fires or not. |
+| x inside a box | ADC pass order within ONE decode step (D25). It is not a column offset; the column span is printed on the card beside it. |
+| Outline of a pass block | Co-tenancy: solid = the card's own tensor, dotted = another tensor sharing the bank. |
+| Hatch inside a pass block or a lane | The part of a bank no pass drives — waste, reported (D27). |
+| Chevron glyph, ink `#3d4f5c` | The accumulator, drawn where the K partials meet. In-macro inside the box, cross-macro between boxes, with the transported bytes named. |
+| Dashed box outline | A box with no `macro`: a fold the mapper has not placed. |
+| Frontier: ink lightness | On the declared front (`#1c2a33`) or dominated (`#8497a2`). Both are the same neutral: no hue appears in the frontier view, because a design point has no parallelism group. |
+| Frontier: mark shape | A filled square is a point with a placement document to open; a circle is a point without one. |
+| Frontier: ring | The knee. |
+
+## The documents the folding views are proved against
+
+| File | What it is |
+|---|---|
+| `fixture_granite_folding.json` | The P7.6 hand fixture: eight real macro slots of `granite_4_0_h_tiny.json` — chips, macros, tiles, cards and the link byte law copied row for row — plus hand-authored `folding` and `passes` blocks built from those very shapes. It is an EXCERPT and says so in `relaxations[]`; its `excerpt.` metrics are facts about the excerpt and its `run.` metrics name the whole-model run they were quoted from. `tests/test_qif_atlas.py` asserts the copied rows are byte-identical to the source artifact, which is the anti-staleness gate a hand fixture can have. |
+| `fixture_frontier_granite.json` | The P7.6 frontier fixture: the eight REAL candidate rows of `docs/qif/dse/granite_lanes_banks/dse_report.json` plus the shipped Granite atlas run as a ninth point, the only one with an artifact to click through to. Two fields are placeholders and carry the mark: the shared-digital area term (the card declares no `area_mm2`, which is why the Wave D front collapsed to one point) and the shared-digital utilization (no producer emits it). It is the shape `fws_frontier/1` producers emit. |

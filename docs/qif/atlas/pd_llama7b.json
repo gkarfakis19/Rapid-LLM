@@ -46630,6 +46630,34 @@
    "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency — that would be a period times a count, which P4 §3 forbids in metrics[]."
   },
   {
+   "key": "sys.prefill.utilization.analog_macro",
+   "label": "analog_macro utilization (mean over the class)",
+   "value": 0.00025783061100266574,
+   "unit": "fraction of the makespan",
+   "basis": "424 of 480 devices ran ops (56 idle, and idle devices are INSIDE this mean); peak 0.000291884, median 0.000291884. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.prefill.utilization.macro_pool",
+   "label": "macro_pool utilization (mean over the class)",
+   "value": 1.9421221485267693e-05,
+   "unit": "fraction of the makespan",
+   "basis": "256 of 480 devices ran ops (224 idle, and idle devices are INSIDE this mean); peak 0.000291318, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.prefill.utilization.shared_digital",
+   "label": "shared_digital utilization (mean over the class)",
+   "value": 0.46711918792555074,
+   "unit": "fraction of the makespan",
+   "basis": "2 of 2 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.467119, median 0.467119. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.prefill.utilization.link",
+   "label": "link utilization (mean over the class)",
+   "value": 0.003339244954688926,
+   "unit": "fraction of the makespan",
+   "basis": "11 of 11 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.00672947, median 0.00224316. links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip link over the makespan — and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
+  },
+  {
    "key": "sys.decode.analog_chips",
    "label": "enumerated analog chiplets",
    "value": 8,
@@ -46726,6 +46754,34 @@
    "value": 1.998145282452723,
    "unit": "requests/s",
    "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 4 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency — that would be a period times a count, which P4 §3 forbids in metrics[]."
+  },
+  {
+   "key": "sys.decode.utilization.analog_macro",
+   "label": "analog_macro utilization (mean over the class)",
+   "value": 0.00012679963543077755,
+   "unit": "fraction of the makespan",
+   "basis": "424 of 960 devices ran ops (536 idle, and idle devices are INSIDE this mean); peak 0.000287094, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.decode.utilization.macro_pool",
+   "label": "macro_pool utilization (mean over the class)",
+   "value": 9.551274670845752e-06,
+   "unit": "fraction of the makespan",
+   "basis": "256 of 960 devices ran ops (704 idle, and idle devices are INSIDE this mean); peak 0.000286538, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.decode.utilization.shared_digital",
+   "label": "shared_digital utilization (mean over the class)",
+   "value": 0.934179024119889,
+   "unit": "fraction of the makespan",
+   "basis": "1 of 1 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.934179, median 0.934179. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.decode.utilization.link",
+   "label": "link utilization (mean over the class)",
+   "value": 0.0016217103472005682,
+   "unit": "fraction of the makespan",
+   "basis": "23 of 23 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.0033155, median 0.00110517. links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip link over the makespan — and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
   }
  ],
  "relaxations": [
@@ -46788,6 +46844,11 @@
    "constraint": "kv_shares_the_activation_tier",
    "value": "cim_sram: one tier, two tenants",
    "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+  },
+  {
+   "constraint": "device_class_utilization",
+   "value": "sys.prefill: analog_macro 0.026% mean / 0.029% peak (56 of 480 idle), macro_pool 0.002% mean / 0.029% peak (224 of 480 idle), shared_digital 46.712% mean / 46.712% peak (0 of 2 idle), link 0.334% mean / 0.673% peak (0 of 11 idle); sys.decode: analog_macro 0.013% mean / 0.029% peak (536 of 960 idle), macro_pool 0.001% mean / 0.029% peak (704 of 960 idle), shared_digital 93.418% mean / 93.418% peak (0 of 1 idle), link 0.162% mean / 0.332% peak (0 of 23 idle)",
+   "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 46.712% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears — it always appears. (sys.decode: D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 93.418% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears — it always appears.)"
   },
   {
    "constraint": "decode_series_window",

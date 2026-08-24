@@ -1491,12 +1491,28 @@ def check_qif_dse_selection(table):
         dup_free and len(union_keys) == len(set(union_keys)),
         "%d union rows" % len(union_keys),
     )
+    # A constraint whose value DIFFERS between candidates is recorded beside
+    # the union entry, never merged into it: per-candidate utilization (P7.3,
+    # D28) is exactly such a constraint, because provisioning is what the
+    # sweep moves. What this row checks is that the disagreement is FLAGGED
+    # and itemized — every differing candidate named, with its own value and
+    # reason — which is the guarantee. (Before P7.3 nothing in this sweep
+    # disagreed, and this row asserted the absence of disagreement instead of
+    # its disclosure; that was a fact about the demo sweep, not a law.)
+    variants_named = all(
+        variant.get("id") and variant.get("value") and variant.get("reason")
+        for d in payload["disclosures"]
+        for variant in d.get("varies_by_candidate", ())
+    )
     table.boolean(
         "%s: every sweep disclosure names the candidates that carried it" % name,
         "each union entry lists its candidates and flags any disagreement",
-        all(d.get("candidates") for d in payload["disclosures"])
-        and not any("varies_by_candidate" in d for d in payload["disclosures"]),
-        "%d rows labelled" % len(payload["disclosures"]),
+        all(d.get("candidates") for d in payload["disclosures"]) and variants_named,
+        "%d rows labelled, %d with a flagged disagreement"
+        % (
+            len(payload["disclosures"]),
+            sum(1 for d in payload["disclosures"] if d.get("varies_by_candidate")),
+        ),
     )
 
     # The emitted machine IS the selection.

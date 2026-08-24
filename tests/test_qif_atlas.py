@@ -736,3 +736,633 @@ def test_a_bit_sliced_group_shares_one_bracket(tmp_path):
     assert "slice" in report["kinds"]
     assert "bit slices (D11)" in report["label"]
     assert report["owners"] == 1
+
+
+# --- P7.6 the folding views: the folding card, the time lanes, the frontier ---
+
+FOLD_FIXTURE = ATLAS_DIR / "fixture_granite_folding.json"
+FRONTIER_FIXTURE = ATLAS_DIR / "fixture_frontier_granite.json"
+GRANITE_ATLAS = ATLAS_DIR / "granite_4_0_h_tiny.json"
+FRONT_EMBED_RE = re.compile(
+    r'<script[^>]*type="application/json"[^>]*id="frontier-embedded"[^>]*>(.*?)</script>',
+    re.DOTALL,
+)
+# The eight excerpt macro slots the folding fixture copies out of the shipped
+# Granite atlas, and the tiles they hold.
+EXCERPT_MACROS = tuple("sys.fws.mac.%06d" % i for i in range(8))
+
+
+def _fold() -> dict:
+    return json.loads(FOLD_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _frontier() -> dict:
+    return json.loads(FRONTIER_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _run_core_pair(driver: str, tmp_path: Path, document: Path, frontier: Path) -> str:
+    """Evaluate the core with BOTH kinds of document in scope.
+
+    An atlas and a frontier are two documents, so the driver gets two globals:
+    ``doc`` (fws_atlas/1) and ``front`` (fws_frontier/1).
+    """
+    html = _html()
+    core = html[html.index(CORE_START) : html.index(CORE_END)]
+    script = tmp_path / "driver_pair.js"
+    script.write_text(
+        "const fs = require('fs');\n"
+        "const doc = JSON.parse(fs.readFileSync(%r, 'utf8'));\n" % str(document)
+        + "const front = JSON.parse(fs.readFileSync(%r, 'utf8'));\n" % str(frontier)
+        + "const ATLAS = eval('(function(){' + "
+        + json.dumps(core)
+        + " + '; return ATLAS; })()');\n"
+        + textwrap.dedent(driver),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [_node(), str(script)], capture_output=True, text=True, timeout=120, cwd=str(PROJECT_ROOT)
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_the_folding_fixture_copies_the_real_granite_rows_verbatim():
+    """The anti-staleness gate a HAND fixture can have.
+
+    The generated documents are pinned by regenerate-and-compare. This one is
+    hand-authored, so what is pinned instead is its provenance claim: the
+    placement rows are copied from the shipped Granite artifact ROW FOR ROW. If
+    the source artifact is regenerated and moves, this fails — which is the
+    same protection, applied to the half of the file that is not invented.
+    """
+    fold, src = _fold(), json.loads(GRANITE_ATLAS.read_text(encoding="utf-8"))
+    src_macros = {m["id"]: m for m in src["macros"]}
+    src_tiles = {t["id"]: t for t in src["tiles"]}
+    fold_macros = {m["id"]: m for m in fold["macros"]}
+    assert fold["cards"] == src["cards"]
+    for mid in EXCERPT_MACROS:
+        assert mid in fold_macros, mid
+        assert fold_macros[mid] == src_macros[mid], mid
+    for tile in fold["tiles"]:
+        assert tile == src_tiles[tile["id"]], tile["id"]
+    # The excerpt chip is a real chip with a stated, smaller slot count.
+    chip = [c for c in fold["chips"] if c["pool"] == "analog"][0]
+    assert chip["macros"] == list(EXCERPT_MACROS)
+    assert chip["capacity"]["macro_slots"] == len(EXCERPT_MACROS)
+    assert any(r["constraint"] == "excerpt_is_not_the_run" for r in fold["relaxations"])
+
+
+def test_the_folding_fixture_validates_clean_and_reports_its_idle_banks(tmp_path):
+    """Clean through BOTH loaders, with the one honest warning it must carry.
+
+    Six banks of the real Granite excerpt fire on no pass — the 304-column
+    ssm_in_proj remainder and the 64-column router each leave three banks dark.
+    Under Invariant W that is waste, and T9 reports it rather than refusing it
+    (D27 makes waste a metric, not an error).
+    """
+    out = _run_core(
+        """
+        const base = ATLAS.validate(doc);
+        const ext = ATLAS.validateExt(doc);
+        console.log(JSON.stringify({
+          baseErrors: base.errors.map(e => e.rule + ' ' + e.field),
+          baseWarnings: base.warnings.map(w => w.rule + ' ' + w.field),
+          extErrors: ext.errors.map(e => e.rule + ' ' + e.field),
+          extWarnings: ext.warnings.map(w => w.rule + ' ' + w.field),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["baseErrors"] == [] and report["baseWarnings"] == []
+    assert report["extErrors"] == []
+    idle = report["extWarnings"]
+    assert len(idle) == 6, idle
+    assert all(entry.startswith("T9 ") for entry in idle)
+    assert sum("mac.000004" in entry for entry in idle) == 3
+    assert sum("mac.000007" in entry for entry in idle) == 3
+
+
+def test_the_folding_extension_self_test_fires_every_refusal(tmp_path):
+    out = _run_core(
+        """
+        const rows = ATLAS.extSelfTest(doc);
+        console.log(JSON.stringify({
+          total: rows.length,
+          cases: ATLAS.EXT_CORRUPTIONS.length,
+          failed: rows.filter(r => !r.pass).map(r => r.rule + ' ' + r.what + ' :: ' + r.got),
+          skipped: rows.filter(r => r.skipped).map(r => r.rule),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["failed"] == []
+    assert report["skipped"] == []
+    assert report["total"] == report["cases"] + 1
+
+
+def test_the_folding_refusals_are_all_n_a_on_a_document_without_the_blocks(tmp_path):
+    """A document with no folding block is judged by none of these rules.
+
+    The blocks are OPTIONAL, so every shipped atlas that predates P7.6 must
+    still load clean; and the honest report for a rule with nothing to corrupt
+    is n/a, exactly as the PD rules are on the one-system fixture.
+    """
+    out = _run_core(
+        """
+        const rows = ATLAS.extSelfTest(doc);
+        const ext = ATLAS.validateExt(doc);
+        console.log(JSON.stringify({
+          skipped: rows.filter(r => r.skipped).length,
+          cases: ATLAS.EXT_CORRUPTIONS.length,
+          errors: ext.errors.length,
+          warnings: ext.warnings.length,
+        }));
+        """,
+        tmp_path,
+    )
+    report = json.loads(out)
+    assert report["skipped"] == report["cases"]
+    assert report["errors"] == 0 and report["warnings"] == 0
+
+
+def test_the_doa_register_binds_in_code_and_in_the_artifact(tmp_path):
+    """D26: a dead fold is refused BY NAME, in the loader and in the document.
+
+    Two halves. The loader carries the register and refuses any variant that
+    claims one of its folds; and the artifact must CARRY the register, so an
+    exporter cannot ship a folding card that quietly forgets one entry.
+    """
+    out = _run_core(
+        """
+        const doa = ATLAS.DOA_FOLDS;
+        const named = doc.folding.refused.map(r => r.fold);
+        const dropped = JSON.parse(JSON.stringify(doc));
+        dropped.folding.refused = dropped.folding.refused.filter(r => r.fold !== 'replication');
+        const claimed = JSON.parse(JSON.stringify(doc));
+        claimed.folding.cards[0].variants[0].kind = 'prefill_folding';
+        console.log(JSON.stringify({
+          doa: doa,
+          named: named,
+          dropped: ATLAS.validateFold(dropped).errors.map(e => e.rule + ' ' + e.field),
+          claimed: ATLAS.validateFold(claimed).errors.map(e => e.rule + ' ' + e.message),
+          live: ATLAS.FOLD_KINDS,
+          kinds: doc.folding.cards.map(c => c.variants.map(v => v.kind)),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert sorted(report["doa"]) == sorted([
+        "idle_spread", "multi_tenant_fold", "non_canonical_walk", "pipelined_decode_fold",
+        "prefill_folding", "replication", "slicing_x_folding",
+    ])
+    assert sorted(report["named"]) == sorted(report["doa"])
+    assert any(entry.startswith("F3 folding.refused") for entry in report["dropped"])
+    assert any("prefill_folding" in msg and "DOA" in msg for msg in report["claimed"])
+    # Every variant the fixture draws is a LIVE fold.
+    for kinds in report["kinds"]:
+        for kind in kinds:
+            assert kind in report["live"], kind
+            assert kind not in report["doa"], kind
+
+
+def test_the_viewers_doa_register_carries_every_fold_the_code_refuses(tmp_path):
+    """D26 binds ONE register, so the two copies of it must not drift.
+
+    cim_timing.DEAD_FOLDS is the register the packer refuses by name (P7.2).
+    The viewer carries its own copy because it judges documents, not calls, and
+    it also carries the folds the plan lists as address-only. What it may never
+    do is spell a dead fold differently or drop one: a fold refused in code and
+    admitted by the artifact contract is a fold that comes back through the
+    picture.
+    """
+    import cim_timing
+
+    out = _run_core("console.log(JSON.stringify(ATLAS.DOA_FOLDS));", tmp_path, document=FOLD_FIXTURE)
+    viewer = set(json.loads(out))
+    assert set(cim_timing.DEAD_FOLDS) <= viewer, sorted(set(cim_timing.DEAD_FOLDS) - viewer)
+    # And the artifact carries the same register, name for name.
+    assert {r["fold"] for r in _fold()["folding"]["refused"]} == viewer
+
+
+def test_a_fold_moves_cells_and_never_changes_how_many_there_are(tmp_path):
+    """Invariant W (D27), hand-computed on the real ssm_out_proj of layer 0.
+
+    granite_4_0_h_tiny's ssm_out_proj is d_inner 3072 -> hidden 1536, carried by
+    two tiles that share one owner tuple (K = 1536 each). So K x N = 3072 x 1536
+    = 4 718 592 cells, and a 1536 x 1536 macro slot holds 2 359 296 of them: the
+    floor is exactly 2 slots. Both variants must enumerate that same number and
+    cost that same silicon; what differs between them is where the K partials
+    meet, which is the whole point of the card.
+    """
+    out = _run_core(
+        """
+        const card = doc.folding.cards.find(c => c.id === 'fold.ssm_out_proj.l0');
+        const per = card.variants.map(v => {
+          let cells = 0, passes = 0;
+          v.boxes.forEach(b => ATLAS.passesOfBox(b).forEach(p => {
+            if (!ATLAS.sameOwner(p.owner, card.tensor.owner)) return;
+            cells += p.rows.count * p.columns.count;
+            passes += 1;
+          }));
+          return {id: v.id, kind: v.kind, cells: cells, passes: passes,
+                  area: v.area.value, slots: v.area.slots,
+                  where: v.accumulator.where, bytes: v.accumulator.transport_bytes,
+                  waste: v.waste.cells, energy: v.energy.value};
+        });
+        console.log(JSON.stringify({K: card.tensor.K, N: card.tensor.N,
+          cells: card.tensor.cells, floor: card.floor_macros, per: per}));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert (report["K"], report["N"]) == (3072, 1536)
+    assert report["cells"] == 3072 * 1536 == 4718592
+    assert report["floor"] == 4718592 // (1536 * 1536) == 2
+    variants = {v["id"]: v for v in report["per"]}
+    assert set(variants) == {"v.k_spread", "v.k_stack"}
+    for variant in variants.values():
+        assert variant["cells"] == 4718592
+        assert variant["slots"] == 2
+        assert variant["area"] == pytest.approx(2 * 2.0204136)
+        assert variant["passes"] == 8          # 2 macros x 4 mux banks, once per step
+        assert variant["waste"] == 0
+        assert variant["energy"] is None       # no card law prices a reduction
+    # The one real difference: where the partials meet, and what crosses.
+    assert variants["v.k_spread"]["where"] == "cross_macro"
+    assert variants["v.k_spread"]["bytes"] == 12288.0   # N 1536 x batch 4 x 2 B
+    assert variants["v.k_stack"]["where"] == "in_macro"
+    assert variants["v.k_stack"]["bytes"] == 0.0
+
+
+def test_the_waste_card_counts_cells_and_not_columns(tmp_path):
+    """D27, hand-computed on the real router of layer 0.
+
+    The router is 1536 x 64 and today owns a whole 1536 x 1536 slot, so
+    (1536 - 64) x 1536 = 2 260 992 cells are unheld: 95.8333% of the slot. The
+    atlas's own macros[].occupancy prints 0.0417 for the same macro and measures
+    COLUMNS. The dense variant shares one 384-column bank with ssm_in_proj's
+    real 304-column remainder: 64 + 304 = 368, leaving a 16-column remainder,
+    16 x 1536 = 24 576 cells, 4.1667% of the bank. That remainder is the only
+    waste Invariant W admits.
+    """
+    out = _run_core(
+        """
+        const card = doc.folding.cards.find(c => c.id === 'fold.router.l0');
+        const macro = doc.macros.find(m => m.id === 'sys.fws.mac.000007');
+        console.log(JSON.stringify({
+          K: card.tensor.K, N: card.tensor.N, cells: card.tensor.cells,
+          occupancy: macro.occupancy,
+          variants: card.variants.map(v => ({
+            id: v.id, kind: v.kind, waste: v.waste, area: v.area.value,
+            kindOfArea: v.area.basis_kind, passes: v.time.passes,
+          })),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert (report["K"], report["N"], report["cells"]) == (1536, 64, 98304)
+    assert report["occupancy"] == pytest.approx(64 / 1536)
+    placed, dense = report["variants"]
+    assert placed["kind"] == "n_spread" and dense["kind"] == "dense_share"
+    assert placed["waste"]["cells"] == (1536 - 64) * 1536 == 2260992
+    assert placed["waste"]["pct"] == pytest.approx(2260992 / (1536 * 1536) * 100)
+    assert placed["waste"]["pct"] == pytest.approx(95.83333333)
+    assert placed["kindOfArea"] == "slots"
+    assert placed["area"] == pytest.approx(2.0204136)
+    # P7.2's own itemization: waste = remainder (inside a committed bank) + tail
+    # (banks the stream never reached), and there is no third term.
+    assert placed["waste"]["terms"] == {
+        "remainder_cells": (384 - 64) * 1536,
+        "tail_cells": 3 * 384 * 1536,
+    }
+    assert sum(placed["waste"]["terms"].values()) == placed["waste"]["cells"]
+    assert dense["waste"]["cells"] == 16 * 1536 == 24576
+    assert dense["waste"]["terms"] == {"remainder_cells": 24576, "tail_cells": 0}
+    assert dense["waste"]["pct"] == pytest.approx(16 / 384 * 100)
+    assert dense["kindOfArea"] == "cell_share"
+    assert dense["area"] == pytest.approx(98304 / (1536 * 1536) * 2.0204136)
+    # The tensor's own time does not change: a co-tenant pays its own pass.
+    assert placed["passes"] == dense["passes"] == 1
+
+
+def test_the_time_lane_view_draws_every_bank_of_every_macro(tmp_path):
+    """The decode schedule of the excerpt, counted by hand.
+
+    Eight macros x 4 mux banks = 32 lanes. ssm_in_proj fills 4 + 4 + 4 + 4 + 1
+    of them (its last N block is 304 of 384 columns), ssm_out_proj 4 + 4, the
+    router 1: 26 passes. The other 6 banks fire on nothing, and they are drawn
+    anyway — a bank omitted is waste made invisible (D27).
+    """
+    out = _run_core(
+        """
+        const boxes = doc.passes.boxes;
+        let lanes = 0, passes = 0, idle = 0;
+        const byOwner = {};
+        boxes.forEach(b => (b.lanes || []).forEach(l => {
+          lanes += 1;
+          if (!l.passes.length) idle += 1;
+          l.passes.forEach(p => {
+            passes += 1;
+            byOwner[p.owner.block] = (byOwner[p.owner.block] || 0) + 1;
+          });
+        }));
+        console.log(JSON.stringify({
+          phase: doc.passes.phase, boxes: boxes.length, lanes: lanes,
+          passes: passes, idle: idle, byOwner: byOwner,
+          declared: boxes.reduce((n, b) => n + b.passes, 0),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["phase"] == "decode"          # D25
+    assert report["boxes"] == 8
+    assert report["lanes"] == 8 * 4 == 32
+    assert report["passes"] == report["declared"] == 26
+    assert report["idle"] == 32 - 26 == 6
+    assert report["byOwner"] == {"ssm_in_proj": 17, "ssm_out_proj": 8, "router": 1}
+
+
+def test_the_frontier_fixture_validates_clean_and_fires_every_refusal(tmp_path):
+    out = _run_core_pair(
+        """
+        const v = ATLAS.validateFrontier(front);
+        const rows = ATLAS.frontierSelfTest(front);
+        const views = ATLAS.frontierViewTest(front);
+        console.log(JSON.stringify({
+          errors: v.errors.map(e => e.rule + ' ' + e.field),
+          total: rows.length, cases: ATLAS.FRONTIER_CORRUPTIONS.length,
+          failed: rows.filter(r => !r.pass).map(r => r.rule + ' ' + r.what + ' :: ' + r.got),
+          skipped: rows.filter(r => r.skipped).length,
+          views: views.map(r => r.rule + (r.pass ? '' : ' BROKEN')),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+        frontier=FRONTIER_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["errors"] == []
+    assert report["failed"] == [] and report["skipped"] == 0
+    assert report["total"] == report["cases"] + 1
+    assert report["views"] == ["V12", "V13"]
+
+
+def test_the_frontier_refuses_a_safety_margin_under_any_of_its_names(tmp_path):
+    """D28 is hard: there are no safety margins, so the loader refuses the word.
+
+    A margin is exactly the kind of number that would look innocent in a sweep
+    output and quietly move every point, which is why it is refused by NAME
+    rather than by value.
+    """
+    out = _run_core_pair(
+        """
+        const names = ['safety_margin', 'derate', 'guard_band', 'timing_margin', 'margin'];
+        const hits = names.map(n => {
+          const d = JSON.parse(JSON.stringify(front));
+          d.points[0][n] = 0.15;
+          return ATLAS.validateFrontier(d).errors.filter(e => e.rule === 'X11').length;
+        });
+        const clean = ATLAS.validateFrontier(front).errors.filter(e => e.rule === 'X11').length;
+        console.log(JSON.stringify({hits: hits, clean: clean}));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+        frontier=FRONTIER_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["hits"] == [1, 1, 1, 1, 1]
+    assert report["clean"] == 0
+
+
+def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
+    """The nine points are the Wave D candidates, checked against their source.
+
+    The eight swept points are copied from docs/qif/dse/granite_lanes_banks;
+    the ninth is the shipped Granite atlas run. The front is the four
+    bank_depth = 1 points (a bank_depth = 2 twin costs the same silicon and runs
+    slower, so it is dominated), and the knee is c002, where the digital term of
+    the fitted step law first falls below the residual the digital knob cannot
+    move.
+    """
+    dse = json.loads(
+        (PROJECT_ROOT / "docs/qif/dse/granite_lanes_banks/dse_report.json").read_text(encoding="utf-8")
+    )
+    measured = {}
+    for candidate in dse["candidates"]:
+        entries = {e["key"]: e["value"] for e in candidate["metrics"]["entries"]}
+        measured[candidate["id"]] = (
+            candidate["knobs"]["vector_lanes"],
+            candidate["knobs"]["bank_depth"],
+            entries["sys.fws.tokens_per_s"],
+            entries["sys.fws.decode_step_median"],
+        )
+    front = _frontier()
+    points = {p["id"]: p for p in front["points"]}
+    for pid, (lanes, depth, tokens, step) in measured.items():
+        point = points[pid]
+        assert point["knobs"]["vector_lanes"] == lanes
+        assert point["knobs"]["bank_depth"] == depth
+        assert point["throughput"]["tokens_per_s"] == tokens
+        assert point["throughput"]["decode_step_s"] == step
+    # The ninth point is the shipped atlas run, and it is the only clickable one.
+    granite = {m["key"]: m["value"] for m in json.loads(GRANITE_ATLAS.read_text(encoding="utf-8"))["metrics"]}
+    assert points["ref.atlas"]["throughput"]["tokens_per_s"] == granite["sys.fws.tokens_per_s"]
+    assert points["ref.atlas"]["in_sweep"] is False
+    clickable = [p for p in front["points"] if p["atlas"]["exists"]]
+    assert [p["id"] for p in clickable] == ["ref.atlas"]
+    assert clickable[0]["atlas"]["document"] == GRANITE_ATLAS.name
+    assert GRANITE_ATLAS.exists()
+    # The declared front, recomputed here from the two axes only.
+    def dominated(p):
+        return any(
+            q is not p
+            and q["area"]["total_mm2"] <= p["area"]["total_mm2"]
+            and q["throughput"]["tokens_per_s"] >= p["throughput"]["tokens_per_s"]
+            and (q["area"]["total_mm2"] < p["area"]["total_mm2"]
+                 or q["throughput"]["tokens_per_s"] > p["throughput"]["tokens_per_s"])
+            for q in front["points"]
+        )
+    assert sorted(p["id"] for p in front["points"] if p["pareto"]) == ["c000", "c002", "c004", "c006"]
+    for point in front["points"]:
+        assert point["pareto"] == (not dominated(point)), point["id"]
+    assert [p["id"] for p in front["points"] if p["knee"]] == ["c002"]
+    assert front["knee"]["point"] == "c002"
+    # The knee law itself: step(lanes) = R + C / lanes reproduces all four
+    # measured bank_depth = 1 steps, and 1024 is the first width whose digital
+    # term falls below the residual.
+    steps = {lanes: step for (lanes, depth, _t, step) in measured.values() if depth == 1}
+    c = (steps[512] - steps[4096]) / (1 / 512 - 1 / 4096)
+    r = steps[512] - c / 512
+    for lanes, step in steps.items():
+        assert r + c / lanes == pytest.approx(step, rel=1e-12)
+    assert c / 512 / r > 1.0
+    assert c / 1024 / r < 1.0
+
+
+def test_every_frontier_point_reports_utilization_and_waste(tmp_path):
+    """D28: per-device utilization at every point, and D27: waste at every point.
+
+    An absent measurement is null WITH A REASON — the shared digital chiplet's
+    occupancy is emitted by nothing today — and it draws as the unknown hatch.
+    A zero would say the silicon was measured and found idle, which is a
+    different and much stronger claim.
+    """
+    front = _frontier()
+    classes = [c["id"] for c in front["device_classes"]]
+    assert classes == ["analog_macro", "shared_digital_chiplet"]
+    for point in front["points"]:
+        got = {u["device_class"]: u for u in point["utilization"]}
+        assert sorted(got) == sorted(classes), point["id"]
+        analog = got["analog_macro"]
+        assert 0.0 < analog["value"] < 1.0 and analog["basis"]
+        digital = got["shared_digital_chiplet"]
+        assert digital["value"] is None and digital["uncovered"]
+        assert 0.0 <= point["packing"]["waste_pct"] <= 100.0
+        assert point["packing"]["basis"]
+    # The analog figure reproduces the shipped atlas's MEASURED duty cycle on
+    # the point that IS the shipped atlas run: 4.732818486437201e-07 s of analog
+    # activity per macro per step over that run's own decode step.
+    granite = json.loads(GRANITE_ATLAS.read_text(encoding="utf-8"))
+    duty = max(m["duty_cycle"] for m in granite["macros"] if m["duty_cycle"] is not None)
+    ref = [p for p in front["points"] if p["id"] == "ref.atlas"][0]
+    analog = [u for u in ref["utilization"] if u["device_class"] == "analog_macro"][0]
+    assert analog["value"] == pytest.approx(duty, rel=1e-12)
+
+
+def test_the_frontier_marks_the_two_fields_no_producer_emits():
+    """The x axis exists only because of a placeholder, and it says so.
+
+    The shipped digital card declares no area_mm2, which is exactly why the Wave
+    D front collapsed to one point. A fixture is allowed to carry the number the
+    picture needs; it is not allowed to wear it as a result.
+    """
+    front = _frontier()
+    assert front["provenance"]["invented_fields"] == [
+        "points[].area.terms.shared_digital_mm2"
+    ]
+    constraints = {r["constraint"] for r in front["relaxations"]}
+    assert "shared_digital_area_is_a_placeholder" in constraints
+    assert "shared_digital_utilization_uncovered" in constraints
+    assert "waste_is_the_column_census" in constraints
+    for point in front["points"]:
+        assert point["area"]["terms"]["shared_digital_mm2"] > 0
+        assert point["area"]["terms"]["analog_mm2"] == pytest.approx(12930.64704)
+        assert sum(point["area"]["terms"].values()) == pytest.approx(point["area"]["total_mm2"])
+
+
+def test_the_embedded_frontier_blob_is_the_frontier_fixture_verbatim():
+    match = FRONT_EMBED_RE.search(_html())
+    assert match is not None, "atlas.html carries no frontier-embedded blob"
+    assert json.loads(match.group(1)) == _frontier()
+
+
+def test_the_extension_view_rules_hold_and_are_emitted_only_where_they_apply(tmp_path):
+    out = _run_core_pair(
+        """
+        const withBlocks = ATLAS.viewTest(doc).map(r => r.rule);
+        const plain = ATLAS.viewTest(JSON.parse(fs.readFileSync(
+          'docs/qif/atlas/fixture_llama7b_tp2.json', 'utf8'))).map(r => r.rule);
+        const broken = ATLAS.viewTest(doc).filter(r => !r.pass)
+          .concat(ATLAS.frontierViewTest(front).filter(r => !r.pass))
+          .map(r => r.rule + ' ' + r.got);
+        console.log(JSON.stringify({withBlocks: withBlocks, plain: plain, broken: broken}));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+        frontier=FRONTIER_FIXTURE,
+    )
+    report = json.loads(out)
+    assert report["broken"] == []
+    assert report["withBlocks"][-2:] == ["V10", "V11"]
+    # A document without the blocks is judged by nine rules, as it always was.
+    assert "V10" not in report["plain"] and "V11" not in report["plain"]
+    assert len(report["plain"]) == 9
+
+
+def test_every_extension_rule_is_documented_in_schema_md(tmp_path):
+    """The same gate the R rules have: a rule the panel prints and SCHEMA.md
+    does not carry sends the reader nowhere."""
+    out = _run_core_pair(
+        """
+        console.log(JSON.stringify({
+          ext: Array.from(new Set(ATLAS.EXT_CORRUPTIONS.map(c => c.rule))),
+          front: Array.from(new Set(ATLAS.FRONTIER_CORRUPTIONS.map(c => c.rule))),
+        }));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+        frontier=FRONTIER_FIXTURE,
+    )
+    rules = json.loads(out)
+    declared = set(rules["ext"]) | set(rules["front"])
+    schema = SCHEMA_MD.read_text(encoding="utf-8")
+    documented = set(re.findall(r"^\| ([FTX]\d+) \|", schema, re.MULTILINE))
+    assert declared <= documented, sorted(declared - documented)
+    # And nothing the loader can emit is outside the declared set.
+    emitted = set(re.findall(r'[EW]\("([FTX]\d+)"', _html()))
+    assert emitted <= declared, sorted(emitted - declared)
+    # Every extension VIEW rule is documented too.
+    views = set(re.findall(r'row\("(V1[0-3])"', _html()))
+    assert views == {"V10", "V11", "V12", "V13"}
+    assert views <= set(re.findall(r"^\| (V\d+) \|", schema, re.MULTILINE))
+
+
+def test_schema_md_states_the_extension_self_tests_real_case_counts(tmp_path):
+    """The Wave C audit's lesson, applied to the new suites: the integer in the
+    prose is asserted against what the harness actually runs."""
+    out = _run_core_pair(
+        """
+        console.log(JSON.stringify([ATLAS.extSelfTest(doc).length,
+                                    ATLAS.frontierSelfTest(front).length,
+                                    ATLAS.EXT_CORRUPTIONS.length]));
+        """,
+        tmp_path,
+        document=FOLD_FIXTURE,
+        frontier=FRONTIER_FIXTURE,
+    )
+    ext_rows, front_rows, ext_cases = json.loads(out)
+    schema = SCHEMA_MD.read_text(encoding="utf-8")
+    stated = re.search(r"folding self-test runs (\d+) cases", schema)
+    assert stated and int(stated.group(1)) == ext_rows
+    stated_front = re.search(r"frontier self-test\s*\nruns (\d+)", schema)
+    assert stated_front and int(stated_front.group(1)) == front_rows
+    stated_skip = re.search(r"reports all (\d+) folding cases as `n/a`", schema)
+    assert stated_skip and int(stated_skip.group(1)) == ext_cases
+
+
+def test_the_frontier_document_never_displaces_the_atlas():
+    """A SOURCE-level assertion, like the sibling-fetch one above.
+
+    The boot block is the one part of the page no headless run reaches. Two
+    documents of two kinds are on screen at once, and a dropped frontier must
+    add a view rather than replace the mapping the reader is looking at.
+    """
+    html = _html()
+    assert 'if (parsed && parsed.schema === A.FRONTIER_SCHEMA) { adoptFrontier(parsed, file.name); return; }' in html
+    assert 'S.front = doc; S.frontSource = source; S.selftest = null; S.view = "frontier";' in html
+    # The frontier blob is parsed BEFORE the atlas adopts, so ?view=frontier is
+    # honoured on the first paint instead of being reset to the package view.
+    assert html.index('$("frontier-embedded")') < html.index('if (embedded) adopt(embedded, "embedded blob");')
+    # And the toolbar refuses to offer a view the loaded document cannot draw.
+    assert 'this document carries no folding block' in html
+    assert 'no fws_frontier/1 document loaded' in html
+
+
+def test_no_frontier_document_smuggles_an_accuracy_field():
+    """D23 applies to every artifact, and the frontier is not an atlas document,
+    so the shipped-atlas scan above does not reach it."""
+    banned = ("accuracy", "perplexity", "top1", "top_1", "bleu", "error_rate")
+    blob = FRONTIER_FIXTURE.read_text(encoding="utf-8").lower()
+    for word in banned:
+        assert word not in blob, word

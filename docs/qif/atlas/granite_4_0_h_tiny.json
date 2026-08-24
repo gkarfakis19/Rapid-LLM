@@ -254748,6 +254748,34 @@
    "value": 3.696165327214333,
    "unit": "requests/s",
    "basis": "4 same-length requests (D15) divided by the observed span of the same timeline. ZERO of them COMPLETE in that span: only 3 of 256 decode steps are lowered, so this is a window rate carrying the batch size, not a completed-request rate. It is NOT recomputed from the extrapolated latency — that would be a period times a count, which P4 §3 forbids in metrics[]."
+  },
+  {
+   "key": "sys.fws.utilization.analog_macro",
+   "label": "analog_macro utilization (mean over the class)",
+   "value": 8.055561320322771e-05,
+   "unit": "fraction of the makespan",
+   "basis": "5610 of 6400 devices ran ops (790 idle, and idle devices are INSIDE this mean); peak 0.000530769, median 4.98982e-05. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.fws.utilization.macro_pool",
+   "label": "macro_pool utilization (mean over the class)",
+   "value": 2.87334482032574e-06,
+   "unit": "fraction of the makespan",
+   "basis": "2716 of 6400 devices ran ops (3684 idle, and idle devices are INSIDE this mean); peak 0.000510817, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.fws.utilization.shared_digital",
+   "label": "shared_digital utilization (mean over the class)",
+   "value": 0.08717627616340659,
+   "unit": "fraction of the makespan",
+   "basis": "10 of 10 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.0881356, median 0.0881356. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+  },
+  {
+   "key": "sys.fws.utilization.link",
+   "label": "link utilization (mean over the class)",
+   "value": 0.00022415911759339895,
+   "unit": "fraction of the makespan",
+   "basis": "17 of 17 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.000323756, median 0.000193514. links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip link over the makespan — and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
   }
  ],
  "relaxations": [
@@ -254825,6 +254853,11 @@
    "constraint": "kv_shares_the_activation_tier",
    "value": "cim_sram: one tier, two tenants",
    "reason": "inference.kvcache_type = cim_sram puts the KV cache in the same activation SRAM tier the replay's activations draw on, so the verdict is taken on the SUM. Under cim_dram the KV cache gets its own declared tier and its own verdict."
+  },
+  {
+   "constraint": "device_class_utilization",
+   "value": "analog_macro 0.008% mean / 0.053% peak (790 of 6400 idle), macro_pool 0.000% mean / 0.051% peak (3684 of 6400 idle), shared_digital 8.718% mean / 8.814% peak (0 of 10 idle), link 0.022% mean / 0.032% peak (0 of 17 idle)",
+   "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 8.814% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears — it always appears."
   },
   {
    "constraint": "decode_series_window",
