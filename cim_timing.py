@@ -261,9 +261,12 @@ OPTIMA block-latency equivalence (recon note for validation)
 """
 
 import math
+import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
+
+import yaml
 
 import llm_util
 
@@ -801,14 +804,22 @@ DEAD_FOLDS: "OrderedDict[str, str]" = OrderedDict(
         (
             "replication",
             "Replication is on the DOA register (D26) and contradicts Invariant W "
-            "(D27): a second copy of a weight either idles or duplicates work decode "
-            "cannot use, and it buys throughput only in a regime D15 does not serve.",
+            "(D27): a second copy of a weight spends cells that hold no new weight, "
+            "which is the one thing D27 forbids. D27 alone is the reason it is dead — "
+            "the older serving argument (\"it buys throughput only in a regime D15 does "
+            "not serve\") no longer applies, because D29 supersedes D15 for fws_cim and "
+            "makes cross-STAGE bank sharing cost time every beat, which is exactly the "
+            "case replication could relieve. The refusal stands on the weight-space "
+            "invariant, not on the serving regime.",
         ),
         (
             "prefill_folding",
-            "DECODE ONLY (D25). Prefill folding is out for P7 — concurrent layers and "
-            "SSD chunking break the decode sequentiality that makes cross-tensor bank "
-            "sharing free (Fact 3) — so no prefill mapping may be packed densely.",
+            "DECODE ONLY (D25), and D25 alone is the reason: P7 prices no prefill op at "
+            "all, so a prefill mapping has nothing to pack. The original rationale "
+            "leaned on P7's Fact 3 (decode sequentiality makes co-residency free), and "
+            "that paragraph is RETIRED — under D29 the pipeline is always full and "
+            "cross-stage sharing contends every beat. The refusal is unchanged; its "
+            "reason is now the decode-only scope and nothing else.",
         ),
     )
 )
@@ -1630,6 +1641,827 @@ def short_conv_ops_per_result(kernel_size: int) -> int:
     return 2 * kernel_size - 1
 
 
+
+# ---------------------------------------------------------------------------
+# THE MEASURED SYNTHESIS LIBRARY (D32) and DERIVED ENGINE SIZING (D31)
+#
+# D32: digital area and power are no longer DECLARED placeholders. They are
+# COMPOSITIONS of blocks that were measured by synthesis — a unit count times
+# that block's own `area_um2` / `power_W` — read from a library file checked in
+# under `configs/hardware-config/digital_components_<tech>.yaml`, whose
+# provenance header names the OPTIMA synthesis run every number came from.
+#
+# THE PATTERN IS OPTIMA'S, THE TIMING IS OURS. OPTIMA's `HWCollection` is a
+# {block: count} bag with `get_total_area_mm2` / `get_total_power_W`, and this
+# module borrows exactly that (:class:`EngineComposition`). What it does NOT
+# borrow is how OPTIMA gets the counts: `create_s3_scan_collection` SIZES the
+# engine to a microcycle budget and `get_execution_cycles` then returns that
+# budget while ignoring its own arguments, so digital load can only cost area
+# there, never time (AUDIT finding 6). Here the counts are DERIVED FROM A BEAT
+# by :meth:`CimDeviceModel.derive_engine_sizing` and the resulting engine is
+# then TIMED by :meth:`CimDeviceModel.price_vector_work` like any other — the
+# derivation is the exact inverse of the pricing law, so a run cannot buy an
+# engine that its own laws would not use.
+#
+# NO MARGINS (D28). OPTIMA multiplies every collection by an `overhead`
+# fraction (0.0 for the adder and the activations, 0.1 for LayerNorm and the
+# scan, 0.15 for the S4 mul, 0.2 for softmax and the Mamba softplus/exp pair,
+# and 0.4 for the depthwise conv) to cover glue and routing. That is a pad
+# nobody measured, so it is NOT carried; :data:`OPTIMA_COLLECTION_OVERHEADS`
+# records what was dropped so the omission is a number rather than a silence.
+# ---------------------------------------------------------------------------
+
+
+#: OPTIMA's per-collection `overhead` fractions, recorded and NOT applied (D28).
+#: Read from perf_model/hardware/collections.py, 2026-08-24.
+OPTIMA_COLLECTION_OVERHEADS = {
+    "Softmax_Stage2": 0.2,
+    "Adder_Residual": 0.0,
+    "LayerNorm_Residual": 0.1,
+    "Mamba_S3_SSM_Scan": 0.1,
+    "Mamba_S4_TwiceMul": 0.15,
+    # The largest pad OPTIMA carries, and the one this repo's per-macro pool
+    # composition mirrors (compose_macro_pool's conv-tap rows, ADJ-3). It was
+    # missing from this record, which made the stated range 0.0-0.2 wrong.
+    "Mamba_DepthwiseConv_k": 0.4,
+    "Mamba_SoftplusAdd": 0.2,
+    "Mamba_ExpMul": 0.2,
+}
+
+#: Directory the checked-in libraries live in (repo-relative, never OPTIMA).
+SYNTHESIS_LIBRARY_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "configs", "hardware-config"
+)
+
+#: Provenance labels for one composed row (D21: one accounting, one label).
+PROVENANCE_MEASURED = "measured-synthesis"
+"""The per-unit area/power came from a synthesis report, verbatim."""
+PROVENANCE_DERIVED_COUNT = "derived-count"
+"""The unit COUNT was derived by a law in this module (the beat, or a width)."""
+PROVENANCE_DECLARED_COUNT = "declared-count"
+"""The unit COUNT came from a card knob a human wrote down."""
+
+
+class SynthesisLibraryError(ValueError):
+    """The library cannot answer, and no number is invented in its place.
+
+    Raised when a library file is missing, when a card names a technology that
+    is not checked in, or — the important one — when a composition asks for a
+    BLOCK THE LIBRARY DOES NOT NAME. D32 makes measured blocks the source of
+    digital area and power; a block nobody synthesised has no area, and a
+    zero-fill or an interpolation would be an invented number (ADJ-4).
+    """
+
+
+@dataclass(frozen=True)
+class SynthesisBlock:
+    """One measured block: what synthesis reported, and where it reported it."""
+
+    name: str
+    area_um2: float
+    power_w: float
+    frequency_ghz: float
+    pipeline_depth: int
+    provenance: str
+    description: str = ""
+    rows: int = 0
+    cols: int = 0
+
+    @property
+    def area_mm2(self) -> float:
+        return float(self.area_um2) / 1.0e6
+
+
+@dataclass(frozen=True)
+class SynthesisLibrary:
+    """A checked-in measured-block library, loaded once and cached by path.
+
+    ``block(name)`` is the whole read interface, and it REFUSES BY NAME.
+    """
+
+    technology: str
+    source: str
+    source_reports: str
+    path: str
+    blocks: "OrderedDict[str, SynthesisBlock]"
+
+    # -- loading ---------------------------------------------------------
+
+    @staticmethod
+    def path_for(technology: str) -> str:
+        """Repo path of a named technology's library."""
+        tech = str(technology).strip()
+        if os.path.sep in tech or tech.endswith((".yaml", ".yml")):
+            return tech
+        return os.path.join(SYNTHESIS_LIBRARY_DIR, f"digital_components_{tech}.yaml")
+
+    @classmethod
+    def load(cls, technology: str = "22nm") -> "SynthesisLibrary":
+        """Load (and cache) the library for a technology name or a file path."""
+        path = cls.path_for(technology)
+        key = os.path.abspath(path)
+        cached = _SYNTHESIS_LIBRARY_CACHE.get(key)
+        if cached is None:
+            cached = cls._read(path)
+            _SYNTHESIS_LIBRARY_CACHE[key] = cached
+        return cached
+
+    @classmethod
+    def _read(cls, path: str) -> "SynthesisLibrary":
+        if not os.path.isfile(path):
+            available = sorted(
+                name[len("digital_components_"):-len(".yaml")]
+                for name in (
+                    os.listdir(SYNTHESIS_LIBRARY_DIR)
+                    if os.path.isdir(SYNTHESIS_LIBRARY_DIR)
+                    else []
+                )
+                if name.startswith("digital_components_") and name.endswith(".yaml")
+            )
+            raise SynthesisLibraryError(
+                f"no measured synthesis library at {path!r}. D32 composes digital area "
+                "and power from blocks a synthesis run measured, so a technology that is "
+                "not checked in has no numbers at all — it is not scaled from another "
+                f"node. Checked in here: {available or 'none'}."
+            )
+        with open(path, "r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        raw = data.get("blocks")
+        if not isinstance(raw, dict) or not raw:
+            raise SynthesisLibraryError(
+                f"{path}: the library declares no 'blocks:' mapping. The file is the "
+                "provenance header plus the measured blocks; without the blocks there is "
+                "nothing to compose."
+            )
+        blocks: "OrderedDict[str, SynthesisBlock]" = OrderedDict()
+        for name, entry in raw.items():
+            if not isinstance(entry, dict):
+                raise SynthesisLibraryError(f"{path}: block {name!r} is not a mapping.")
+            missing = [
+                key for key in ("area_um2", "power_W", "provenance") if key not in entry
+            ]
+            if missing:
+                raise SynthesisLibraryError(
+                    f"{path}: block {name!r} declares no {', '.join(missing)}. Every "
+                    "block carries its measured area, its measured power and the "
+                    "provenance line that says which synthesis run measured them."
+                )
+            blocks[str(name)] = SynthesisBlock(
+                name=str(name),
+                area_um2=float(entry["area_um2"]),
+                power_w=float(entry["power_W"]),
+                frequency_ghz=float(entry.get("frequency_GHz", 0.0) or 0.0),
+                pipeline_depth=int(entry.get("pipeline_depth", 1) or 1),
+                provenance=str(entry["provenance"]),
+                description=str(entry.get("description", "")),
+                rows=int(entry.get("rows", 0) or 0),
+                cols=int(entry.get("cols", 0) or 0),
+            )
+        return cls(
+            technology=str(data.get("technology", "")),
+            source=str(data.get("source", "")),
+            source_reports=str(data.get("source_reports", "")),
+            path=path,
+            blocks=blocks,
+        )
+
+    # -- reading ---------------------------------------------------------
+
+    def block(self, name: str) -> SynthesisBlock:
+        """The named measured block, or a refusal that names it (D32/ADJ-4)."""
+        found = self.blocks.get(str(name))
+        if found is None:
+            raise SynthesisLibraryError(
+                f"the {self.technology} synthesis library names no block {str(name)!r}. "
+                "D32 prices digital silicon from MEASURED blocks only: there is no "
+                "default block, no substitute and no zero-fill, because a block nobody "
+                "synthesised has no area and no power to report. The library names: "
+                f"{', '.join(self.blocks)}. Source: {self.source_reports or self.source}."
+            )
+        return found
+
+    def area_mm2(self, name: str) -> float:
+        return self.block(name).area_mm2
+
+    def power_w(self, name: str) -> float:
+        return float(self.block(name).power_w)
+
+    def provenance_line(self) -> str:
+        return (
+            f"synthesis library {self.technology}: {len(self.blocks)} measured blocks "
+            f"from {self.source_reports or self.source}, checked in at {self.path} "
+            "(D32; nothing is read from the source project at runtime)."
+        )
+
+
+#: Path -> loaded library. A library file is immutable data; one read is enough.
+_SYNTHESIS_LIBRARY_CACHE: "OrderedDict[str, SynthesisLibrary]" = OrderedDict()
+
+
+@dataclass(frozen=True)
+class BlockCount:
+    """``count`` copies of one measured block, and what they cost."""
+
+    block: str
+    count: int
+    unit_area_mm2: float
+    unit_power_w: float
+    role: str
+    count_provenance: str
+    unit_provenance: str = PROVENANCE_MEASURED
+
+    @property
+    def area_mm2(self) -> float:
+        return self.count * self.unit_area_mm2
+
+    @property
+    def power_w(self) -> float:
+        return self.count * self.unit_power_w
+
+
+@dataclass(frozen=True)
+class EngineComposition:
+    """One engine, composed of measured blocks — the D32 accounting unit.
+
+    ``area_mm2`` and ``power_w`` are ``sum(count * unit)`` over :attr:`units`
+    and nothing else: no overhead fraction, no margin, no rounding (D28). Every
+    row carries TWO provenance labels, because they answer different questions —
+    ``unit_provenance`` says where the per-unit silicon number came from
+    (always ``measured-synthesis`` here) and ``count_provenance`` says where the
+    COUNT came from (``derived-count`` when a law in this module produced it
+    from the beat or a width, ``declared-count`` when a card knob did).
+    """
+
+    name: str
+    technology: str
+    units: Tuple[BlockCount, ...]
+    basis: str
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def area_mm2(self) -> float:
+        return math.fsum(unit.area_mm2 for unit in self.units)
+
+    @property
+    def power_w(self) -> float:
+        return math.fsum(unit.power_w for unit in self.units)
+
+    @property
+    def blocks(self) -> "OrderedDict[str, int]":
+        out: "OrderedDict[str, int]" = OrderedDict()
+        for unit in self.units:
+            out[unit.block] = out.get(unit.block, 0) + int(unit.count)
+        return out
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("engine", self.name),
+                ("technology", self.technology),
+                ("area_mm2", self.area_mm2),
+                ("power_W", self.power_w),
+                ("basis", self.basis),
+                (
+                    "units",
+                    [
+                        OrderedDict(
+                            (
+                                ("block", unit.block),
+                                ("role", unit.role),
+                                ("count", int(unit.count)),
+                                ("unit_area_mm2", unit.unit_area_mm2),
+                                ("unit_power_W", unit.unit_power_w),
+                                ("area_mm2", unit.area_mm2),
+                                ("power_W", unit.power_w),
+                                ("count_provenance", unit.count_provenance),
+                                ("unit_provenance", unit.unit_provenance),
+                            )
+                        )
+                        for unit in self.units
+                    ],
+                ),
+                ("disclosures", list(self.disclosures)),
+            )
+        )
+
+    def report(self) -> str:
+        lines = [
+            f"[FWS-CIM] {self.name} (D32, {self.technology} measured synthesis): "
+            f"{self.area_mm2:.6g} mm2, {self.power_w:.6g} W",
+            f"  basis  {self.basis}",
+        ]
+        for unit in self.units:
+            lines.append(
+                f"  {unit.block:<32} x {unit.count:<8d} {unit.area_mm2:>12.6g} mm2 "
+                f"{unit.power_w:>10.6g} W  [{unit.count_provenance}/{unit.unit_provenance}]"
+                f"  {unit.role}"
+            )
+        for note in self.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+
+def _units(
+    library: SynthesisLibrary,
+    rows: Sequence[Tuple[str, int, str]],
+    *,
+    count_provenance: str,
+) -> Tuple[BlockCount, ...]:
+    """Build BlockCount rows, refusing any block the library does not name."""
+    out: List[BlockCount] = []
+    for block_name, count, role in rows:
+        count = int(count)
+        if count <= 0:
+            continue
+        block = library.block(block_name)
+        out.append(
+            BlockCount(
+                block=block.name,
+                count=count,
+                unit_area_mm2=block.area_mm2,
+                unit_power_w=float(block.power_w),
+                role=role,
+                count_provenance=count_provenance,
+                unit_provenance=block.provenance,
+            )
+        )
+    return tuple(out)
+
+
+#: One scan/vector LANE, spelled in measured blocks. See
+#: :func:`compose_vector_engine` for why a lane holds both an FP_MULT and an
+#: FP_ADD.
+VECTOR_LANE_BLOCKS = (
+    ("FP_MULT", 1, "the lane's multiply path"),
+    ("FP_ADD", 1, "the lane's add path"),
+    ("M_REG", 1, "the lane's operand/accumulate register"),
+)
+
+
+def compose_vector_engine(
+    library: SynthesisLibrary,
+    lanes: int,
+    *,
+    count_provenance: str = PROVENANCE_DERIVED_COUNT,
+) -> EngineComposition:
+    """The scan/vector engine of the shared digital chiplet, in measured blocks.
+
+    ONE LANE HOLDS BOTH ARITHMETIC UNITS, and that is a consequence of the law
+    rather than a pad. :meth:`CimDeviceModel.price_vector_work` charges one
+    cycle per lane for ONE SCALAR OPERATION, "a multiply OR an add", and the
+    laws that feed it (`ssm_recurrent_scan_work`, `ssd_chunked_scan_work`,
+    `delta_rule_work`, `rg_lru_work`) hand it a single ``ops = muls + adds``
+    total with no schedule attached. A lane that may be handed either kind of
+    operation on any cycle therefore contains both units. Splitting the lanes
+    by the mul/add mix would be cheaper silicon, but it would only be honest
+    with a per-cycle SCHEDULE that the beat-level sizing does not have, and a
+    lane that could not retire the op it was handed would break the peak the
+    pricing law is pinned to. The stance is stated here rather than padded into
+    a number (D28), and it is the ONE stance: no other composition of a vector
+    lane exists in this module.
+
+    OPTIMA's `create_s3_scan_collection` instead emits separate `FP_MULT` and
+    `FP_ADD` counts, because it derives them from ONE hard-coded scan schedule.
+    Our laws are not one schedule, so that split is not available to us; the
+    difference is named here (D21, one accounting per metric).
+    """
+    lanes = int(lanes)
+    if lanes < 1:
+        raise ValueError("compose_vector_engine: lanes must be >= 1")
+    return EngineComposition(
+        name="scan/vector engine",
+        technology=library.technology,
+        units=_units(
+            library,
+            [(block, count * lanes, role) for block, count, role in VECTOR_LANE_BLOCKS],
+            count_provenance=count_provenance,
+        ),
+        basis=(
+            f"{lanes} lane(s) x (FP_MULT + FP_ADD + M_REG): one lane retires one scalar "
+            "operation of EITHER kind per vector cycle, which is the peak "
+            "CimDeviceModel.price_vector_work is bound to, so the lane holds both "
+            "arithmetic units"
+        ),
+        disclosures=(
+            "vector lane composition: a lane holds an FP_MULT and an FP_ADD because the "
+            "pricing law lets it retire either on any cycle and the work laws report one "
+            "ops total, not a schedule. A mix-split engine would be smaller and is NOT "
+            "modelled, because nothing in this repo declares the per-cycle mix.",
+            "no overhead fraction is applied (D28): OPTIMA's own scan collection carries "
+            f"overhead {OPTIMA_COLLECTION_OVERHEADS['Mamba_S3_SSM_Scan']} for glue and "
+            "routing; that pad is dropped and named rather than carried.",
+        ),
+    )
+
+
+def compose_softmax_engine(
+    library: SynthesisLibrary,
+    lanes: int,
+    replicas: int = 1,
+    *,
+    count_provenance: str = PROVENANCE_DECLARED_COUNT,
+) -> EngineComposition:
+    """The softmax pipeline, in measured blocks — OPTIMA's collection, term for term.
+
+    The per-lane census is copied from OPTIMA's `create_softmax_collection`
+    (perf_model/hardware/collections.py), which is a REFERENCE in the D21 sense:
+    for a width ``w`` it instantiates ``FP_COMP: w - 1`` (the running max tree),
+    ``FP_ADD: 2w - 1`` (the max subtract plus the sum tree), ``FP_MULT: 2w``,
+    ``BF16_EXP: w`` and ``BF16_RECIP: 1`` (one reciprocal per row, shared by the
+    whole width). The width here is this card's ``cim.fabric.softmax_lanes``,
+    and the whole census is instantiated once PER REPLICA, because
+    :meth:`CimDeviceModel.softmax_cycles` already spends ``softmax_lanes *
+    replicas`` lanes.
+
+    Its pipeline depth is 20 in that collection, which is the same 20 this
+    repo's ``cim.fabric.softmax_pipeline_depth`` defaults to — the two numbers
+    agree because they have the same origin, and a test pins that.
+    """
+    lanes = int(lanes)
+    replicas = max(1, int(replicas))
+    if lanes < 1:
+        raise ValueError("compose_softmax_engine: lanes must be >= 1")
+    rows = [
+        ("FP_COMP", replicas * (lanes - 1), "running-max comparison tree"),
+        ("FP_ADD", replicas * (2 * lanes - 1), "max subtract + the sum tree"),
+        ("FP_MULT", replicas * (2 * lanes), "scale and normalise"),
+        ("BF16_EXP", replicas * lanes, "the exponential itself"),
+        ("BF16_RECIP", replicas * 1, "one reciprocal per row, shared by the width"),
+    ]
+    return EngineComposition(
+        name="softmax lanes",
+        technology=library.technology,
+        units=_units(library, rows, count_provenance=count_provenance),
+        basis=(
+            f"OPTIMA create_softmax_collection at width {lanes}, instantiated "
+            f"{replicas} time(s) (one per attention replica, matching "
+            "CimDeviceModel.softmax_cycles which spends softmax_lanes x replicas)"
+        ),
+        disclosures=(
+            "no overhead fraction is applied (D28): OPTIMA's softmax collection carries "
+            f"overhead {OPTIMA_COLLECTION_OVERHEADS['Softmax_Stage2']}, the largest pad "
+            "in its library, and it is dropped and named rather than carried.",
+        ),
+    )
+
+
+def compose_sa_fabric(
+    library: SynthesisLibrary,
+    rows: int,
+    cols: int,
+    num_arrays: int = 1,
+    replicas: int = 1,
+    *,
+    count_provenance: str = PROVENANCE_DERIVED_COUNT,
+) -> EngineComposition:
+    """The systolic-array attention fabric, in measured GEMMINI blocks.
+
+    The library's `GEMMINI_SYS_ARRAY` is a FIXED 32x32 array (its own ``rows``
+    and ``cols`` fields say so), so a declared ``rows x cols`` fabric is built
+    from ``ceil(rows / 32) * ceil(cols / 32)`` of them, per array, per replica.
+
+    THE CEIL IS THE HONEST PART. OPTIMA's `DigitalTile.rtl_arrays_needed`
+    multiplies the RATIOS (``rows / 32 * cols / 32``) and keeps the fraction, so
+    a 32x64 fabric costs exactly 2.0 arrays there and a 40x64 fabric costs 2.5 —
+    half a synthesised block. Blocks are integers exactly as chips are (D21), so
+    this composition ceils, and the difference against OPTIMA is 0 whenever the
+    declared geometry is a multiple of 32 (which every shipped card is).
+    """
+    rows = int(rows)
+    cols = int(cols)
+    num_arrays = max(1, int(num_arrays))
+    replicas = max(1, int(replicas))
+    gemmini = library.block("GEMMINI_SYS_ARRAY")
+    phys_rows = int(gemmini.rows or 0)
+    phys_cols = int(gemmini.cols or 0)
+    if phys_rows < 1 or phys_cols < 1:
+        raise SynthesisLibraryError(
+            f"{library.technology} GEMMINI_SYS_ARRAY declares no rows/cols geometry, so "
+            "the number of blocks a rows x cols fabric needs cannot be counted. The "
+            "block's own geometry is what makes the count a measurement rather than an "
+            "assumption."
+        )
+    tiles = _ceil_div(rows, phys_rows) * _ceil_div(cols, phys_cols)
+    blocks = tiles * num_arrays * replicas
+    exact = (rows % phys_rows == 0) and (cols % phys_cols == 0)
+    disclosures = [
+        "no overhead fraction is applied (D28).",
+        "the attention datapath's converter blocks (COMBINED_CONV, "
+        "COMBINED_CONV_SEQUENTIAL, INT8_BUFF_DIV_SYS_ARRAY_PENALTY) are NOT composed: "
+        "all three are measured at 0 area and 0 power in both checked-in libraries, and "
+        "OPTIMA's own source note records its counts for them (rows, cols, 2*rows*cols) "
+        "as unexplained placeholders. They are named here and left out, so no invented "
+        "count enters and no number changes.",
+        "TRANSPOSER: ONE per attention replica (one K-matrix preparation path per "
+        "replica). OPTIMA instantiates 9 per replica and its own source comment says "
+        "'the 9 is unexplained'; an uncalibrated count is not copied (ADJ-4). At "
+        f"{library.technology} the difference is {8 * replicas} x "
+        f"{library.block('TRANSPOSER').area_mm2:.6g} mm2.",
+    ]
+    if not exact:
+        disclosures.append(
+            f"the declared fabric is {rows} x {cols}, which is not a whole multiple of "
+            f"the measured {phys_rows} x {phys_cols} block: {tiles} blocks are "
+            f"instantiated per array and the remainder columns/rows are IDLE SILICON "
+            "that this composition still pays for, exactly as the machine would."
+        )
+    return EngineComposition(
+        name="SA attention fabric",
+        technology=library.technology,
+        units=_units(
+            library,
+            [
+                (
+                    "GEMMINI_SYS_ARRAY",
+                    blocks,
+                    f"{phys_rows}x{phys_cols} systolic blocks tiling {rows}x{cols} "
+                    f"x {num_arrays} array(s) x {replicas} replica(s)",
+                ),
+                ("TRANSPOSER", replicas, "K-matrix preparation, one per replica"),
+            ],
+            count_provenance=count_provenance,
+        ),
+        basis=(
+            f"ceil({rows}/{phys_rows}) * ceil({cols}/{phys_cols}) = {tiles} measured "
+            f"{phys_rows}x{phys_cols} blocks per array, x {num_arrays} arrays "
+            f"x {replicas} replicas = {blocks}, plus {replicas} TRANSPOSER"
+        ),
+        disclosures=tuple(disclosures),
+    )
+
+
+def compose_macro_pool(
+    library: SynthesisLibrary,
+    sizing: "DigitalPoolSizing",
+    *,
+    count_provenance: str = PROVENANCE_DERIVED_COUNT,
+) -> EngineComposition:
+    """One macro's digital pool, in measured blocks (D12 sizing x D32 pricing).
+
+    The counts are :meth:`CimDeviceModel.digital_pool_sizing`'s own derived
+    widths, unchanged: ``adders`` shift-add adders, ``conv_lanes`` depthwise-conv
+    lanes, and one holding register per lane.
+
+    This CLOSES the named gap P7.2 left open. `price_packing_accumulation`
+    discloses that "the accumulator's holding REGISTER is not priced separately:
+    no card declares a register area". The library declares one — `M_REG` — so
+    the register is now a measured block with a counted instance per lane
+    instead of a gap.
+    """
+    lanes = max(0, int(sizing.lanes))
+    conv_lanes = max(0, int(sizing.conv_lanes))
+    rows = [
+        ("FP_ADD", int(sizing.adders), "shift-add tree adders (bit-slice reduction)"),
+        ("FP_MULT", conv_lanes, "short depthwise conv taps (ADJ-3)"),
+        ("FP_ADD", conv_lanes, "short depthwise conv accumulate (ADJ-3)"),
+        ("M_REG", lanes + conv_lanes, "one holding register per pool lane"),
+    ]
+    return EngineComposition(
+        name="per-macro digital pool",
+        technology=library.technology,
+        units=_units(library, rows, count_provenance=count_provenance),
+        basis=(
+            f"CimDeviceModel.digital_pool_sizing: {sizing.adders} adders + "
+            f"{conv_lanes} conv lane(s) + {lanes + conv_lanes} register(s), the widths "
+            "D12 derives from the macro's own result rate"
+        ),
+        disclosures=(
+            "the pool's holding register is now a MEASURED block (M_REG), which retires "
+            "the P7.2 disclosure that called it a named gap; the register count is one "
+            "per lane, not one per adder, because the K-inner walk keeps one partial "
+            "live per lane at a time.",
+            "no overhead fraction is applied (D28).",
+        ),
+    )
+
+
+# --- Derived engine sizing (D31): the beat sets the width -------------------
+
+
+#: The lane count :meth:`CimDeviceModel.price_vector_work` reports while the
+#: D31 PROBE pass is running. During the probe a vector op costs 0 s by
+#: construction, so this number times nothing; it exists only so the work laws
+#: can be evaluated before any width has been derived. Large enough that
+#: ``ceil(ops / lanes) == 1`` for every work count this repo can produce.
+_PROBE_LANES = 1 << 62
+
+
+class EngineSizingError(ValueError):
+    """The beat cannot be held at ANY engine width, and no margin hides it.
+
+    D31 derives the engine from the beat. When the pipeline fill alone already
+    costs more cycles than the beat has, no lane count fixes it: adding lanes
+    shortens the streaming term and never the fill. That is a real, reportable
+    infeasibility (the beat is too short for the declared clock and pipeline
+    depth), so it is refused by name rather than clamped.
+    """
+
+
+@dataclass(frozen=True)
+class EngineDemand:
+    """What ONE stage asks of its vector engine in ONE beat.
+
+    ``calls`` is the number of SEPARATE priced vector-op calls the stage runs in
+    a beat, and ``ops`` their scalar-operation totals. They are kept apart
+    because :meth:`CimDeviceModel.price_vector_work` charges every call its own
+    pipeline fill: ``depth + ceil(ops/lanes) - 1`` cycles each. Summing the ops
+    into one number and sizing on that would under-count the fill by
+    ``(calls - 1) * (depth - 1)`` cycles, which is a real cost of the machine.
+    """
+
+    stage: int
+    ops: Tuple[float, ...]
+
+    @property
+    def calls(self) -> int:
+        return len(self.ops)
+
+    @property
+    def total_ops(self) -> float:
+        return math.fsum(self.ops)
+
+
+@dataclass(frozen=True)
+class StageEngineSizing:
+    """One stage's derived width and the cycles it actually spends."""
+
+    stage: int
+    calls: int
+    #: The per-call scalar-op counts, kept so the cycle identity stays
+    #: CHECKABLE: ``vector_cycles_at(ops, lanes, depth) == used_cycles``. A row
+    #: that carried only the total could not reconstruct its own fill, because
+    #: every call pays one.
+    ops: Tuple[float, ...]
+    total_ops: float
+    lanes: int
+    budget_cycles: int
+    fill_cycles: int
+    stream_cycles: int
+    used_cycles: int
+    time_s: float
+    slack_s: float
+
+
+@dataclass(frozen=True)
+class DerivedEngineSizing:
+    """The engine D31 derives from the beat, with everything it was derived from.
+
+    ``vector_lanes`` is the width the WORST stage needs; the chiplet card is one
+    card, so one width is provisioned and the per-stage rows show which stage
+    set it and how much slack the others run with. ``binding_stage`` is that
+    worst stage — reporting it is the point of the exercise (D28: idle silicon
+    must be visible, and so must the stage that paid for it).
+    """
+
+    analog_beat_s: float
+    clock_hz: float
+    pipeline_depth: int
+    vector_lanes: int
+    binding_stage: int
+    per_stage: Tuple[StageEngineSizing, ...]
+    composition: Optional[EngineComposition] = None
+    basis: str = ""
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def utilization(self) -> float:
+        """Binding stage's engine duty inside the beat (1.0 = perfectly held)."""
+        for row in self.per_stage:
+            if row.stage == self.binding_stage:
+                return (
+                    (row.time_s / self.analog_beat_s) if self.analog_beat_s > 0 else 0.0
+                )
+        return 0.0
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("analog_beat_s", self.analog_beat_s),
+                ("vector_lanes", int(self.vector_lanes)),
+                ("lane_provenance", PROVENANCE_DERIVED_COUNT),
+                ("binding_stage", int(self.binding_stage)),
+                ("vector_clock_hz", self.clock_hz),
+                ("vector_pipeline_depth", int(self.pipeline_depth)),
+                ("engine_utilization_at_beat", self.utilization),
+                ("basis", self.basis),
+                (
+                    "per_stage",
+                    [
+                        OrderedDict(
+                            (
+                                ("stage", int(row.stage)),
+                                ("vector_calls", int(row.calls)),
+                                ("scalar_ops", row.total_ops),
+                                ("scalar_ops_per_call", list(row.ops)),
+                                ("lanes", int(row.lanes)),
+                                ("budget_cycles", int(row.budget_cycles)),
+                                ("fill_cycles", int(row.fill_cycles)),
+                                ("stream_cycles", int(row.stream_cycles)),
+                                ("used_cycles", int(row.used_cycles)),
+                                ("time_s", row.time_s),
+                                ("slack_s", row.slack_s),
+                            )
+                        )
+                        for row in self.per_stage
+                    ],
+                ),
+                (
+                    "composition",
+                    self.composition.summary() if self.composition else None,
+                ),
+                ("disclosures", list(self.disclosures)),
+            )
+        )
+
+    def report(self) -> str:
+        lines = [
+            "[FWS-CIM] derived engine sizing (D31 — the beat sets the width, never a sweep)",
+            f"  analog beat             {self.analog_beat_s:.6g} s (what the analog "
+            "stages set; the sizing budget)",
+            f"  vector lanes            {self.vector_lanes} (DERIVED; stage "
+            f"{self.binding_stage} is binding, engine duty "
+            f"{self.utilization * 100:.3f}% of the analog beat)",
+            f"  vector engine           {self.clock_hz / 1e9:.4g} GHz, pipeline depth "
+            f"{self.pipeline_depth}",
+        ]
+        for row in self.per_stage:
+            lines.append(
+                f"  stage {row.stage:<3d} {row.calls:>4d} call(s) {row.total_ops:>14.6g} ops"
+                f"  {row.used_cycles:>10d}/{row.budget_cycles:<10d} cycles"
+                f"  slack {row.slack_s:.6g} s"
+            )
+        if self.composition is not None:
+            lines.append(self.composition.report())
+        for note in self.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+
+def vector_cycles_at(ops: Sequence[float], lanes: int, depth: int) -> int:
+    """Cycles a stage's vector calls cost at ``lanes`` — the pricing law, summed.
+
+    Each call costs ``depth + ceil(ops/lanes) - 1``, exactly what
+    :meth:`CimDeviceModel.price_vector_work` charges; a stage's calls share one
+    engine, so within a beat they add. This function IS the predicate
+    :func:`derive_vector_lanes` inverts, so the derivation and the pricing can
+    never drift apart.
+    """
+    lanes = max(1, int(lanes))
+    depth = max(1, int(depth))
+    return int(
+        sum(depth + _ceil_div(math.ceil(float(call)), lanes) - 1 for call in ops)
+    )
+
+
+def derive_vector_lanes(
+    ops: Sequence[float], beat_s: float, clock_hz: float, depth: int
+) -> int:
+    """The SMALLEST lane count whose priced time fits the beat (D31, D28).
+
+    ``budget_cycles = floor(beat * clock)`` — floor, because a cycle the beat
+    does not contain cannot be spent — and the answer is the smallest integer
+    ``lanes`` with ``vector_cycles_at(ops, lanes, depth) <= budget_cycles``.
+    Smallest, so there is no margin (D28); integer, because a lane is silicon.
+
+    The predicate is monotone in ``lanes`` (``ceil(x/lanes)`` never rises as
+    lanes rise), so a binary search returns the exact minimum rather than a
+    conservative one. Above ``lanes = max(ops)`` every call already costs its
+    fill plus one streaming cycle, so that is the upper bound of the search and
+    a beat that does not fit there does not fit anywhere — :class:`EngineSizingError`.
+    """
+    calls = [float(call) for call in ops if float(call) > 0]
+    depth = max(1, int(depth))
+    if beat_s <= 0 or clock_hz <= 0:
+        raise EngineSizingError(
+            f"derive_vector_lanes needs a positive beat and clock (got beat={beat_s!r}, "
+            f"clock={clock_hz!r}). D31 derives the engine FROM the beat; with no beat "
+            "there is nothing to derive from and no default width to fall back on."
+        )
+    if not calls:
+        return 1
+    budget = int(math.floor(float(beat_s) * float(clock_hz)))
+    ceiling = max(1, int(math.ceil(max(calls))))
+    if vector_cycles_at(calls, ceiling, depth) > budget:
+        floor_cycles = len(calls) * depth
+        raise EngineSizingError(
+            f"no vector-engine width holds a {beat_s:.6g} s beat: {len(calls)} call(s) "
+            f"cost at least {floor_cycles} cycles (pipeline depth {depth} each, one "
+            f"streaming cycle each) and the beat contains only {budget} cycles at "
+            f"{clock_hz / 1e9:.4g} GHz. Lanes shorten the STREAMING term and never the "
+            "FILL, so this is not fixable by provisioning: the beat is shorter than the "
+            "engine's own latency. Widen the beat, raise the clock, or declare a "
+            "shallower pipeline (D31 refuses to clamp, and D28 forbids padding it)."
+        )
+    low, high = 1, ceiling
+    while low < high:
+        mid = (low + high) // 2
+        if vector_cycles_at(calls, mid, depth) <= budget:
+            high = mid
+        else:
+            low = mid + 1
+    return int(low)
+
+
 # --- MLA (D6): the pricing seam and the KV-replication area consequence ----
 
 
@@ -1683,6 +2515,15 @@ class CimDeviceModel:
         else:
             self.params = CimModelParams.from_model(model_params)
         self._warned_unknown_ops = set()
+        #: D31: the engine sizing DERIVED from this run's beat, installed by
+        #: :meth:`install_derived_engine` once the beat is known. None means
+        #: "not derived yet" — never "zero lanes".
+        self._derived_engine: Optional[DerivedEngineSizing] = None
+        #: D31 pass A: while probing, vector work is COUNTED and costs no time,
+        #: so the measured beat is the one the ANALOG stages set. See
+        #: :meth:`engine_probe`.
+        self._engine_probe = False
+        self._probe_ops: List[float] = []
         if self.fabric.model == "sa" and int(self.fabric.num_arrays) < 2:
             print(
                 "[WARNING]: cim.fabric.num_arrays < 2 — the folded attention law "
@@ -2684,13 +3525,377 @@ class CimDeviceModel:
         """
         return self.total_arrays() * float(self.analog.area_mm2_per_array)
 
-    def shared_digital_area_mm2(self) -> float:
-        """Declared silicon of the shared digital chiplet card (D13); 0 by default."""
-        return float(self.digital_card.area_mm2)
-
     def system_area_mm2(self) -> float:
-        """Analog macro area plus the shared digital chiplet's declared area."""
+        """Analog macro area plus the shared digital chiplet's area (D32)."""
         return self.total_area_mm2() + self.shared_digital_area_mm2()
+
+    # ------------------------------------------------------------------
+    # D32: digital area and power composed from the MEASURED library
+    # ------------------------------------------------------------------
+
+    @property
+    def synthesis_technology(self) -> Optional[str]:
+        """The measured library this run's digital cards price against, if any."""
+        card = self.digital_card
+        tech = str(getattr(card, "synthesis_library", "") or "").strip()
+        return tech or None
+
+    def synthesis_library(self) -> SynthesisLibrary:
+        """This run's measured block library, or a refusal that names the knob."""
+        tech = self.synthesis_technology
+        if not tech:
+            raise SynthesisLibraryError(
+                f"shared digital chiplet card '{self.digital_card.name}' names no "
+                "synthesis library: set cim.cards.<card>.synthesis_library to a "
+                "technology that is checked in under configs/hardware-config "
+                "(digital_components_<tech>.yaml). D32 composes digital area and power "
+                "from MEASURED blocks; without a library the card can only report the "
+                "declared area_mm2 placeholder it was given, and this model will not "
+                "pretend the two are the same number."
+            )
+        return SynthesisLibrary.load(tech)
+
+    def has_synthesis_library(self) -> bool:
+        return self.synthesis_technology is not None
+
+    def resolved_vector_lanes(self) -> Optional[int]:
+        """The lane count if this run HAS one, else None — never a refusal.
+
+        Composition asks a different question from pricing. Pricing a scan op
+        without an engine is a gap and must refuse (:attr:`vector_lanes`).
+        Composing the chiplet of a run that prices NO scan op at all is not a
+        gap: the run demands no scan engine, so none is provisioned and none is
+        composed. D31 derives the width from demand, and zero demand derives
+        zero silicon.
+        """
+        if self._engine_probe:
+            # Pass A's sentinel width is not silicon and must never be composed
+            # or reported; while probing there is no engine yet, by definition.
+            return None
+        try:
+            return int(self.vector_lanes)
+        except EngineCapabilityError:
+            return None
+
+    def vector_engine_composition(
+        self, lanes: Optional[int] = None
+    ) -> EngineComposition:
+        """The scan/vector engine of ONE shared digital chiplet, in blocks (D32)."""
+        lanes = self.vector_lanes if lanes is None else int(lanes)
+        return compose_vector_engine(
+            self.synthesis_library(),
+            lanes,
+            count_provenance=(
+                PROVENANCE_DECLARED_COUNT
+                if self.digital_card.has_vector_engine
+                else PROVENANCE_DERIVED_COUNT
+            ),
+        )
+
+    def softmax_engine_composition(self) -> EngineComposition:
+        """The softmax pipeline of ONE shared digital chiplet, in blocks (D32)."""
+        return compose_softmax_engine(
+            self.synthesis_library(),
+            int(self.fabric.softmax_lanes),
+            int(self.fabric.replicas),
+            count_provenance=PROVENANCE_DECLARED_COUNT,
+        )
+
+    def sa_fabric_composition(self) -> EngineComposition:
+        """The attention systolic fabric of ONE shared digital chiplet (D32)."""
+        return compose_sa_fabric(
+            self.synthesis_library(),
+            int(self.fabric.rows),
+            int(self.fabric.cols),
+            int(self.fabric.num_arrays),
+            int(self.fabric.replicas),
+            count_provenance=PROVENANCE_DERIVED_COUNT,
+        )
+
+    def macro_pool_composition(
+        self, sizing: Optional[DigitalPoolSizing] = None
+    ) -> EngineComposition:
+        """ONE analog macro's digital pool, in measured blocks (D12 x D32)."""
+        sizing = self.digital_pool_sizing() if sizing is None else sizing
+        return compose_macro_pool(self.synthesis_library(), sizing)
+
+    def shared_digital_compositions(self) -> Tuple[EngineComposition, ...]:
+        """Every engine ONE shared digital chiplet is made of (D32).
+
+        The chiplet is the SA attention fabric plus its softmax pipeline plus
+        the scan/vector engine — the three units this repo's laws time. Nothing
+        else is composed, and the gap is named by
+        :meth:`shared_digital_area_disclosures` rather than absorbed into a pad.
+        """
+        out = [self.sa_fabric_composition(), self.softmax_engine_composition()]
+        lanes = self.resolved_vector_lanes()
+        if lanes is not None:
+            out.append(self.vector_engine_composition(lanes))
+        return tuple(out)
+
+    def shared_digital_area_mm2(self) -> float:
+        """Shared digital chiplet area (mm2), COMPOSED when a library is named.
+
+        D32 replaces the declared placeholder: when the card names a synthesis
+        library, this is the sum of the measured block areas of the three
+        engines the chiplet's laws time. A card that names none keeps returning
+        its declared ``area_mm2`` exactly as before, so nothing moves under a
+        config that did not ask for the library.
+        """
+        if not self.has_synthesis_library():
+            return float(self.digital_card.area_mm2)
+        return math.fsum(
+            composition.area_mm2 for composition in self.shared_digital_compositions()
+        )
+
+    def shared_digital_power_w(self) -> float:
+        """Shared digital chiplet power (W), composed from measured blocks (D32).
+
+        There is no declared fallback: before D32 no card carried a power knob
+        at all, so a card with no library has NO power number and says so with
+        a refusal rather than a zero.
+        """
+        return math.fsum(
+            composition.power_w for composition in self.shared_digital_compositions()
+        )
+
+    def shared_digital_area_disclosures(self) -> Tuple[str, ...]:
+        """What the composed chiplet area does and does not include (D21/D32)."""
+        if not self.has_synthesis_library():
+            return (
+                f"shared digital chiplet area is the DECLARED "
+                f"{float(self.digital_card.area_mm2):.6g} mm2 placeholder: card "
+                f"'{self.digital_card.name}' names no synthesis_library, so D32's "
+                "measured composition did not run and no power figure exists for it.",
+            )
+        library = self.synthesis_library()
+        notes = [library.provenance_line()]
+        for composition in self.shared_digital_compositions():
+            notes.extend(composition.disclosures)
+        if self.resolved_vector_lanes() is None:
+            notes.append(
+                "NO scan/vector engine is composed into this chiplet: the run prices no "
+                "SSM scan, delta rule or RG-LRU op, so it demands none and D31 derives "
+                "none. The chiplet area and power below are the SA fabric and the "
+                "softmax pipeline only, which is a statement about this WORKLOAD, not "
+                "about the card."
+            )
+        notes.append(
+            "the composed chiplet is the SA fabric + softmax pipeline + scan/vector "
+            "engine, which are the three units this repo declares laws for. Its "
+            "activation SRAM, its interconnect and its control are NOT composed — this "
+            "repo declares no law that says how many of anything they need — so the "
+            "composed area is a LOWER BOUND on the chiplet, named here rather than "
+            "padded (D28)."
+        )
+        notes.append(
+            "TWO MEASURED BLOCKS THE LIBRARY HOLDS AND NO COMPOSITION USES: M_SOFTPLUS "
+            "and ELASTIC_BUFFER_256_MXFP4_ELEMS. The scan lane composes no "
+            "transcendental unit because the scan work law counts no transcendental op "
+            "(ssm_recurrent_scan_work prices exp(dt A) as a plain multiply), so the "
+            "engine SIZED is exactly the engine PRICED — and the composed scan area is "
+            "therefore a FLOOR for a model that really runs exp/softplus. No elastic "
+            "buffering between stages is modelled either. Both are absences of a LAW, "
+            "not measured zeros, unlike COMBINED_CONV, COMBINED_CONV_SEQUENTIAL and "
+            "INT8_BUFF_DIV_SYS_ARRAY_PENALTY, which the source measures at zero."
+        )
+        if float(self.digital_card.area_mm2) > 0:
+            notes.append(
+                f"card '{self.digital_card.name}' also declares area_mm2 = "
+                f"{float(self.digital_card.area_mm2):.6g} mm2. The COMPOSED area wins "
+                "(D32) and the declared number is not added to it: one accounting per "
+                "metric (D21)."
+            )
+        seen: List[str] = []
+        for note in notes:
+            if note not in seen:
+                seen.append(note)
+        return tuple(seen)
+
+    def report_digital_composition(self) -> str:
+        """The D32 line: every engine of the shared chiplet, block by block."""
+        if not self.has_synthesis_library():
+            return (
+                "[FWS-CIM] digital area (D32): card "
+                f"'{self.digital_card.name}' names no synthesis_library, so the "
+                f"{float(self.digital_card.area_mm2):.6g} mm2 it reports is the DECLARED "
+                "placeholder and no power figure exists."
+            )
+        lines = [
+            "[FWS-CIM] shared digital chiplet, composed from measured synthesis (D32): "
+            f"{self.shared_digital_area_mm2():.6g} mm2, "
+            f"{self.shared_digital_power_w():.6g} W"
+        ]
+        for composition in self.shared_digital_compositions():
+            lines.append(composition.report())
+        for note in self.shared_digital_area_disclosures():
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # D31: derive the engine width from the beat
+    # ------------------------------------------------------------------
+
+    def derive_engine_sizing(
+        self,
+        analog_beat_s: float,
+        demand: Sequence[EngineDemand],
+        *,
+        compose: Optional[bool] = None,
+    ) -> DerivedEngineSizing:
+        """Size the scan/vector engine so it HOLDS the beat, and report it (D31).
+
+        ``analog_beat_s`` is the beat the ANALOG stages set — the probe pass
+        measures it with every vector op counted and untimed, so it does not
+        depend on the width being derived. ``demand`` is one
+        :class:`EngineDemand` per pipeline stage: the scalar-op count of each
+        vector call that stage runs in ONE beat.
+
+        WHAT "HOLDS THE BEAT" MEANS, EXACTLY. The criterion is *digital
+        per-beat time <= the analog beat*: the engine is sized so it is at most
+        CO-BOUND with the analog stages and never the binding term. It is NOT
+        sized so the finished machine's beat equals the analog beat, and it
+        cannot be: under D29 a stage holds ONE stream at a time, so a stage's
+        analog passes and its scan run in SERIES and the measured beat is their
+        sum whatever the width. Lanes shorten the digital half and nothing
+        shortens the sum below the analog half. The consequence is stated in
+        the disclosures and in the report rather than smoothed away: at the
+        derived width the two halves are comparable, which is precisely P7's
+        "the knee is where the analog m-pass time becomes co-bound with the
+        digital side".
+
+        THE DERIVATION IS THE PRICING LAW, INVERTED. For a candidate width the
+        cost of a stage's beat is exactly what :meth:`price_vector_work` would
+        charge — ``sum over calls of (depth + ceil(ops/lanes) - 1)`` — and the
+        answer is the SMALLEST integer width for which that sum fits
+        ``floor(beat * clock)`` cycles. Smallest, so there is no margin (D28);
+        integer, because a lane is silicon; the pricing law itself, so an engine
+        this method sizes is one the run's own laws will actually use.
+
+        ONE CARD, ONE WIDTH. The chiplet is a single card, so the provisioned
+        width is the maximum over the stages and the per-stage rows report the
+        slack the others run with — which is exactly the idle silicon D28 says
+        must stay visible.
+        """
+        clock = self.vector_clock_hz
+        depth = self.vector_pipeline_depth
+        beat_s = float(analog_beat_s)
+        rows: List[StageEngineSizing] = []
+        for entry in sorted(demand, key=lambda item: int(item.stage)):
+            calls = [float(call) for call in entry.ops if float(call) > 0]
+            lanes = derive_vector_lanes(calls, beat_s, clock, depth)
+            budget = int(math.floor(beat_s * clock))
+            used = vector_cycles_at(calls, lanes, depth)
+            rows.append(
+                StageEngineSizing(
+                    stage=int(entry.stage),
+                    calls=len(calls),
+                    ops=tuple(calls),
+                    total_ops=math.fsum(calls),
+                    lanes=int(lanes),
+                    budget_cycles=budget,
+                    fill_cycles=len(calls) * (depth - 1),
+                    stream_cycles=used - len(calls) * (depth - 1),
+                    used_cycles=used,
+                    time_s=used / clock,
+                    slack_s=beat_s - used / clock,
+                )
+            )
+        if not rows:
+            raise EngineSizingError(
+                "derive_engine_sizing was given no per-stage demand. D31 sizes the "
+                "engine from the work a stage does in a beat; with no demand there is "
+                "nothing to size and a width would be an invention, not a derivation."
+            )
+        provisioned = max(int(row.lanes) for row in rows)
+        binding = max(rows, key=lambda row: (int(row.lanes), row.total_ops)).stage
+        # Re-price every stage at the PROVISIONED width. One card carries one
+        # width, so a stage whose own derivation asked for fewer lanes actually
+        # runs on the wider engine and finishes early: its reported slack is the
+        # slack of the machine that gets built, not of the one it asked for.
+        budget = int(math.floor(beat_s * clock))
+        repriced: List[StageEngineSizing] = []
+        for row, entry in zip(rows, sorted(demand, key=lambda item: int(item.stage))):
+            calls = [float(call) for call in entry.ops if float(call) > 0]
+            used = vector_cycles_at(calls, provisioned, depth)
+            fill = len(calls) * (depth - 1)
+            repriced.append(
+                StageEngineSizing(
+                    stage=row.stage,
+                    calls=row.calls,
+                    ops=tuple(calls),
+                    total_ops=row.total_ops,
+                    lanes=provisioned,
+                    budget_cycles=budget,
+                    fill_cycles=fill,
+                    stream_cycles=used - fill,
+                    used_cycles=used,
+                    time_s=used / clock,
+                    slack_s=beat_s - used / clock,
+                )
+            )
+        rows = repriced
+        composition = None
+        want_composition = (
+            self.has_synthesis_library() if compose is None else bool(compose)
+        )
+        if want_composition:
+            composition = compose_vector_engine(
+                self.synthesis_library(),
+                provisioned,
+                count_provenance=PROVENANCE_DERIVED_COUNT,
+            )
+        disclosures = [
+            "D31: the scan/vector engine is not a swept axis and not a declared knob. "
+            "Its width is the smallest integer that holds the beat, and it is reported.",
+            "one card, one width: the provisioned width is the maximum over the stages, "
+            "so every non-binding stage runs with the slack printed beside it. That "
+            "slack is idle silicon and D28 requires it to be visible, not smoothed.",
+            "the derivation inverts CimDeviceModel.price_vector_work exactly (same "
+            "pipeline depth, same ceil, same per-call fill), so the engine it sizes is "
+            "the engine the run then prices. No margin is added (D28).",
+            (
+                "THE CONDITION ON THAT INVERSION: price_vector_work returns "
+                "max(arithmetic time, state time), and only the ARITHMETIC term is "
+                "inverted here. state time = ceil(state_bytes / state_bytes_per_cycle) "
+                "/ clock and lanes do not shorten it, so a card that declares "
+                "state_bytes_per_cycle could have a state term the derived width cannot "
+                "hold — no lane count fixes it, and this method would not refuse it the "
+                "way it refuses a beat shorter than the pipeline fill. "
+                + (
+                    f"This card declares state_bytes_per_cycle = "
+                    f"{float(self.digital_card.state_bytes_per_cycle):.6g}, so the state "
+                    "term is LIVE and the inversion above is exact only for the "
+                    "arithmetic half."
+                    if float(self.digital_card.state_bytes_per_cycle) > 0
+                    else "This card declares no state_bytes_per_cycle, so the state term "
+                    "is 0 and the inversion is exact."
+                )
+            ),
+            "the criterion is digital-per-beat <= the ANALOG beat, so the engine is at "
+            "most CO-BOUND with the analog stages and never the binding term. The "
+            "MEASURED beat of the priced run is larger than the analog beat, because a "
+            "D29 stage holds one stream at a time and its analog passes and its scan "
+            "therefore run in series. A wider engine would still shorten the measured "
+            "beat; D31 does not buy that width, because the engine is not a free knob "
+            "and the point derived here is the smallest one at which the digital side "
+            "stops dominating.",
+        ]
+        return DerivedEngineSizing(
+            analog_beat_s=beat_s,
+            clock_hz=clock,
+            pipeline_depth=depth,
+            vector_lanes=provisioned,
+            binding_stage=int(binding),
+            per_stage=tuple(rows),
+            composition=composition,
+            basis=(
+                f"smallest integer lanes with sum(depth + ceil(ops/lanes) - 1) <= "
+                f"floor(beat x clock) = {int(math.floor(beat_s * clock))} cycles at "
+                f"{clock / 1e9:.4g} GHz, depth {depth}, over {len(rows)} stage(s)"
+            ),
+            disclosures=tuple(disclosures),
+        )
 
     def layer_stage_energy_pj(
         self, seq_len: Optional[int] = None
@@ -3878,10 +5083,25 @@ class CimDeviceModel:
                 f"{sizing.conv_lanes} conv lanes ({sizing.conv_ops_per_s:.6g} ops/s) and "
                 f"{sizing.conv_area_mm2:.6g} mm2."
             )
+        if self.has_synthesis_library() and float(self.card.pool_area_mm2_per_adder) <= 0:
+            pool = self.macro_pool_composition(sizing)
+            line += (
+                f" The area above is 0 because the card declares no "
+                f"pool_area_mm2_per_adder; the pool's COMPOSED area (D32, "
+                f"{pool.technology} measured blocks) is {pool.area_mm2:.6g} mm2 per "
+                f"macro and {pool.power_w:.6g} W, itemized block by block in "
+                "evaluation.digital_silicon.per_macro_pool. Two accountings, two names "
+                "(D21): the declared knob is not silently replaced here."
+            )
         digital_area = self.shared_digital_area_mm2()
         if digital_area > 0:
+            source = (
+                f"COMPOSES (D32, {self.synthesis_technology} measured blocks)"
+                if self.has_synthesis_library()
+                else "declares"
+            )
             line += (
-                f" Shared digital chiplet card '{self.digital_card.name}' declares "
+                f" Shared digital chiplet card '{self.digital_card.name}' {source} "
                 f"{digital_area:.6g} mm2, counted in system_area_mm2 and never in the "
                 "analog area total."
             )
@@ -3900,24 +5120,89 @@ class CimDeviceModel:
 
     @property
     def vector_lanes(self) -> int:
-        """Declared scan/vector lanes on the shared digital chiplet card.
+        """Scan/vector lanes of the shared digital chiplet — DERIVED (D31).
 
-        Raises :class:`EngineCapabilityError` when the card declares none.
-        There is no honest default (ADJ-4): the systolic array is a matmul
-        engine and the softmax lanes are a softmax pipeline, so neither can
-        be borrowed as a scan engine without inventing silicon.
+        THREE SOURCES, IN THIS ORDER, and every one of them says which it is:
+
+        1. an EXPLICIT ``cim.cards.<card>.vector_lanes``. D31 retires the lane
+           count as a design input, so a declared value is an OVERRIDE and it
+           rides a disclosure (:meth:`vector_engine_disclosures`) naming what
+           the beat would have derived instead when a derivation exists.
+        2. the sizing :meth:`install_derived_engine` put here once the beat was
+           known — the default, and the D31 answer.
+        3. neither: :class:`EngineCapabilityError`, still. A lane count cannot
+           be invented from the systolic array (a matmul engine) or from
+           ``softmax_lanes`` (a softmax pipeline), and it cannot be derived
+           without a beat, so an unmapped call with no override is refused
+           rather than answered (ADJ-4).
         """
         card = self.digital_card
-        if not card.has_vector_engine:
-            raise EngineCapabilityError(
-                f"shared digital chiplet card '{card.name}' declares no vector engine: set "
-                "cim.cards.<card>.vector_lanes to the number of scan/elementwise lanes "
-                "(one lane retires one scalar operation per vector cycle). It has NO "
-                "default — the systolic array is a matmul engine and softmax_lanes is a "
-                "softmax pipeline, so deriving scan lanes from either would invent "
-                "silicon (ADJ-4). Every SSM scan, delta-rule and RG-LRU law needs it."
-            )
-        return int(card.vector_lanes)
+        if card.has_vector_engine:
+            return int(card.vector_lanes)
+        if self._engine_probe:
+            return _PROBE_LANES
+        if self._derived_engine is not None:
+            return int(self._derived_engine.vector_lanes)
+        raise EngineCapabilityError(
+            f"shared digital chiplet card '{card.name}' has no vector engine: none was "
+            "DERIVED for this run and the card declares no override. D31 sizes the "
+            "scan/vector engine FROM THE PIPELINE BEAT — the evaluator measures the beat "
+            "the analog stages set, then calls "
+            "CimDeviceModel.derive_engine_sizing/install_derived_engine — so a call "
+            "outside a mapped run has no beat to derive from. Set "
+            "cim.cards.<card>.vector_lanes to override it explicitly (the value rides a "
+            "disclosure, D31), or price this op inside a mapped run. There is no "
+            "default: the systolic array is a matmul engine and softmax_lanes is a "
+            "softmax pipeline, so deriving scan lanes from either would invent silicon "
+            "(ADJ-4). Every SSM scan, delta-rule and RG-LRU law needs it."
+        )
+
+    @property
+    def vector_lanes_provenance(self) -> str:
+        """Where this run's lane count came from: declared, derived, or absent."""
+        if self.digital_card.has_vector_engine:
+            return PROVENANCE_DECLARED_COUNT
+        if self._derived_engine is not None:
+            return PROVENANCE_DERIVED_COUNT
+        return "undetermined"
+
+    # -- D31 pass A: probe the beat the ANALOG stages set ----------------
+
+    #: The width the probe pass pretends to have. It is never composed, never
+    #: reported and never priced: while probing, every vector op costs 0 s (see
+    #: :meth:`price_vector_work`), and this value only exists so the work laws
+    #: can run at all. It is not a default and not a fallback.
+    ENGINE_PROBE_LANES = _PROBE_LANES
+
+    @property
+    def engine_probing(self) -> bool:
+        return bool(self._engine_probe)
+
+    def begin_engine_probe(self) -> None:
+        """Enter pass A: vector work is COUNTED and costs no time (D31).
+
+        The point of the probe is that the beat it produces is the beat the
+        ANALOG stages set — the input D31 sizes the engine against. Timing the
+        vector ops during pass A would make the beat depend on a width nobody
+        has derived yet, which is the circularity this pass exists to break.
+        """
+        self._engine_probe = True
+        self._probe_ops = []
+
+    def end_engine_probe(self) -> Tuple[float, ...]:
+        """Leave pass A and return every vector-op scalar-op count it saw."""
+        self._engine_probe = False
+        ops = tuple(self._probe_ops)
+        self._probe_ops = []
+        return ops
+
+    def install_derived_engine(self, sizing: Optional["DerivedEngineSizing"]) -> None:
+        """Install (or clear) the width D31 derived from this run's beat."""
+        self._derived_engine = sizing
+
+    @property
+    def derived_engine(self) -> Optional["DerivedEngineSizing"]:
+        return self._derived_engine
 
     @property
     def vector_clock_hz(self) -> float:
@@ -3938,6 +5223,37 @@ class CimDeviceModel:
         """
         card = self.digital_card
         notes = []
+        if card.has_vector_engine:
+            derived = self._derived_engine
+            line = (
+                f"vector_lanes = {int(card.vector_lanes)} is DECLARED on card "
+                f"'{card.name}' and is therefore an OVERRIDE: D31 retires the scan/vector "
+                "engine as a design input, because its width is derived from the pipeline "
+                "beat and reported, never chosen or swept. The run honours the "
+                "declaration; this line is the disclosure it rides on."
+            )
+            if derived is not None:
+                # Only reachable when a caller derived a sizing by hand and
+                # installed it beside a declared width: evaluate_fws's own path
+                # skips the probe entirely for an override card, so a shipped
+                # run never has a derivation to compare the declaration with.
+                # P7.9: the config headers and the status entries used to claim
+                # this sentence always rides an override. It does not, and they
+                # no longer say so.
+                line += (
+                    f" The analog beat of {derived.analog_beat_s:.6g} s would have derived "
+                    f"{int(derived.vector_lanes)} lane(s)."
+                )
+            notes.append(line)
+        elif self._derived_engine is not None:
+            sizing = self._derived_engine
+            notes.append(
+                f"vector_lanes = {int(sizing.vector_lanes)} is DERIVED (D31) from the "
+                f"measured ANALOG beat {sizing.analog_beat_s:.6g} s: the smallest width whose "
+                "own priced time fits the beat, with no margin (D28). Stage "
+                f"{int(sizing.binding_stage)} is binding and the engine runs at "
+                f"{sizing.utilization * 100:.3f}% duty inside the beat."
+            )
         if card.vector_clock_ghz <= 0:
             notes.append(
                 f"vector_clock_ghz undeclared: inherited cim.fabric.clock_ghz = "
@@ -3973,10 +5289,34 @@ class CimDeviceModel:
         silicon its card declares — the DESIGN2 section-8 erratum is the
         precedent for making that a checked property rather than a hope.
         """
-        lanes = self.vector_lanes
         clock = self.vector_clock_hz
         depth = self.vector_pipeline_depth
         ops = work.ops
+        if self._engine_probe and not self.digital_card.has_vector_engine:
+            # D31 pass A. The work is RECORDED and costs nothing, so the beat
+            # this pass measures is the one the analog stages set — the input
+            # the sizing is derived from. Nothing here reaches a report: the
+            # probe's pricing is thrown away and pass B prices the real engine.
+            self._probe_ops.append(float(ops))
+            return DigitalOpCost(
+                law=work.law,
+                validated=work.validated,
+                work=work,
+                lanes=0,
+                clock_hz=clock,
+                pipeline_depth=depth,
+                arith_cycles=0,
+                arith_time_s=0.0,
+                state_time_s=0.0,
+                time_s=0.0,
+                ops_per_s=0.0,
+                disclosures=(
+                    "D31 engine PROBE pass: this vector op is counted, not timed, so "
+                    "the measured beat is the one the analog stages set. The number "
+                    "is discarded — the run is priced again on the derived engine.",
+                ),
+            )
+        lanes = self.vector_lanes
         arith_cycles = depth + _ceil_div(math.ceil(ops), lanes) - 1
         arith_time = arith_cycles / clock
         state_bpc = float(self.digital_card.state_bytes_per_cycle)

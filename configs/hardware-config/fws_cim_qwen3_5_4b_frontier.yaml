@@ -1,53 +1,15 @@
-# FWS-CIM MAPPED run for Qwen3.5-4B — the QIF P1 SECOND P0 model (ADJ-1).
-# Pair with configs/model-config/qwen3_5_4b_inf.yaml at tp=1, pp=1.
+# FWS-CIM FRONTIER SWEEP for Qwen3.5-4B (QIF P7.4/P7.5, the ADJ-1 second P0).
 #
-# SECOND READER (Wave C audit): tests/test_qif_carrier_rows.py also runs
-# Gemma-3-4B on this card, because its 2560-row analog point is the one Gemma
-# needs and inventing a second design point is the ADJ-4 failure. The two
-# sizing knobs below ARE derived from Qwen, so Gemma's own arithmetic is
-# recorded here and pinned by that file: 34 layers at layers_per_chip 4 = 9
-# analog chips, and the busiest chip (the last, carrying the 262208-wide
-# lm_head) holds 133 macros against arrays_per_chip 180. An edit to the Qwen
-# sizing that breaks the Gemma fit fails that test instead of moving a row
-# silently. Gemma ships no artifact from this card; it is a test row only.
+# This file is the SHIPPED Qwen machine (configs/hardware-config/
+# fws_cim_qwen3_5_4b.yaml) verbatim, plus the `mapping_dse:` block at the
+# bottom. Strip that block and it is the shipped single design point, runnable
+# through run_perf unchanged; a test pins the two documents equal outside it.
 #
-# This is the FIRST consumer of the delta-rule law (P2.6 3), which is
-# LAW_UNVALIDATED by design: no reference implementation exists to check it
-# against, so every delta_rule op in this run carries the `unvalidated` label
-# in its basis string and the run's report and atlas say so. Read that label
-# before quoting a number from this point.
-#
-# It is also the first GATED-ATTENTION point. Qwen3.5 declares
-# attn_output_gate, and the QIF C1 adjudication treats it as an ordinary
-# weight matrix: W_g is placed as an analog tile of shape
-# (hidden, num_heads * head_dim) = 2560 x 4096 beside qkv and o_proj, and the
-# sigmoid + elementwise multiply is per-macro pool work (ADJ-3 / D12).
-#
-# It runs ONLY on the mapped path — the `mapping:` block at the bottom is what
-# makes P3 place the model and P4 price it op by op (ADJ-6 / A1). Drop that
-# block and validate_model_config refuses the run by name: the closed form has
-# no stage for a linear-attention recurrence and none for the gate matrix
-# (P1.4, narrowed by P1.5 and by C1).
-#
-# Analog point: rows = 2560 (K per array tile matches hidden_dim), stored
-# cols = cols_adc * adc_mux = 2560. Per-layer analog macros for Qwen3.5-4B
-# (H=2560, dense SwiGLU FFN I=9216, GQA q16/kv4 head_dim=256, gated-DeltaNet
-# 16 key heads x 128 and 32 value heads x 128, conv k=4):
-#   dense FFN, every layer: ffn1 ceil(2*9216/2560)=8 + ffn2 ceil(9216/2560)=4
-#     = 12
-#   linear-attention mixer (24 layers): la_qkv_proj ceil(12288/2560)=5,
-#     la_gate_proj 1, la_out_proj ceil(4096/2560)=2 -> 8, so 20 macros/layer
-#   gated-attention mixer (8 layers): qkv ceil((16+2*4)*256/2560)=3,
-#     attn_gate_proj ceil(4096/2560)=2, o_proj ceil(4096/2560)=2 -> 7,
-#     so 19 macros/layer
-#   lm_head adds ceil(248320/2560) = 97 macros on the last chip.
-# layers_per_chip 4 (the layer_plan period: 3 linear + 1 attention) -> 8
-# chips; worst chip = 3*20 + 19 + 97 = 176.
-#
-# Energy/area per array are the T1 OPTIMA point scaled by cell count
-# (2560*2560 / 1280*1280 = 4.0), the same convention fws_cim_llama7b.yaml,
-# fws_cim_moe.yaml and fws_cim_granite_tiny.yaml use. They are NOT measured
-# Qwen silicon.
+# THE REGIME IS D29: the pipeline is ALWAYS FULL. Decode is independent streams
+# staggered across the PP stages, one token exits per beat, the local batch is
+# always 1, and the resident-stream count D IS the stage count. Digital
+# provisioning is NOT an axis: D31 derives the engine per point from the beat
+# and D32 prices it, and the per-macro pools, from measured synthesis.
 
 device_class: fws_cim
 
@@ -241,14 +203,84 @@ inference:
 mapping:
   parallelism:
     tp: 1
-  # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer
-  # is the law this machine is placed under. On this card dense and dedicated
-  # coincide tile for tile (the degenerate identity of P7.2) — 632 macros either
-  # way — so declaring it moves no number here. What it adds is the CENSUS:
-  # committed cells, remainder waste and the global cell floor (545 macros,
-  # 13.83% waste), which is the quantity D27 is written about.
+  # D27 / Invariant W (HARD): the DENSE packer is the law every point of this
+  # sweep is placed under. It matters here in a way it does not on the shipped
+  # card: at bank_depth 1 the dense and dedicated laws SEPARATE (Granite: 4828
+  # macros against 5544), so a sweep that left the default dedicated law in
+  # place was pricing analog silicon D27 forbids and reporting no waste for it.
   packing: dense
   # ADJ-6: the decode series is a bounded window plus a disclosed
   # extrapolation. Three steps give a first / median / last that are three
   # different readings rather than one repeated.
   decode_window: 3
+
+# --- the FRONTIER sweep block (QIF P7.4, D29-D32). Owned and strict-keyed by
+# --- tools/fws_qif_dse.py, which strips it before the config parser sees it.
+#
+#   layers_per_chip - STAGE GRANULARITY. The default stage plan is one stage per
+#     analog chip, so this number moves the chip split, the stage count, D, the
+#     beat and the per-stage state bill at once. Qwen3.5-4B has 32 layers, so
+#     every rung divides 32.
+#   arrays_per_chip - CHIP CAPACITY, the AREA axis: under Invariant W (D27) the
+#     dense packer decides the analog macro count, so a point spends analog
+#     silicon only on slots no tensor lands on. The global cell floor is a LOWER
+#     BOUND, not the packed count, and every point reports its own cell census
+#     (macros, floor, waste%) so the gap is measured rather than asserted. The
+#     rungs are the TIGHT capacity for each granularity rung. Under the DENSE
+#     law a Qwen layer costs 18.25 macros at bank_depth 1 (584 macros over 32
+#     layers, measured) against 20 for a linear-attention layer and 19 for a
+#     gated-attention one under the retired per-tensor placement, and D30 has
+#     removed the lm_head that arrays_per_chip 180 was sized around - so the
+#     rungs are 20, 40, 80, 160, 320 and 640, which admit 1, 2, 4, 8, 16 and 32
+#     layers per chip under either law, plus 180 itself, the capacity the
+#     shipped machine declares.
+#   bank_depth - the analog card's allocation granularity in mux slots; the card
+#     declares adc_mux = 4, so 1, 2 and 4 are the depths it admits.
+#
+# WHAT IS NOT AN AXIS HERE, AND WHY (D28 names digital chiplet count, engine
+# widths and pool widths as first-class sweep axes):
+#   * ENGINE WIDTH is retired by D31 - derived from the beat at every point.
+#   * POOL WIDTH is derived by D12 from the measured concurrency.
+#   * CHIPLET COUNT is a supported axis (mapping.shared_chiplets) and this sweep
+#     deliberately does not declare it: the count is DERIVED one-per-analog-chip,
+#     so it moves with layers_per_chip. Read the consequence honestly - the whole
+#     area SPREAD of this front is D x (per-chiplet composed area), because the
+#     analog term and the pool term are the same on every front point.
+#     arrays_per_chip is therefore a TRIM (it finds the tight capacity) rather
+#     than a spread-producing axis: extra capacity is unowned slots with no
+#     throughput return, so a larger-capacity candidate is always dominated.
+#
+# max_stage_state_bytes is DELIBERATELY NOT DECLARED here, and the reason is a
+# measured one. Qwen3.5-4B is 8 gated-attention layers in 32, with GQA q16/kv4
+# at head_dim 256 = 4096 B of KV per token per attention layer, so a stage's
+# resident KV is (layers in the stage) x (D streams) x that. For a COARSE stage
+# plan those two factors trade off and the MAX over stages barely moves: the
+# checked-in curve measures 68.1 MiB at D = 2, 4 and 8 alike. It is NOT
+# invariant, though - Qwen is a HYBRID (8 gated-attention layers in 32), so once
+# a stage holds a single attention layer the max stops averaging and climbs:
+# 120.5 MiB at D = 16 and 226.1 MiB at D = 32, a 3.3x spread over the visited
+# plans, and the validator gates exactly that rise. What matters for the budget
+# is the MINIMUM over the visited plans, and that minimum is 68.1 MiB - already
+# 6.5% ABOVE this config's own 64 MiB L2 tier (tech_param.SRAM-L2.size =
+# 67108864 B). No visited stage plan brings it down. Declaring that tier as the sweep budget would therefore refuse
+# EVERY point and produce no frontier at all, so this sweep declares no budget
+# and REPORTS the bill at every point instead (the evaluator's own residency
+# verdict is taken against the on-chip SRAM-L2 tier and rides every row as
+# state_bill.onchip_tier_verdict, with the 8 GiB activation-stub reading beside
+# it under activation_tier_verdict). That Qwen does not fit its own declared L2 at any stage plan is
+# the finding, and it is stated rather than tuned away. The Granite curve
+# (fws_cim_granite_tiny_frontier.yaml) DOES declare its tier as a budget, and
+# its refusals are what a residency-bound frontier looks like.
+mapping_dse:
+  label: "Qwen3.5-4B: the D29 frontier - stage granularity x chip capacity x bank depth"
+  objective: throughput
+  search: ladder
+  repair_axis: arrays_per_chip
+  initializer:
+    layers_per_chip: 4
+    arrays_per_chip: 180
+    bank_depth: 1
+  axes:
+    layers_per_chip: [16, 8, 4, 2, 1]
+    arrays_per_chip: [20, 40, 80, 160, 180, 320, 640]
+    bank_depth: [1, 2, 4]

@@ -4,10 +4,10 @@
 # `mapping_dse` sweep block removed (a runnable config declares a machine, not a
 # candidate space).
 #
-# sweep base:  configs/hardware-config/fws_cim_granite_tiny_dse.yaml
+# sweep base:  configs/hardware-config/fws_cim_granite_tiny_frontier.yaml
 # model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
-# candidate:   c006 (vector_lanes = 4096, bank_depth = 1)
-# headline:    25673.8 tokens/s, measured on this point's own timeline by fws_eval
+# candidate:   c003 (layers_per_chip = 4, arrays_per_chip = 604, bank_depth = 1)
+# headline:    15299 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
@@ -30,7 +30,7 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 640
+    arrays_per_chip: 604
     layers_per_chip: 4
     moe_expert_parallel: 1
   cards:
@@ -41,7 +41,6 @@ cim:
     sa:
       kind: digital_chiplet
       synthesis_library: 22nm
-      vector_lanes: 4096
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 0
@@ -160,3 +159,4 @@ mapping:
     tp: 1
   packing: dense
   decode_window: 3
+  layers_per_chip: 4

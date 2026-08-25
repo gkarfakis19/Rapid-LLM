@@ -1,29 +1,16 @@
-# FWS-CIM MAPPED run for Granite-4.0-H-Tiny — the QIF P1 HEADLINE model (ADJ-1).
-# Pair with configs/model-config/granite_4_0_h_tiny_inf.yaml at tp=1, pp=1.
+# FWS-CIM FRONTIER SWEEP for Granite-4.0-H-Tiny (QIF P7.4/P7.5, ADJ-1 headline).
 #
-# This is the first HYBRID end-to-end point: 36 Mamba-2 layers and 4 attention
-# layers, MoE on every layer. It runs ONLY on the mapped path — the `mapping:`
-# block at the bottom is what makes P3 place the model and P4 price it op by op
-# (ADJ-6 / A1). Drop that block and validate_model_config refuses the run by
-# name: the pass-1/2 closed-form report has no stage for a recurrence and would
-# price a Mamba layer as attention (P1.4, narrowed by P1.5).
+# This file is the SHIPPED Granite machine (configs/hardware-config/
+# fws_cim_granite_tiny.yaml) verbatim, plus the `mapping_dse:` block at the
+# bottom. Strip that block and it is the shipped single design point, runnable
+# through run_perf unchanged; a test pins the two documents equal outside it, so
+# the sweep can never quietly price a machine that no longer exists.
 #
-# Analog point: rows = 1536 (K per array tile matches hidden_dim = 1536),
-# stored cols = cols_adc * adc_mux = 1536. Per-layer analog macros for
-# Granite-4.0-H-Tiny (H=1536, GQA q12/kv4 d=128, 64 routed experts at I=512,
-# one shared MLP at I=1024, gated MLP, router):
-#   MoE part, every layer: router 1 + 64*(ffn1 1 + ffn2 1) + shared
-#     (ffn1 ceil(2*1024/1536)=2 + ffn2 1) = 132
-#   Mamba-2 mixer (36 layers): in_proj ceil((2*3072 + 2*1*128 + 48)/1536) = 5,
-#     out_proj ceil(3072/1536) = 2 -> 7, so 139 macros/layer
-#   attention mixer (4 layers): QKV ceil((12+2*4)*128/1536) = 2, O 1 -> 3,
-#     so 135 macros/layer
-#   lm_head adds ceil(100352/1536) = 66 macros on the last chip.
-# layers_per_chip 4 -> 10 chips; worst chip 4*139 + 66 = 622.
-#
-# Energy/area per array are the T1 OPTIMA point scaled by cell count
-# (1536*1536 / 1280*1280 = 1.44), the same convention fws_cim_llama7b.yaml and
-# fws_cim_moe.yaml use. They are NOT measured Granite silicon.
+# THE REGIME IS D29: the pipeline is ALWAYS FULL. Decode is independent streams
+# staggered across the PP stages, one token exits per beat, the local batch is
+# always 1, and the resident-stream count D IS the stage count. That is why the
+# axes below are what they are, and why digital provisioning is not among them
+# (D31 derives the engine per point; D32 prices it from measured synthesis).
 
 device_class: fws_cim
 
@@ -217,15 +204,102 @@ inference:
 mapping:
   parallelism:
     tp: 1
-  # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer
-  # is the law this machine is placed under. On this card dense and dedicated
-  # coincide tile for tile (the degenerate identity of P7.2), so declaring it
-  # moves no number here — what it adds is the CENSUS: every report now carries
-  # the committed cells, the remainder waste and the global cell floor, which
-  # is the quantity D27 is written about. At a finer allocation granularity
-  # (bank_depth 1) the two laws separate and dense saves 716 macros.
+  # D27 / Invariant W (HARD): the DENSE packer is the law every point of this
+  # sweep is placed under. It matters here in a way it does not on the shipped
+  # card: at bank_depth 1 the dense and dedicated laws SEPARATE (Granite: 4828
+  # macros against 5544), so a sweep that left the default dedicated law in
+  # place was pricing analog silicon D27 forbids and reporting no waste for it.
   packing: dense
   # ADJ-6: the decode series is a bounded window plus a disclosed
   # extrapolation. Three steps give a first / median / last that are three
   # different readings rather than one repeated.
   decode_window: 3
+
+# --- the FRONTIER sweep block (QIF P7.4, D29-D32). Owned and strict-keyed by
+# --- tools/fws_qif_dse.py, which strips it before the config parser sees the
+# --- file.
+#
+# THE AXES (regime v2). Digital provisioning is NOT among them: D31 derives the
+# scan/vector engine from the beat at every point and D32 prices it, and the
+# per-macro pools, from the measured synthesis library.
+#
+#   layers_per_chip - STAGE GRANULARITY. The default stage plan is one stage per
+#     analog chip (fws_mapping.stage_partition), so this one number moves the
+#     chip split, the stage count, D, the beat and the per-stage state bill all
+#     at once. It is the only axis here that buys throughput. Granite-4.0-H-Tiny
+#     has 40 layers, so every rung divides 40.
+#   arrays_per_chip - CHIP CAPACITY: the macro slots a chip offers. Under
+#     Invariant W (D27) the dense packer decides the analog macro count and the
+#     mapper never chooses it, so the only way a POINT spends analog silicon is
+#     by enumerating slots no tensor lands on: this is the AREA axis. Note what
+#     the invariant does and does not say. The global cell floor is a LOWER
+#     BOUND (Granite: 2876 macros), not the packed count: a per-chip packer
+#     cannot reach it once the layers are split across chips, and every point of
+#     this sweep reports its own cell census - macros, floor and waste% - so the
+#     gap is a number and not a claim. It is also NOT what makes the analog term
+#     constant along the front: that is the ladder settling on one slot count on
+#     every non-dominated point, larger-capacity candidates being dominated
+#     because unowned slots buy no throughput. The rungs are the TIGHT DENSE
+#     capacity for each granularity rung, ESTIMATED and then checked by the
+#     sweep itself. Under the dense law a Granite layer costs about 120.6
+#     macros at bank_depth 1 - measured, not assumed: the packer places 483
+#     macros for a 4-layer chip and 965 for an 8-layer one - so the rungs are
+#     ceil(L x 120.625) for L in the layers_per_chip axis: 121, 242, 483, 604,
+#     965, 1207, 2413. Three more stand beside them: 640, the capacity the
+#     shipped machine declares (and the initializer's rung), and 1400 and 2800,
+#     which give the coarser plans room at bank_depth 2 and 4, where a layer
+#     costs 137.2 and 138.6 macros instead.
+#     A rung that falls a macro short is NOT a bug and is not hidden: the
+#     placement refuses it BY NAME with the slot count it actually wanted, and
+#     repair_axis retries at the smallest rung that admits it - both rows stay
+#     in the report. The checked-in curve shows exactly that happening, and the
+#     refusals are where the true tight capacities are written down: 4 layers
+#     need 484 (not 483), 5 need 605 (not 604) and 8 need 968 (not 965), the
+#     few-macro remainder being the per-chip tail the linear rate does not
+#     carry. Tightening the rungs to those three numbers is a REAL improvement
+#     to the area axis and is left for the next wave rather than done here on a
+#     curve nobody has re-walked.
+#   bank_depth - the analog card's allocation granularity in mux slots. The card
+#     declares adc_mux = 4, so 1, 2 and 4 are the depths it admits and a depth it
+#     does not divide is refused BY THE CARD.
+#
+# WHAT IS NOT AN AXIS HERE, AND WHY (D28 names digital chiplet count, engine
+# widths and pool widths as first-class sweep axes):
+#   * ENGINE WIDTH is retired by D31 - derived from the beat at every point.
+#   * POOL WIDTH is derived by D12 from the measured concurrency.
+#   * CHIPLET COUNT is a supported axis (mapping.shared_chiplets) and this sweep
+#     deliberately does not declare it: the count is DERIVED one-per-analog-chip,
+#     so it moves with layers_per_chip. Read the consequence honestly - the whole
+#     area SPREAD of this front is D x (per-chiplet composed area), because the
+#     analog term and the pool term are the same on every front point.
+#     arrays_per_chip is therefore a TRIM (it finds the tight capacity) rather
+#     than a spread-producing axis: extra capacity is unowned slots with no
+#     throughput return, so a larger-capacity candidate is always dominated.
+#
+# repair_axis: stage granularity and chip capacity are not independent - a chip
+# has to hold the layers its stage owns - so a granularity step the placement
+# refuses is retried at the SMALLEST declared capacity that admits it, and both
+# the refusal and the repaired point stay in the report.
+#
+# max_stage_state_bytes: 67108864 B is this config's own declared on-chip L2
+# tier (tech_param.SRAM-L2.size, 64 MiB), taken as the per-stage residency
+# BUDGET for this sweep. It is a DECLARED sweep constraint, not a measured
+# capacity and not a margin (D28); the evaluator's own residency verdict is
+# taken against this SAME on-chip tier (state_bill.onchip_tier_verdict) and the
+# 8 GiB activation stub (tech_param.DRAM.size) rides beside it as
+# state_bill.activation_tier_verdict. D29 makes this the question that decides a stage
+# plan: every stage holds ALL D streams' recurrent state and KV for its layers.
+mapping_dse:
+  label: "Granite-4.0-H-Tiny: the D29 frontier - stage granularity x chip capacity x bank depth"
+  objective: throughput
+  search: ladder
+  repair_axis: arrays_per_chip
+  max_stage_state_bytes: 67108864
+  initializer:
+    layers_per_chip: 4
+    arrays_per_chip: 640
+    bank_depth: 1
+  axes:
+    layers_per_chip: [20, 10, 8, 5, 4, 2, 1]
+    arrays_per_chip: [121, 242, 483, 604, 640, 965, 1207, 1400, 2413, 2800]
+    bank_depth: [1, 2, 4]

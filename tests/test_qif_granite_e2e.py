@@ -144,13 +144,41 @@ def test_a_block_kind_nobody_prices_would_still_be_refused_on_the_mapped_path():
     assert priced <= set(config._BLOCK_KINDS)
 
 
-def test_an_ssm_run_without_a_declared_vector_engine_refuses_by_name():
-    """ADJ-4: scan lanes have no default. A missing engine is not a free one."""
+def test_an_ssm_run_without_a_declared_vector_engine_derives_one_from_the_beat():
+    """D31 (WAVE F): an undeclared engine inside a mapped run is DERIVED, not refused.
+
+    REGIME-CHANGE REWRITE. The old claim was "a mapped Granite run whose card
+    declares no vector_lanes refuses by name (ADJ-4: scan lanes have no
+    default)". D31 retires vector_lanes as an input and makes the DEFAULT
+    "derive it from the beat the analog stages set", so the new claim is: the
+    run completes, the width is derived, and it is REPORTED with its provenance
+    and the stage that bound it. ADJ-4 is not weakened — the refusal survives
+    wherever there is no beat to derive from, which
+    tests/test_qif_digital_ops.py::test_vector_lanes_have_no_default_and_refuse_by_name
+    still pins on a bare device.
+    """
     hw = _hw(GRANITE_HW, lambda raw: raw["cim"].pop("cards"))
     mapping = fws_mapping.build_mapping(hw, config.parse_config(GRANITE_MODEL, "LLM"))
-    with pytest.raises(cim_timing.EngineCapabilityError) as excinfo:
-        fws_eval.evaluate_fws(build_fws_program(mapping))
-    assert "vector_lanes" in str(excinfo.value)
+    evaluation = fws_eval.evaluate_fws(build_fws_program(mapping))
+    sizing = mapping.device.derived_engine
+    assert sizing is not None
+    assert sizing.vector_lanes >= 1
+    assert mapping.device.vector_lanes == sizing.vector_lanes
+    assert mapping.device.vector_lanes_provenance == cim_timing.PROVENANCE_DERIVED_COUNT
+    # The width HOLDS the analog beat: the binding stage's own priced vector
+    # time fits inside it, and one lane fewer would not (no margin, D28).
+    binding = next(r for r in sizing.per_stage if r.stage == sizing.binding_stage)
+    assert binding.time_s <= sizing.analog_beat_s
+    assert binding.used_cycles <= binding.budget_cycles
+    # ... and it is REPORTED, which is the other half of D31.
+    row = next(
+        d for d in evaluation.disclosures if d.constraint == "derived_engine_sizing"
+    )
+    assert str(sizing.vector_lanes) in row.value
+    assert "D31" in row.reason
+    # This card names no synthesis library, so nothing is composed for it (D32
+    # composes from MEASURED blocks or not at all).
+    assert sizing.composition is None
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +192,12 @@ def test_every_hybrid_block_kind_is_priced_by_a_named_law(granite):
         laws.setdefault(cost.block, set()).add(cost.basis.split("(")[0].strip())
     assert "ssm_scan" in laws, sorted(laws)
     assert any("price_ssm_block" in basis for basis in laws["ssm_scan"])
-    assert any("prefill_attention_timing" in b for b in laws["attention_qk"])
-    for block in ("ssm_in_proj", "ssm_out_proj", "ffn1_routed", "ffn2_shared", "lm_head"):
+    # WAVE F (D29/D30): a mapped run lowers DECODE only — the streams arrive
+    # already prefilled — so attention is priced by the decode law, and there
+    # is no lm_head block at all because D30 drops the endpoints entirely.
+    assert any("decode_attention_timing" in b for b in laws["attention_qk"])
+    assert "lm_head" not in laws
+    for block in ("ssm_in_proj", "ssm_out_proj", "ffn1_routed", "ffn2_shared", "o_proj"):
         assert any("price_tiled_op" in b for b in laws[block]), block
     # No op may be priced by an unnamed law, ever.
     assert all(cost.basis for cost in granite.pricing.costs)
@@ -249,22 +281,23 @@ def test_no_op_exceeds_the_engine_peak_its_law_declares(granite):
 
 
 def test_the_scan_engine_is_the_binding_resource_and_says_so(granite):
-    """The SSD scan runs AT the declared peak: the engine, not the array, binds."""
+    """The SSD scan runs AT the declared peak: the engine, not the array, binds.
+
+    WAVE F: the run is DECODE ONLY (D25/D29), so this is the recurrent scan of
+    ONE token of ONE stream (M = 1). The engine still runs at its declared peak
+    to within the pipeline drain it pays once, and it still dwarfs the analog
+    projection that feeds it — by 25x here rather than the prefill's larger
+    factor, because the analog side also fell to M = 1.
+    """
     device = granite.mapping.device
     peak = device.vector_lanes * device.vector_clock_hz
     scan = next(
-        cost
-        for cost in granite.pricing.costs
-        if cost.block == "ssm_scan" and cost.phase == "prefill"
+        cost for cost in granite.pricing.costs if cost.block == "ssm_scan"
     )
     utilisation = float(scan.detail["ops"]) / scan.duration_s / peak
-    assert utilisation == pytest.approx(1.0, rel=1e-3)
-    # ... and it dwarfs the analog projections that feed it, which is the
-    # finding, not a bug (D5's "heavy digital co-compute", for a recurrence).
+    assert 0.98 < utilisation <= 1.0
     in_proj = next(
-        cost
-        for cost in granite.pricing.costs
-        if cost.block == "ssm_in_proj" and cost.phase == "prefill"
+        cost for cost in granite.pricing.costs if cost.block == "ssm_in_proj"
     )
     assert scan.duration_s > 10 * in_proj.duration_s
 
@@ -279,7 +312,9 @@ def test_an_analog_op_matches_the_M_law_computed_by_hand(granite):
     device = granite.mapping.device
     slice_cycles = int(device.analog.slice_cycles)
     f_analog = float(device.analog.analog_clock_mhz) * 1e6
-    for block, phase in (("qkv", "prefill"), ("ffn1_routed", "prefill"), ("qkv", "decode")):
+    # WAVE F: every op of a filled-pipeline run is a DECODE op at M = 1, so the
+    # law is checked on the three blocks rather than on three phases.
+    for block, phase in (("qkv", "decode"), ("ffn1_routed", "decode"), ("ssm_out_proj", "decode")):
         cost = next(
             c
             for c in granite.pricing.costs
@@ -293,17 +328,20 @@ def test_an_analog_op_matches_the_M_law_computed_by_hand(granite):
 
 
 def test_a_routed_expert_sees_the_routed_token_count_by_hand(granite):
-    """ceil(B*S * top_k * alpha / E) — Granite: 7168 * 6 / 64 = 672."""
+    """ceil(m * top_k * alpha / E) at the ONE token a stage holds per beat.
+
+    WAVE F (D29): the local batch is 1, so the hot-expert count is
+    ceil(1 * 6 / 64) = 1 — one token reaches an expert or it does not, and the
+    law rounds up to the expert that gets it. The retired regime asked the same
+    question at m = B x S = 7168 and got 672.
+    """
     params = granite.mapping.device.params
-    owner_tokens = granite.serving.batch * granite.serving.prefill_len
+    owner_tokens = 1.0
     expected = math.ceil(owner_tokens * params.top_k * params.expert_imbalance_factor
                          / params.num_experts)
-    assert expected == 672
-    cost = next(
-        c
-        for c in granite.pricing.costs
-        if c.block == "ffn1_routed" and c.phase == "prefill"
-    )
+    assert expected == 1
+    assert granite.mapping.device.moe_tokens_hot(1) == 1
+    cost = next(c for c in granite.pricing.costs if c.block == "ffn1_routed")
     assert "m_tokens=%d" % expected in cost.basis
 
 
@@ -327,13 +365,22 @@ def test_the_report_is_one_document_with_every_component_labeled(granite):
         )
     keys = {metric["key"] for metric in document["evaluation"]["metrics"]}
     assert "sys.fws.tokens_per_s" in keys
-    # The Granite point lowers 3 of 256 decode steps, so the requests/s figure
-    # is a WINDOW rate and carries the name that says so (D21). An unqualified
-    # "completed requests per second" here would be a second, contradicting
-    # value for the quantity the extrapolation block prices.
-    assert "sys.fws.requests_per_s_lowered_window" in keys
-    assert "sys.fws.requests_per_s" not in keys
-    assert document["evaluation"]["extrapolation"]["extrapolated"] is True
+    # WAVE F (D29): the metric set is the filled pipeline's. There is no
+    # requests/s figure at all — a request occupies one stream for decode_len x
+    # D beats and NONE completes inside the lowered window, so the only
+    # request-scale number is the labeled extrapolation, which is what P4 3
+    # allows and what D21 requires (one accounting per metric).
+    assert keys == {
+        "sys.fws.beat",
+        "sys.fws.tokens_per_s",
+        "sys.fws.per_stream_tokens_per_s",
+        "sys.fws.resident_streams",
+        "sys.fws.per_token_latency",
+    }
+    assert not any(key.startswith("sys.fws.requests_per_s") for key in keys)
+    extrapolation = document["evaluation"]["extrapolation"]
+    assert extrapolation["extrapolated"] is True
+    assert "DECODE_LEN x D x BEAT" in extrapolation["basis"]
 
 
 def test_the_declared_vector_engine_relaxations_ride_the_report(granite):
@@ -597,16 +644,63 @@ def test_the_atlas_and_the_report_size_the_pool_the_same_way(granite):
 
 
 def test_the_granite_headline_numbers_are_the_ones_reported(granite):
-    """Pins what the P1.5 status report states, so the two cannot drift apart."""
+    """Pins what the P1.5 status report states, so the two cannot drift apart.
+
+    WAVE F (D29/D30). Granite is a FILLED PIPELINE now: 10 stages (one per
+    analog chiplet), D = 10 resident streams, one token out per beat, local
+    batch 1, and no lm_head (66 macros gone, 5610 -> 5544). There is no prefill
+    figure any more — the streams arrive already prefilled (D25) — and the
+    headline is 1 / beat, not tokens over a batched step.
+    """
     document = fws_eval.report_document(granite)
     mapping = document["mapping"]
     assert mapping["analog_chips"] == 10
-    assert mapping["macros_holding_tiles"] == 5610
+    assert mapping["macros_holding_tiles"] == 5544
     assert mapping["shared_digital_chiplets"] == 10
+    assert mapping["serving_regime"] == "filled_pipeline"
+    assert mapping["resident_streams"] == 10
     metrics = {metric["key"]: metric["value"] for metric in document["evaluation"]["metrics"]}
-    # Prefill is scan-bound: 36 SSD layers on a 1024-lane engine.
-    assert metrics["sys.fws.prefill_latency"] == pytest.approx(1.0795, rel=1e-3)
-    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(4485.9, rel=1e-3)
+    assert "sys.fws.prefill_latency" not in metrics
+    # WAVE F REWRITE (D31/D32, P7.8). OLD: beat 43.98 us / 22737 tokens/s on a
+    # card that DECLARED 1024 vector lanes nobody measured. NEW: the card
+    # declares no engine at all — the width is DERIVED from the beat the analog
+    # stages set (220 lanes here, the smallest integer that holds it, no margin)
+    # — and the beat is 66.21 us because the derived engine is by construction
+    # only as fast as it must be. The old number was not more accurate; it was
+    # a machine somebody guessed. D31 is exactly this trade: the width stops
+    # being a choice and starts being a consequence, and the headline moves to
+    # whatever the consequence is.
+    assert metrics["sys.fws.beat"] == pytest.approx(6.620929e-05, rel=1e-3)
+    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(15103.6, rel=1e-3)
+    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(1510.36, rel=1e-3)
+    assert metrics["sys.fws.resident_streams"] == 10.0
+    # The engine is REPORTED, which is the other half of D31, and its silicon is
+    # COMPOSED from the measured 22nm synthesis library (D32).
+    silicon = document["evaluation"]["digital_silicon"]
+    assert silicon["vector_lanes"] == 220
+    assert silicon["vector_lanes_provenance"] == "derived-count"
+    assert silicon["library"]["technology"] == "22nm"
+    assert silicon["digital_area_mm2_total"] == pytest.approx(52.5867, rel=1e-4)
+    # The energy is the WINDOW's, and the window is D - 1 fill beats plus the
+    # steady sample: a longer window is more beats of real work, not a
+    # different machine. It is reported per run, never per token here.
+    #
+    # WAVE F (D32): it rose from 1.449e9 pJ because the shared digital chiplet
+    # is no longer an UNCOVERED component. Its ops are now charged the composed
+    # engine's measured power for their own duration, which is a term that
+    # always existed and used to report zero.
     assert document["evaluation"]["energy"]["total_pj"] == pytest.approx(
-        1.9499e11, rel=1e-3
+        9.27615e09, rel=1e-3
     )
+    digital = next(
+        c
+        for c in document["evaluation"]["energy"]["components"]
+        if c["key"] == "shared_digital_chiplet"
+    )
+    assert digital["coverage"] == "partial" and digital["energy_pj"] > 0
+    # THE GEORGE CONSTRAINT, on the headline model: every one of the 10 stages
+    # holds all 10 streams' state and KV for its own 4 layers.
+    residency = document["evaluation"]["state_residency"]
+    assert residency["resident_streams"] == 10 and residency["stages"] == 10
+    assert residency["max_stage_state_bytes"] == pytest.approx(60413952.0)
+    assert residency["verdict"] == "fits"

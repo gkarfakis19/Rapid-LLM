@@ -46796,6 +46796,11 @@
    "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
   },
   {
+   "constraint": "serving_regime",
+   "value": "lockstep (RETIRED D15 semantics)",
+   "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+  },
+  {
    "constraint": "decode_window",
    "value": "sys.decode: 4 of 256 steps lowered",
    "reason": "ADJ-6: the DAG grows linearly in the decode length, so a bounded window is lowered and the remaining steps are an extrapolation the consumer must declare. P3 lowers the window and states the bound; it extrapolates nothing."
@@ -46823,7 +46828,7 @@
   {
    "constraint": "shared_digital_energy",
    "value": "0 pJ: no law",
-   "reason": "No law prices a shared-digital-chiplet op's energy: the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+   "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
   },
   {
    "constraint": "row_block_partial_sum_law",

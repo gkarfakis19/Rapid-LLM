@@ -218,6 +218,10 @@ def test_every_axis_writes_exactly_one_documented_field():
         "column_sets_per_tile": lambda raw: raw["cim"]["allocation"]["column_sets_per_tile"],
         "arrays_per_chip": lambda raw: raw["cim"]["chip"]["arrays_per_chip"],
         "layers_per_chip": lambda raw: raw["mapping"]["layers_per_chip"],
+        # WAVE F (P7.4, D29): the stage plan is its own axis, because a stage
+        # count IS the resident-stream count D and a sweep has to be able to
+        # move it without moving the chip split.
+        "layers_per_stage": lambda raw: raw["mapping"]["layers_per_stage"],
         "shared_chiplets": lambda raw: raw["mapping"]["shared_chiplets"],
     }
     assert set(fields) == set(DSE.AXIS_TARGETS)
@@ -227,6 +231,7 @@ def test_every_axis_writes_exactly_one_documented_field():
         "column_sets_per_tile": 2,
         "arrays_per_chip": 200,
         "layers_per_chip": 4,
+        "layers_per_stage": 2,
         "shared_chiplets": 3,
     }
     for axis, reader in fields.items():
@@ -696,14 +701,55 @@ def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
         assert all(b > a for a, b in zip(series, series[1:])), series
     # ... and it is sub-linear: 8x the lanes is well under 8x the headline,
     # because the analog GEMMs and the transfers do not move with them.
+    #
+    # WAVE F (D29): the machine under this sweep is now a FILLED PIPELINE, and
+    # the ratio fell from 1.79x to 1.28x for a reason the sweep itself shows.
+    # Under the retired lockstep regime a decode step WAS the scan chain of 36
+    # Mamba layers, so the vector engine owned the critical path and buying
+    # lanes bought throughput. In the filled pipeline every stage fires every
+    # beat: the scan is one stage's work inside a beat, the beat is the SLOWEST
+    # stage, and widening the engine moves only the part of the beat that stage
+    # owns. Idle silicon is the finding (D28), and it is now visible one level
+    # up: the lanes are less binding than they looked.
     slowest = min(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
     fastest = max(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
-    assert 1.5 < fastest / slowest < 8.0
+    assert 1.2 < fastest / slowest < 8.0
+    assert all(
+        c["metrics"]["serving_regime"] == "filled_pipeline"
+        and c["metrics"]["resident_streams"] == 10.0
+        for c in payload["candidates"]
+    )
 
     assert payload["headline_metric"] == "tokens_per_s"
     assert payload["selected"]["knobs"] == {"vector_lanes": 4096, "bank_depth": 1}
-    assert payload["front_ids"] == [payload["selected_id"]]
-    assert payload["front_shape"] == "flat_area"
+
+    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: `front_ids == [selected_id]` and
+    # `front_shape == "flat_area"` — every candidate carried the same silicon,
+    # so the front collapsed to the fastest point and nothing traded area for
+    # speed. That was TRUE of a machine whose shared digital chiplet declared
+    # `area_mm2: 0`; Wave D's own front_shape note and P7.6's hand-off both
+    # said so by name. NEW CLAIM: the chiplet's silicon is COMPOSED from the
+    # measured synthesis library, so a wider engine costs real mm2 and the
+    # front is a SPREAD. This is the axis P7 said was missing, and it is now
+    # in the artifact rather than in a note about the artifact.
+    assert payload["front_shape"] == "spread"
+    assert len(payload["front_ids"]) > 1
+    assert payload["selected_id"] in payload["front_ids"]
+    # The trade is REAL and monotone: more lanes, more silicon, more tokens/s.
+    by_lanes = sorted(
+        (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == 1),
+        key=lambda c: c["knobs"]["vector_lanes"],
+    )
+    silicon = [c["silicon"]["total_silicon_mm2"] for c in by_lanes]
+    assert all(b > a for a, b in zip(silicon, silicon[1:])), silicon
+    # ... and the digital term is the one that moved: the analog floor is fixed
+    # (Invariant W), so every mm2 of the spread is digital silicon.
+    analog = {c["silicon"]["analog_macro_silicon_mm2"] for c in payload["candidates"]}
+    assert len(analog) == 1
+    assert all(
+        c["silicon"]["shared_digital_area_provenance"] == "composed-measured"
+        for c in payload["candidates"]
+    )
     assert payload["verify"]["pass"] is True
     assert all(check["ok"] for check in payload["verify"]["checks"])
     assert DEMO_MD.read_text().startswith("# QIF P3.7 — mapped-path DSE report")
@@ -772,10 +818,11 @@ def test_demo_config_is_the_shipped_granite_point_plus_the_sweep_block():
 def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
     """The front note is DERIVED, not a constant string.
 
-    On the demo sweep the two bank depths place 19566 and 11103 tiles, so a
-    note claiming the same tiles are placed either way would be contradicted
-    by the table two sections above it in its own report. The note may only
-    name quantities that are actually constant.
+    On the demo sweep the two bank depths place different tile counts (19304
+    and 10972 under the dense law this config declares), so a note claiming the
+    same tiles are placed either way would be contradicted by the table two
+    sections above it in its own report. The note may only name quantities that
+    are actually constant.
     """
     payload = json.loads(DEMO_JSON.read_text())
     note = payload["front_note"]
@@ -783,35 +830,87 @@ def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
     assert len(tiles) > 1, "this gate is only meaningful while the tiles differ"
     assert "same tiles are placed either way" not in note
     assert "the model's weights" not in note
-    # What IS constant is the enumerated slot count and the chiplet count,
-    # and those are the two terms the silicon accounting multiplies.
+
+    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: the note names the constant slot
+    # count and chiplet count, and it names every uncovered silicon term —
+    # both of which were clauses of the FLAT_AREA note, the only shape this
+    # sweep could produce while the chiplet declared no area. NEW CLAIM: the
+    # note is derived from whatever shape the front actually has, and it must
+    # still never assert a mechanism the candidates refute. The flat_area
+    # clauses are asserted when the front IS flat, so neither branch rots.
+    shape = payload["front_shape"]
     slots = {c["silicon"]["analog_macro_slots"] for c in payload["candidates"] if c["ok"]}
     chiplets = {
         c["placement"]["shared_digital_chiplets"] for c in payload["candidates"] if c["ok"]
     }
     assert len(slots) == 1 and len(chiplets) == 1
-    assert f"slot count is {slots.pop()}" in note
-    assert f"chiplet count is {chiplets.pop()}" in note
-    # The note's coverage clause is read off the accounting, not asserted.
     uncovered = payload["silicon_coverage"]["uncovered_terms"]
-    assert uncovered, "the demo's digital card declares no area law"
-    for term in uncovered:
-        assert term in note
+    if shape == "flat_area":
+        assert f"slot count is {slots.pop()}" in note
+        assert f"chiplet count is {chiplets.pop()}" in note
+        for term in uncovered:
+            assert term in note
+    else:
+        # A spread note may only claim a trade that the numbers contain.
+        assert shape == "spread", shape
+        corners = {
+            (
+                round(c["metrics"]["tokens_per_s"], 12),
+                round(c["silicon"]["total_silicon_mm2"], 12),
+            )
+            for c in payload["candidates"]
+            if c["id"] in payload["front_ids"]
+        }
+        assert len(corners) > 1, "a 'spread' note over one corner would be a tie"
+        assert f"{len(payload['front_ids'])} non-dominated points" in note
+        assert f"{len(corners)} distinct" in note
+        assert not uncovered, (
+            "the composed silicon accounting covers every term on this sweep; if a "
+            "term goes uncovered again the note has to name it"
+        )
 
 
 def test_banking_moves_active_column_sets_and_not_wasted_columns():
     """The MECHANISM behind the banking win, pinned to the numbers.
 
-    ADJ-4 prices ACTIVE column sets. A finer bank therefore cuts the energy
-    of the analog arrays; it does NOT recover stranded columns. Both the
-    unowned-column census and the macro count are identical across the whole
-    sweep, so any prose crediting the win to wasted columns is refuted here.
+    ADJ-4 prices ACTIVE column sets. A finer bank therefore cuts the ENERGY of
+    the analog arrays; it does NOT recover stranded columns, and it does not
+    buy a single mm2 of silicon. The unowned-column census and the enumerated
+    SLOT count are identical across the whole sweep, so any prose crediting the
+    energy win to wasted columns or to a smaller machine is refuted here.
+
+    P7.9 REWRITE. OLD CLAIM: the MACRO COUNT is identical across the sweep too.
+    NEW CLAIM: it is not, and that is Invariant W working. That sweep ran under
+    the DEDICATED law, where every tensor rounds up to its own whole macros and
+    a finer bank changes nothing; under the DENSE law this config now declares
+    (D27), a finer bank lets one macro's banks hold blocks of DIFFERENT tensors,
+    so bank_depth 1 places 4828 macros against bank_depth 2's 5488. WHY THE
+    ENERGY CLAIM SURVIVES ANYWAY: the silicon a point buys is its enumerated
+    SLOTS (6400 either way, asserted below), not the macros a mapping fills, so
+    the two wins stay separate — energy from the active-column-set law, macros
+    from Invariant W — and neither is the other's cause.
     """
     payload = json.loads(DEMO_JSON.read_text())
     valid = [c for c in payload["candidates"] if c["ok"]]
     assert len({c["placement"]["unowned_columns"] for c in valid}) == 1
-    assert len({c["placement"]["macros_holding_tiles"] for c in valid}) == 1
     assert len({c["placement"]["analog_macro_slots"] for c in valid}) == 1
+    assert len({c["silicon"]["total_silicon_mm2"] for c in valid}) > 1, (
+        "the silicon still moves across this sweep — with vector_lanes, not with "
+        "the bank depth"
+    )
+    # The macro count moves with the BANK DEPTH and with nothing else.
+    by_depth = {}
+    for cand in valid:
+        by_depth.setdefault(cand["knobs"]["bank_depth"], set()).add(
+            cand["placement"]["macros_holding_tiles"]
+        )
+    assert {depth: sorted(v) for depth, v in by_depth.items()} == {
+        1: [4828],
+        2: [5488],
+    }
+    # Fewer macros is LESS WASTE, measured in cells (D27), not fewer slots.
+    waste = {c["knobs"]["bank_depth"]: c["packing"]["waste_pct"] for c in valid}
+    assert waste[1] < waste[2]
 
     def component(cand, name):
         return next(
@@ -905,8 +1004,22 @@ def test_markdown_carries_the_silicon_accountings_coverage():
     report = DEMO_MD.read_text()
     payload = json.loads(DEMO_JSON.read_text())
     assert "silicon_accounting" in report
-    assert "silicon_uncovered" in report
-    assert "not a measured zero" in report
-    for term in payload["silicon_coverage"]["uncovered_terms"]:
-        assert term in report
+    uncovered = payload["silicon_coverage"]["uncovered_terms"]
+
+    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: the MD always carries a
+    # `silicon_uncovered` line saying the 0 mm2 shared-digital term is an
+    # ABSENT law and not a measured zero. That claim depended on the term
+    # being absent. NEW CLAIM: the MD states the accounting's PROVENANCE on
+    # every run — an uncovered term is still named as an absent law, and a
+    # covered one names the measured library it was composed from. What is
+    # forbidden is a silent number, in either direction.
+    if uncovered:
+        assert "silicon_uncovered" in report
+        assert "not a measured zero" in report
+        for term in uncovered:
+            assert term in report
+    else:
+        assert "silicon_uncovered" not in report
+        assert "COMPOSED area" in report
+        assert "D32" in report
     assert payload["selected"]["silicon"]["basis"] in report

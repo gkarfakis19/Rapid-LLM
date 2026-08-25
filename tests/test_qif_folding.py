@@ -514,30 +514,73 @@ def test_the_dedicated_packing_reports_no_packing_summary(llama_device):
 
 def test_a_finer_bank_lets_invariant_w_fill_macros_and_the_delta_is_disclosed():
     # Granite-4.0-H-Tiny, the headline model (ADJ-1), on a card that admits
-    # single-mux-slot allocation. The shipped 5610-macro placement is 47.6%
-    # empty weight space; dense packing at bank_depth 1 reaches 4894 macros for
-    # the same weights, against a GLOBAL CELL FLOOR of 2941.
+    # single-mux-slot allocation. The shipped 5544-macro placement is 48.1%
+    # empty weight space; dense packing at bank_depth 1 reaches 4828 macros for
+    # the same weights, against a GLOBAL CELL FLOOR of 2876.
+    #
+    # WAVE F (D30): these four numbers each fell by exactly the LM HEAD, which
+    # D30 drops entirely — ceil(100352 / 1536) = 66 macros of vocabulary
+    # projection on the last chip, off both placements (5610 -> 5544 dedicated,
+    # 4894 -> 4828 dense). The floor's numerator loses the head's CELLS, which
+    # is 1536 x 100352 = 154,140,672 and not the 66 whole macros' worth of
+    # cells the head occupies, so the floor falls by 65 (2941 -> 2876) rather
+    # than by 66 — the difference is the ceiling, as the assertion below says. The SAVING is unchanged at 716 macros, because the
+    # endpoint filled whole macros under either law and packing it densely
+    # never bought anything.
     dense = _mapping(
         FWS_GRANITE, GRANITE, mutate=_bank_depth(1), packing=fws_mapping.PACKING_DENSE
     )
     summary = dense.packing_summary()
-    assert summary["macros"] == 4894
-    assert summary["dedicated_macros"] == 5610
+    assert summary["macros"] == 4828
+    assert summary["dedicated_macros"] == 5544
     assert summary["macros_saved"] == 716
-    assert summary["cell_floor_macros"] == 2941
+    assert summary["cell_floor_macros"] == 2876
     assert summary["real_cells"] + summary["remainder_cells"] + summary["tail_cells"] == (
         summary["committed_cells"]
     )
-    assert summary["waste_pct"] == pytest.approx(39.9102642, abs=1e-6)
+    assert summary["waste_pct"] == pytest.approx(40.4420395, abs=1e-6)
     # DISCLOSED, never silent (D21): the delta rides in a relaxation banner.
     relaxation = [r for r in dense.relaxations() if r.constraint == "packing"][0]
     assert "716 macros" in relaxation.reason
-    assert "cell floor 2941" in relaxation.value
+    assert "cell floor 2876" in relaxation.value
     # The shipped card's own waste is a separate, larger number — the card's
     # granularity speaking, which is exactly what the note says.
     shipped = _mapping(FWS_GRANITE, GRANITE, packing=fws_mapping.PACKING_DENSE)
-    assert shipped.packing_summary()["waste_pct"] == pytest.approx(47.5794712, abs=1e-6)
+    assert shipped.packing_summary()["waste_pct"] == pytest.approx(48.1338684, abs=1e-6)
     assert any("WHOLE-MACRO allocation only" in note for note in shipped.notes)
+
+
+def test_the_endpoint_macros_are_gone_and_that_is_the_whole_delta():
+    """WAVE F (D30): the packer carries no endpoint arrays, and the count says so.
+
+    The check is the arithmetic of the drop, not a re-assertion of the new
+    numbers: the LOCKSTEP mapping of the same model still places the lm_head,
+    the D29 mapping does not, and the difference is exactly the macros that
+    endpoint owned.
+    """
+    hw = _hw(FWS_GRANITE, _bank_depth(1))
+    with_endpoints = config.parse_config(str(GRANITE), "LLM")
+    # The shipped config now declares D30's drop, so the COMPARISON has to put
+    # the endpoint back: this is the placement the same model had before D30.
+    with_endpoints.model_config.disable_embedding_unembedding = False
+    with_endpoints.model_config.global_batch_size = 4
+    lockstep = fws_mapping.build_mapping(
+        hw,
+        with_endpoints,
+        packing=fws_mapping.PACKING_DENSE,
+        regime=fws_mapping.REGIME_LOCKSTEP,
+    )
+    filled = _mapping(
+        FWS_GRANITE, GRANITE, mutate=_bank_depth(1), packing=fws_mapping.PACKING_DENSE
+    )
+    assert filled.regime == fws_mapping.REGIME_FILLED
+    assert "lm_head" in lockstep.endpoint_blocks and not filled.endpoint_blocks
+    dropped = lockstep.packing_summary()["macros"] - filled.packing_summary()["macros"]
+    assert dropped == 66 == math.ceil(100352 / 1536)
+    assert (
+        lockstep.packing_summary()["cell_floor_macros"]
+        - filled.packing_summary()["cell_floor_macros"]
+    ) == 65  # the floor is a ceiling over cells, so it drops by ceil, not by 66
 
 
 def test_a_dense_mapping_still_prices_end_to_end_and_holds_its_invariants():

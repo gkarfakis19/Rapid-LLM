@@ -181,9 +181,21 @@ def test_hunyuan_4bs_decoupled_head_dim_is_honored_and_not_derived():
 
 @pytest.fixture(scope="module")
 def gemma():
+    """Gemma-3-4B on the 2560 card, in the RETIRED lockstep regime, by name.
+
+    WAVE F (P7.7, D29): a config that declares a `mapping:` block is a FILLED
+    PIPELINE, which refuses a declared batch and declared endpoints and lowers
+    no prefill at all. The rows below are about the SLIDING-WINDOW law - and
+    two of them need BOTH the prefill and the decode window law live on one
+    timeline - so this fixture keeps the batch-4 workload of the retired regime
+    and says so. The window law itself is untouched by the pivot.
+    """
     mapping = fws_mapping.build_mapping(
-        _hw(CARD_2560_HW), config.parse_config(GEMMA_3_4B, "LLM")
+        _hw(CARD_2560_HW),
+        config.parse_config(GEMMA_3_4B, "LLM"),
+        regime=fws_mapping.REGIME_LOCKSTEP,
     )
+    assert mapping.regime == fws_mapping.REGIME_LOCKSTEP
     return fws_eval.evaluate_fws(build_fws_program(mapping))
 
 

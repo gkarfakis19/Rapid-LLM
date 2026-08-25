@@ -58,6 +58,17 @@ LFM2 = MODEL_DIR / "lfm2_2p6b_inf.yaml"
 #: The checked-in P3 export the atlas can be opened with.
 P3_ATLAS = ATLAS_DIR / "p3_llama7b_tp2.json"
 
+#: WAVE F (D29). A DECLARED `mapping:` block now means a FILLED PIPELINE, and
+#: the filled pipeline refuses a declared batch and declared endpoints BY NAME.
+#: The fixtures in this file are PLACEMENT fixtures over the batch-4 Llama2-7B
+#: and MoE-small workloads of the retired regime — chips, tiles, groups, pp
+#: annotation, PD inventories — none of which the regime changes. They
+#: therefore declare the regime they mean, by name, instead of being rewritten
+#: into a different machine: the placement questions this file asks have the
+#: same answers under both regimes, and the D29 regime has its own file
+#: (tests/test_qif_pipeline.py).
+LOCKSTEP = {"regime": "lockstep"}
+
 #: The pairs the mapping is built over throughout this file.
 PAIRS = (
     (FWS_LLAMA7B, LLAMA2_7B_FWS_INF, "LLM"),
@@ -94,7 +105,7 @@ def llama_mapping():
 def llama_tp2_mapping():
     def mutate(raw):
         raw["parallelism"]["tp"] = 2
-        raw["mapping"] = {"chips": 8, "shared_chiplets": 2, "parallelism": {"tp": 2}}
+        raw["mapping"] = {"chips": 8, "shared_chiplets": 2, "parallelism": {"tp": 2}, **LOCKSTEP}
 
     return _mapping(FWS_LLAMA7B, LLAMA2_7B_FWS_INF, mutate=mutate)
 
@@ -211,7 +222,7 @@ def test_declared_chip_count_is_checked_against_the_enumerated_placement():
         _mapping(
             FWS_LLAMA7B,
             LLAMA2_7B_FWS_INF,
-            mutate=lambda raw: raw.update({"mapping": {"chips": 7}}),
+            mutate=lambda raw: raw.update({"mapping": {"chips": 7, **LOCKSTEP}}),
         )
     assert "enumerates 4 analog chips" in str(excinfo.value)
     assert "never a quotient" in str(excinfo.value)
@@ -222,7 +233,7 @@ def test_one_degree_has_one_home():
         _mapping(
             FWS_LLAMA7B,
             LLAMA2_7B_FWS_INF,
-            mutate=lambda raw: raw.update({"mapping": {"parallelism": {"tp": 2}}}),
+            mutate=lambda raw: raw.update({"mapping": {"parallelism": {"tp": 2}, **LOCKSTEP}}),
         )
     assert "disagrees with parallelism.tp = 1" in str(excinfo.value)
 
@@ -243,7 +254,7 @@ def test_pp_is_an_independent_annotation_not_the_chip_index():
     mapping = _mapping(
         FWS_LLAMA7B,
         LLAMA2_7B_FWS_INF,
-        mutate=lambda raw: raw.update({"mapping": {"parallelism": {"pp": 2}}}),
+        mutate=lambda raw: raw.update({"mapping": {"parallelism": {"pp": 2}, **LOCKSTEP}}),
     )
     assert mapping.hw.sch_config.pp == 1
     assert mapping.degrees["pp"] == 2
@@ -262,7 +273,7 @@ def test_declared_pp_membership_is_validated_by_name():
             FWS_LLAMA7B,
             LLAMA2_7B_FWS_INF,
             mutate=lambda raw: raw.update(
-                {"mapping": {"parallelism": {"pp": 2}, "membership": {"pp": membership}}}
+                {"mapping": {"parallelism": {"pp": 2}, "membership": {"pp": membership}, **LOCKSTEP}}
             ),
         )
 
@@ -282,7 +293,7 @@ def test_shared_chiplet_count_is_an_input_with_a_reported_suggestion():
     mapping = _mapping(
         FWS_LLAMA7B,
         LLAMA2_7B_FWS_INF,
-        mutate=lambda raw: raw.update({"mapping": {"shared_chiplets": 1}}),
+        mutate=lambda raw: raw.update({"mapping": {"shared_chiplets": 1, **LOCKSTEP}}),
     )
     assert len(mapping.digital_chips()) == 1
     assert mapping.shared_chiplet_suggestion == len(mapping.analog_chips())
@@ -291,7 +302,7 @@ def test_shared_chiplet_count_is_an_input_with_a_reported_suggestion():
         _mapping(
             FWS_LLAMA7B,
             LLAMA2_7B_FWS_INF,
-            mutate=lambda raw: raw.update({"mapping": {"shared_chiplets": 0}}),
+            mutate=lambda raw: raw.update({"mapping": {"shared_chiplets": 0, **LOCKSTEP}}),
         )
     assert "act x act compute" in str(excinfo.value)
 
@@ -732,7 +743,7 @@ def test_primary_group_names_the_first_axis_with_a_degree(llama_mapping, llama_t
     pp_mapping = _mapping(
         FWS_LLAMA7B,
         LLAMA2_7B_FWS_INF,
-        mutate=lambda raw: raw.update({"mapping": {"parallelism": {"pp": 2}}}),
+        mutate=lambda raw: raw.update({"mapping": {"parallelism": {"pp": 2}, **LOCKSTEP}}),
     )
     assert pp_mapping.primary_group == "pp"
 
@@ -751,7 +762,12 @@ def test_a_group_axis_the_mapping_does_not_carry_is_refused(llama_mapping):
 
 def _pd_pair(prefill=None, decode=None):
     def mutate(raw):
-        raw["mapping"] = {"pd": {"prefill": prefill or {}, "decode": decode or {}}}
+        raw["mapping"] = {
+            "pd": {
+                "prefill": dict(prefill or {}, **LOCKSTEP),
+                "decode": dict(decode or {}, **LOCKSTEP),
+            }
+        }
 
     hw = _hw(FWS_LLAMA7B, mutate)
     model = config.parse_config(str(LLAMA2_7B_FWS_INF), "LLM")

@@ -4,22 +4,22 @@
 # `mapping_dse` sweep block removed (a runnable config declares a machine, not a
 # candidate space).
 #
-# sweep base:  configs/hardware-config/fws_cim_granite_tiny_dse.yaml
-# model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
-# candidate:   c006 (vector_lanes = 4096, bank_depth = 1)
-# headline:    25673.8 tokens/s, measured on this point's own timeline by fws_eval
+# sweep base:  configs/hardware-config/fws_cim_qwen3_5_4b_frontier.yaml
+# model:       configs/model-config/qwen3_5_4b_inf.yaml
+# candidate:   c020 (layers_per_chip = 1, arrays_per_chip = 20, bank_depth = 1)
+# headline:    14846.5 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
   analog:
-    rows: 1536
-    cols_adc: 384
+    rows: 2560
+    cols_adc: 640
     adc_mux: 4
     slice_cycles: 2
     analog_clock_mhz: 100
-    energy_per_vec_pj: 13730.312016
+    energy_per_vec_pj: 38139.7556
     shots_per_output: 2
-    area_mm2_per_array: 2.0204136
+    area_mm2_per_array: 5.61226
   fabric:
     model: sa
     rows: 32
@@ -30,7 +30,7 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 640
+    arrays_per_chip: 20
     layers_per_chip: 4
     moe_expert_parallel: 1
   cards:
@@ -41,7 +41,6 @@ cim:
     sa:
       kind: digital_chiplet
       synthesis_library: 22nm
-      vector_lanes: 4096
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 0
@@ -160,3 +159,4 @@ mapping:
     tp: 1
   packing: dense
   decode_window: 3
+  layers_per_chip: 1

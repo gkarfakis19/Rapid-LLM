@@ -169,6 +169,110 @@ PACKING_DEDICATED = "dedicated"
 PACKING_DENSE = "dense"
 PACKING_MODES: Tuple[str, ...] = (PACKING_DEDICATED, PACKING_DENSE)
 
+#: The two SERVING REGIMES a mapped fws_cim run can be lowered under (D29).
+#:
+#: ``filled_pipeline`` is D29 and the default for every run that DECLARES a
+#: ``mapping:`` block: decode is independent streams staggered across the
+#: pipeline stages, ONE token exits per beat, the local batch is always 1
+#: (M = 1 on every analog op, attention and scan per stream), and the resident
+#: stream count D IS the stage count. Batch size does not exist in it.
+#:
+#: ``lockstep`` is the RETIRED D15 regime — one batch of same-length requests
+#: stepping through the whole model together — kept as a degenerate/testing
+#: mode. It is what the pass-1/2 closed form models, so the ADJ-8 bridge and
+#: every run that declares no ``mapping:`` block lower under it, and every such
+#: run carries the ``serving_regime`` disclosure that says so by name.
+REGIME_FILLED = "filled_pipeline"
+REGIME_LOCKSTEP = "lockstep"
+SERVING_REGIMES: Tuple[str, ...] = (REGIME_FILLED, REGIME_LOCKSTEP)
+
+
+@dataclass(frozen=True)
+class PipelineStage:
+    """One PP stage of the filled pipeline (D29): layers, chips, and its index.
+
+    A stage is the unit the rotation turns on: at every beat, stage ``index``
+    holds one stream and hands it to stage ``index + 1``. The stage COUNT is
+    the resident-stream count D — it is derived here and never configured as a
+    batch (D29: batch size does not exist).
+    """
+
+    index: int
+    layers: Tuple[int, ...]
+    chips: Tuple[int, ...]
+    label: str
+
+    def as_dict(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("stage", int(self.index)),
+                ("label", self.label),
+                ("layers", list(self.layers)),
+                ("chips", list(self.chips)),
+            )
+        )
+
+
+def stage_partition(
+    num_layers: int,
+    layers_per_stage: Optional[object],
+    chip_layers: Sequence[Tuple[int, ...]],
+    pp_of_backbone_chip: Sequence[int],
+    pp: int,
+) -> Tuple[Tuple[int, ...], str]:
+    """Partition the backbone layers into PP stages — the D29 stage plan.
+
+    Three sources, in this order, and no fourth:
+
+    1. ``mapping.layers_per_stage`` — an int (uniform) or a list (per stage).
+    2. ``mapping.parallelism.pp`` > 1 — the DECLARED pp membership already
+       groups chips into stages, so the stage's layers are its chips' layers.
+    3. the chip partition itself — the default: **one stage per chip**.
+
+    Returns the per-stage layer tuples and the basis string that names which
+    source produced them, because a stage count is the resident-stream count
+    and a reader must be able to see where it came from.
+    """
+    total = int(num_layers)
+    if layers_per_stage is not None:
+        if isinstance(layers_per_stage, (list, tuple)):
+            counts = [int(value) for value in layers_per_stage]
+        else:
+            width = int(layers_per_stage)
+            counts = [width] * (total // width)
+            if total % width:
+                counts.append(total % width)
+        if any(count <= 0 for count in counts):
+            raise MappingError(
+                "execution",
+                f"mapping.layers_per_stage = {layers_per_stage!r} produces an EMPTY "
+                "stage. A stage with no layers is a resident stream with nothing to "
+                "do (D29).",
+            )
+        if sum(counts) != total:
+            raise MappingError(
+                "execution",
+                f"mapping.layers_per_stage = {layers_per_stage!r} covers {sum(counts)} "
+                f"layers but the model has {total}. The stage plan is a PARTITION of "
+                "the layers: every layer is on exactly one stage.",
+            )
+        basis = f"mapping.layers_per_stage = {layers_per_stage!r}"
+    elif int(pp) > 1:
+        groups: "OrderedDict[int, List[int]]" = OrderedDict()
+        for chip_index, stage_index in enumerate(pp_of_backbone_chip):
+            groups.setdefault(int(stage_index), []).extend(chip_layers[chip_index])
+        counts = [len(groups[key]) for key in sorted(groups)]
+        basis = f"mapping.parallelism.pp = {int(pp)} (the declared pp membership)"
+    else:
+        counts = [len(layers) for layers in chip_layers]
+        basis = "the chip partition (default: one stage per analog chip)"
+    stages: List[Tuple[int, ...]] = []
+    cursor = 0
+    for count in counts:
+        stages.append(tuple(range(cursor, cursor + count)))
+        cursor += count
+    return tuple(stages), basis
+
 
 @dataclass(frozen=True)
 class ShardCoord:
@@ -526,6 +630,9 @@ class FwsMapping:
         relaxations: Sequence[Relaxation],
         packing: str = PACKING_DEDICATED,
         packings: Mapping[int, DensePacking] = (),
+        regime: str = REGIME_LOCKSTEP,
+        stages: Sequence[PipelineStage] = (),
+        stage_basis: str = "",
     ) -> None:
         self.device = device
         self.hw = hw_config
@@ -554,6 +661,13 @@ class FwsMapping:
         self.packings = OrderedDict(
             (int(chip_id), value) for chip_id, value in dict(packings).items()
         )
+        #: P7.7 / D29: the SERVING REGIME this mapping is lowered under, the
+        #: stage plan the rotation turns on, and where the plan came from.
+        #: ``resident_streams`` (D) is DERIVED from the stage count — it is
+        #: never a configured batch, which under D29 does not exist.
+        self.regime = str(regime)
+        self.stages = tuple(stages)
+        self.stage_basis = str(stage_basis)
 
         sizes = {axis: max(1, int(self.degrees[axis])) for axis in MAPPING_AXES}
         strides: Dict[str, int] = {}
@@ -578,6 +692,29 @@ class FwsMapping:
         for macro in self.macros:
             for tile in macro.tiles:
                 self._macro_of_tile[id(tile)] = macro.macro_id
+
+    # -- the filled pipeline (D29): stages, D, and the layer -> stage map ---
+
+    @property
+    def resident_streams(self) -> int:
+        """D — the resident stream count, which IS the stage count (D29).
+
+        Derived, never declared: one stream per stage, one token out per beat.
+        A mapping with no stage plan (the retired lockstep regime) has no
+        resident streams and reports 0 rather than 1, so the two regimes can
+        never be read off one field as if they were the same machine.
+        """
+        return len(self.stages)
+
+    def stage_of_layer(self, layer: int) -> int:
+        for stage in self.stages:
+            if int(layer) in stage.layers:
+                return stage.index
+        raise MappingError(
+            "execution",
+            f"layer {layer} is on no pipeline stage: the stage plan is a partition of "
+            "the layers and this one covers none of it (D29).",
+        )
 
     # -- the shard grid: membership CONSTRUCTED, never inferred (P3.3) ----
 
@@ -813,6 +950,14 @@ class FwsMapping:
                 ("devices", len(self.devices)),
                 ("owners", len(self._tiles_by_owner)),
                 ("decode_window", self.decode_window),
+                # D29: the regime is the machine. Two mappings of one model
+                # that differ only by this word are two different machines,
+                # so it rides the summary beside the parallelism degrees.
+                ("serving_regime", self.regime),
+                ("pipeline_stages", len(self.stages)),
+                ("resident_streams", self.resident_streams),
+                ("stage_plan_basis", self.stage_basis),
+                ("layers_per_stage", [len(stage.layers) for stage in self.stages]),
                 # P7.3: the placement LAW these numbers came out of. Two
                 # mappings of one model can differ only by this word, so a
                 # summary that omitted it would make them look identical.
@@ -1317,6 +1462,7 @@ def build_mapping(
     label: Optional[str] = None,
     model_id: Optional[str] = None,
     packing: Optional[str] = None,
+    regime: Optional[str] = None,
 ) -> FwsMapping:
     """``(workload, platform) -> mapping`` — the seam P3 fixes now.
 
@@ -1342,8 +1488,17 @@ def build_mapping(
 
     model = getattr(model_config, "model_config", model_config)
     device = CimDeviceModel(hw_config, model)
+    mapping_config = getattr(hw_config, "mapping_config", None)
+    # A run DECLARES a mapping when its HARDWARE CONFIG carries a `mapping:`
+    # block — config.py's own definition of a MAPPED fws_cim run, and the seam
+    # D29 keys off: a mapped run is a FILLED PIPELINE, and a run whose config
+    # declares no mapping is the retired lockstep comparison mode that holds
+    # the ADJ-8 bridge and the pass-1/2 closed form. A spec handed in by a
+    # caller (a PD half, a sweep candidate, an atlas emitter) does not by
+    # itself declare a regime: it can name one in `spec.regime`, and the
+    # `regime=` keyword overrides everything.
+    declared_mapping = mapping_config is not None
     if spec is None:
-        mapping_config = getattr(hw_config, "mapping_config", None)
         spec = (
             mapping_config.system
             if mapping_config is not None
@@ -1366,6 +1521,45 @@ def build_mapping(
             "macros, 'dense' packs one contiguous bank stream (Invariant W, D27).",
         )
     dense = packing == PACKING_DENSE
+    # --- the SERVING REGIME (D29) ----------------------------------------
+    declared_regime = regime if regime is not None else getattr(spec, "regime", None)
+    if declared_regime is None:
+        regime = REGIME_FILLED if (declared_mapping and phase == "decode") else REGIME_LOCKSTEP
+    else:
+        regime = str(declared_regime)
+    if regime not in SERVING_REGIMES:
+        raise MappingError(
+            "execution",
+            f"serving regime {regime!r} is not a regime this mapper lowers. The regimes "
+            f"are {SERVING_REGIMES}: '{REGIME_FILLED}' is D29 (staggered streams, one "
+            f"token out per beat, local batch 1) and '{REGIME_LOCKSTEP}' is the RETIRED "
+            "D15 batched-synchronous mode kept for the closed-form bridge.",
+        )
+    if regime == REGIME_FILLED and phase != "decode":
+        raise MappingError(
+            "execution",
+            f"mapping.regime = {REGIME_FILLED!r} on a {phase!r} mapping. The filled "
+            "pipeline is a DECODE regime (D25: prefill is out of P7; D29 stages "
+            "STREAMS, and a prefill has no stream to stagger). Lower the prefill half "
+            f"under {REGIME_LOCKSTEP!r}, or drop the regime and let the phase choose.",
+        )
+    if regime == REGIME_FILLED and int(getattr(p, "batch_size", 1) or 1) != 1:
+        # D29: THE LOCAL BATCH IS ALWAYS 1 and batch size does not exist as a
+        # concept. The refusal names the field, because a run that quietly
+        # forced M = 1 would publish a throughput for a machine the user did
+        # not ask for.
+        raise MappingError(
+            "execution",
+            "model_param.global_batch_size / gradient_accumulation_steps declare a "
+            f"local batch of {int(p.batch_size)}, and D29 removes batch size from the "
+            "fws_cim serving surface entirely: the pipeline is ALWAYS FULL, decode is "
+            "independent streams staggered across the pipeline stages, every analog op "
+            "fires at M = 1 and attention/scan are per stream. Throughput comes from "
+            "the resident stream count D (= the stage count, DERIVED), never from a "
+            "batch. Set model_param.global_batch_size: 1, or lower this run under the "
+            f"retired {REGIME_LOCKSTEP!r} regime, which is what the pass-1/2 closed "
+            "form models.",
+        )
     if dense and phase == "prefill":
         # D25 / D26: the refusal IS the implementation.
         refuse_dead_fold(
@@ -1619,6 +1813,22 @@ def build_mapping(
             next_chip_id += 1
 
     endpoints = _endpoint_shapes(device, tp)
+    if regime == REGIME_FILLED and endpoints:
+        # D30: embedding and lm_head are DROPPED ENTIRELY. There is no endpoint
+        # array, no endpoint stage and no note — so a model that still declares
+        # them is refused BY NAME rather than quietly placed and then ignored
+        # somewhere downstream.
+        raise MappingError(
+            "residency",
+            "D30 drops embedding and lm_head ENTIRELY on the fws_cim mapped path, but "
+            f"this model declares the endpoint stage(s) "
+            f"{', '.join(sorted({stage.op for _where, stage in endpoints}))}. Set "
+            "model_param.disable_embedding_unembedding: true (it is the enforced "
+            "default for a mapped fws_cim run, not a knob), or lower the run under the "
+            f"retired {REGIME_LOCKSTEP!r} regime, which still places endpoints. A "
+            "ViT-shaped model cannot disable its patch embedding or head in the schema, "
+            "so a ViT runs only under the lockstep regime.",
+        )
     #: Chips are enumerated slot ranges: chip i owns macro ids
     #: [i * macro_slots, (i+1) * macro_slots). When the slot count is derived
     #: (arrays_per_chip = 0) it is not known yet, so placement runs on a
@@ -1882,8 +2092,104 @@ def build_mapping(
     device.validate_macro_capacity(all_tiles)
     device.validate_allocation()
 
+    # --- the stage plan: D29's PP stages, and D = the stage count ---------
+    stages: List[PipelineStage] = []
+    stage_basis = ""
+    if regime == REGIME_FILLED:
+        stage_layers, stage_basis = stage_partition(
+            int(p.num_layers),
+            getattr(spec, "layers_per_stage", None),
+            tuple(layers_of_chip),
+            tuple(pp_of_chip[:backbone_per_shard]),
+            pp,
+        )
+        for index, stage_layer_ids in enumerate(stage_layers):
+            hosts = sorted(
+                {
+                    chip_id
+                    for layer in stage_layer_ids
+                    for chip_id in layer_chip.get(layer, ())
+                }
+            )
+            stages.append(
+                PipelineStage(
+                    index=index,
+                    layers=tuple(stage_layer_ids),
+                    chips=tuple(hosts),
+                    label=(
+                        f"stage {index}: layers {stage_layer_ids[0]}-"
+                        f"{stage_layer_ids[-1]}"
+                    ),
+                )
+            )
+        relaxations.append(
+            Relaxation(
+                constraint="serving_regime",
+                value=(
+                    f"{REGIME_FILLED} (D29): D = {len(stages)} resident streams, "
+                    "local batch 1"
+                ),
+                reason=(
+                    f"The pipeline is ALWAYS FULL. {len(stages)} PP stages from "
+                    f"{stage_basis}; D = the stage count, DERIVED and never configured "
+                    "as a batch (D29 removes batch size from this surface). Decode is "
+                    "independent streams staggered one stage apart: one token exits per "
+                    "BEAT, throughput = 1/beat, per-stream rate = 1/(D x beat), every "
+                    "analog op fires at M = 1 and attention/scan are priced per stream "
+                    "at that stream's own context. EVERY stage holds all D streams' "
+                    "state and KV for its layers, which the evaluation reports per "
+                    "stage and checks against the declared tiers."
+                ),
+            )
+        )
+    else:
+        relaxations.append(
+            Relaxation(
+                constraint="serving_regime",
+                value=f"{REGIME_LOCKSTEP} (RETIRED D15 semantics)",
+                reason=(
+                    "This mapping is lowered as ONE batch of same-length requests "
+                    "stepping through the whole model together, which is what the "
+                    "pass-1/2 closed form models and what the ADJ-8 bridge compares "
+                    "against. D29 SUPERSEDED it for fws_cim: the shipped regime is the "
+                    f"filled pipeline ({REGIME_FILLED!r}), and every run that declares "
+                    "a `mapping:` block gets it. This run does not declare one (or "
+                    "asked for lockstep by name), so it is the degenerate comparison "
+                    "mode: its batch, its endpoints and its per-step semantics are the "
+                    "retired ones and none of its numbers is a D29 result."
+                ),
+            )
+        )
     decode_window = int(spec.decode_window or DEFAULT_DECODE_WINDOW)
-    if phase == "decode" and decode_len > decode_window:
+    if regime == REGIME_FILLED and phase == "decode":
+        # Under D29 the window is measured in BEATS, not in a request's decode
+        # steps: the DAG lowers D - 1 beats of fill plus `decode_window` beats
+        # of steady state, and a request's own decode_len is an extrapolation
+        # the evaluation labels as one. Reporting "3 of 256 steps" here would
+        # name a quantity this DAG does not lower.
+        relaxations.append(
+            Relaxation(
+                constraint="decode_window",
+                value=(
+                    f"{len(stages) + decode_window + 1} beats lowered "
+                    f"({len(stages) - 1} to fill the pipeline, then {decode_window} "
+                    "STEADY inter-exit intervals measured)"
+                ),
+                reason=(
+                    "ADJ-6 bounds the lowered window; D29 makes the unit a BEAT. The "
+                    f"pipeline needs D - 1 = {len(stages) - 1} beats to fill; "
+                    f"{decode_window + 2} traversals then complete inside the window and "
+                    f"their {decode_window + 1} inter-exit intervals are measured, of "
+                    "which the FIRST is held out (that traversal travelled through a "
+                    "filling pipeline, so nothing queued behind it and its exit is "
+                    f"early). The beat is the median of the remaining {decode_window}. "
+                    f"The declared decode_len ({decode_len} tokens per request) never "
+                    "enters the DAG: a request's decode phase is decode_len x D x beat "
+                    "and the evaluation prints it in its extrapolation block, labeled."
+                ),
+            )
+        )
+    elif phase == "decode" and decode_len > decode_window:
         relaxations.append(
             Relaxation(
                 constraint="decode_window",
@@ -1922,6 +2228,9 @@ def build_mapping(
         relaxations=relaxations,
         packing=packing,
         packings=packings,
+        regime=regime,
+        stages=tuple(stages),
+        stage_basis=stage_basis,
     )
     if dense:
         summary = mapping.packing_summary()

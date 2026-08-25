@@ -1165,20 +1165,52 @@ def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
             candidate["knobs"]["vector_lanes"],
             candidate["knobs"]["bank_depth"],
             entries["sys.fws.tokens_per_s"],
-            entries["sys.fws.decode_step_median"],
+            # WAVE F (D29): the sweep is a FILLED PIPELINE, so the per-token
+            # period each point publishes is its measured BEAT. The fixture's
+            # decode_step_s field carries it — the same quantity, the time from
+            # one token to the next, under the schema's existing name.
+            entries["sys.fws.beat"],
         )
     front = _frontier()
     points = {p["id"]: p for p in front["points"]}
+    silicon = {c["id"]: c["silicon"] for c in dse["candidates"]}
     for pid, (lanes, depth, tokens, step) in measured.items():
         point = points[pid]
         assert point["knobs"]["vector_lanes"] == lanes
         assert point["knobs"]["bank_depth"] == depth
         assert point["throughput"]["tokens_per_s"] == tokens
         assert point["throughput"]["decode_step_s"] == step
+        # P7.9: the AREA is checked against its source the same way the
+        # throughput is. The document used to carry a two-term sum that was
+        # internally consistent and disagreed with the sweep by the whole
+        # per-macro pool term, and no gate could see it because no gate
+        # compared an area (D21).
+        assert point["area"]["total_mm2"] == pytest.approx(
+            silicon[pid]["total_silicon_mm2"], rel=1e-12
+        )
+        assert point["area"]["terms"]["macro_pool_mm2"] == pytest.approx(
+            silicon[pid]["macro_pool_silicon_mm2"], rel=1e-12
+        )
+        assert point["area"]["terms"]["shared_digital_mm2"] == pytest.approx(
+            silicon[pid]["shared_digital_silicon_mm2"], rel=1e-12
+        )
     # The ninth point is the shipped atlas run, and it is the only clickable one.
     granite = {m["key"]: m["value"] for m in json.loads(GRANITE_ATLAS.read_text(encoding="utf-8"))["metrics"]}
     assert points["ref.atlas"]["throughput"]["tokens_per_s"] == granite["sys.fws.tokens_per_s"]
     assert points["ref.atlas"]["in_sweep"] is False
+    # P7.9: the ninth point's engine is DERIVED, and the document says which
+    # width and whose it is. It used to be labelled "vector_lanes 1024" — a
+    # declared width it does not have, next to a genuinely-declared 1024-lane
+    # point with a different area — and to carry 5610 pre-D30 placed tiles.
+    report = json.loads(
+        (PROJECT_ROOT / "docs/qif/atlas/granite_4_0_h_tiny_report.json").read_text(encoding="utf-8")
+    )
+    silicon_block = report["evaluation"]["digital_silicon"]
+    ref = points["ref.atlas"]
+    assert ref["knobs"]["vector_lanes"] == silicon_block["vector_lanes"]
+    assert ref["knobs"]["vector_lanes_provenance"] == silicon_block["vector_lanes_provenance"]
+    assert "DERIVED" in ref["label"]
+    assert ref["provisioning"]["placed_tiles"] == report["mapping"]["tiles"]
     clickable = [p for p in front["points"] if p["atlas"]["exists"]]
     assert [p["id"] for p in clickable] == ["ref.atlas"]
     assert clickable[0]["atlas"]["document"] == GRANITE_ATLAS.name
@@ -1193,21 +1225,46 @@ def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
                  or q["throughput"]["tokens_per_s"] > p["throughput"]["tokens_per_s"])
             for q in front["points"]
         )
-    assert sorted(p["id"] for p in front["points"] if p["pareto"]) == ["c000", "c002", "c004", "c006"]
+    # WAVE F REWRITE (D32, P7.8). OLD: the front is exactly the four
+    # bank_depth = 1 sweep points. NEW: the reference atlas run joins it. Its
+    # engine width is DERIVED from its own beat (D31) rather than declared, so
+    # it carries LESS digital silicon than any swept point and is non-dominated
+    # on the area axis. That is the whole content of D31 drawn on the picture:
+    # the derived point is the cheapest one on the frontier.
+    assert sorted(p["id"] for p in front["points"] if p["pareto"]) == [
+        "c000", "c002", "c004", "c006", "ref.atlas"
+    ]
     for point in front["points"]:
         assert point["pareto"] == (not dominated(point)), point["id"]
-    assert [p["id"] for p in front["points"] if p["knee"]] == ["c002"]
-    assert front["knee"]["point"] == "c002"
-    # The knee law itself: step(lanes) = R + C / lanes reproduces all four
-    # measured bank_depth = 1 steps, and 1024 is the first width whose digital
-    # term falls below the residual.
-    steps = {lanes: step for (lanes, depth, _t, step) in measured.values() if depth == 1}
-    c = (steps[512] - steps[4096]) / (1 / 512 - 1 / 4096)
-    r = steps[512] - c / 512
-    for lanes, step in steps.items():
-        assert r + c / lanes == pytest.approx(step, rel=1e-12)
-    assert c / 512 / r > 1.0
-    assert c / 1024 / r < 1.0
+    # THE KNEE, REWRITTEN FOR D29 (Wave F). Under the retired lockstep regime
+    # the knee sat at 1024 lanes: the scan engine was the whole critical path
+    # of a decode step, so the digital term C / lanes was still ABOVE the
+    # residual at 512. In the filled pipeline every stage fires every beat, the
+    # scan is one stage's work inside a beat, and the digital term is already
+    # below the residual at the smallest width the sweep contains — so the knee
+    # is the first swept point and every doubling past it pays area for a term
+    # that was never binding. The law itself is unchanged and still exact.
+    beats = {lanes: step for (lanes, depth, _t, step) in measured.values() if depth == 1}
+    c = (beats[512] - beats[4096]) / (1 / 512 - 1 / 4096)
+    r = beats[512] - c / 512
+    for lanes, beat in beats.items():
+        # A FIT, not an identity any more: the lockstep step WAS the scan chain
+        # and the law was exact to 1e-13; the D29 beat is a MAX over stages, so
+        # the reciprocal-in-lanes law describes it to 4e-5 and the fixture's own
+        # basis says exactly that.
+        assert r + c / lanes == pytest.approx(beat, rel=1e-4)
+    assert "a FIT, not an identity" in front["knee"]["basis"]
+    knee_lanes = min(lanes for lanes in beats if c / lanes < r)
+    assert knee_lanes == 512
+    assert c / 512 / r < 1.0
+    knee_id = [p["id"] for p in front["points"]
+               if p["in_sweep"] and p["knobs"]["bank_depth"] == 1
+               and p["knobs"]["vector_lanes"] == knee_lanes][0]
+    assert [p["id"] for p in front["points"] if p["knee"]] == [knee_id]
+    assert front["knee"]["point"] == knee_id
+    # 8x the lanes buys well under 2x the throughput: the finding the fixture
+    # exists to draw, and it survived the regime change with a different cause.
+    assert 1.0 < beats[512] / beats[4096] < 2.0
 
 
 def test_every_frontier_point_reports_utilization_and_waste(tmp_path):
@@ -1240,25 +1297,58 @@ def test_every_frontier_point_reports_utilization_and_waste(tmp_path):
     assert analog["value"] == pytest.approx(duty, rel=1e-12)
 
 
-def test_the_frontier_marks_the_two_fields_no_producer_emits():
-    """The x axis exists only because of a placeholder, and it says so.
+def test_the_frontier_marks_the_field_no_producer_emits():
+    """WAVE F REWRITE (D32, P7.8): the x axis is real, and ONE field is still absent.
 
-    The shipped digital card declares no area_mm2, which is exactly why the Wave
-    D front collapsed to one point. A fixture is allowed to carry the number the
-    picture needs; it is not allowed to wear it as a result.
+    OLD CLAIM: the shared-digital AREA term is an invented placeholder, and the
+    fixture wears the mark, because the digital card declared no area_mm2 —
+    which is exactly why the Wave D front collapsed to one point. NEW CLAIM: D32
+    composes that term from measured synthesis blocks, so nothing in this
+    document is invented; what remains marked is what the composition does NOT
+    cover (activation SRAM, interconnect, control — no block in the library) and
+    the per-candidate shared-digital OCCUPANCY, which no producer emits.
     """
     front = _frontier()
-    assert front["provenance"]["invented_fields"] == [
-        "points[].area.terms.shared_digital_mm2"
-    ]
+    assert front["provenance"]["invented_fields"] == []
     constraints = {r["constraint"] for r in front["relaxations"]}
-    assert "shared_digital_area_is_a_placeholder" in constraints
+    assert "shared_digital_area_is_a_placeholder" not in constraints
+    assert "shared_digital_area_is_composed_not_measured_in_situ" in constraints
     assert "shared_digital_utilization_uncovered" in constraints
-    assert "waste_is_the_column_census" in constraints
+    # P7.9 REWRITE. OLD: the waste figure is the COLUMN census and D27's cell
+    # census "does not exist yet". NEW: the cell census landed with P7.2's dense
+    # packer in the same plan, it is nearly twice the column figure, and the
+    # document now carries it — what is still relaxed is its SCOPE (one
+    # reference mapping's census repeated on every row).
+    assert "waste_is_the_column_census" not in constraints
+    assert "waste_is_one_reference_mappings_cell_census" in constraints
+    # P7.9: the eight swept points sweep vector_lanes, which D31 retires. That
+    # is a fact about the document and it is named ON the document, not only in
+    # a status file a chart reader never opens.
+    assert "the_eight_swept_points_sweep_a_RETIRED_axis" in constraints
+    cells = [
+        r for r in front["relaxations"]
+        if r["constraint"] == "waste_is_one_reference_mappings_cell_census"
+    ][0]
+    assert "COLUMN census" in cells["reason"] and "per-point" in cells["reason"]
+    assert front["points"][0]["packing"]["basis_kind"] == "cells"
+    composed = [
+        r for r in front["relaxations"]
+        if r["constraint"] == "shared_digital_area_is_composed_not_measured_in_situ"
+    ][0]
+    assert "LOWER BOUND" in composed["reason"]
     for point in front["points"]:
         assert point["area"]["terms"]["shared_digital_mm2"] > 0
         assert point["area"]["terms"]["analog_mm2"] == pytest.approx(12930.64704)
+        # P7.9: THREE terms, not two. The per-macro digital pool is a whole
+        # device class and the document used to omit it while declaring
+        # uncovered == [] — which made its total disagree with the source
+        # sweep's own total_silicon_mm2 by exactly that term (D21).
+        assert point["area"]["terms"]["macro_pool_mm2"] > 0
+        assert sorted(point["area"]["terms"]) == [
+            "analog_mm2", "macro_pool_mm2", "shared_digital_mm2"
+        ]
         assert sum(point["area"]["terms"].values()) == pytest.approx(point["area"]["total_mm2"])
+        assert point["area"]["uncovered"] == []
 
 
 def test_the_embedded_frontier_blob_is_the_frontier_fixture_verbatim():

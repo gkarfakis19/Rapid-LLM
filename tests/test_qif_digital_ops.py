@@ -93,10 +93,19 @@ def bare_t1():
 
 def test_vector_lanes_have_no_default_and_refuse_by_name(bare_t1):
     # ADJ-4: the systolic array is a matmul engine and softmax_lanes is a
-    # softmax pipeline. Neither may stand in for scan lanes, so an undeclared
-    # engine is a NAMED refusal, never a borrowed number.
+    # softmax pipeline. Neither may stand in for scan lanes.
+    #
+    # WAVE F (D31): the lane count is no longer DECLARED, it is DERIVED from
+    # the pipeline beat. That moves the refusal without weakening it — a call
+    # OUTSIDE a mapped run has no beat to derive from, so it still gets a named
+    # refusal rather than a borrowed number, and the message now says which of
+    # the two is missing.
     assert bare_t1.digital_card.has_vector_engine is False
-    with pytest.raises(cim_timing.EngineCapabilityError, match="declares no vector engine"):
+    assert bare_t1.derived_engine is None
+    assert bare_t1.vector_lanes_provenance == "undetermined"
+    with pytest.raises(cim_timing.EngineCapabilityError, match="has no vector engine"):
+        _ = bare_t1.vector_lanes
+    with pytest.raises(cim_timing.EngineCapabilityError, match="D31 sizes the scan/vector engine FROM THE PIPELINE BEAT"):
         _ = bare_t1.vector_lanes
     with pytest.raises(cim_timing.EngineCapabilityError, match="vector_lanes"):
         bare_t1.price_ssm_scan(1, d_inner=8, d_state=4, n_groups=1, n_heads=1)
