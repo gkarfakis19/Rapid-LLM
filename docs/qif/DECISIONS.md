@@ -222,3 +222,13 @@ Process and scope:
   FP_ADD/FP_MULT/BF16_EXP/RECIP/systolic/buffer/register blocks composed
   into engine area and power, first-order. Declared placeholders are
   replaced by block compositions.
+
+- **ADJ-9 (2026-08-25, adjudicated from George's own words; he may overrule):
+  D31-v2 — derive the engine to the ANALOG floor.** "Full util" means the
+  analog side: the digital engine is sized UP until the analog m-pass time
+  is the beat-setter (digital per-stage time <= analog stage time), not the
+  smallest engine that keeps itself busy. Rationale: the audit measured
+  +27% tokens/s for +0.78% area on Granite — digital silicon is nearly free
+  against the Invariant-W analog floor, so the machine must never be left
+  digital-bound by a minimal derivation. The Wave-D demo sweep's
+  vector_lanes axis retires when this lands.
