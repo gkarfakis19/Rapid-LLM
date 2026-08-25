@@ -172,3 +172,14 @@ mapping:
   # extrapolation. Three steps give a first / median / last that are three
   # different readings rather than one repeated.
   decode_window: 3
+  # THE RETIRED REGIME, DECLARED BY NAME (P7.7, D29). Every other mapped config
+  # in this tree is a FILLED PIPELINE: staggered streams, one token out per
+  # beat, local batch 1, D = the stage count. This point is deliberately not.
+  # It is the COMPARISON workhorse — the PD picture (docs/qif/atlas/pd_llama7b.json),
+  # the P3.7 DSE round trip in the validator and the Llama2-7B closed-form
+  # bridge point all read it against pass-1/2 numbers, which model exactly this
+  # batched-synchronous machine (D15). Lowering it as a filled pipeline would
+  # compare two different machines. The D29 twin of this workload is
+  # configs/model-config/llama2_7b_fws_decode_inf.yaml, which the filled-pipeline
+  # tests run on this same hardware with mapping.regime dropped.
+  regime: lockstep

@@ -15,6 +15,7 @@
 
 from dataclasses import dataclass, field
 import math
+import os
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import yaml as _yaml
@@ -2995,6 +2996,77 @@ def _parse_cim_float(block: Dict[str, object], context: str, field: str, *, defa
     return parsed
 
 
+def _synthesis_technologies_message(cim_timing_module) -> str:
+    """"Checked in: ..." — the one list both synthesis-library refusals print."""
+    available = sorted(
+        entry[len("digital_components_"):-len(".yaml")]
+        for entry in (
+            os.listdir(cim_timing_module.SYNTHESIS_LIBRARY_DIR)
+            if os.path.isdir(cim_timing_module.SYNTHESIS_LIBRARY_DIR)
+            else []
+        )
+        if entry.startswith("digital_components_") and entry.endswith(".yaml")
+    )
+    return f"Checked in: {available or 'none'}."
+
+
+def _parse_synthesis_library(card_dict: Dict[str, object], context: str) -> str:
+    """Parse `synthesis_library` on a digital chiplet card and REFUSE BY NAME.
+
+    D32 composes digital area and power from a checked-in library of blocks a
+    synthesis run measured. The card names a technology; this function checks
+    that the technology is actually checked in, so a typo is caught where the
+    config is read rather than deep inside a composition. An unknown technology
+    is refused with the list of the ones that exist: there is no nearest match
+    and no scaling from another node (a retargeted number is no longer measured).
+    """
+    raw = card_dict.get("synthesis_library", "")
+    if raw in (None, "", False):
+        return ""
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"{context}.synthesis_library must be a technology NAME (a string such as "
+            f"'22nm'), got {raw!r}."
+        )
+    name = raw.strip()
+    import cim_timing as _cim_timing  # local: config.py is imported by cim_timing's callers
+
+    # A TECHNOLOGY NAME, never a path. SynthesisLibrary.path_for passes a value
+    # containing a separator or a .yaml suffix through unchanged, which is
+    # wanted inside tests but is an escape hatch at the CONFIG surface: it would
+    # let a run of this repo depend on a file outside it (the shared NFS copy of
+    # the OPTIMA library, say), which is exactly what D32's "copy, never a
+    # runtime dependency" forbids. Refused here, by name.
+    separators = tuple(sep for sep in (os.sep, os.altsep) if sep)
+    if name.endswith((".yaml", ".yml")) or any(sep in name for sep in separators):
+        raise ValueError(
+            f"{context}.synthesis_library must be a technology NAME (a string such as "
+            f"'22nm'), not a file path (got {raw!r}). D32's library is CHECKED IN to "
+            "this repo and a run must never read another project's copy at runtime; "
+            "a path here would make the numbers depend on a file outside the tree. "
+            + _synthesis_technologies_message(_cim_timing)
+        )
+
+    path = _cim_timing.SynthesisLibrary.path_for(name)
+    if not os.path.isfile(path):
+        available = sorted(
+            entry[len("digital_components_"):-len(".yaml")]
+            for entry in (
+                os.listdir(_cim_timing.SYNTHESIS_LIBRARY_DIR)
+                if os.path.isdir(_cim_timing.SYNTHESIS_LIBRARY_DIR)
+                else []
+            )
+            if entry.startswith("digital_components_") and entry.endswith(".yaml")
+        )
+        raise ValueError(
+            f"{context}.synthesis_library = {name!r} names no checked-in library "
+            f"({path} does not exist). D32 prices digital silicon from MEASURED blocks, "
+            f"so a technology with no synthesis run behind it has no numbers at all and "
+            f"is not scaled from another node. Checked in: {available or 'none'}."
+        )
+    return name
+
+
 @dataclass
 class CIMAnalogConfig:
     """Analog fixed-weight-stationary array parameters (cim.analog).
@@ -3550,7 +3622,24 @@ class CIMDigitalChipletCardConfig:
 
     name: str
     fabric: CIMFabricConfig
+    #: DECLARED chiplet silicon, the pre-D32 placeholder. It is still parsed and
+    #: still reported by a card that names no `synthesis_library`; the moment a
+    #: card names one, `cim_timing.CimDeviceModel.shared_digital_area_mm2`
+    #: COMPOSES the area from measured blocks and this number is not added to it
+    #: (one accounting per metric, D21).
     area_mm2: float = 0.0
+    #: --- THE MEASURED SYNTHESIS LIBRARY (D32) -----------------------------
+    #: Technology name of the checked-in block library this chiplet's area and
+    #: power are composed from: `configs/hardware-config/digital_components_
+    #: <tech>.yaml`, copied from the OPTIMA synthesis run named in its own
+    #: provenance header. "22nm" and "12nm" are checked in.
+    #:
+    #: UNDECLARED means the card keeps the declared `area_mm2` placeholder and
+    #: has NO power figure at all — D32 says digital area and power come from
+    #: measured blocks, and a card that names no library has no measured blocks
+    #: to come from. It is not defaulted to a technology: picking one for a card
+    #: that did not name it would silently retarget its silicon (ADJ-4).
+    synthesis_library: str = ""
     #: --- ENGINE CAPABILITY knobs (QIF P2.6, digital op laws) ---------------
     #: The chiplet's VECTOR/SCAN engine: the unit every non-attention digital
     #: op law (SSD scan, selective scan, delta rule, RG-LRU) is timed on. One
@@ -3558,12 +3647,25 @@ class CIMDigitalChipletCardConfig:
     #: vector cycle — the peak is `vector_lanes * vector_clock`, and every law
     #: is bound by it by construction.
     #:
-    #: `vector_lanes` has NO default on purpose (ADJ-4, no invented numbers).
-    #: The systolic array's rows x cols is a MATMUL engine, not a scan engine,
-    #: and `softmax_lanes` is a softmax pipeline, not a general vector unit —
-    #: deriving scan lanes from either would invent silicon. A card that does
-    #: not declare it makes `cim_timing.EngineCapabilityError` the answer to
-    #: every scan/delta-rule pricing call, which is the honest answer.
+    #: D31 RETIRES `vector_lanes` AS A DESIGN INPUT. Absent (the default, 0) is
+    #: now "DERIVE IT": a mapped run measures the beat its analog stages set and
+    #: `cim_timing.CimDeviceModel.derive_engine_sizing` returns the smallest
+    #: integer width that holds that beat, with no margin (D28). The width is
+    #: REPORTED, never chosen and never swept.
+    #:
+    #: A DECLARED value still works and is honoured, as an OVERRIDE that rides a
+    #: disclosure (`cim_timing.CimDeviceModel.vector_engine_disclosures` names it
+    #: as an override of a retired input). It does NOT print what the beat would
+    #: have derived: a declared width skips the probe pass, so no derivation
+    #: exists to compare it with (P7.9 correction — this comment used to claim
+    #: a sentence no run can emit).
+    #:
+    #: Outside a mapped run there is no beat, so an undeclared card still makes
+    #: `cim_timing.EngineCapabilityError` the answer to every scan/delta-rule
+    #: pricing call: the systolic array's rows x cols is a MATMUL engine, not a
+    #: scan engine, and `softmax_lanes` is a softmax pipeline, not a general
+    #: vector unit — deriving scan lanes from either would invent silicon
+    #: (ADJ-4, no invented numbers).
     vector_lanes: int = 0
     #: 0 -> inherit `fabric.clock_ghz`. Honest: the vector engine sits on THIS
     #: chiplet, and the chiplet declares exactly one clock.
@@ -3627,6 +3729,7 @@ class CIMDigitalChipletCardConfig:
             name=name,
             fabric=fabric,
             area_mm2=_parse_cim_float(card_dict, context, "area_mm2", default=0.0),
+            synthesis_library=_parse_synthesis_library(card_dict, context),
             vector_lanes=_coerce_int(
                 card_dict.get("vector_lanes", 0), f"{context}.vector_lanes", min_value=0
             ),
@@ -4018,6 +4121,22 @@ class MappingSystemConfig:
     #: Decode steps the DAG builder lowers (ADJ-6's bounded window). None
     #: leaves the builder's default; the truncation is always disclosed.
     decode_window: Optional[int] = None
+    #: The SERVING REGIME (P7.7, D29). ``None`` takes the default: a run that
+    #: declares a `mapping:` block is a MAPPED fws_cim run and is therefore a
+    #: FILLED PIPELINE (staggered streams, one token out per beat, local batch
+    #: 1, D = the stage count). ``lockstep`` asks for the RETIRED D15
+    #: batched-synchronous mode by name — the degenerate comparison regime the
+    #: closed-form bridge needs — and the run discloses it.
+    #:
+    #: The regimes themselves live in :data:`fws_mapping.SERVING_REGIMES`; this
+    #: block spells the name, the mapper owns the law (D21).
+    regime: Optional[str] = None
+    #: Layers per PP STAGE (D29). ``None`` derives the stage plan: the declared
+    #: pp membership when ``parallelism.pp > 1``, else ONE STAGE PER CHIP. An
+    #: int is a uniform width; a list is the per-stage plan. The stage COUNT is
+    #: the resident-stream count D, which is DERIVED and reported — it is never
+    #: a batch, because under D29 a batch does not exist.
+    layers_per_stage: Optional[Union[int, Tuple[int, ...]]] = None
     #: The PLACEMENT LAW for this system's weights (P7.3, D27).
     #:
     #: ``dedicated`` (the default, so no shipped config moves) is today's
@@ -4041,11 +4160,39 @@ class MappingSystemConfig:
         "membership",
         "decode_window",
         "packing",
+        "regime",
+        "layers_per_stage",
     )
+
+    #: Keys the fws serving surface REFUSES BY NAME (D29). Batch size does not
+    #: exist in the filled-pipeline regime: throughput comes from the resident
+    #: stream count D, which is the stage count and is derived, never declared.
+    _REFUSED_KEYS = ("batch", "batch_size", "local_batch", "streams", "resident_streams")
+
+    @classmethod
+    def refuse_batch_by_name(cls, raw, context: str) -> None:
+        """D29: a batch on the fws serving surface is refused, by its own name.
+
+        It runs BEFORE the generic unknown-key check so the message is the
+        decision rather than a list of supported keys: a user who writes
+        ``batch: 4`` here is asking for a machine that does not exist any more,
+        and the sentence they get back has to say that.
+        """
+        named = [key for key in cls._REFUSED_KEYS if key in raw]
+        if named:
+            raise ValueError(
+                f"{context}.{named[0]} is refused BY NAME (D29). The fws_cim pipeline is "
+                "ALWAYS FULL: decode is independent streams staggered across the "
+                "pipeline stages, one token exits per beat, the local batch is always 1, "
+                "and the resident stream count D IS the stage count — DERIVED from the "
+                "stage plan and reported, never configured. Use mapping.layers_per_stage "
+                "to change D by changing the stage plan."
+            )
 
     @classmethod
     def from_dict(cls, raw: object, context: str) -> "MappingSystemConfig":
         raw = _require_mapping(context, raw)
+        cls.refuse_batch_by_name(raw, context)
         _reject_unknown_keys(context, raw, cls._KEYS)
         layers_raw = raw.get("layers_per_chip")
         layers: Optional[Union[int, Tuple[int, ...], str]]
@@ -4117,7 +4264,51 @@ class MappingSystemConfig:
                 else _coerce_int(raw["decode_window"], f"{context}.decode_window", min_value=1)
             ),
             packing=_parse_packing(raw.get("packing"), f"{context}.packing"),
+            regime=_parse_regime(raw.get("regime"), f"{context}.regime"),
+            layers_per_stage=_parse_layers_per_stage(
+                raw.get("layers_per_stage"), f"{context}.layers_per_stage"
+            ),
         )
+
+
+def _parse_regime(raw: object, context: str) -> Optional[str]:
+    """`mapping.regime` -> one of the mapper's serving regimes (P7.7, D29).
+
+    Imported from the module that lowers them, so a regime can never be
+    spellable in the config and missing from the builder (D21).
+    """
+    from fws_mapping import REGIME_FILLED, REGIME_LOCKSTEP, SERVING_REGIMES
+
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"{context} must be one of {SERVING_REGIMES} (got {raw!r}): the regime is a "
+            "serving LAW, named, not a number"
+        )
+    value = raw.strip().lower()
+    if value not in SERVING_REGIMES:
+        raise ValueError(
+            f"{context} = {raw!r} is not a serving regime this mapper lowers. The "
+            f"regimes are {SERVING_REGIMES}: {REGIME_FILLED!r} is D29 (staggered "
+            "streams, one token out per beat, local batch 1, D = the stage count) and "
+            f"{REGIME_LOCKSTEP!r} is the RETIRED D15 batched-synchronous mode, kept as "
+            "the degenerate comparison regime the closed-form bridge needs."
+        )
+    return value
+
+
+def _parse_layers_per_stage(
+    raw: object, context: str
+) -> Optional[Union[int, Tuple[int, ...]]]:
+    """`mapping.layers_per_stage` -> the PP stage plan (D29). Int or list."""
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        if not raw:
+            raise ValueError(f"{context} list must not be empty")
+        return tuple(_coerce_int(item, f"{context} entries", min_value=1) for item in raw)
+    return _coerce_int(raw, context, min_value=1)
 
 
 def _parse_packing(raw: object, context: str) -> str:
@@ -4169,6 +4360,7 @@ class MappingConfig:
     def from_dict(cls, raw: object) -> "MappingConfig":
         context = "mapping"
         raw = _require_mapping(context, raw)
+        MappingSystemConfig.refuse_batch_by_name(raw, context)
         _reject_unknown_keys(context, raw, MappingSystemConfig._KEYS + ("pd",))
         pd_raw = raw.get("pd")
         prefill = decode = None
@@ -4701,6 +4893,64 @@ def _unpriced_model_inputs(model: "LLMConfig", *, mapped_fws: bool = False) -> T
     return tuple(unpriced)
 
 
+def _validate_fws_filled_pipeline(hw_config: HWConfig, model: "LLMConfig") -> None:
+    """The D29/D30 serving surface of a MAPPED fws_cim run, refused by name.
+
+    A mapped run is a FILLED PIPELINE (D29): decode is independent streams
+    staggered across the pipeline stages, one token exits per beat, and THE
+    LOCAL BATCH IS ALWAYS 1 — batch size does not exist as a concept, so a
+    declared batch is refused rather than silently overridden. D30 drops
+    embedding and lm_head entirely, so a model that still declares its
+    endpoints is refused too. Both refusals name the field and the decision.
+
+    A run that asks for the retired lockstep regime BY NAME keeps the old
+    semantics (it is the degenerate comparison mode the closed-form bridge
+    needs) and neither refusal applies to it.
+    """
+    from fws_mapping import REGIME_LOCKSTEP
+
+    mapping_config = getattr(hw_config, "mapping_config", None)
+    if mapping_config is None:
+        return
+    systems = [
+        system
+        for system in (
+            mapping_config.system,
+            mapping_config.prefill,
+            mapping_config.decode,
+        )
+        if system is not None
+    ]
+    if systems and all(system.regime == REGIME_LOCKSTEP for system in systems):
+        return
+    local_batch = int(model.global_batch_size) // max(
+        1, int(model.gradient_accumulation_steps)
+    )
+    if local_batch != 1:
+        raise ValueError(
+            "model_param.global_batch_size declares a local batch of "
+            f"{local_batch} and this is a MAPPED fws_cim run, where D29 removes batch "
+            "size from the serving surface entirely: the pipeline is ALWAYS FULL, "
+            "decode is independent streams staggered across the pipeline stages, one "
+            "token exits per beat, every analog op fires at M = 1 and attention/scan "
+            "are per stream. Throughput comes from the resident stream count D, which "
+            "IS the stage count and is DERIVED from mapping.layers_per_stage (default: "
+            "one stage per chip) — never declared. Set global_batch_size: 1, or declare "
+            f"mapping.regime: {REGIME_LOCKSTEP} to keep the retired D15 semantics."
+        )
+    if not bool(model.disable_embedding_unembedding):
+        raise ValueError(
+            "model_param.disable_embedding_unembedding is false on a MAPPED fws_cim "
+            "run. D30 DROPS embedding and lm_head entirely: there is no endpoint array, "
+            "no endpoint stage and no note, so `true` is the enforced default here and "
+            "declaring the endpoints is refused by name rather than placed and then "
+            "ignored. Set model_param.disable_embedding_unembedding: true, or declare "
+            f"mapping.regime: {REGIME_LOCKSTEP}, which still places endpoints. A "
+            "ViT-shaped model cannot disable its patch embedding or head in this schema "
+            "(the field refuses ViT by name), so a ViT runs only under lockstep."
+        )
+
+
 def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> None:
     sch = getattr(hw_config, "sch_config", None)
     if sch is None:
@@ -4737,6 +4987,9 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     if not isinstance(model, LLMConfig):
         raise ValueError("Unsupported model config type for validation")
+
+    if mapped_fws:
+        _validate_fws_filled_pipeline(hw_config, model)
 
     # Every timing path in this repo prices ONE uniform transformer layer
     # repeated num_layers times. A hybrid layer plan would be priced as if its

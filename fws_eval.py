@@ -73,11 +73,15 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from cim_timing import (
     LAW_UNVALIDATED,
+    PROVENANCE_DERIVED_COUNT,
     CimDeviceModel,
+    DerivedEngineSizing,
     DigitalPoolSizing,
+    EngineDemand,
+    EngineSizingError,
     ReductionOpDescriptor,
 )
-from fws_mapping import FwsMapping, MappingError, Relaxation
+from fws_mapping import REGIME_FILLED, FwsMapping, MappingError, Relaxation
 from program.analytic_sim import CoarseEvalResult, DeviceResource, evaluate_detailed
 from program.fws_build import (
     LAW_ANALOG_GEMM,
@@ -334,6 +338,8 @@ class _Pricer:
         self._seen: set = set()
         self._link_cache: Dict[str, Tuple[float, float, float]] = {}
         self._attention_cache: Dict[Tuple[str, int, Optional[int]], object] = {}
+        #: D32 engine power, composed from the measured library once per run.
+        self._engine_power: Dict[str, Optional[float]] = {}
         mixers = tuple(getattr(self.model, "layer_mixers", ())) or (("attention",),)
         self._mixers = mixers
 
@@ -668,14 +674,15 @@ class _Pricer:
                 "declared; it is an unchecked count of the arithmetic the algorithm "
                 "does.",
             )
-        self._fabric_energy_disclosure()
+        self._fabric_energy_disclosure("vector")
+        energy_pj, coverage = self._fabric_energy("vector", cost.time_s)
         return self._cost(
             a,
             duration_s=cost.time_s,
             basis=basis,
-            energy_pj=0.0,
+            energy_pj=energy_pj,
             energy_component="shared_digital_chiplet",
-            coverage=COVERAGE_UNCOVERED,
+            coverage=coverage,
             detail=OrderedDict(
                 (
                     ("arith_cycles", float(cost.arith_cycles)),
@@ -686,14 +693,72 @@ class _Pricer:
             ),
         )
 
-    def _fabric_energy_disclosure(self) -> None:
+    def _engine_power_w(self, engine: str) -> Optional[float]:
+        """Composed power (W) of one shared-chiplet engine, or None with no library.
+
+        D32: the library reports a MEASURED power per block, so an engine's
+        power is the same unit-count composition its area is. Two engines are
+        distinguished because they are different silicon running different ops:
+        ``vector`` is the scan engine, ``attention`` is the systolic fabric plus
+        the softmax pipeline beside it.
+        """
+        if engine in self._engine_power:
+            return self._engine_power[engine]
+        value: Optional[float] = None
+        if self.device.engine_probing:
+            # D31 pass A composes nothing: there is no engine yet, and the
+            # probe's costs are discarded anyway. Not cached, so pass B asks
+            # the question again on the real engine.
+            return None
+        if self.device.has_synthesis_library():
+            if engine == "vector":
+                value = float(self.device.vector_engine_composition().power_w)
+            elif engine == "attention":
+                value = float(
+                    self.device.sa_fabric_composition().power_w
+                    + self.device.softmax_engine_composition().power_w
+                )
+        self._engine_power[engine] = value
+        return value
+
+    def _fabric_energy(self, engine: str, duration_s: float) -> Tuple[float, str]:
+        """(pJ, coverage) for one shared-chiplet op, from the measured library."""
+        power = self._engine_power_w(engine)
+        if power is None:
+            return 0.0, COVERAGE_UNCOVERED
+        return float(power) * float(duration_s) * 1e12, COVERAGE_PARTIAL
+
+    def _fabric_energy_disclosure(self, engine: str = "vector") -> None:
+        if self.device.engine_probing:
+            # Pass A has no engine and its disclosures are discarded; pass B
+            # makes this one against the engine that was actually derived.
+            return
+        if not self.device.has_synthesis_library():
+            self._disclose(
+                "shared_digital_energy",
+                "0 pJ: no law",
+                "No law prices a shared-digital-chiplet op's energy: the card names no "
+                "cim.cards.<card>.synthesis_library, so D32's measured block powers are "
+                "not available and the card schema refuses an energy_per_op_pj knob "
+                "precisely because nothing would read it (P2.1). Fabric TIME is fully "
+                "priced; fabric ENERGY is uncovered and the total says so instead of "
+                "absorbing it into a blanket PARTIAL word (ADJ-6).",
+            )
+            return
+        power = self._engine_power_w(engine)
         self._disclose(
-            "shared_digital_energy",
-            "0 pJ: no law",
-            "No law prices a shared-digital-chiplet op's energy: the card schema refuses "
-            "an energy_per_op_pj knob precisely because nothing would read it (P2.1). "
-            "Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says "
-            "so instead of absorbing it into a blanket PARTIAL word (ADJ-6).",
+            f"shared_digital_energy:{engine}",
+            f"{engine} engine at {power:.6g} W (composed), charged for the op's own time",
+            "D32: the shared digital chiplet's energy is now COMPOSED from the measured "
+            "synthesis library — the engine's block census times each block's own "
+            f"measured power gives {power:.6g} W, and an op is charged that power for "
+            "exactly as long as it runs. The label is PARTIAL, not COVERED, and here is "
+            "why: the library reports ONE average power per block and does not separate "
+            "dynamic from static, so (a) a block's power is charged at its synthesis "
+            "toggle rate rather than at this op's activity, and (b) the chiplet's "
+            "LEAKAGE while it is idle is not charged at all — an idle engine costs 0 pJ "
+            "here, which is a floor, not a measurement. Both directions are named rather "
+            "than folded into one adjusted number (D21, one accounting per metric).",
         )
 
     def _attention(self, a: FwsOpAnnotation) -> OpCost:
@@ -720,7 +785,8 @@ class _Pricer:
             "quantities, two names (P4 §1). On disagreement the DAG wins and the closed "
             "form is annotated (ADJ-8); this note is that annotation.",
         )
-        self._fabric_energy_disclosure()
+        self._fabric_energy_disclosure("attention")
+        energy_pj, coverage = self._fabric_energy("attention", cycles / f_fabric)
         return self._cost(
             a,
             duration_s=cycles / f_fabric,
@@ -728,9 +794,9 @@ class _Pricer:
                 f"CimDeviceModel.{self._attention_law_name(a)}: {what} at "
                 f"f_fabric = {f_fabric / 1e9:.4g} GHz"
             ),
-            energy_pj=0.0,
+            energy_pj=energy_pj,
             energy_component="shared_digital_chiplet",
-            coverage=COVERAGE_UNCOVERED,
+            coverage=coverage,
             detail=OrderedDict(
                 (
                     ("cycles", float(cycles)),
@@ -792,6 +858,13 @@ class _Pricer:
         return size
 
     def _context_of(self, a: FwsOpAnnotation) -> int:
+        if a.context is not None:
+            # THE FILLED PIPELINE (D29): the resident streams sit at DIFFERENT
+            # decode depths, so the context belongs to the STREAM and the
+            # lowering stamps it on the op. A step index would be the wrong
+            # question here — several streams share a beat and none of them
+            # shares a context.
+            return int(a.context)
         if a.phase == "prefill":
             return int(self.serving.prefill_len)
         # Decode step k attends to the prefill context plus the k tokens it has
@@ -1025,6 +1098,48 @@ class DeviceOccupancy:
     occupancy: float
 
 
+#: How closely two inter-exit intervals must agree before the beat they carry
+#: is called SETTLED (P7.9 / D29). It is a convergence tolerance on a
+#: measurement, not a margin (D28): nothing is padded by it and no number is
+#: relaxed toward it.
+BEAT_CONVERGENCE_TOL = 1e-3
+
+
+def _converged_beat_tail(
+    intervals: Sequence[float], tol: float = BEAT_CONVERGENCE_TOL
+) -> Tuple[float, ...]:
+    """The longest SUFFIX of ``intervals`` that agrees with its own median.
+
+    The exits of a filling pipeline ramp: the first traversals leave early
+    because nothing is queued behind them yet. D - 1 held-out beats is the
+    right allowance only when every stage has the same service time, and an
+    uneven stage plan takes longer to settle — so holding out a FIXED count
+    leaves ramp in the sample and makes the reported beat depend on how many
+    beats the window happened to lower (measured: 12% on Granite-4.0-H-Tiny
+    between decode_window 2 and 3).
+
+    This reads the beat off the settled TAIL instead: grow a suffix from the
+    last interval backwards while it still agrees with its own median to
+    ``tol``, and stop at the first interval that does not. A single interval
+    is trivially its own tail, and the caller reports how many were dropped as
+    ramp rather than smoothing them in.
+    """
+    values = [float(value) for value in intervals]
+    if not values:
+        return ()
+    best = tuple(values[-1:])
+    for start in range(len(values) - 2, -1, -1):
+        window = values[start:]
+        centre = _median(window)
+        if centre <= 0:
+            break
+        if max(abs(value - centre) for value in window) / centre <= tol:
+            best = tuple(window)
+        else:
+            break
+    return best
+
+
 def _median(values: Sequence[float]) -> float:
     ordered = sorted(values)
     if not ordered:
@@ -1065,6 +1180,12 @@ class FwsEvaluation:
     extrapolation: Mapping[str, object]
     disclosures: Tuple[Relaxation, ...]
     decode_step_times_s: Tuple[float, ...]
+    #: The filled pipeline, MEASURED (P7.7, D29): the beat, the exits it was
+    #: read from, the fill transient and the stage plan. Empty under the
+    #: retired lockstep regime.
+    pipeline: Mapping[str, object] = field(default_factory=OrderedDict)
+    #: Per-stage resident state/KV for all D streams, with its verdict (D29).
+    state_residency: Mapping[str, object] = field(default_factory=OrderedDict)
 
     # -- projections a consumer asks for by name ------------------------
 
@@ -1342,24 +1463,33 @@ def _build_bank_sharing(
     annotations: Sequence[FwsOpAnnotation],
     serving: ServingPoint,
 ) -> "OrderedDict[str, object]":
-    """What co-residency in a bank actually COSTS on a decode step (P7 Fact 3).
+    """What co-residency in a bank actually COSTS (P7 Fact 3, restated by D29).
 
     Dense packing puts several tensors — and several layers — in one macro, so
     the question a reader will ask is whether the strangers get in each other's
     way. This block answers it by MEASUREMENT, not by assertion: every op that
     started later than it was ready is charged to whatever else was running on
-    its device at the time, split three ways.
+    its device at the time, split by whose weights the blocker holds.
 
       * ``same_owner_delay_s`` — one tensor's own blocks waiting for one
         another. That is the macro walking its banks, not co-residency.
-      * ``cross_layer_delay_s`` — a resident of ANOTHER LAYER in the way.
-        Decode runs layers strictly in sequence (D15's batched-synchronous
-        regime), so this is 0.0 and Fact 3 is the reason.
+      * ``cross_layer_delay_s`` — a resident of ANOTHER LAYER in the way. It
+        splits in two, and D29 is why the split exists:
+
+        - ``within_stage_cross_layer_delay_s`` — the other layer is on the SAME
+          stage. A stage runs its layers in sequence for the one stream it
+          holds, so this stays 0.0: within-stage sharing is serial-free.
+        - ``cross_stage_delay_s`` — the other layer is on a DIFFERENT STAGE.
+          Under D29 every stage fires EVERY BEAT, on a different stream, so two
+          stages sharing a macro contend on every beat. This is the term the
+          retired lockstep regime could not have: it reported 0 because the
+          layers ran one after another. It is priced by the timeline and
+          reported here.
+
       * ``cross_tensor_same_layer_delay_s`` — a resident of the SAME layer in
         the way. Two tensors of one layer CAN be concurrent (a routed expert
         and a shared expert, a router and a projection), and when the packer
-        puts them in one macro they serialize. This is real, the timeline
-        already prices it, and it is reported rather than assumed away.
+        puts them in one macro they serialize.
     """
     if serving.decode_steps <= 0:
         return OrderedDict(
@@ -1373,7 +1503,12 @@ def _build_bank_sharing(
                 ),
             )
         )
-    step = int(serving.decode_steps) - 1
+    select, scope = _measurement_slice(serving)
+    step = int(scope.get("beat", scope.get("decode_step", 0)))
+    stage_of_layer: Dict[int, int] = {}
+    for stage in getattr(mapping, "stages", ()):  # empty under lockstep
+        for layer in stage.layers:
+            stage_of_layer[int(layer)] = int(stage.index)
     ready = _ready_times(program, timeline)
     by_device: "OrderedDict[int, List[int]]" = OrderedDict()
     for cost in pricing.costs:
@@ -1389,12 +1524,14 @@ def _build_bank_sharing(
         by_device.setdefault(int(cost.device_id), []).append(int(cost.uid))
     same_owner = 0.0
     cross_layer = 0.0
+    cross_stage = 0.0
+    within_stage = 0.0
     cross_tensor = 0.0
     delayed = 0
     for uids in by_device.values():
         for uid in uids:
             annotation = annotations[uid]
-            if annotation.phase != "decode" or int(annotation.step) != step:
+            if not select(annotation):
                 continue
             gap_start = float(ready[uid])
             gap_end = float(timeline.start_times[uid])
@@ -1414,6 +1551,12 @@ def _build_bank_sharing(
                     same_owner += overlap
                 elif blocker.layer != annotation.layer:
                     cross_layer += overlap
+                    mine = stage_of_layer.get(int(annotation.layer or -1), -1)
+                    theirs = stage_of_layer.get(int(blocker.layer or -1), -2)
+                    if mine != theirs:
+                        cross_stage += overlap
+                    else:
+                        within_stage += overlap
                 else:
                     cross_tensor += overlap
     sharing_owners = 0
@@ -1425,29 +1568,47 @@ def _build_bank_sharing(
             sharing_owners += 1
         if len({tile.owner.layer for tile in macro.tiles}) > 1:
             sharing_layers += 1
-    return OrderedDict(
+    sharing_stages = 0
+    if stage_of_layer:
+        for macro in mapping.macros:
+            if not macro.tiles:
+                continue
+            if len({stage_of_layer.get(int(tile.owner.layer), -1) for tile in macro.tiles}) > 1:
+                sharing_stages += 1
+    block = OrderedDict(
         (
             ("measured", True),
             ("decode_step", step),
             ("macros_sharing_banks_across_tensors", sharing_owners),
             ("macros_sharing_banks_across_layers", sharing_layers),
+            ("macros_sharing_banks_across_stages", sharing_stages),
             ("delayed_ops", delayed),
             ("same_owner_delay_s", same_owner),
             ("cross_layer_delay_s", cross_layer),
+            ("cross_stage_delay_s", cross_stage),
+            ("within_stage_cross_layer_delay_s", within_stage),
             ("cross_tensor_same_layer_delay_s", cross_tensor),
             (
                 "basis",
-                "for every ANALOG op of the lowered decode step that started later "
-                "than its last dependency finished, the waiting interval is attributed "
-                "to the ops that occupied the same macro during it, split by whose "
-                "weights they are. cross_layer_delay_s == 0 IS Fact 3, measured on this timeline: "
-                "decode runs layers in sequence, so a resident of another layer is "
-                "never in the way. A non-zero same-layer term is two concurrent "
-                "tensors of ONE layer sharing a macro; the timeline already prices it "
-                "and this line is where a reader sees it.",
+                f"for every ANALOG op of {scope['scope']} that started later than its "
+                "last dependency finished, the waiting interval is attributed to the ops "
+                "that occupied the same macro during it, split by whose weights they "
+                "are. WITHIN A STAGE the layers run in sequence for the one stream the "
+                "stage holds, so within_stage_cross_layer_delay_s == 0 is the "
+                "serial-free half of D29's statement, measured. ACROSS STAGES every "
+                "stage fires on the same beat for a different stream, so "
+                "cross_stage_delay_s is the contention D29 says a shared bank now pays "
+                "every beat — it can only be non-zero when a macro actually holds two "
+                "stages' weights (macros_sharing_banks_across_stages), which the default "
+                "one-stage-per-chip plan never produces and a finer layers_per_stage "
+                "does. A non-zero same-layer term is two concurrent tensors of ONE layer "
+                "sharing a macro; the timeline already prices it and this line is where "
+                "a reader sees it.",
             ),
         )
     )
+    block.update(scope)
+    return block
 
 
 def _utilization_disclosures(
@@ -1517,14 +1678,39 @@ def _utilization_disclosures(
                     f"in decode step {sharing['decode_step']}"
                 ),
                 reason=(
-                    "P7 Fact 3 covers CROSS-LAYER co-residency: decode runs layers in "
-                    "sequence, so residents of different layers never wait for each "
-                    "other, and this timeline measures that delay as exactly 0. Two "
-                    "tensors of the SAME layer can be concurrent (a routed expert "
+                    "Two tensors of the SAME layer can be concurrent (a routed expert "
                     "beside a shared expert, a router beside a projection), and when "
                     "the packer lands them in one macro they serialize on its ADC "
                     "path. The timeline prices that; this banner is where a reader "
-                    "sees which kind of sharing cost time."
+                    "sees which kind of sharing cost time. The CROSS-LAYER terms are "
+                    "the other half and D29 splits them: within a stage the layers run "
+                    "in sequence for the one stream the stage holds and the measured "
+                    f"delay is {float(sharing.get('within_stage_cross_layer_delay_s', 0.0)) * 1e6:.3f} "
+                    "us; across stages every stage fires on the same beat for a "
+                    "different stream and the measured delay is "
+                    f"{float(sharing.get('cross_stage_delay_s', 0.0)) * 1e6:.3f} us."
+                ),
+            )
+        )
+    if sharing.get("measured") and float(sharing.get("cross_stage_delay_s", 0)) > 0:
+        out.append(
+            Relaxation(
+                constraint="cross_stage_bank_sharing_contends_every_beat",
+                value=(
+                    f"{float(sharing['cross_stage_delay_s']) * 1e6:.3f} us on "
+                    f"{sharing.get('scope', 'the measured slice')}, on "
+                    f"{int(sharing.get('macros_sharing_banks_across_stages', 0))} macros "
+                    "holding two stages' weights"
+                ),
+                reason=(
+                    "D29's consequence, MEASURED: the pipeline is always full, so every "
+                    "stage fires on every beat for a different stream. A macro that "
+                    "holds weights of two STAGES is therefore wanted twice in the same "
+                    "beat and the second op waits. Under the retired lockstep regime "
+                    "this term was structurally 0 (the layers ran one after another), "
+                    "which is why the packer may place a cross-stage sharing that used "
+                    "to be free and is not free any more. Within-stage sharing stays "
+                    "serial-free and its own term says so."
                 ),
             )
         )
@@ -1581,6 +1767,48 @@ def _packing_block(mapping: FwsMapping) -> "OrderedDict[str, object]":
     return block
 
 
+def _measurement_slice(serving: ServingPoint) -> Tuple[object, "OrderedDict[str, object]"]:
+    """The slice of the timeline the per-step measurements are taken on.
+
+    Under the FILLED PIPELINE the unit is a BEAT, not a step: in one beat every
+    stage fires once, for D DIFFERENT streams, so a beat is exactly the window
+    in which the whole machine walks all of its banks once. The last lowered
+    beat is chosen because it is the one with every stage occupied — the fill
+    is behind it. Under the retired lockstep regime the unit is the last
+    lowered decode step, which is what it always was.
+    """
+    if str(getattr(serving, "regime", "")) == REGIME_FILLED:
+        beat = int(serving.beats) - 1
+
+        def _select(annotation: FwsOpAnnotation) -> bool:
+            return int(annotation.beat) == beat
+
+        return _select, OrderedDict(
+            (
+                ("unit", "beat"),
+                ("beat", beat),
+                ("resident_streams", int(serving.streams)),
+                (
+                    "scope",
+                    f"beat {beat} of {int(serving.beats)} lowered — every stage "
+                    f"occupied, one stream each (D29)",
+                ),
+            )
+        )
+    step = int(serving.decode_steps) - 1
+
+    def _select_step(annotation: FwsOpAnnotation) -> bool:
+        return annotation.phase == "decode" and int(annotation.step) == step
+
+    return _select_step, OrderedDict(
+        (
+            ("unit", "decode_step"),
+            ("decode_step", step),
+            ("scope", f"lowered decode step {step} (the retired lockstep regime)"),
+        )
+    )
+
+
 def _build_bank_passes(
     mapping: FwsMapping,
     pricing: PricingResult,
@@ -1611,13 +1839,14 @@ def _build_bank_passes(
                 ),
             )
         )
-    step = int(serving.decode_steps) - 1
+    select, scope = _measurement_slice(serving)
+    step = int(scope.get("beat", scope.get("decode_step", 0)))
     charged: Dict[int, float] = {}
     for cost in pricing.costs:
         annotation = annotations[cost.uid]
         if annotation.law != LAW_ANALOG_GEMM:
             continue
-        if annotation.phase != "decode" or int(annotation.step) != step:
+        if not select(annotation):
             continue
         macros = {tile.site.macro_id for tile in annotation.tiles}
         if len(macros) != 1:
@@ -1646,7 +1875,7 @@ def _build_bank_passes(
     reread = math.fsum(
         max(0.0, charged.get(macro_id, 0.0) - sets) for macro_id, sets in owned.items()
     )
-    return OrderedDict(
+    block = OrderedDict(
         (
             ("measured", True),
             ("decode_step", step),
@@ -1659,13 +1888,18 @@ def _build_bank_passes(
             (
                 "basis",
                 "sum of the active-column-set charge (ADJ-4) over every analog op of "
-                f"lowered decode step {step}, per macro, against the column sets the "
-                "placement claimed on that macro. Equality per macro is Fact 1: each "
-                "macro walks its occupied banks once per decode step, whichever "
-                "tensors co-reside there.",
+                f"{scope['scope']}, per macro, against the column sets the placement "
+                "claimed on that macro. Equality per macro is Fact 1: each macro walks "
+                f"its occupied banks exactly once per {scope['unit']}, whichever tensors "
+                "co-reside there. Under the filled pipeline (D29) a beat is the unit "
+                "because every stage fires once per beat, each for a different stream — "
+                "so the whole machine reads every stored weight once per beat and one "
+                "token leaves.",
             ),
         )
     )
+    block.update(scope)
+    return block
 
 
 def _busy_intervals(
@@ -1767,6 +2001,216 @@ def _phase_window(
     if first is math.inf:
         return (0.0, 0.0)
     return (first, last)
+
+
+def _build_pipeline_metrics(
+    mapping: FwsMapping,
+    serving: ServingPoint,
+    costs: Sequence[OpCost],
+    timeline: CoarseEvalResult,
+) -> Tuple[Tuple[Metric, ...], Tuple[float, ...], Dict[str, object], "OrderedDict[str, object]"]:
+    """The FILLED PIPELINE's metrics (D29), every one read off the timeline.
+
+    The beat is not assumed and it is not a max-stage-time formula: it is the
+    MEASURED interval between consecutive token EXITS. Traversal j exits when
+    its last stage finishes, so the exits are timeline finishes and the beat is
+    their difference — which is where "throughput = 1/beat" comes from. The
+    first D - 1 beats are the pipeline FILLING and the transient is reported
+    beside the beat instead of being averaged into it.
+    """
+    system = mapping.system_id
+    streams = max(1, int(serving.streams))
+    beats_lowered = int(serving.beats)
+    # A traversal COMPLETES inside the window when its last stage fits: it
+    # enters at beat j and leaves at beat j + D - 1.
+    complete = [j for j in range(beats_lowered) if j + streams - 1 <= beats_lowered - 1]
+    exits: List[Tuple[int, float, float]] = []
+    for traversal in complete:
+        first, last = _phase_window(costs, timeline, "decode", traversal)
+        if last <= 0:
+            continue
+        exits.append((traversal, float(first), float(last)))
+    intervals = [
+        float(exits[index][2] - exits[index - 1][2]) for index in range(1, len(exits))
+    ]
+    # THE FILL TRANSIENT, held out rather than averaged in. The first completed
+    # traversal is the one that entered at beat 0: it walked the stages while
+    # the pipeline was still filling, so nothing was ever waiting behind it and
+    # its exit lands EARLY. Every later exit is spaced by the machine's own
+    # steady rhythm. The transient interval is reported beside the beat instead
+    # of being smoothed into it (D28: a transient is a fact, not noise).
+    steady = intervals[1:] if len(intervals) > 1 else intervals
+    # THE BEAT IS READ OFF THE SETTLED TAIL (P7.9). Holding out a fixed count
+    # of fill intervals is exact only for a pipeline of equal-service stages;
+    # an uneven stage plan is still ramping after D - 1 beats, and a median
+    # taken over a sample that still contains ramp moves with the window size
+    # (12% on Granite between decode_window 2 and 3). The tail is the longest
+    # suffix of the steady sample that agrees with its own median, so the
+    # reported beat is the machine's periodic rhythm and not an average of the
+    # ramp and the rhythm. Every dropped interval is printed below.
+    tail = list(_converged_beat_tail(steady))
+    ramp = steady[: len(steady) - len(tail)]
+    beat = float(_median(tail)) if tail else 0.0
+    metrics: List[Metric] = []
+    pipeline: "OrderedDict[str, object]" = OrderedDict(
+        (
+            ("regime", str(serving.regime)),
+            ("resident_streams", streams),
+            ("stage_plan_basis", str(mapping.stage_basis)),
+            ("stages", [stage.as_dict() for stage in mapping.stages]),
+            ("beats_lowered", beats_lowered),
+            ("fill_beats", streams - 1),
+            ("steady_beats_measured", len(steady)),
+            ("tokens_exited", len(exits)),
+            ("exit_times_s", [row[2] for row in exits]),
+            ("beat_intervals_s", list(intervals)),
+            ("steady_beat_intervals_s", list(steady)),
+            ("converged_tail_intervals_s", list(tail)),
+            ("ramp_beat_intervals_s", list(ramp)),
+            (
+                "transient_beat_intervals_s",
+                list(intervals[: len(intervals) - len(steady)]),
+            ),
+            ("beat_s", beat),
+            (
+                "beat_basis",
+                "the MEDIAN of the SETTLED TAIL of the measured intervals between "
+                f"consecutive token exits: {len(tail)} of the {len(intervals)} measured "
+                "interval(s). One interval is held out as the traversal that entered at "
+                "beat 0 and travelled through a filling pipeline (nothing queued behind "
+                f"it, so its exit lands early), and a further {len(ramp)} interval(s) "
+                "are dropped as RAMP because they do not agree with the tail's own "
+                f"median to {BEAT_CONVERGENCE_TOL:.0e}. Both sets are printed above "
+                "rather than smoothed in, and the tail rule is what makes the reported "
+                "beat independent of how many beats the window lowered (P7.9). An exit "
+                "is the finish of the last op of a completed traversal on the one "
+                "timeline, so the beat is a difference of two timeline readings and "
+                "never a max-stage-time formula (A1, P4 3).",
+            ),
+        )
+    )
+    if beat > 0:
+        metrics.append(
+            Metric(
+                key=f"{system}.beat",
+                label="pipeline beat (one token exits per beat)",
+                value=beat,
+                unit="s",
+                basis=str(pipeline["beat_basis"]),
+            )
+        )
+        metrics.append(
+            Metric(
+                key=f"{system}.tokens_per_s",
+                label="steady throughput = 1 / beat (HEADLINE)",
+                value=1.0 / beat,
+                unit="tokens/s",
+                basis=(
+                    "D29's identity, on the measured beat: the pipeline is always full, "
+                    "so exactly ONE token leaves the last stage per beat and the system "
+                    f"rate is 1/beat. The beat is the median of the SETTLED TAIL "
+                    f"({len(tail)} interval(s)) of the {len(intervals)} measured "
+                    "inter-exit intervals; the fill transient and any still-ramping "
+                    "intervals are held out and printed beside it, and this headline is "
+                    "only a settled measurement when pipeline.beat_converged is true — "
+                    "the run says so by name when it is not. Nothing here is a period "
+                    "times a count."
+                ),
+            )
+        )
+        metrics.append(
+            Metric(
+                key=f"{system}.per_stream_tokens_per_s",
+                label="per-stream token rate",
+                value=1.0 / (beat * streams),
+                unit="tokens/s",
+                basis=(
+                    f"1 / (D x beat) with D = {streams} resident streams (D29). A stream "
+                    "gets the machine once every D beats, which is the price of keeping "
+                    "the pipeline full."
+                ),
+            )
+        )
+    metrics.append(
+        Metric(
+            key=f"{system}.resident_streams",
+            label="resident streams D (= pipeline stages)",
+            value=float(streams),
+            unit="streams",
+            basis=(
+                f"the stage count, DERIVED from {mapping.stage_basis or 'the stage plan'}. "
+                "D29 makes D a consequence of the stage plan, never a configured batch — "
+                "the serving surface refuses a batch by name."
+            ),
+        )
+    )
+    if exits:
+        # The LAST completed traversal is the most steady one in the window.
+        traversal, first, last = exits[-1]
+        measured_latency = float(last - first)
+        metrics.append(
+            Metric(
+                key=f"{system}.per_token_latency",
+                label="per-token latency (one stream's traversal of the pipeline)",
+                value=measured_latency,
+                unit="s",
+                basis=(
+                    f"finish of traversal {traversal}'s last op minus the issue of its "
+                    "first, both read off the one timeline: the wall time one stream "
+                    "needs to walk every stage and emit one token. D29's identity says "
+                    "this is D x beat; the identity residual is reported in the pipeline "
+                    "block rather than replacing the measurement."
+                ),
+            )
+        )
+        pipeline["per_token_latency_s"] = measured_latency
+        pipeline["identity_d_times_beat_s"] = float(streams * beat)
+        pipeline["identity_residual_s"] = float(measured_latency - streams * beat)
+        pipeline["identity_residual_rel"] = (
+            float((measured_latency - streams * beat) / measured_latency)
+            if measured_latency > 0
+            else 0.0
+        )
+        pipeline["identity_basis"] = (
+            "D x beat is D29's IDENTITY for the per-token latency, and it holds exactly "
+            "when every stage takes one beat. The metric is the MEASURED traversal "
+            "instead, because a metric that is a period times a count is forbidden (P4 "
+            "3) and because the two differ for a real reason: the SLOWEST stage sets the "
+            "beat while a traversal pays the SUM of its stages, and a stage is released "
+            "the moment it is done rather than held for a whole beat. An uneven stage "
+            "plan therefore measures a traversal SHORTER than D x beat, and the residual "
+            "printed here is exactly that skew — it is the stage plan's imbalance, "
+            "reported, not an error term."
+        )
+    extrapolation: Dict[str, object] = OrderedDict(
+        (
+            ("lowered_decode_steps", len(intervals)),
+            ("declared_decode_steps", int(serving.decode_len)),
+            ("extrapolated", False),
+        )
+    )
+    if beat > 0 and int(serving.decode_len) > 0:
+        extrapolation.update(
+            (
+                ("extrapolated", True),
+                ("remaining_steps", max(0, int(serving.decode_len) - 1)),
+                ("median_step_s", beat),
+                (
+                    "extrapolated_request_latency_s",
+                    float(serving.decode_len) * float(streams) * beat,
+                ),
+                (
+                    "basis",
+                    "DECODE_LEN x D x BEAT. A request occupies one stream and gets a "
+                    "token every D beats, so its decode phase is decode_len x D x beat. "
+                    "This is an EXTRAPOLATION — a period times a count — so it lives "
+                    "here, labeled, and never enters metrics[] (P4 3, ADJ-6). Prefill is "
+                    "not in it: D25/D29 make the mapped run decode-only and the streams "
+                    "arrive already prefilled.",
+                ),
+            )
+        )
+    return tuple(metrics), tuple(intervals), extrapolation, pipeline
 
 
 def _build_metrics(
@@ -2198,6 +2642,25 @@ def _state_residency(mapping: FwsMapping, batch: int, act_bytes: float, block: s
     return 0.0
 
 
+def _resident_contexts(serving: ServingPoint) -> List[int]:
+    """The D resident streams' decode contexts at the LAST lowered beat (D29).
+
+    The convention (disclosed on every filled-pipeline run): stream ``i``
+    enters at ``prefill_len + i + 1`` and advances one token every D beats, so
+    at beat ``B - 1`` it has completed ``floor((B - 1 - i) / D)`` further
+    traversals. This is the same arithmetic the LOWERING stamps on each op, so
+    the resident-memory figures and the priced attention costs are one
+    accounting, not two.
+    """
+    streams = max(1, int(serving.streams))
+    beats = max(1, int(serving.beats))
+    out: List[int] = []
+    for index in range(streams):
+        turns = max(0, (beats - 1 - index) // streams)
+        out.append(int(serving.prefill_len) + index + turns + 1)
+    return out
+
+
 def _build_memory(
     mapping: FwsMapping,
     serving: ServingPoint,
@@ -2246,10 +2709,20 @@ def _build_memory(
         )
 
     # Recurrent state and KV are RESIDENT for the whole run, per layer, on the
-    # chiplet that runs the layer's act x act op.
+    # chiplet that runs the layer's act x act op. Under the FILLED PIPELINE the
+    # resident population is D STREAMS, not a batch (D29): every stage holds
+    # ALL D streams' state and KV for its layers, and each of those streams is
+    # at its OWN context, so the KV total is a sum over streams and never a
+    # count times one context.
+    filled = str(getattr(serving, "regime", "")) == REGIME_FILLED
+    residents = int(serving.streams) if filled else int(serving.batch)
+    resident_contexts = _resident_contexts(serving) if filled else []
     per_chip_state: Dict[int, float] = {}
+    state_items: List[Tuple[int, int, float]] = []   # (chip, layer, bytes)
     seen_state: set = set()
-    kv_layers: Dict[Tuple[int, int], int] = {}
+    #: (chip, layer) -> {stream: the largest context that stream reached}. Under
+    #: lockstep there is ONE pseudo-stream carrying the batch.
+    kv_contexts: Dict[Tuple[int, int], Dict[int, int]] = {}
     for cost in pricing.costs:
         annotation = annotations[cost.uid]
         if annotation.kind != "fabric":
@@ -2260,28 +2733,61 @@ def _build_memory(
             if key in seen_state:
                 continue
             seen_state.add(key)
-            per_chip_state[chip_id] = per_chip_state.get(chip_id, 0.0) + _state_residency(
-                mapping, serving.batch, act_bytes, annotation.block
+            bytes_here = _state_residency(
+                mapping, residents, act_bytes, annotation.block
             )
+            per_chip_state[chip_id] = per_chip_state.get(chip_id, 0.0) + bytes_here
+            state_items.append((chip_id, int(annotation.layer or 0), bytes_here))
         elif annotation.block == "attention_qk":
             key = (chip_id, int(annotation.layer if annotation.layer is not None else -1))
             context = (
-                int(serving.prefill_len)
-                if annotation.phase == "prefill"
-                else int(serving.prefill_len + int(annotation.step) + 1)
+                int(annotation.context)
+                if annotation.context is not None
+                else (
+                    int(serving.prefill_len)
+                    if annotation.phase == "prefill"
+                    else int(serving.prefill_len + int(annotation.step) + 1)
+                )
             )
-            kv_layers[key] = max(kv_layers.get(key, 0), context)
+            stream = int(annotation.stream) if annotation.stream >= 0 else 0
+            per_stream = kv_contexts.setdefault(key, {})
+            per_stream[stream] = max(per_stream.get(stream, 0), context)
+            if filled:
+                # D29: the stage holds ALL D streams' KV for this layer, whether
+                # or not the WINDOW happened to lower every stream's pass on it
+                # (a late stage sees fewer traversals inside a bounded window).
+                # The contexts come from the regime's own convention, which is
+                # the same convention stamped on the priced ops — so the two can
+                # never disagree, and a truncated window cannot under-report
+                # resident memory.
+                for index, value in enumerate(resident_contexts):
+                    per_stream[index] = max(per_stream.get(index, 0), int(value))
 
     kv_story = str(
         getattr(getattr(mapping.hw, "inference_config", None), "kvcache_type", "") or ""
     ).strip().lower()
     kv_enabled = kv_story in ("cim_sram", "cim_dram") and not mapping.device.params.is_vit_shaped
     per_chip_kv: Dict[int, float] = {}
+    kv_items: List[Tuple[int, int, float]] = []      # (chip, layer, bytes)
+    kv_context_census: List[int] = []
     if kv_enabled:
-        for (chip_id, _layer), context in kv_layers.items():
-            per_chip_kv[chip_id] = per_chip_kv.get(chip_id, 0.0) + float(
-                serving.batch
-            ) * mapping.device.kv_bytes_per_stream_layer(context, kv_precision, tp)
+        for (chip_id, layer), per_stream in kv_contexts.items():
+            if filled:
+                # ONE accounting, summed over the streams that are actually
+                # resident: stream i holds its own KV at its own context.
+                contexts = [per_stream[key] for key in sorted(per_stream)]
+                bytes_here = math.fsum(
+                    mapping.device.kv_bytes_per_stream_layer(ctx, kv_precision, tp)
+                    for ctx in contexts
+                )
+            else:
+                contexts = [max(per_stream.values())]
+                bytes_here = float(residents) * mapping.device.kv_bytes_per_stream_layer(
+                    contexts[0], kv_precision, tp
+                )
+            kv_context_census.extend(contexts)
+            per_chip_kv[chip_id] = per_chip_kv.get(chip_id, 0.0) + bytes_here
+            kv_items.append((chip_id, int(layer), bytes_here))
 
     sram = mapping.hw.tech_config.DRAM
     sram_capacity = float(getattr(sram, "size", 0.0) or 0.0)
@@ -2394,7 +2900,252 @@ def _build_memory(
                     ),
                 )
             )
-    return tuple(verdicts), tuple(disclosures)
+    # D29 makes the per-stage state a FEASIBILITY question, and the state it
+    # asks about is RESIDENT and read every beat — so the tier that decides it
+    # is the on-chip SRAM the config declares, not the activation/DRAM stub.
+    # Both are reported, each under its own name (D21): `verdict` belongs to
+    # the on-chip tier because that is the check that can fail, and
+    # `activation_tier_verdict` keeps the DRAM reading beside it.
+    onchip = mapping.hw.tech_config.SRAML2
+    onchip_capacity = float(getattr(onchip, "size", 0.0) or 0.0)
+    residency_disclosed = _build_state_residency(
+        mapping,
+        serving,
+        state_items,
+        kv_items,
+        kv_context_census,
+        residents,
+        sram_capacity,
+        kv_enabled,
+        kv_story,
+        onchip_capacity,
+    )
+    residency = residency_disclosed
+    if residency.get("measured"):
+        # The SAME bytes, at the scope D29 asks the question at. Named verdicts,
+        # one row per stage, with the regrouping stated in the basis so a reader
+        # never reads the stage total as a second, additional demand.
+        for row in residency["per_stage"]:
+            verdicts.append(
+                MemoryVerdict(
+                    scope=f"stage {int(row['stage'])}",
+                    tier="stage_state_kv",
+                    owner=str(row["label"]),
+                    high_water_bytes=float(row["state_bytes"]),
+                    # THE DECLARED ACTIVATION TIER, deliberately. These
+                    # MemoryVerdict rows are P4's capacity machinery and are
+                    # what the DSE's `memory` stage gates a candidate on, and
+                    # that gate belongs to the size the config DECLARES for the
+                    # activation/KV store. The tighter ON-CHIP reading is D29's
+                    # own feasibility question and rides state_residency, whose
+                    # `verdict` is the on-chip one — a sweep gates its stage
+                    # plans on its own declared max_stage_state_bytes budget,
+                    # not on this row (D21: two questions, two names).
+                    capacity_bytes=float(row["activation_tier_capacity_bytes"]),
+                    status=str(row["activation_tier_verdict"]),
+                    basis=_RESIDENCY_BASIS
+                    + " This row is taken against tech_param.DRAM.size, the declared "
+                    "activation tier. The ON-CHIP reading against tech_param.SRAM-L2.size "
+                    f"({float(row['capacity_bytes']):.6g} B) is "
+                    f"{str(row['verdict']).upper()} and rides "
+                    "evaluation.state_residency as its headline verdict.",
+                    contributors=OrderedDict(
+                        (
+                            ("recurrent_state", float(row["recurrent_state_bytes"])),
+                            ("kv_cache", float(row["kv_bytes"])),
+                        )
+                    ),
+                    disclosure=(
+                        ""
+                        if row["activation_tier_verdict"] != "VIOLATED"
+                        else (
+                            f"stage {int(row['stage'])} must hold "
+                            f"{float(row['state_bytes']):.6g} B of state and KV for all "
+                            f"{int(residency['resident_streams'])} resident streams "
+                            f"against a declared {float(row['capacity_bytes']):.6g} B "
+                            "tier. D29 makes this a FEASIBILITY question about the stage "
+                            "plan itself: fewer layers per stage lowers D and the "
+                            "per-stage demand together."
+                        )
+                    ),
+                )
+            )
+        disclosures.append(
+            Relaxation(
+                constraint="stage_state_tier_is_one_declared_size",
+                value=(
+                    f"on-chip {onchip_capacity:.6g} B (tech_param.SRAM-L2.size) applied "
+                    f"to EVERY stage; the activation stub {sram_capacity:.6g} B "
+                    "(tech_param.DRAM.size) reported beside it"
+                ),
+                reason=(
+                    "The state/KV feasibility check needs a per-stage capacity and the "
+                    "schema declares no per-stage field. D29's state is RESIDENT and "
+                    "read every beat, so the tier that decides feasibility is the "
+                    "declared ON-CHIP SRAM-L2 size, and that is what "
+                    "state_residency.verdict is taken against; the DRAM activation stub "
+                    "is orders of magnitude larger and would make the check vacuous, so "
+                    "it rides under its own name as activation_tier_verdict rather than "
+                    "as the headline. Each declared size is applied to each stage "
+                    "independently, exactly as the per-chip verdicts apply theirs to "
+                    "each chip. A stage that spans several chips is judged against one "
+                    "chip's tier, which is PESSIMISTIC, and it is disclosed rather than "
+                    "silently scaled by a chip count the schema does not tie to a stage."
+                ),
+            )
+        )
+        disclosures.append(
+            Relaxation(
+                constraint="representative_context",
+                value=(
+                    f"median context {residency['representative_context']:.6g} over "
+                    f"[{residency['context_min']:.6g}, {residency['context_max']:.6g}]"
+                ),
+                reason=(
+                    "D29 leaves the resident streams at DIFFERENT decode depths. Every "
+                    "priced attention and scan op uses ITS OWN stream's context — no op "
+                    "is priced at the representative figure. The representative context "
+                    "is the MEDIAN over the lowered window and exists so a reader can "
+                    "name the depth the reported state figures belong to. The convention "
+                    "is: stream i enters at prefill_len + i + 1 and advances one token "
+                    "every D beats."
+                ),
+            )
+        )
+    return tuple(verdicts), tuple(disclosures), residency
+
+
+#: The state/KV residency block of a filled-pipeline run (D29, P7.7 item 3).
+_RESIDENCY_BASIS = (
+    "D29: EVERY stage holds ALL D resident streams' state and KV for the layers it "
+    "owns. The per-stage figure is the SAME per-(chip, layer) quantities the memory "
+    "verdicts are taken on, regrouped by stage — not a second computation (D21): "
+    "recurrent state is D x P2's per-stream state law, and KV is the SUM over the "
+    "resident streams of P2's kv_bytes_per_stream_layer at each stream's OWN context, "
+    "because the streams sit at different decode depths."
+)
+
+
+def _build_state_residency(
+    mapping: FwsMapping,
+    serving: ServingPoint,
+    state_items: Sequence[Tuple[int, int, float]],
+    kv_items: Sequence[Tuple[int, int, float]],
+    contexts: Sequence[int],
+    residents: int,
+    capacity_bytes: float,
+    kv_enabled: bool,
+    kv_story: str,
+    onchip_capacity_bytes: float = 0.0,
+) -> "OrderedDict[str, object]":
+    """Per-stage resident state/KV and its feasibility verdict (the D29 headline).
+
+    The number rides the report's headline block because it is the constraint
+    that decides whether a stage plan is buildable at all: D streams of KV and
+    recurrent state, on every stage, for that stage's layers.
+    """
+    filled = str(getattr(serving, "regime", "")) == REGIME_FILLED
+    if not filled or not mapping.stages:
+        return OrderedDict(
+            (
+                ("measured", False),
+                (
+                    "reason",
+                    "the retired lockstep regime has no resident streams: state and KV "
+                    "belong to ONE batch stepping through the whole model, which the "
+                    "per-chip memory verdicts already report (D29 supersedes it).",
+                ),
+            )
+        )
+    per_layer_state: Dict[int, float] = {}
+    for _chip, layer, value in state_items:
+        per_layer_state[int(layer)] = per_layer_state.get(int(layer), 0.0) + float(value)
+    per_layer_kv: Dict[int, float] = {}
+    for _chip, layer, value in kv_items:
+        per_layer_kv[int(layer)] = per_layer_kv.get(int(layer), 0.0) + float(value)
+
+    rows = []
+    for stage in mapping.stages:
+        state = math.fsum(per_layer_state.get(int(layer), 0.0) for layer in stage.layers)
+        kv = math.fsum(per_layer_kv.get(int(layer), 0.0) for layer in stage.layers)
+        total = state + kv
+        activation_status = (
+            "undeclared"
+            if capacity_bytes <= 0
+            else ("fits" if total <= capacity_bytes else "VIOLATED")
+        )
+        status = (
+            "undeclared"
+            if onchip_capacity_bytes <= 0
+            else ("fits" if total <= onchip_capacity_bytes else "VIOLATED")
+        )
+        rows.append(
+            OrderedDict(
+                (
+                    ("stage", int(stage.index)),
+                    ("label", stage.label),
+                    ("layers", len(stage.layers)),
+                    ("chips", list(stage.chips)),
+                    ("recurrent_state_bytes", float(state)),
+                    ("kv_bytes", float(kv)),
+                    ("state_bytes", float(total)),
+                    ("per_stream_state_bytes", float(total) / max(1, int(residents))),
+                    ("capacity_bytes", float(onchip_capacity_bytes)),
+                    ("verdict", status),
+                    ("activation_tier_capacity_bytes", float(capacity_bytes)),
+                    ("activation_tier_verdict", activation_status),
+                )
+            )
+        )
+    total_bytes = math.fsum(row["state_bytes"] for row in rows)
+    ordered = sorted(int(value) for value in contexts)
+    representative = (
+        float(_median([float(value) for value in ordered])) if ordered else 0.0
+    )
+    violated = [row for row in rows if row["verdict"] == "VIOLATED"]
+    activation_violated = [
+        row for row in rows if row["activation_tier_verdict"] == "VIOLATED"
+    ]
+    return OrderedDict(
+        (
+            ("measured", True),
+            ("resident_streams", int(residents)),
+            ("stages", len(rows)),
+            ("per_stage", rows),
+            ("total_state_bytes", float(total_bytes)),
+            ("per_stream_model_state_bytes", float(total_bytes) / max(1, int(residents))),
+            ("max_stage_state_bytes", max((row["state_bytes"] for row in rows), default=0.0)),
+            ("capacity_bytes", float(onchip_capacity_bytes)),
+            ("tier", "tech_param.SRAM-L2.size (the on-chip tier the state lives in)"),
+            ("stages_violating", [int(row["stage"]) for row in violated]),
+            (
+                "verdict",
+                "undeclared"
+                if onchip_capacity_bytes <= 0
+                else ("VIOLATED" if violated else "fits"),
+            ),
+            ("activation_tier_capacity_bytes", float(capacity_bytes)),
+            (
+                "activation_tier",
+                "tech_param.DRAM.size (the activation stub, orders of magnitude larger)",
+            ),
+            (
+                "activation_tier_stages_violating",
+                [int(row["stage"]) for row in activation_violated],
+            ),
+            (
+                "activation_tier_verdict",
+                "undeclared"
+                if capacity_bytes <= 0
+                else ("VIOLATED" if activation_violated else "fits"),
+            ),
+            ("representative_context", representative),
+            ("context_min", float(ordered[0]) if ordered else 0.0),
+            ("context_max", float(ordered[-1]) if ordered else 0.0),
+            ("kv_story", kv_story if kv_enabled else "no KV in this run"),
+            ("basis", _RESIDENCY_BASIS),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2483,6 +3234,272 @@ def _build_pools(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# D31 pass A: the beat the ANALOG stages set, and the engine derived from it
+# ---------------------------------------------------------------------------
+
+
+def _analog_beat_of(
+    mapping: FwsMapping,
+    serving: ServingPoint,
+    pricing: PricingResult,
+    timeline: CoarseEvalResult,
+) -> float:
+    """The PROBE beat and its convergence, on a timeline whose vector ops cost nothing.
+
+    Filled pipeline (D29): the beat is the median steady inter-exit interval,
+    read by :func:`_build_pipeline_metrics` from this very timeline. Retired
+    lockstep regime: the same quantity is the decode step, so that is what the
+    engine is sized against there — one law, two regime spellings.
+    """
+    if str(getattr(serving, "regime", "")) == REGIME_FILLED:
+        _, _, _, pipeline = _build_pipeline_metrics(
+            mapping, serving, pricing.costs, timeline
+        )
+        beat = float(pipeline.get("beat_s", 0.0) or 0.0)
+        settled = [float(v) for v in pipeline.get("converged_tail_intervals_s", ())]
+        steady = [float(v) for v in pipeline.get("steady_beat_intervals_s", ())]
+        spread = (
+            max(abs(value - beat) for value in steady) / beat
+            if steady and beat > 0
+            else 0.0
+        )
+        return beat, OrderedDict(
+            (
+                ("regime", REGIME_FILLED),
+                ("converged", len(settled) >= 2),
+                ("converged_tail_beats", len(settled)),
+                ("ramp_beats_dropped", len(steady) - len(settled)),
+                ("steady_beat_spread", spread),
+            )
+        )
+    _, step_times, _ = _build_metrics(mapping, serving, pricing.costs, timeline)
+    beat = float(_median(step_times)) if step_times else 0.0
+    return beat, OrderedDict(
+        (
+            ("regime", "lockstep"),
+            ("converged", None),
+            ("converged_tail_beats", len(step_times)),
+            ("ramp_beats_dropped", 0),
+            ("steady_beat_spread", None),
+        )
+    )
+
+
+def _engine_demand(
+    serving: ServingPoint,
+    annotations: Sequence[FwsOpAnnotation],
+    costs: Sequence[OpCost],
+) -> Tuple[EngineDemand, ...]:
+    """Per-stage vector-engine demand in ONE beat, from the probe's own costs.
+
+    The scope is :func:`_measurement_slice`'s — the last lowered beat under the
+    filled pipeline, the last lowered decode step under lockstep — because that
+    is the slice in which every stage fires exactly once. Sizing on the whole
+    lowered window would size the engine for D beats' work in one beat.
+
+    A vector op is one whose priced cost carries an ``ops`` detail, which is
+    exactly the set :meth:`CimDeviceModel.price_vector_work` produces; the
+    attention ops on the same chiplet run on the systolic array and the softmax
+    lanes, which are different silicon with their own laws.
+    """
+    select, _ = _measurement_slice(serving)
+    per_stage: "OrderedDict[int, List[float]]" = OrderedDict()
+    for annotation, cost in zip(annotations, costs):
+        if "ops" not in cost.detail or not select(annotation):
+            continue
+        stage = int(annotation.stage)
+        per_stage.setdefault(stage, []).append(float(cost.detail["ops"]))
+    return tuple(
+        EngineDemand(stage=stage, ops=tuple(ops)) for stage, ops in per_stage.items()
+    )
+
+
+#: The convergence state of the LAST probe beat a derivation was taken from
+#: (D31). Written by :func:`_derive_engine` and read by
+#: :func:`engine_sizing_disclosures` in the same call chain.
+_PROBE_BEAT_CONVERGENCE: "OrderedDict[str, object]" = OrderedDict()
+
+
+def _derive_engine(
+    program: Program,
+    mapping: FwsMapping,
+    serving: ServingPoint,
+    capacity_overrides: Optional[Mapping[int, int]],
+) -> Optional[DerivedEngineSizing]:
+    """Size the scan/vector engine from this run's own beat (D31), or do nothing.
+
+    THE CIRCULARITY AND HOW IT IS BROKEN. The engine's width sets the time its
+    ops take, which contributes to the beat, which is what the width is derived
+    from. Pass A prices the run with every vector op COUNTED AND UNTIMED
+    (:meth:`CimDeviceModel.begin_engine_probe`), so the beat it measures is the
+    one the ANALOG stages set — a quantity no digital width can move. The width
+    that holds THAT beat is then derived, installed, and the caller prices the
+    run again for real. TWO PASSES ARE ENOUGH because the sizing budget does not
+    depend on the sizing: pass A's beat is a property of the analog side alone,
+    so pass B cannot change the number pass A derived from, and no iteration is
+    needed or attempted.
+
+    WHAT PASS B THEN MEASURES IS LARGER, and that is the machine, not an error.
+    The criterion is *digital-per-beat <= the ANALOG beat* (see
+    :meth:`CimDeviceModel.derive_engine_sizing`): the engine is sized to be at
+    most CO-BOUND, never binding. Under D29 a stage holds ONE stream at a time,
+    so its analog passes and its scan run in SERIES and the beat pass B reports
+    is their sum. No width makes the two equal; a wider one would shorten the
+    sum, and D31 does not buy it, because the engine is not a free knob.
+
+    Returns None when there is nothing to derive — a card that declares an
+    explicit ``vector_lanes`` override (D31 honours it, with a disclosure), or a
+    run with no vector op in it at all.
+    """
+    device = mapping.device
+    # Always CLEAR first. The sizing belongs to one program's beat and one
+    # program's demand, and a device object outlives both (a mapping is reused
+    # across programs by callers and fixtures alike). Keeping a previous run's
+    # width would quietly price this run on another run's silicon — and the
+    # override branch below is exactly the case that used to skip the clear,
+    # so an override card reusing a device could publish another run's
+    # derivation in evaluation.digital_silicon.
+    device.install_derived_engine(None)
+    if device.digital_card.has_vector_engine:
+        return None
+    annotations = annotations_of(program)
+    device.begin_engine_probe()
+    try:
+        probe = price_program(program, mapping, capacity_overrides=capacity_overrides)
+        if not device.end_engine_probe():
+            # No vector op was priced: this run has no scan, no delta rule and
+            # no RG-LRU, so it needs no scan engine and none is invented.
+            return None
+    finally:
+        # Idempotent: a probe that raised must not leave the device probing.
+        device.end_engine_probe()
+    timeline = evaluate_detailed(
+        program,
+        None,
+        {},
+        resources=probe.resources,
+        durations=probe.durations,
+        require_pipeline=False,
+    )
+    beat, convergence = _analog_beat_of(mapping, serving, probe, timeline)
+    demand = _engine_demand(serving, annotations, probe.costs)
+    if beat <= 0 or not demand:
+        return None
+    sizing = device.derive_engine_sizing(beat, demand)
+    device.install_derived_engine(sizing)
+    # The PROBE's own convergence, carried out so the disclosure can say
+    # whether the width was derived from a settled number. A shorter probe beat
+    # means a tighter cycle budget and therefore MORE lanes, so a probe still
+    # ramping would systematically over-size the engine — a reader must be able
+    # to see that this run's was not.
+    _PROBE_BEAT_CONVERGENCE.clear()
+    _PROBE_BEAT_CONVERGENCE.update(convergence)
+    return sizing
+
+
+def engine_sizing_disclosures(
+    sizing: Optional[DerivedEngineSizing],
+) -> List[Relaxation]:
+    """The D31 derivation, stated in the artifact rather than only on stdout."""
+    if sizing is None:
+        return []
+    rows = ", ".join(
+        f"stage {row.stage}: {row.used_cycles}/{row.budget_cycles} cycles"
+        for row in sizing.per_stage[:6]
+    )
+    binding = next(
+        (row for row in sizing.per_stage if row.stage == sizing.binding_stage), None
+    )
+    out = [
+        Relaxation(
+            constraint="derived_engine_sizing",
+            value=(
+                f"vector_lanes = {int(sizing.vector_lanes)} ({PROVENANCE_DERIVED_COUNT}), "
+                f"binding stage {int(sizing.binding_stage)}, engine duty "
+                f"{sizing.utilization * 100:.3f}% of the {sizing.analog_beat_s:.6g} s "
+                "ANALOG beat"
+            ),
+            reason=(
+                "D31: the scan/vector engine is never a swept or declared free knob. Its "
+                "width is DERIVED here as the smallest integer lane count whose own "
+                "priced time fits the beat the ANALOG stages set, with no margin (D28). "
+                "The beat comes from a PROBE pass in which every vector op is counted "
+                "and costs nothing, so the number the engine is sized against does not "
+                "depend on the engine. The derivation inverts "
+                "CimDeviceModel.price_vector_work exactly, so the engine sized here is "
+                "the engine the run is then priced on. THE CRITERION IS "
+                "digital-per-beat <= the ANALOG beat: the engine is at most CO-BOUND "
+                "with the analog stages and never the binding term. It does not make "
+                "the MEASURED beat equal the analog beat and cannot — a D29 stage holds "
+                "one stream at a time, so its analog passes and its scan run in series "
+                "and the measured beat is their sum at any width"
+                + (
+                    f" (here {binding.time_s:.6g} s of digital against a "
+                    f"{sizing.analog_beat_s:.6g} s analog beat on the binding stage)"
+                    if binding is not None
+                    else ""
+                )
+                + f". Per stage: {rows}."
+                + (
+                    " Stage -1 is the RETIRED lockstep regime's spelling for 'no pipeline "
+                    "stage': that regime has one decode STEP rather than D staggered "
+                    "stages, so the engine is sized against the step and there is one row."
+                    if sizing.binding_stage < 0
+                    else ""
+                )
+            ),
+        )
+    ]
+    probe = dict(_PROBE_BEAT_CONVERGENCE)
+    if probe.get("regime") == REGIME_FILLED:
+        out.append(
+            Relaxation(
+                constraint="derived_engine_probe_beat",
+                value=(
+                    f"probe beat {sizing.analog_beat_s:.6g} s, "
+                    + ("CONVERGED" if probe.get("converged") else "NOT CONVERGED")
+                    + f" ({int(probe.get('converged_tail_beats', 0))} settled interval(s), "
+                    f"{int(probe.get('ramp_beats_dropped', 0))} dropped as ramp, whole "
+                    f"steady sample spread "
+                    f"{float(probe.get('steady_beat_spread', 0.0)) * 100:.4f}%)"
+                ),
+                reason=(
+                    "The width above is derived from the PROBE pass's beat, and that "
+                    "beat is a measurement like any other. A SHORTER probe beat is a "
+                    "tighter cycle budget and therefore MORE lanes, so a derivation "
+                    "taken from a still-ramping probe systematically over-sizes the "
+                    "engine. The probe beat is read off the same settled tail the "
+                    "priced pass uses (P7.9), so it does not move with the window, and "
+                    "this line is where a reader sees whether it settled at all rather "
+                    "than having to trust that it did."
+                ),
+            )
+        )
+    if sizing.composition is not None:
+        out.append(
+            Relaxation(
+                constraint="derived_engine_area",
+                value=(
+                    f"{sizing.composition.area_mm2:.6g} mm2, "
+                    f"{sizing.composition.power_w:.6g} W"
+                ),
+                reason=(
+                    "D32: the derived engine's silicon is a COMPOSITION of measured "
+                    "synthesis blocks — "
+                    + ", ".join(
+                        f"{name} x {count}"
+                        for name, count in sizing.composition.blocks.items()
+                    )
+                    + f" — at {sizing.composition.technology}. "
+                    + sizing.composition.basis
+                    + "."
+                ),
+            )
+        )
+    return out
+
+
 def evaluate_fws(
     program: Program,
     mapping: Optional[FwsMapping] = None,
@@ -2503,6 +3520,13 @@ def evaluate_fws(
             "execution",
             "evaluate_fws needs an FWS program built by program.fws_build.build_fws_program.",
         )
+    # D31: the engine is DERIVED from the beat, so it must exist before the
+    # run is priced. Pass A measures the beat the analog stages set; this
+    # installs the width that holds it. A caller that passes its own `pricing`
+    # has already priced the run and is not re-sized under it.
+    engine_sizing = None
+    if pricing is None:
+        engine_sizing = _derive_engine(program, mapping, serving, capacity_overrides)
     pricing = pricing or price_program(
         program, mapping, capacity_overrides=capacity_overrides
     )
@@ -2514,9 +3538,15 @@ def evaluate_fws(
         durations=pricing.durations,
         require_pipeline=False,
     )
-    metrics, step_times, extrapolation = _build_metrics(
-        mapping, serving, pricing.costs, timeline
-    )
+    pipeline: "OrderedDict[str, object]" = OrderedDict()
+    if str(getattr(serving, "regime", "")) == REGIME_FILLED:
+        metrics, step_times, extrapolation, pipeline = _build_pipeline_metrics(
+            mapping, serving, pricing.costs, timeline
+        )
+    else:
+        metrics, step_times, extrapolation = _build_metrics(
+            mapping, serving, pricing.costs, timeline
+        )
     occupancy, duty = _build_occupancy(mapping, pricing, timeline, program)
     annotations = annotations_of(program)
     utilization = _build_utilization(
@@ -2527,7 +3557,7 @@ def evaluate_fws(
         mapping, program, pricing, timeline, annotations, serving
     )
     energy = _build_energy(pricing)
-    memory, memory_disclosures = _build_memory(
+    memory, memory_disclosures, residency = _build_memory(
         mapping, serving, program, pricing, timeline
     )
     pools = _build_pools(mapping, program, pricing, timeline)
@@ -2537,12 +3567,112 @@ def evaluate_fws(
     # exists, which is its own kind of dishonesty.
     disclosures = [item for item in disclosures if item.constraint != "op_durations"]
     disclosures.extend(pricing.disclosures)
+    disclosures.extend(engine_sizing_disclosures(engine_sizing))
     disclosures.extend(memory_disclosures)
     disclosures.extend(
         _utilization_disclosures(
             mapping, utilization, bank_passes, bank_sharing, program
         )
     )
+    if pipeline:
+        disclosures.append(
+            Relaxation(
+                constraint="pipeline_fill_transient",
+                value=(
+                    f"{int(pipeline['fill_beats'])} fill beats before "
+                    f"{int(pipeline['steady_beats_measured'])} measured steady beats"
+                ),
+                reason=(
+                    "D29's pipeline is full only after every stage has a stream, which "
+                    f"takes D - 1 = {int(pipeline['fill_beats'])} beats. The window "
+                    f"lowers {int(pipeline['beats_lowered'])} beats: the fill is IN the "
+                    "DAG (its contention is priced like any other) and the beat is read "
+                    "from the exits of the completed traversals, whose intervals are "
+                    "printed one by one in the pipeline block so a reader can see the "
+                    "convergence rather than trust an average. Streams that enter too "
+                    "late to finish inside the window are lowered as far as the window "
+                    "reaches and their partial work is on the timeline, contending, "
+                    "exactly as it would in the machine."
+                ),
+            )
+        )
+    if pipeline:
+        # D29's beat is a MEASUREMENT, so whether it has CONVERGED inside the
+        # lowered window is part of the number. The fill allowance is D - 1
+        # beats, which is exactly right for a pipeline whose stages have equal
+        # service times; an UNEVEN stage plan takes longer to settle, and a
+        # reader must be told which of the two this run was rather than shown a
+        # median that quietly averaged a ramp.
+        steady = [float(value) for value in pipeline["steady_beat_intervals_s"]]
+        settled = [float(value) for value in pipeline["converged_tail_intervals_s"]]
+        ramp = [float(value) for value in pipeline["ramp_beat_intervals_s"]]
+        beat_value = float(pipeline["beat_s"])
+        spread = (
+            max(abs(value - beat_value) for value in steady) / beat_value
+            if steady and beat_value > 0
+            else 0.0
+        )
+        tail = (
+            max(abs(value - beat_value) for value in settled) / beat_value
+            if len(settled) >= 2 and beat_value > 0
+            else 0.0
+        )
+        pipeline["steady_beat_spread"] = spread
+        pipeline["steady_beat_tail_agreement"] = tail
+        # CONVERGED means the reported beat came off a tail of at least two
+        # intervals that agree with each other — i.e. the machine was seen
+        # repeating itself. A single steady interval cannot show that and says
+        # so under its own name rather than being called converged.
+        pipeline["converged_tail_beats"] = len(settled)
+        pipeline["ramp_beats_dropped"] = len(ramp)
+        pipeline["beat_converged"] = len(settled) >= 2
+        if ramp:
+            disclosures.append(
+                Relaxation(
+                    constraint="beat_read_from_the_converged_tail",
+                    value=(
+                        f"{len(ramp)} of {len(steady)} steady interval(s) dropped as "
+                        f"RAMP; the beat is the median of the remaining {len(settled)}, "
+                        f"which agree to {tail * 100:.4f}%"
+                    ),
+                    reason=(
+                        "The exits were still SETTLING inside the lowered window: the "
+                        "fill allowance of D - 1 beats is exact only when every stage "
+                        "has the same service time, and this run's stage plan is uneven, "
+                        "so a stream can wait on a slower stage and the exits take "
+                        "longer than D - 1 beats to become periodic. The dropped "
+                        "intervals are printed in the pipeline block as "
+                        "ramp_beat_intervals_s and the whole steady sample spreads "
+                        f"{spread * 100:.1f}% about the beat. Reading the beat off the "
+                        "tail instead of the median of the whole sample is what makes "
+                        "the headline independent of the window size; the alternative "
+                        "measured 12% higher on Granite-4.0-H-Tiny at decode_window 2. "
+                        "Nothing is padded and no interval is smoothed — the ramp is "
+                        "named, not averaged."
+                    ),
+                )
+            )
+        if steady and not pipeline["beat_converged"]:
+            disclosures.append(
+                Relaxation(
+                    constraint="pipeline_beat_NOT_converged",
+                    value=(
+                        f"{len(steady)} steady interval(s), no two of which agree to "
+                        f"{BEAT_CONVERGENCE_TOL:.0e}"
+                        if len(steady) >= 2
+                        else "one steady interval: a single reading cannot show a period"
+                    ),
+                    reason=(
+                        "The headline tokens/s = 1/beat is NOT a settled measurement on "
+                        "this run. The beat is the last inter-exit interval, which is "
+                        "the best reading the window contains, and it is published under "
+                        "this flag rather than presented as converged. Lengthening "
+                        "mapping.decode_window until pipeline.beat_converged is true is "
+                        "the fix; it costs a proportionally larger DAG and is not done "
+                        "silently (D28: a transient is a fact, not noise)."
+                    ),
+                )
+            )
     if extrapolation.get("extrapolated"):
         disclosures.append(
             Relaxation(
@@ -2572,6 +3702,8 @@ def evaluate_fws(
         extrapolation=extrapolation,
         disclosures=tuple(disclosures),
         decode_step_times_s=step_times,
+        pipeline=pipeline,
+        state_residency=residency,
     )
 
 
@@ -2647,6 +3779,98 @@ def _pool_block(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
     )
 
 
+def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
+    """D32: every digital mm2 and watt, composed from measured blocks.
+
+    ONE ACCOUNTING (D21). The shared chiplet term is the composed engine census
+    times the chiplet COUNT the mapping placed; the per-macro pool term is the
+    composed pool census times the analog macro SLOT count the same summary
+    reports. Neither is the declared `area_mm2` placeholder — when a card names
+    a library the placeholder is not added on top, and when it does not, this
+    block says so and carries no power figure at all.
+    """
+    device = evaluation.mapping.device
+    summary = evaluation.mapping.summary()
+    chiplets = int(summary.get("shared_digital_chiplets", 0) or 0)
+    slots = int(summary.get("analog_macro_slots", 0) or 0)
+    out: "OrderedDict[str, object]" = OrderedDict(
+        (
+            ("producer", "cim_timing engine compositions (QIF P7.8, D31/D32)"),
+            ("library", None),
+            ("shared_digital_chiplets", chiplets),
+            ("analog_macro_slots", slots),
+        )
+    )
+    if not device.has_synthesis_library():
+        out["composed"] = False
+        out["shared_digital_area_mm2_per_chiplet"] = float(
+            device.shared_digital_area_mm2()
+        )
+        out["disclosures"] = list(device.shared_digital_area_disclosures())
+        return out
+    library = device.synthesis_library()
+    out["library"] = OrderedDict(
+        (
+            ("technology", library.technology),
+            ("path", library.path),
+            ("source", library.source),
+            ("source_reports", library.source_reports),
+            ("blocks", len(library.blocks)),
+            ("measurement", "measured via synthesis"),
+        )
+    )
+    out["composed"] = True
+    engines = [
+        composition.summary() for composition in device.shared_digital_compositions()
+    ]
+    pool_sizing = device.digital_pool_sizing()
+    pool = device.macro_pool_composition(pool_sizing)
+    chiplet_area = float(device.shared_digital_area_mm2())
+    chiplet_power = float(device.shared_digital_power_w())
+    out["shared_digital_chiplet"] = OrderedDict(
+        (
+            ("area_mm2_per_chiplet", chiplet_area),
+            ("power_W_per_chiplet", chiplet_power),
+            ("area_mm2_total", chiplet_area * chiplets),
+            ("power_W_total", chiplet_power * chiplets),
+            ("engines", engines),
+        )
+    )
+    measured_peak = max(
+        (int(report.peak_concurrent_demand) for report in evaluation.pools), default=0
+    )
+    out["per_macro_pool"] = OrderedDict(
+        (
+            ("area_mm2_per_macro", pool.area_mm2),
+            ("power_W_per_macro", pool.power_w),
+            ("area_mm2_total", pool.area_mm2 * slots),
+            ("power_W_total", pool.power_w * slots),
+            ("composition", pool.summary()),
+            ("sizing", "D12 per-unit"),
+            (
+                "basis",
+                "the SILICON term prices D12's PER-UNIT pool derivation on every one of "
+                f"the {slots} enumerated macro slots. It is deliberately NOT the "
+                "demand-scaled width: evaluation.digital_pool reports what the TIMELINE "
+                "measured each macro needing (peak concurrent demand up to "
+                f"{measured_peak} on this run), which is a different question — how wide "
+                "a pool has to be so it never blocks — asked only of the macros that "
+                "hold tiles. Two names, two quantities, and this one is the machine's "
+                "provisioned silicon (D21).",
+            ),
+        )
+    )
+    out["digital_area_mm2_total"] = chiplet_area * chiplets + pool.area_mm2 * slots
+    out["digital_power_W_total"] = chiplet_power * chiplets + pool.power_w * slots
+    sizing = device.derived_engine
+    out["derived_engine_sizing"] = sizing.summary() if sizing is not None else None
+    # None = no vector op ran, so no engine was derived and none is invented (D31).
+    out["vector_lanes"] = device.resolved_vector_lanes()
+    out["vector_lanes_provenance"] = device.vector_lanes_provenance
+    out["disclosures"] = list(device.shared_digital_area_disclosures())
+    return out
+
+
 def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
     """The shared report JSON: mapping block (P3), evaluation block (P4), disclosures.
 
@@ -2671,13 +3895,29 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
                         ("step_times_s", list(evaluation.decode_step_times_s)),
                         (
                             "basis",
-                            "finish(step k terminal op) - finish(step k-1 terminal op) on "
-                            "the one timeline; step -1 is the prefill terminal (P4 §3).",
+                            (
+                                "finish(beat k terminal op) - finish(beat k-1 terminal "
+                                "op) on the one timeline. Under D29 this is the SAME "
+                                "series as pipeline.beat_intervals_s under the legacy "
+                                "name (one accounting, two spellings, D21): there is no "
+                                "decode STEP in a filled pipeline and no prefill op is "
+                                "lowered at all (D25), so the pre-D29 gloss 'step -1 is "
+                                "the prefill terminal' does not apply here. The HEADLINE "
+                                "reads pipeline.beat_s, not this series."
+                                if str(serving.regime) == REGIME_FILLED
+                                else "finish(step k terminal op) - finish(step k-1 "
+                                "terminal op) on the one timeline; step -1 is the "
+                                "prefill terminal (P4 §3)."
+                            ),
                         ),
                     )
                 ),
             ),
             ("extrapolation", OrderedDict(evaluation.extrapolation)),
+            # D29's two first-class quantities: the rotation the beat was read
+            # from, and the state every stage must hold for all D streams.
+            ("pipeline", OrderedDict(evaluation.pipeline)),
+            ("state_residency", OrderedDict(evaluation.state_residency)),
             (
                 "occupancy",
                 [
@@ -2779,6 +4019,7 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
                 ],
             ),
             ("digital_pool", _pool_block(evaluation)),
+            ("digital_silicon", _digital_silicon_block(evaluation)),
         )
     )
     return OrderedDict(
@@ -2813,8 +4054,21 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
                 "serving",
                 OrderedDict(
                     (
-                        ("producer", "P1 / config (D15)"),
+                        (
+                            "producer",
+                            "P1 / config (D29)"
+                            if str(serving.regime) == REGIME_FILLED
+                            else "P1 / config (D15, RETIRED regime)",
+                        ),
+                        ("regime", str(serving.regime)),
+                        # D29: batch size does not exist on this surface. The
+                        # field prints the local batch the regime PINS (1) so a
+                        # reader of an old artifact and a reader of this one are
+                        # never comparing two different machines under one word.
                         ("batch", int(serving.batch)),
+                        ("resident_streams", int(serving.streams)),
+                        ("beats_lowered", int(serving.beats)),
+                        ("steady_beats", int(serving.steady_beats)),
                         ("prefill_len", int(serving.prefill_len)),
                         ("decode_len", int(serving.decode_len)),
                         ("decode_steps_lowered", int(serving.decode_steps)),
@@ -2858,6 +4112,13 @@ def _packing_point(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
             ("tiles", int(summary["tiles"])),
             ("packing_accounting", _packing_block(mapping)),
             ("makespan_s", float(evaluation.makespan_s)),
+            # P7.7 / D29: under the FILLED PIPELINE the per-token period is the
+            # BEAT and the series below is the beat series (the intervals
+            # between token exits). The key keeps its name because it is the
+            # same quantity — the time from one token to the next — and the
+            # regime beside it says which machine produced it.
+            ("serving_regime", str(getattr(evaluation.serving, "regime", ""))),
+            ("resident_streams", int(getattr(evaluation.serving, "streams", 0))),
             ("decode_step_times_s", [float(value) for value in steps]),
             ("median_decode_step_s", _median(steps)),
             ("tokens_per_s", float(tokens[0].value) if tokens else None),
@@ -2913,8 +4174,10 @@ def packing_comparison_document(
     if dedicated.serving != dense.serving:
         raise MappingError(
             "assembly",
-            "the two halves serve different points (D15). Only the packing law may "
-            "differ, or the step times below compare two workloads.",
+            "the two halves serve different points. Only the packing law may differ, "
+            "or the step times below compare two workloads — under D29 that includes "
+            "the resident stream count D and the beat window, which are part of the "
+            "serving point.",
         )
     left_point = _packing_point(dedicated)
     right_point = _packing_point(dense)
@@ -2950,7 +4213,10 @@ def packing_comparison_document(
                 "dimension-mismatch remainder, which waste_pct itemizes. The step "
                 "delta is the two timelines' median lowered decode steps, and it is "
                 "the accumulator/partial-transport trade (P7 Fact 1), not an analog "
-                "speed-up: both laws charge the same column-set passes per step.",
+                "speed-up: both laws charge the same column-set passes per step. "
+                "Under the filled pipeline (D29) that step IS the beat and the passes "
+                "are counted per beat, which is the same statement one level up: every "
+                "stored weight is read once per beat and one token leaves.",
             ),
         )
     )
@@ -2960,9 +4226,14 @@ def packing_comparison_document(
             (
                 "note",
                 "DECODE ONLY (D25). Dense packing is Invariant W in the mapper (D27): "
-                "one contiguous bank stream per chip, cross-tensor and cross-layer "
-                "bank sharing legal because decode layers are sequential (P7 Fact 3). "
-                "Both halves below are full placed-DAG evaluations, not estimates.",
+                "one contiguous bank stream per chip, with cross-tensor and cross-layer "
+                "bank sharing legal. Under the FILLED PIPELINE (D29) the cost of that "
+                "sharing is no longer structurally zero: every stage fires on every "
+                "beat for a different stream, so a macro holding two STAGES' weights "
+                "contends every beat and the timeline prices it, while sharing WITHIN a "
+                "stage stays serial-free. Both halves below are full placed-DAG "
+                "evaluations, not estimates, and each carries its own bank_sharing "
+                "measurement of exactly that split.",
             ),
             (
                 "provenance",
@@ -3072,9 +4343,18 @@ def render_report(document: Mapping[str, object]) -> List[str]:
         str(evaluation["single_accounting"]),
         "",
         (
-            f"Serving (D15):          batch {serving['batch']}, prefill {serving['prefill_len']} "
-            f"tokens, decode {serving['decode_len']} steps "
-            f"({serving['decode_steps_lowered']} lowered)"
+            (
+                f"Serving (D29):          FILLED PIPELINE, "
+                f"D = {serving['resident_streams']} resident streams (= stages), local "
+                f"batch {serving['batch']}, {serving['beats_lowered']} beats lowered "
+                f"({serving['steady_beats']} steady); prefill is external"
+            )
+            if str(serving.get("regime")) == REGIME_FILLED
+            else (
+                f"Serving (D15, RETIRED): batch {serving['batch']}, prefill "
+                f"{serving['prefill_len']} tokens, decode {serving['decode_len']} steps "
+                f"({serving['decode_steps_lowered']} lowered)"
+            )
         ),
         (
             f"Placement:              {mapping['analog_chips']} analog chiplets, "
@@ -3091,8 +4371,57 @@ def render_report(document: Mapping[str, object]) -> List[str]:
         rendered = f"{value:.6g}" if isinstance(value, float) else str(value)
         lines.append(f"  {metric['label']:<52} {rendered:>16} {metric['unit']}")
         lines.append(f"      basis: {metric['basis']}")
+    residency = evaluation.get("state_residency") or {}
+    if residency.get("measured"):
+        # THE GEORGE CONSTRAINT, in the headline block: every stage holds all D
+        # streams' state and KV for its layers, and the verdict is named.
+        lines.extend(
+            [
+                "",
+                (
+                    f"Resident state (D29):   {float(residency['max_stage_state_bytes']) / 2 ** 20:.3f} MiB "
+                    f"on the worst of {residency['stages']} stages, "
+                    f"{float(residency['total_state_bytes']) / 2 ** 20:.3f} MiB total for "
+                    f"{residency['resident_streams']} streams "
+                    f"({float(residency['per_stream_model_state_bytes']) / 2 ** 20:.3f} MiB "
+                    f"per stream) — verdict {residency['verdict']}"
+                    + (
+                        ""
+                        if not residency["stages_violating"]
+                        else f", VIOLATED on stage(s) {residency['stages_violating']}"
+                    )
+                ),
+                (
+                    f"  at a representative context of "
+                    f"{residency['representative_context']:.6g} tokens (median of the "
+                    f"window; the streams span {residency['context_min']:.6g} to "
+                    f"{residency['context_max']:.6g} and each is priced at its own)"
+                ),
+                f"  basis: {residency['basis']}",
+            ]
+        )
+    pipeline = evaluation.get("pipeline") or {}
+    if pipeline:
+        rendered = ", ".join(
+            f"{value * 1e6:.3f}" for value in pipeline["beat_intervals_s"]
+        )
+        lines.extend(
+            [
+                "",
+                (
+                    f"Beat series (us, {pipeline['tokens_exited']} token exits over "
+                    f"{pipeline['beats_lowered']} beats): {rendered}"
+                ),
+                (
+                    f"  the first {len(pipeline['transient_beat_intervals_s'])} is the "
+                    f"FILL TRANSIENT and is held out of the beat; "
+                    f"{pipeline['fill_beats']} beats of fill precede the steady window"
+                ),
+                f"  basis: {pipeline['beat_basis']}",
+            ]
+        )
     series = evaluation["decode_series"]
-    if series["lowered_steps"]:
+    if series["lowered_steps"] and not pipeline:
         rendered = ", ".join(f"{value * 1e6:.3f}" for value in series["step_times_s"])
         lines.extend(
             [
@@ -3107,13 +4436,35 @@ def render_report(document: Mapping[str, object]) -> List[str]:
             [
                 "",
                 (
-                    f"EXTRAPOLATION (not a metric): {extrapolation['remaining_steps']} of "
-                    f"{extrapolation['declared_decode_steps']} decode steps were NOT lowered."
+                    (
+                        "EXTRAPOLATION (not a metric): a REQUEST decodes "
+                        f"{extrapolation['declared_decode_steps']} tokens; the window "
+                        f"measured {extrapolation['lowered_decode_steps']} inter-exit "
+                        f"intervals of the machine that serves it "
+                        f"({pipeline['steady_beats_measured']} steady, the rest the fill "
+                        "transient)."
+                    )
+                    if pipeline
+                    else (
+                        f"EXTRAPOLATION (not a metric): {extrapolation['remaining_steps']} "
+                        f"of {extrapolation['declared_decode_steps']} decode steps were "
+                        "NOT lowered."
+                    )
                 ),
                 (
-                    f"  median lowered step {float(extrapolation['median_step_s']) * 1e6:.3f} us "
-                    f"-> extrapolated request latency "
-                    f"{float(extrapolation['extrapolated_request_latency_s']) * 1e3:.6f} ms"
+                    (
+                        f"  beat {float(extrapolation['median_step_s']) * 1e6:.3f} us x D "
+                        f"x {extrapolation['declared_decode_steps']} tokens -> "
+                        "extrapolated request decode latency "
+                        f"{float(extrapolation['extrapolated_request_latency_s']) * 1e3:.6f} ms"
+                    )
+                    if pipeline
+                    else (
+                        f"  median lowered step "
+                        f"{float(extrapolation['median_step_s']) * 1e6:.3f} us "
+                        f"-> extrapolated request latency "
+                        f"{float(extrapolation['extrapolated_request_latency_s']) * 1e3:.6f} ms"
+                    )
                 ),
                 f"  {extrapolation['basis']}",
             ]

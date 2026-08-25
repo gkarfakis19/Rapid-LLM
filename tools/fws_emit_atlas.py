@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import os
 import sys
 
@@ -91,20 +92,22 @@ def _override_spec(spec, *, shared_chiplets=None, macros_per_chip=None, layers_p
         for value in (shared_chiplets, macros_per_chip, layers_per_chip, decode_window)
     ):
         return spec
-    return config_module.MappingSystemConfig(
-        chips=spec.chips,
-        macros_per_chip=spec.macros_per_chip if macros_per_chip is None else int(macros_per_chip),
-        shared_chiplets=spec.shared_chiplets if shared_chiplets is None else int(shared_chiplets),
-        parallelism=spec.parallelism,
-        layers_per_chip=spec.layers_per_chip if layers_per_chip is None else layers_per_chip,
-        membership=spec.membership,
-        decode_window=spec.decode_window if decode_window is None else int(decode_window),
-        # P7.3: the declared PLACEMENT LAW is carried, never re-defaulted. A
-        # --layers_per_chip override that quietly turned a dense packing back
-        # into the dedicated one would draw a different machine under the same
-        # title.
-        packing=spec.packing,
-    )
+    # dataclasses.replace, not a field-by-field rebuild: a rebuild DROPS every
+    # field it does not name, and it has now done that twice — the declared
+    # PLACEMENT LAW (P7.3) and then the declared SERVING REGIME (P7.7), each of
+    # which would have drawn a different machine under the same title. replace
+    # carries everything the spec has, including fields added after this line
+    # was written.
+    overrides = {}
+    if macros_per_chip is not None:
+        overrides["macros_per_chip"] = int(macros_per_chip)
+    if shared_chiplets is not None:
+        overrides["shared_chiplets"] = int(shared_chiplets)
+    if layers_per_chip is not None:
+        overrides["layers_per_chip"] = layers_per_chip
+    if decode_window is not None:
+        overrides["decode_window"] = int(decode_window)
+    return dataclasses.replace(spec, **overrides)
 
 
 def _price(mapping):

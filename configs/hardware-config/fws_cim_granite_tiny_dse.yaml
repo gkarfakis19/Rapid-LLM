@@ -50,32 +50,58 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 640     # worst chip: 4 layers * 139 + lm_head 66 = 622
+    arrays_per_chip: 640     # worst chip: 4 layers * 139 = 556 under D30
+                             # (which DROPS the lm_head; the +66 that used to
+                             # sit here is gone). 640 is deliberately held at
+                             # the pre-D30 value so the 84 unowned slots are
+                             # the frontier's own area axis - read the D32
+                             # pool total as the machine's SLOTS, never as
+                             # demand.
     layers_per_chip: 4       # 40 layers -> 10 chips; endpoints on first/last chips
     moe_expert_parallel: 1   # routed experts of a layer stay on that layer's chip
 
   # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
-  # The shared digital chiplet card is what makes the SSD scan TIMEABLE: P2.6's
-  # laws refuse to run without a declared vector engine (ADJ-4 forbids deriving
-  # scan lanes from the systolic array or the softmax pipeline).
+  # The shared digital chiplet card is what makes the SSD scan TIMEABLE, and
+  # under D31 it no longer DECLARES the engine: it names the measured synthesis
+  # library its silicon is composed from, and the width is derived from the
+  # beat (ADJ-4 still forbids deriving scan lanes from the systolic array or
+  # the softmax pipeline, which is why the beat is the only honest source).
   cards:
     ctt:
       kind: analog_macro
       device: ctt
     sa:
       kind: digital_chiplet
-      # DECLARED DESIGN POINT, not measured silicon and not an OPTIMA port.
-      # 1024 lanes at the chiplet clock = 9.7e11 scalar ops/s, about an eighth
-      # of the same chiplet's systolic matmul peak (2 arrays x 32x64 MACs x 2
-      # x 0.95 GHz = 7.8e12 FLOP/s) — the ratio an elementwise/scan unit beside
-      # a matmul engine plausibly carries. Every SSD-scan number in this run
-      # scales inversely with it; replace it with Samyak's figure when it
-      # exists and re-run (P6 calibration seam: cards change, laws do not).
-      vector_lanes: 1024
+      # D32: this chiplet's AREA and POWER are COMPOSED from the measured
+      # synthesis library checked in beside this file — the SA fabric from
+      # GEMMINI_SYS_ARRAY blocks, the softmax pipeline from
+      # FP_COMP/FP_ADD/FP_MULT/BF16_EXP/BF16_RECIP, the scan engine from
+      # FP_MULT/FP_ADD/M_REG. Nothing is declared and nothing is estimated;
+      # digital_components_22nm.yaml names the synthesis run every number
+      # came from.
+      synthesis_library: 22nm
+      # D31: vector_lanes is GONE as an input. The engine's width is DERIVED
+      # from the beat this run's ANALOG stages set — the smallest integer lane
+      # count whose own priced time fits that beat, with no margin (D28) — and
+      # it is REPORTED (evaluation.digital_silicon.derived_engine_sizing, plus
+      # a derived_engine_sizing disclosure). The 1024-lane "declared design
+      # point" this card used to carry was a number nobody measured; declaring
+      # one again is still possible and rides a disclosure naming it an
+      # OVERRIDE of a retired input. (P7.9 correction: that disclosure does not
+      # print what the beat would have derived. A declared width skips the
+      # probe pass entirely, so no derivation exists to compare it with, and
+      # claiming otherwise described a sentence no run can emit.)
       # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
       # undeclared on purpose: the first two inherit the chiplet's own clock
       # and softmax depth (disclosed per priced op), and an undeclared state
       # bandwidth REPORTS recurrent-state traffic without bounding it.
+      # NOTE (D31, P7.8): the mapping_dse block at the end of this file still
+      # SWEEPS vector_lanes. Under D31 that axis is retired — the engine is not
+      # a free knob — so every candidate that sets it is a DECLARED OVERRIDE and
+      # each one's report carries the override disclosure by name. The axis is
+      # left standing only because this sweep and its checked-in artifact are
+      # P7.4/P7.5's deliverable; retiring it belongs to that wave, not to a
+      # silent edit here.
 
 sw_param:
   full_recomputation: false
@@ -198,6 +224,11 @@ inference:
 mapping:
   parallelism:
     tp: 1
+  # D27 / Invariant W (HARD): the DENSE packer is the law, exactly as the shipped
+  # card declares it (a test pins these two documents equal outside the sweep
+  # block). At this card's whole-macro granularity dense and dedicated coincide;
+  # at bank_depth 1 they separate, and the sweep visits both.
+  packing: dense
   # ADJ-6: the decode series is a bounded window plus a disclosed
   # extrapolation. Three steps give a first / median / last that are three
   # different readings rather than one repeated.

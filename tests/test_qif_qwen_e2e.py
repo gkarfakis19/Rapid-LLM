@@ -81,9 +81,43 @@ def _model(path, mutate=None):
     return config.parse_config(handle.name, "LLM")
 
 
+#: WAVE F (D29/D30). The SHIPPED Qwen point is a filled pipeline: staggered
+#: streams, one token out per beat, local batch 1, no prefill in the DAG at all
+#: (the streams arrive prefilled — D25/D29). That is the ``qwen`` fixture and
+#: the shipped artifacts.
+#:
+#: Most of this file predates the pivot and asks LAW questions on a PREFILL
+#: pass — the gated-attention tile priced by the analog M-law at m = 7168, the
+#: delta-rule work count at that same m, the prefill split that is P1's finding
+#: #1. Those laws did not change and the questions are still worth asking, so
+#: they run on ``qwen_lockstep``: the same hardware and model under the RETIRED
+#: regime, declared by name, with its batch-4 workload intact. Every test that
+#: uses it says so in its own first line.
+def _qwen_model(lockstep=False):
+    model = config.parse_config(QWEN_MODEL, "LLM")
+    if lockstep:
+        # the workload as it was before D29/D30 removed the batch and the
+        # endpoints from this surface
+        model.model_config.global_batch_size = 4
+        model.model_config.disable_embedding_unembedding = False
+    return model
+
+
 @pytest.fixture(scope="module")
 def qwen():
-    mapping = fws_mapping.build_mapping(_hw(QWEN_HW), config.parse_config(QWEN_MODEL, "LLM"))
+    mapping = fws_mapping.build_mapping(_hw(QWEN_HW), _qwen_model())
+    return fws_eval.evaluate_fws(build_fws_program(mapping))
+
+
+@pytest.fixture(scope="module")
+def qwen_lockstep():
+    """The RETIRED regime, by name: the prefill machine the law checks need."""
+    mapping = fws_mapping.build_mapping(
+        _hw(QWEN_HW),
+        _qwen_model(lockstep=True),
+        regime=fws_mapping.REGIME_LOCKSTEP,
+    )
+    assert mapping.regime == fws_mapping.REGIME_LOCKSTEP
     return fws_eval.evaluate_fws(build_fws_program(mapping))
 
 
@@ -135,7 +169,15 @@ def test_the_same_injected_gate_runs_on_a_mapped_fws_cim_config():
         raw["model_param"]["attention"]["output_gate"] = True
 
     def mapped(raw):
-        raw["mapping"] = {"parallelism": {"tp": 1}, "decode_window": 1}
+        # WAVE F: this llama7b point carries the batch-4 workload of the
+        # retired regime, so it declares that regime by name. The question the
+        # test asks — does the fws_cim + `mapping:` PAIR open the gate stage —
+        # is the same under either one.
+        raw["mapping"] = {
+            "parallelism": {"tp": 1},
+            "decode_window": 1,
+            "regime": "lockstep",
+        }
         # W_g adds ceil(4096/4096) = 1 macro per layer to the llama7b point.
         raw["cim"]["chip"]["arrays_per_chip"] = 128
 
@@ -228,7 +270,7 @@ def test_the_gate_matrix_is_the_parameter_censuss_own_term(qwen):
     assert gated - ungated == placed == 2560 * 4096
 
 
-def test_the_gate_is_priced_by_the_analog_law_and_matches_it_by_hand(qwen):
+def test_the_gate_is_priced_by_the_analog_law_and_matches_it_by_hand(qwen_lockstep):
     """HAND CHECK of the analog M-law on the gate op (DESIGN2 section-8 style).
 
     Prefill token count m = batch 4 x prefill 1792 = 7168. The gate tile on one
@@ -243,7 +285,7 @@ def test_the_gate_is_priced_by_the_analog_law_and_matches_it_by_hand(qwen):
     """
     gate_ops = [
         cost
-        for cost in qwen.pricing.costs
+        for cost in qwen_lockstep.pricing.costs
         if cost.block == "attn_gate_proj" and cost.phase == "prefill" and cost.layer == 3
     ]
     assert len(gate_ops) == 2
@@ -256,14 +298,14 @@ def test_the_gate_is_priced_by_the_analog_law_and_matches_it_by_hand(qwen):
     assert all(cost.energy_pj > 0 for cost in gate_ops)
 
 
-def test_the_gate_multiply_is_pool_work_and_rides_the_pool_sizing(qwen):
+def test_the_gate_multiply_is_pool_work_and_rides_the_pool_sizing(qwen_lockstep):
     """ADJ-3 / D12: sigmoid + multiply is elementwise, so it is pool work.
 
     "Absorbed" is a SIZED claim, not a free one: the op costs 0 s because no
     card declares a per-element pool law, and its CONCURRENCY is measured and
     reported as the derived pool width (P4.5). This asserts both halves.
     """
-    multiplies = [cost for cost in qwen.pricing.costs if cost.block == "attn_output_gate"]
+    multiplies = [cost for cost in qwen_lockstep.pricing.costs if cost.block == "attn_output_gate"]
     # 8 gated layers x (1 prefill + 3 lowered decode steps)
     assert len(multiplies) == 8 * 4
     assert all(cost.device_class == "macro_pool" for cost in multiplies)
@@ -273,15 +315,15 @@ def test_the_gate_multiply_is_pool_work_and_rides_the_pool_sizing(qwen):
     # putting it there: both operands are already local.
     gate_macros = {
         tile.site.macro_id
-        for owner in qwen.mapping.owners()
+        for owner in qwen_lockstep.mapping.owners()
         if owner.op == "attn_gate_proj"
-        for tile in qwen.mapping.tiles_for(owner)
+        for tile in qwen_lockstep.mapping.tiles_for(owner)
     }
     assert {cost.macro_id for cost in multiplies} <= gate_macros
 
     # And it reaches P4.5's sizing: each host macro has a pool report whose
     # measured ops are exactly the gate multiplies scheduled on it.
-    pools = {report.macro_id: report for report in qwen.pools}
+    pools = {report.macro_id: report for report in qwen_lockstep.pools}
     for macro_id in {cost.macro_id for cost in multiplies}:
         assert macro_id in pools, "a placed pool op that sizes no pool is a lost op"
         report = pools[macro_id]
@@ -291,9 +333,9 @@ def test_the_gate_multiply_is_pool_work_and_rides_the_pool_sizing(qwen):
         assert "attn_gate_proj" in report.owner
 
 
-def test_the_gate_sits_between_the_attention_output_and_the_o_proj(qwen):
+def test_the_gate_sits_between_the_attention_output_and_the_o_proj(qwen_lockstep):
     """The DAG order is the algorithm's order, not a convenient one."""
-    program = qwen.program
+    program = qwen_lockstep.program
     by_uid = {a.uid: a for a in fws_eval.annotations_of(program)}
     multiply = next(
         a for a in by_uid.values()
@@ -321,12 +363,12 @@ def test_the_gate_sits_between_the_attention_output_and_the_o_proj(qwen):
 # ---------------------------------------------------------------------------
 
 
-def test_the_delta_rule_prices_every_linear_attention_layer(qwen):
-    plan = tuple(qwen.mapping.model.layer_mixers)
+def test_the_delta_rule_prices_every_linear_attention_layer(qwen_lockstep):
+    plan = tuple(qwen_lockstep.mapping.model.layer_mixers)
     linear_layers = [i for i, kinds in enumerate(plan) if "linear_attn" in kinds]
     assert len(linear_layers) == 24
     delta = [
-        cost for cost in qwen.pricing.costs
+        cost for cost in qwen_lockstep.pricing.costs
         if cost.block == "delta_rule" and cost.phase == "prefill"
     ]
     assert sorted(cost.layer for cost in delta) == linear_layers
@@ -334,7 +376,7 @@ def test_the_delta_rule_prices_every_linear_attention_layer(qwen):
     assert all("price_linear_attention_block" in cost.basis for cost in delta)
 
 
-def test_a_delta_rule_op_matches_its_law_computed_by_hand(qwen):
+def test_a_delta_rule_op_matches_its_law_computed_by_hand(qwen_lockstep):
     """HAND CHECK of the delta-rule law on one prefill op.
 
     Qwen3.5-4B: 16 key heads x d_k 128; 32 value heads x 128 = 4096 value
@@ -354,30 +396,56 @@ def test_a_delta_rule_op_matches_its_law_computed_by_hand(qwen):
 
     The engine retires `lanes` ops per cycle and drains its pipeline once:
 
-        cycles = ceil(ops / 1024) + (pipeline_depth - 1)
-               = 25,776,128 + 19 = 25,776,147
-        t      = cycles / 0.95e9 = 27.1328 ms
+        cycles = ceil(ops / lanes) + (pipeline_depth - 1)
+
+    WAVE F REWRITE (D31, P7.8). OLD: `lanes = 1024`, DECLARED on the card, for
+    25,776,147 cycles and 27.1328 ms. NEW: the card declares no engine, so the
+    width is DERIVED — 178 lanes, the smallest integer that holds this run's
+    step — and the same hand arithmetic gives
+
+        cycles = ceil(26,394,755,072 / 178) + 19 = 148,285,141 + 19
+               = 148,285,160
+        t      = cycles / 0.95e9 = 156.0896 ms
+
+    The LAW is untouched and the hand check is the same check; only the width
+    it is evaluated at moved, from a number somebody declared to a number the
+    beat derived. Note also WHICH beat: this run is the retired lockstep
+    fixture, so the engine is sized against its DECODE STEP and the PREFILL op
+    below is then priced on decode-sized silicon — which is what the machine
+    physically has, and which is why P7 is decode-only (D25) and these prefill
+    rows are law checks rather than claims about prefill performance.
     """
     cost = next(
-        c for c in qwen.pricing.costs
+        c for c in qwen_lockstep.pricing.costs
         if c.block == "delta_rule" and c.phase == "prefill" and c.layer == 0
     )
     per = 16 * 128 * 256
     expected_ops = 7168 * (7 * per + 12288)
     assert expected_ops == 26_394_755_072
     assert float(cost.detail["ops"]) == float(expected_ops)
-    device = qwen.mapping.device
-    assert device.vector_lanes == 1024
+    device = qwen_lockstep.mapping.device
+    assert device.vector_lanes == 178
+    assert device.vector_lanes_provenance == "derived-count"
     assert device.vector_clock_hz == 0.95e9
-    cycles = math.ceil(expected_ops / 1024) + (device.vector_pipeline_depth - 1)
-    assert cycles == 25_776_147
+    cycles = math.ceil(expected_ops / 178) + (device.vector_pipeline_depth - 1)
+    assert cycles == 148_285_160
     assert float(cost.detail["arith_cycles"]) == float(cycles)
     assert cost.duration_s == pytest.approx(cycles / 0.95e9, rel=1e-12)
-    # The pipeline drain is 19 cycles on 25.8 million: the op is lane-bound,
+    # The pipeline drain is 19 cycles on 148 million: the op is lane-bound,
     # so it also sits within 1e-6 of the pure ops / (lanes * clock) bound.
     assert cost.duration_s == pytest.approx(
-        expected_ops / (1024 * 0.95e9), rel=1e-6
+        expected_ops / (178 * 0.95e9), rel=1e-6
     )
+    # And 178 is the SMALLEST width that holds the step: one lane fewer does not
+    # fit, which is what "no margins" (D28) means as an assertion.
+    sizing = device.derived_engine
+    assert sizing.vector_lanes == 178
+    row = sizing.per_stage[0]
+    assert row.used_cycles <= row.budget_cycles
+    assert row.time_s <= sizing.analog_beat_s
+    assert cim_timing.vector_cycles_at(
+        [expected_ops], 178, device.vector_pipeline_depth
+    ) == cycles
 
 
 def test_no_op_exceeds_the_engine_peak_its_law_declares(qwen):
@@ -404,7 +472,7 @@ def test_no_op_exceeds_the_engine_peak_its_law_declares(qwen):
             assert (sets * tokens) / cost.duration_s <= set_peak * (1 + 1e-9), cost.block
 
 
-def test_the_unvalidated_law_label_rides_the_report_and_the_atlas(qwen):
+def test_the_unvalidated_law_label_rides_the_report_and_the_atlas(qwen_lockstep):
     """LAW_UNVALIDATED is part of the number, so it travels with the number.
 
     cim_timing labels every priced digital op; before C1 the label reached the
@@ -413,10 +481,10 @@ def test_the_unvalidated_law_label_rides_the_report_and_the_atlas(qwen):
     behind it. It is now a disclosure, which both artifacts carry.
     """
     assert cim_timing.LAW_UNVALIDATED == "unvalidated"
-    delta = next(cost for cost in qwen.pricing.costs if cost.block == "delta_rule")
+    delta = next(cost for cost in qwen_lockstep.pricing.costs if cost.block == "delta_rule")
     assert cim_timing.LAW_UNVALIDATED in delta.basis
 
-    document = fws_eval.report_document(qwen)
+    document = fws_eval.report_document(qwen_lockstep)
     entry = next(
         item for item in document["disclosures"]
         if item["constraint"] == "unvalidated_law:delta_rule_recurrent"
@@ -488,6 +556,10 @@ def test_a_declared_delta_chunk_size_is_honored_and_relabels_the_disclosure():
     Declaring ``model_param.linear_attention.chunk_size`` moves the prefill
     delta-rule ops to the chunked law and rewrites the disclosure to name the
     declared value. Decode stays recurrent -- one token is not a chunk.
+
+    WAVE F: the question is about PREFILL, and a D29 mapped run lowers none
+    (the streams arrive prefilled -- D25/D29), so the run declares the RETIRED
+    regime by name. The chunked law itself is untouched by the pivot.
     """
     model = _model(
         QWEN_MODEL,
@@ -495,7 +567,11 @@ def test_a_declared_delta_chunk_size_is_honored_and_relabels_the_disclosure():
     )
     assert model.model_config.linear_attention.chunk_size == 64
     evaluation = fws_eval.evaluate_fws(
-        build_fws_program(fws_mapping.build_mapping(_hw(QWEN_HW), model))
+        build_fws_program(
+            fws_mapping.build_mapping(
+                _hw(QWEN_HW), model, regime=fws_mapping.REGIME_LOCKSTEP
+            )
+        )
     )
     document = fws_eval.report_document(evaluation)
     entry = next(
@@ -523,7 +599,7 @@ def test_a_declared_delta_chunk_size_below_one_is_refused_by_name():
 # ---------------------------------------------------------------------------
 
 
-def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen):
+def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_lockstep):
     """P1's finding #1 (D5), restated for a 3:1 linear:full stack.
 
     Qwen3.5-4B's prefill is owned by the shared digital chiplet twice over: the
@@ -532,20 +608,32 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen):
     what ONE delta-rule layer costs at this context. The analog macros hold
     every weight matrix in the model and account for well under half of it.
     """
-    prefill = [cost for cost in qwen.pricing.costs if cost.phase == "prefill"]
-    latency = qwen.metric("sys.fws.prefill_latency").value
+    prefill = [cost for cost in qwen_lockstep.pricing.costs if cost.phase == "prefill"]
+    latency = qwen_lockstep.metric("sys.fws.prefill_latency").value
     delta = sum(c.duration_s for c in prefill if c.block == "delta_rule")
     attention = sum(
         c.duration_s for c in prefill
         if c.block in ("attention_qk", "attention_pv", "attention_softmax")
     )
     analog = sum(c.duration_s for c in prefill if c.device_class == "analog_macro")
-    assert 0.5 < delta / latency < 0.6
-    assert 0.3 < attention / latency < 0.4
-    assert 0.85 < (delta + attention) / latency < 0.95
-    assert analog / latency < 0.5
-    # per-layer: 24 linear layers vs 8 attention layers
-    assert (attention / 8) / (delta / 24) > 1.5
+
+    # WAVE F REWRITE (D31, P7.8). OLD CLAIM: delta 50-60% of the critical path,
+    # attention 30-40%, together 85-95%, and ONE attention layer costing >1.5x
+    # ONE delta-rule layer. Those splits were read on a card that DECLARED 1024
+    # vector lanes. NEW CLAIM: the engine is DERIVED from this run's own decode
+    # step (178 lanes), so the delta rule — which is the only block that runs on
+    # it — dominates far harder, and the per-layer comparison REVERSES. The
+    # finding P1 wanted is unchanged and stronger: this stack is shared-digital
+    # bound, and the analog macros that hold every weight in the model are under
+    # a tenth of the path. What changed is which digital unit owns it, and that
+    # is a consequence of D31 (a decode-sized engine priced on a prefill), not a
+    # new law.
+    assert 0.8 < delta / latency < 0.95
+    assert 0.05 < attention / latency < 0.2
+    assert 0.9 < (delta + attention) / latency < 1.0
+    assert analog / latency < 0.2
+    # per-layer: 24 linear layers vs 8 attention layers — now the OTHER way.
+    assert (attention / 8) / (delta / 24) < 1.0
 
 
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):

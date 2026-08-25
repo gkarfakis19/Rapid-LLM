@@ -1,622 +1,664 @@
 {
- "schema": "fws_frontier/1",
- "title": "Granite-4.0-H-Tiny decode frontier: area vs tokens/s",
- "subtitle": "P7.6 fixture for the frontier explorer, matching the contract P7.4/P7.5 (builder E3) emit. Decode only (D25); no safety margins (D28).",
- "decode_only": "Every point is a decode design point in D15's batched-synchronous regime. Prefill is out of P7 (D25) and no prefill figure appears here.",
- "provisioning_stance": "No point carries a safety margin, a derate or a guard band: D28 makes the frontier itself the statement of how close a point runs. The loader refuses any such field by name.",
- "provenance": {
-  "authored": "2026-08-24",
-  "author": "P7.6 hand fixture. The eight sweep points are the REAL candidate rows of docs/qif/dse/granite_lanes_banks/dse_report.json (fws_qif_dse, Wave D); the ninth is the shipped Granite atlas run. The shared-digital area term and the shared-digital utilization are the two fields no producer emits, and they carry their marks.",
-  "reference_run": {
-   "command": "tools/fws_qif_dse.py --hardware_config configs/hardware-config/fws_cim_granite_tiny_dse.yaml --model_config configs/model-config/granite_4_0_h_tiny_inf.yaml",
-   "report": "docs/qif/dse/granite_lanes_banks/dse_report.json",
-   "parallelism": "tp = 1, ep = 1, pp = 1"
+  "schema": "fws_frontier/1",
+  "title": "Granite-4.0-H-Tiny decode frontier: area vs tokens/s",
+  "subtitle": "P7.6 fixture for the frontier explorer, matching the contract P7.4/P7.5 (builder E3) emit. Decode only (D25); no safety margins (D28).",
+  "decode_only": "Every point is a decode design point in D29's FILLED PIPELINE: staggered streams, one token out per beat, local batch 1, D = the stage count (10 here, one stage per analog chiplet). Prefill is out of P7 (D25), the streams arrive already prefilled, and no prefill figure appears here.",
+  "provisioning_stance": "No point carries a safety margin, a derate or a guard band: D28 makes the frontier itself the statement of how close a point runs. The loader refuses any such field by name.",
+  "provenance": {
+    "authored": "2026-08-24",
+    "author": "P7.6 hand fixture, REGROUNDED by P7.8 (D32) and corrected by P7.9. The eight sweep points are the REAL candidate rows of docs/qif/dse/granite_lanes_banks/dse_report.json; the ninth is the shipped Granite atlas run. The shared-digital AREA term used to be the one invented field in this document; D32 composes it from the measured synthesis library, so nothing here is invented any more. The shared-digital UTILIZATION is still the field no producer emits per candidate, and it still carries its mark.",
+    "reference_run": {
+      "command": "tools/fws_qif_dse.py --hardware_config configs/hardware-config/fws_cim_granite_tiny_dse.yaml --model_config configs/model-config/granite_4_0_h_tiny_inf.yaml",
+      "report": "docs/qif/dse/granite_lanes_banks/dse_report.json",
+      "parallelism": "tp = 1, ep = 1, pp = 1"
+    },
+    "grounded": [
+      "throughput.tokens_per_s and throughput.decode_step_s of all nine points are measured off each candidate's own timeline",
+      "area.terms.analog_mm2 is the P3.6 enumerated_macro_silicon accounting",
+      "area.terms.shared_digital_mm2 is the D32 COMPOSED chiplet area: unit counts of measured 22nm synthesis blocks x each block's measured area, times the chiplet count the mapping placed",
+      "area.terms.macro_pool_mm2 is the D32 COMPOSED per-macro pool area on every enumerated macro slot - the third silicon term, added by P7.9; area.total_mm2 now equals the source report's own total_silicon_mm2 on every swept point",
+      "packing.waste_pct is D27's CELL census of the reference mapping (P7.9; it was the smaller column census before)",
+      "utilization analog_macro is derived from the reference run's MEASURED macro duty cycle and each point's MEASURED beat",
+      "the knee law R + C / lanes is fitted to the 4 measured beats and reproduces all of them to within 3e-05 relative (a fit, not an identity - see knee.basis)"
+    ],
+    "invented_fields": [],
+    "note": "The x axis is REAL and now carries all THREE silicon terms. Wave D's front collapsed because the shared digital card declared no area_mm2; D32 replaced that placeholder with a composition of measured synthesis blocks, and P7.9 added the per-macro pool term the document was missing, so area.total_mm2 agrees with the source sweep's own total_silicon_mm2 point for point. What is still absent is the shared-digital OCCUPANCY per candidate, which draws as the unknown hatch."
   },
-  "grounded": [
-   "throughput.tokens_per_s and throughput.decode_step_s of all nine points are measured off each candidate's own timeline",
-   "area.terms.analog_mm2 is the P3.6 enumerated_macro_silicon accounting",
-   "utilization analog_macro is derived from the reference run's MEASURED macro duty cycle and each point's MEASURED decode step",
-   "packing.waste_pct is the reference mapping's measured unowned-column census",
-   "the knee law R + C / lanes is fitted to the four measured decode steps and reproduces all four to 1e-13"
+  "model": {
+    "id": "granite_4_0_h_tiny",
+    "label": "Granite-4.0-H-Tiny",
+    "basis": "configs/model-config/granite_4_0_h_tiny_inf.yaml (ADJ-1 headline model)"
+  },
+  "axes": {
+    "x": {
+      "key": "area.total_mm2",
+      "label": "total silicon",
+      "unit": "mm2",
+      "basis": "the machine's three silicon terms, all named per point: enumerated analog macro slots x macro footprint + shared digital chiplets + per-macro digital pools. The analog term is the SLOTS the machine has, not the global cell floor (a lower bound the packer cannot reach once the layers are split across chips)."
+    },
+    "y": {
+      "key": "throughput.tokens_per_s",
+      "label": "decode throughput",
+      "unit": "tokens/s",
+      "basis": "the headline at the decode terminal (ADJ-6)"
+    }
+  },
+  "device_classes": [
+    {
+      "id": "analog_macro",
+      "label": "analog macro slots",
+      "basis": "the 6400 enumerated slots of the 10 analog chiplets"
+    },
+    {
+      "id": "shared_digital_chiplet",
+      "label": "shared digital chiplets",
+      "basis": "the 10 shared digital chiplets (D13)"
+    }
   ],
-  "invented_fields": [
-   "points[].area.terms.shared_digital_mm2"
+  "knobs": [
+    {
+      "id": "vector_lanes",
+      "label": "shared-chiplet vector lanes",
+      "basis": "cim.cards.sa.vector_lanes - the scan engine's declared width (D13)"
+    },
+    {
+      "id": "bank_depth",
+      "label": "analog allocation granularity (mux slots)",
+      "basis": "cim.cards.ctt.bank_depth; the card declares adc_mux = 4, so 1, 2 and 4 are the values it admits"
+    },
+    {
+      "id": "shared_chiplets",
+      "label": "shared digital chiplet count",
+      "basis": "constant at 10 over this sweep: no axis here moves it, which is half the reason the front is nearly vertical"
+    }
   ],
-  "note": "The x axis exists only because of a PLACEHOLDER. The shipped shared-digital card declares no area_mm2, so every real candidate carries the same silicon and the Wave D front collapsed to one point - its own front_shape note says so. The placeholder makes the picture the frontier explorer is FOR; it is marked at every point and it is the first thing P7.4 must replace with a declared card area."
- },
- "model": {
-  "id": "granite_4_0_h_tiny",
-  "label": "Granite-4.0-H-Tiny",
-  "basis": "configs/model-config/granite_4_0_h_tiny_inf.yaml (ADJ-1 headline model)"
- },
- "axes": {
-  "x": {
-   "key": "area.total_mm2",
-   "label": "total silicon",
-   "unit": "mm2",
-   "basis": "analog floor + shared digital, both named per point"
-  },
-  "y": {
-   "key": "throughput.tokens_per_s",
-   "label": "decode throughput",
-   "unit": "tokens/s",
-   "basis": "the headline at the decode terminal (ADJ-6)"
-  }
- },
- "device_classes": [
-  {
-   "id": "analog_macro",
-   "label": "analog macro slots",
-   "basis": "the 6400 enumerated slots of the 10 analog chiplets"
-  },
-  {
-   "id": "shared_digital_chiplet",
-   "label": "shared digital chiplets",
-   "basis": "the 10 shared digital chiplets (D13)"
-  }
- ],
- "knobs": [
-  {
-   "id": "vector_lanes",
-   "label": "shared-chiplet vector lanes",
-   "basis": "cim.cards.sa.vector_lanes - the scan engine's declared width (D13)"
-  },
-  {
-   "id": "bank_depth",
-   "label": "analog allocation granularity (mux slots)",
-   "basis": "cim.cards.ctt.bank_depth; the card declares adc_mux = 4, so 1, 2 and 4 are the values it admits"
-  },
-  {
-   "id": "shared_chiplets",
-   "label": "shared digital chiplet count",
-   "basis": "constant at 10 over this sweep: no axis here moves it, which is half the reason the front is nearly vertical"
-  }
- ],
- "points": [
-  {
-   "id": "c000",
-   "label": "vector_lanes 512, bank_depth 1",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 512,
-    "bank_depth": 1,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 19566,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12933.20704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 2.56
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 512 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 3432.1215725183133,
-    "decode_step_s": 0.0011654598811501327,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
+  "points": [
     {
-     "device_class": "analog_macro",
-     "value": 0.00040609021065286474,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+      "id": "c000",
+      "label": "vector_lanes 512, bank_depth 1",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 512,
+        "bank_depth": 1,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 19304,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 12991.49566398,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 45.37071678,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 4.53707 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 20164.435204419802,
+        "decode_step_s": 4.9592264294157464e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0016571586127009507,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": true,
+      "knee": true
     },
     {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
+      "id": "c001",
+      "label": "vector_lanes 512, bank_depth 2",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 512,
+        "bank_depth": 2,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 10972,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 12991.49566398,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 45.37071678,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 4.53707 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 20106.88200429231,
+        "decode_step_s": 4.9734215368972936e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0016524325623861694,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": false,
+      "knee": false
+    },
+    {
+      "id": "c002",
+      "label": "vector_lanes 1024, bank_depth 1",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 1024,
+        "bank_depth": 1,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 19304,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13005.98228414,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 59.85733694,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 5.98573 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 22983.138243358997,
+        "decode_step_s": 4.3510159030999654e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.001888593200873668,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": true,
+      "knee": false
+    },
+    {
+      "id": "c003",
+      "label": "vector_lanes 1024, bank_depth 2",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 1024,
+        "bank_depth": 2,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 10972,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13005.98228414,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 59.85733694,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 5.98573 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 22908.400019516692,
+        "decode_step_s": 4.3652110105815126e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0018824573600066592,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": false,
+      "knee": false
+    },
+    {
+      "id": "c004",
+      "label": "vector_lanes 2048, bank_depth 1",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 2048,
+        "bank_depth": 1,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 19304,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13034.95552446,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 88.83057726000001,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 8.88306 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 24710.20709304116,
+        "decode_step_s": 4.046910639942059e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.002030371478253328,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": true,
+      "knee": false
+    },
+    {
+      "id": "c005",
+      "label": "vector_lanes 2048, bank_depth 2",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 2048,
+        "bank_depth": 2,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 10972,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13034.95552446,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 88.83057726000001,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 8.88306 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 24623.83553135515,
+        "decode_step_s": 4.061105747423606e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0020232815418157507,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": false,
+      "knee": false
+    },
+    {
+      "id": "c006",
+      "label": "vector_lanes 4096, bank_depth 1",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 4096,
+        "bank_depth": 1,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 19304,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13092.9020051,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 146.77705790000002,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 14.6777 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 25673.836124882622,
+        "decode_step_s": 3.8950159030999576e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0021094690631428374,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": true,
+      "knee": false
+    },
+    {
+      "id": "c007",
+      "label": "vector_lanes 4096, bank_depth 2",
+      "in_sweep": true,
+      "knobs": {
+        "vector_lanes": 4096,
+        "bank_depth": 2,
+        "shared_chiplets": 10
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 10972,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 13092.9020051,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 146.77705790000002,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.02041 + 10 shared digital chiplets x the card's COMPOSED area 14.6777 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead) + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32, same measured library). The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS)."
+      },
+      "throughput": {
+        "tokens_per_s": 25580.609419475863,
+        "decode_step_s": 3.909211010581505e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0021018169994030268,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": null,
+        "exists": false,
+        "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
+      },
+      "pareto": false,
+      "knee": false
+    },
+    {
+      "id": "ref.atlas",
+      "label": "vector_lanes 220 (DERIVED), bank_depth 4",
+      "in_sweep": false,
+      "knobs": {
+        "vector_lanes": 220,
+        "bank_depth": 4,
+        "shared_chiplets": 10,
+        "vector_lanes_provenance": "derived-count"
+      },
+      "provisioning": {
+        "analog_chips": 10,
+        "shared_chiplets": 10,
+        "analog_macro_slots": 6400,
+        "placed_tiles": 5544,
+        "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
+      },
+      "area": {
+        "total_mm2": 12983.23376342,
+        "terms": {
+          "analog_mm2": 12930.64704,
+          "shared_digital_mm2": 37.10881622,
+          "macro_pool_mm2": 15.477907199999999
+        },
+        "uncovered": [],
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 = 12930.6 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + 10 shared digital chiplets x the COMPOSED area 3.71088 mm2 + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead). This run's engine width is DERIVED from its own beat (220 lanes, derived-count), which is why it is not one of the swept widths."
+      },
+      "throughput": {
+        "tokens_per_s": 15102.65925726391,
+        "decode_step_s": 6.621350471898061e-05,
+        "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. This point is the SHIPPED atlas run: the same hardware config file as the sweep minus its mapping_dse block, so its bank_depth is the card's declared adc_mux = 4, the third value the card admits. Its 5610 placed tiles against the sweep's 19566 (depth 1) and 11103 (depth 2) are the evidence for that reading."
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "value": 0.0012422505819738071,
+          "uncovered": null,
+          "basis": "analog active time per macro per BEAT 8.224853424291288e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+        },
+        {
+          "device_class": "shared_digital_chiplet",
+          "value": null,
+          "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
+          "basis": "absent law"
+        }
+      ],
+      "packing": {
+        "waste_pct": 48.133868446368446,
+        "basis_kind": "cells",
+        "cell_floor_macros": 2876,
+        "macros": 5544,
+        "per_point": false,
+        "basis": "D27's waste, counted in CELLS on the REFERENCE MAPPING (the shipped Granite card, bank_depth 4, which is the ref.atlas point): 5544 macros commit 13079937024 cells to hold 6784057344 real weight cells, so 48.1339% of the committed cells hold no weight, against a GLOBAL CELL FLOOR of 2876 macros. It is ONE mapping's census carried on every row, not a per-point measurement: the eight swept points differ in bank_depth and in placed tiles and each has its own census. The per-point cell census IS emitted, by the D31-legal frontier curves under docs/qif/dse/*_frontier/dse_report.json (candidates[].packing)."
+      },
+      "atlas": {
+        "document": "granite_4_0_h_tiny.json",
+        "exists": true,
+        "basis": "the shipped P3.6/P4 artifact of this exact design point"
+      },
+      "pareto": true,
+      "knee": false
     }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": true,
-   "knee": false
+  ],
+  "knee": {
+    "point": "c000",
+    "basis": "the 4 measured BEATS at bank_depth 1 fit beat(lanes) = R + C / lanes to within 3.3e-05 relative - a FIT, not an identity: under D29 the beat is a MAX over the stages, so a reciprocal-in-lanes law describes it closely and does not define it (under the retired lockstep regime the same law was exact to 1e-13, because the step WAS the scan chain) - with residual R = 3.746985827911986e-05 s and C = 0.006227151879699244 s x lanes. The knee is the smallest swept width at which the digital term C / lanes has dropped BELOW the residual no vector-lane count moves: at 512 lanes the term is 0.325 x R. WAVE F (D32, P7.8): the x axis is now REAL - the shared digital chiplet's area is COMPOSED from the measured 22nm synthesis library, so a wider engine costs real silicon and the front is a SPREAD rather than the collapsed point Wave D reported. Across the swept widths 8x the lanes buys 1.273x the throughput for 101.406 mm2 more silicon, and every doubling past the knee pays area for a term that was never binding.",
+    "caveat": "the residual is NOT the analog m-pass time: analog activity is 8.224853424291288e-08 s per macro per beat, orders below R. What R actually contains is the part of the beat no vector-lane count moves, and decomposing it per device class is P7.4's job, not this fixture's. Note also that none of the swept widths is the width D31 would DERIVE for this machine: every sweep point declares its lanes, which under D31 is an override that rides a disclosure, and the sweep is kept as P7.4's deliverable rather than silently retired here."
   },
-  {
-   "id": "c001",
-   "label": "vector_lanes 512, bank_depth 2",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 512,
-    "bank_depth": 2,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 11103,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12933.20704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 2.56
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 512 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 3414.4028067616764,
-    "decode_step_s": 0.0011715079404452933,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
+  "relaxations": [
     {
-     "device_class": "analog_macro",
-     "value": 0.0004039937180996182,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+      "constraint": "shared_digital_area_is_composed_not_measured_in_situ",
+      "value": "10 chiplets x the composed per-chiplet area (D32, 22nm)",
+      "reason": "The shared-digital area term is no longer a placeholder: it is a COMPOSITION of blocks a synthesis run measured (GEMMINI_SYS_ARRAY, FP_ADD/FP_MULT/FP_COMP/BF16_EXP/BF16_RECIP/M_REG/TRANSPOSER), counted by this repo's own laws. What it is NOT is a measurement of a whole chiplet: the activation SRAM, the interconnect and the control logic have no block in the library and are not composed, so this term is a LOWER BOUND and the x axis is optimistic by whatever they would have cost (D28 forbids padding it, D21 requires saying so)."
     },
     {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
+      "constraint": "shared_digital_utilization_uncovered",
+      "value": "no value at any of the 9 points",
+      "reason": "D28 requires per-device utilization at every point and no producer emits it for the digital class. It draws as the unknown hatch. This is the field the frontier explorer most needs from P7.4."
+    },
+    {
+      "constraint": "waste_is_one_reference_mappings_cell_census",
+      "value": "48.1339% of committed CELLS, on one mapping, carried on every row",
+      "reason": "P7.9 CORRECTION. This row used to carry the COLUMN census (28.1960%) and a note saying D27's cell census does not exist yet. It does: cim_timing.dense_pack emits it and P7.2 landed it in the same plan, and for this reference mapping it is 48.1339% \u2014 nearly twice the column figure, because a column census misses the row remainder of every tile whose K is below the card's rows. What is still a relaxation is the SCOPE: this is one mapping's census repeated on every row, not a per-point measurement. The per-point cell census is emitted by the frontier curves under docs/qif/dse/*_frontier."
+    },
+    {
+      "constraint": "ninth_point_is_not_a_sweep_candidate",
+      "value": "ref.atlas: vector_lanes 220 DERIVED (D31), bank_depth 4",
+      "reason": "it is the shipped Granite atlas run, carried here because it is the only point with a placement document to click through to. It shares the sweep's analog inventory; its bank_depth is the card's own 4 and its engine is not a swept width at all \u2014 D31 DERIVES 220 lanes from its own beat, which is why it carries less digital silicon than any declared-width point on the picture and is the cheapest point on the front. P7.9 CORRECTION: this row previously labelled it 'vector_lanes 1024' and read its bank_depth off 5610 placed tiles, both pre-D30/D31 numbers \u2014 it places 5544 tiles and declares no engine width."
+    },
+    {
+      "constraint": "decode_window",
+      "value": "3 of 256 steps lowered at every point",
+      "reason": "ADJ-6: the DAG grows linearly in decode length, so each candidate lowers a bounded window and the rest is an extrapolation the consumer declares."
+    },
+    {
+      "constraint": "the_eight_swept_points_sweep_a_RETIRED_axis",
+      "value": "vector_lanes 512-4096, declared-count, on all eight in_sweep points",
+      "reason": "D31 retires vector_lanes as a design point: one beat admits exactly one legal width, and a spread produced by declaring several is an OVERRIDE sweep, not a D31-conformant frontier. The eight points are kept because they are the frozen Wave-D demo sweep and its artifact is regenerate-gated, and because the picture they draw \u2014 8x the lanes buys under 2x the throughput \u2014 is the finding that motivated the retirement. The D31-legal curves, whose width is DERIVED at every point, are docs/qif/dse/granite_4_0_h_tiny_frontier and .../qwen3_5_4b_frontier."
     }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": false,
-   "knee": false
-  },
-  {
-   "id": "c002",
-   "label": "vector_lanes 1024, bank_depth 1",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 1024,
-    "bank_depth": 1,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 19566,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12935.76704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 5.12
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 1024 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 4579.180058167549,
-    "decode_step_s": 0.0008735188285216022,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0005418107008004989,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": true,
-   "knee": true
-  },
-  {
-   "id": "c003",
-   "label": "vector_lanes 1024, bank_depth 2",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 1024,
-    "bank_depth": 2,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 11103,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12935.76704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 5.12
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 1024 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 4547.692796768069,
-    "decode_step_s": 0.0008795668878167628,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0005380851134795302,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": false,
-   "knee": false
-  },
-  {
-   "id": "c004",
-   "label": "vector_lanes 2048, bank_depth 1",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 2048,
-    "bank_depth": 1,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 19566,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12940.88704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 10.24
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 2048 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 5497.916753968228,
-    "decode_step_s": 0.000727548302202452,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0006505160512518408,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": true,
-   "knee": false
-  },
-  {
-   "id": "c005",
-   "label": "vector_lanes 2048, bank_depth 2",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 2048,
-    "bank_depth": 2,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 11103,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12940.88704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 10.24
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 2048 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 5452.589747842776,
-    "decode_step_s": 0.0007335963615422436,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0006451529389387062,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": false,
-   "knee": false
-  },
-  {
-   "id": "c006",
-   "label": "vector_lanes 4096, bank_depth 1",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 4096,
-    "bank_depth": 1,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 19566,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12951.12704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 20.48
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 4096 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 6110.946938895255,
-    "decode_step_s": 0.0006545630390832891,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0007230500660510071,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": true,
-   "knee": false
-  },
-  {
-   "id": "c007",
-   "label": "vector_lanes 4096, bank_depth 2",
-   "in_sweep": true,
-   "knobs": {
-    "vector_lanes": 4096,
-    "bank_depth": 2,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 11103,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12951.12704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 20.48
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 4096 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 6054.9996961390025,
-    "decode_step_s": 0.0006606110983871094,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. "
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0007164303624314576,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": null,
-    "exists": false,
-    "basis": "no atlas was emitted for this sweep candidate; the DSE prices candidates and emits no placement document per point"
-   },
-   "pareto": false,
-   "knee": false
-  },
-  {
-   "id": "ref.atlas",
-   "label": "vector_lanes 1024, bank_depth 4",
-   "in_sweep": false,
-   "knobs": {
-    "vector_lanes": 1024,
-    "bank_depth": 4,
-    "shared_chiplets": 10
-   },
-   "provisioning": {
-    "analog_chips": 10,
-    "shared_chiplets": 10,
-    "analog_macro_slots": 6400,
-    "placed_tiles": 5610,
-    "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
-   },
-   "area": {
-    "total_mm2": 12935.76704,
-    "terms": {
-     "analog_mm2": 12930.64704,
-     "shared_digital_mm2": 5.12
-    },
-    "uncovered": [],
-    "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 2.0204136 = 12930.64704 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + a PLACEHOLDER shared-digital term of 10 chiplets x 1024 lanes x 0.0005 mm2/lane. The shipped digital card declares no area_mm2, so without the placeholder this axis is constant and the whole front collapses to one point - which is exactly what the Wave D sweep reported as front_shape flat_area."
-   },
-   "throughput": {
-    "tokens_per_s": 4485.862641968201,
-    "decode_step_s": 0.0008916902543063543,
-    "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. This point is the SHIPPED atlas run: the same hardware config file as the sweep minus its mapping_dse block, so its bank_depth is the card's declared adc_mux = 4, the third value the card admits. Its 5610 placed tiles against the sweep's 19566 (depth 1) and 11103 (depth 2) are the evidence for that reading."
-   },
-   "utilization": [
-    {
-     "device_class": "analog_macro",
-     "value": 0.0005307693409881282,
-     "uncovered": null,
-     "basis": "analog active time per macro per decode step 4.732818486437201e-07 s (the reference run's measured macros[].duty_cycle x its measured decode step) divided by THIS point's decode step. At the cell floor every bank fires once per step, so the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
-    },
-    {
-     "device_class": "shared_digital_chiplet",
-     "value": null,
-     "uncovered": "no producer emits per-device occupancy for the shared digital chiplet: the Wave D report carries times and energies, not device utilization. D28 requires it at every point, so it is drawn as the unknown hatch until P7.4 emits it - an absent measurement, never a zero.",
-     "basis": "absent law"
-    }
-   ],
-   "packing": {
-    "waste_pct": 27.175130208333332,
-    "basis_kind": "columns",
-    "basis": "unowned stored columns 2671424 of 9830400 enumerated (6400 slots x 1536 stored columns) on the reference mapping. This is the COLUMN accounting; D27's waste is counted in CELLS and is larger, because a tile whose K is below the card's rows leaves row remainder no column census sees. No producer emits the cell census yet (P7.2)."
-   },
-   "atlas": {
-    "document": "granite_4_0_h_tiny.json",
-    "exists": true,
-    "basis": "the shipped P3.6/P4 artifact of this exact design point"
-   },
-   "pareto": false,
-   "knee": false
-  }
- ],
- "knee": {
-  "point": "c002",
-  "basis": "the four measured decode steps at bank_depth 1 fit step(lanes) = R + C / lanes EXACTLY (to 1e-13) with residual R = 5.815777759308828e-04 s and C = 0.2989476378722559 s x lanes. The knee is the smallest swept width at which the digital term C / lanes drops BELOW the residual the digital knob cannot move: at 512 lanes the term is 1.004 x R, at 1024 it is 0.502 x R. Past 1024 every doubling buys a term already smaller than the floor, and pays area for it.",
-  "caveat": "the residual is NOT the analog m-pass time: analog activity is 4.732818486437201e-07 s per macro per step, three orders below R. What R actually contains is the part of the decode step no vector-lane count moves, and decomposing it per device class is P7.4's job, not this fixture's."
- },
- "relaxations": [
-  {
-   "constraint": "shared_digital_area_is_a_placeholder",
-   "value": "10 chiplets x lanes x 0.0005 mm2/lane",
-   "reason": "the shipped digital card declares no area_mm2 (an ABSENT law, not a measured zero). Every x coordinate here is analog silicon plus that placeholder; the RANKING is optimistic by whatever the real card costs."
-  },
-  {
-   "constraint": "shared_digital_utilization_uncovered",
-   "value": "no value at any of the 9 points",
-   "reason": "D28 requires per-device utilization at every point and no producer emits it for the digital class. It draws as the unknown hatch. This is the field the frontier explorer most needs from P7.4."
-  },
-  {
-   "constraint": "waste_is_the_column_census",
-   "value": "27.1751% unowned columns, not cells",
-   "reason": "D27 counts waste in CELLS. The only census any producer emits is columns, which misses the row remainder of every tile whose K is below the card's rows. The cell census arrives with P7.2's dense packer and will be larger."
-  },
-  {
-   "constraint": "ninth_point_is_not_a_sweep_candidate",
-   "value": "ref.atlas: vector_lanes 1024, bank_depth 4",
-   "reason": "it is the shipped Granite atlas run, carried here because it is the only point with a placement document to click through to. It shares the sweep's analog inventory and its bank_depth is read from its 5610 placed tiles; it was not re-run for this fixture and is marked in_sweep false."
-  },
-  {
-   "constraint": "decode_window",
-   "value": "3 of 256 steps lowered at every point",
-   "reason": "ADJ-6: the DAG grows linearly in decode length, so each candidate lowers a bounded window and the rest is an extrapolation the consumer declares."
-  }
- ]
+  ]
 }

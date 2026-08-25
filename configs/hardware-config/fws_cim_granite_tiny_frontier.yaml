@@ -1,0 +1,305 @@
+# FWS-CIM FRONTIER SWEEP for Granite-4.0-H-Tiny (QIF P7.4/P7.5, ADJ-1 headline).
+#
+# This file is the SHIPPED Granite machine (configs/hardware-config/
+# fws_cim_granite_tiny.yaml) verbatim, plus the `mapping_dse:` block at the
+# bottom. Strip that block and it is the shipped single design point, runnable
+# through run_perf unchanged; a test pins the two documents equal outside it, so
+# the sweep can never quietly price a machine that no longer exists.
+#
+# THE REGIME IS D29: the pipeline is ALWAYS FULL. Decode is independent streams
+# staggered across the PP stages, one token exits per beat, the local batch is
+# always 1, and the resident-stream count D IS the stage count. That is why the
+# axes below are what they are, and why digital provisioning is not among them
+# (D31 derives the engine per point; D32 prices it from measured synthesis).
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 1536               # array rows (K per array tile) = hidden_dim
+    cols_adc: 384            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 13730.312016  # T1 point scaled by cell count (x1.44)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 2.0204136    # T1 point scaled by cell count (x1.44)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 640     # worst chip: 4 layers * 139 = 556 under D30
+                             # (which DROPS the lm_head; the +66 that used to
+                             # sit here is gone). 640 is deliberately held at
+                             # the pre-D30 value so the 84 unowned slots are
+                             # the frontier's own area axis - read the D32
+                             # pool total as the machine's SLOTS, never as
+                             # demand.
+    layers_per_chip: 4       # 40 layers -> 10 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # routed experts of a layer stay on that layer's chip
+
+  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
+  # The shared digital chiplet card is what makes the SSD scan TIMEABLE, and
+  # under D31 it no longer DECLARES the engine: it names the measured synthesis
+  # library its silicon is composed from, and the width is derived from the
+  # beat (ADJ-4 still forbids deriving scan lanes from the systolic array or
+  # the softmax pipeline, which is why the beat is the only honest source).
+  cards:
+    ctt:
+      kind: analog_macro
+      device: ctt
+    sa:
+      kind: digital_chiplet
+      # D32: this chiplet's AREA and POWER are COMPOSED from the measured
+      # synthesis library checked in beside this file — the SA fabric from
+      # GEMMINI_SYS_ARRAY blocks, the softmax pipeline from
+      # FP_COMP/FP_ADD/FP_MULT/BF16_EXP/BF16_RECIP, the scan engine from
+      # FP_MULT/FP_ADD/M_REG. Nothing is declared and nothing is estimated;
+      # digital_components_22nm.yaml names the synthesis run every number
+      # came from.
+      synthesis_library: 22nm
+      # D31: vector_lanes is GONE as an input. The engine's width is DERIVED
+      # from the beat this run's ANALOG stages set — the smallest integer lane
+      # count whose own priced time fits that beat, with no margin (D28) — and
+      # it is REPORTED (evaluation.digital_silicon.derived_engine_sizing, plus
+      # a derived_engine_sizing disclosure). The 1024-lane "declared design
+      # point" this card used to carry was a number nobody measured; declaring
+      # one again is still possible and rides a disclosure naming it an
+      # OVERRIDE of a retired input. (P7.9 correction: that disclosure does not
+      # print what the beat would have derived. A declared width skips the
+      # probe pass entirely, so no derivation exists to compare it with, and
+      # claiming otherwise described a sentence no run can emit.)
+      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
+      # undeclared on purpose: the first two inherit the chiplet's own clock
+      # and softmax depth (disclosed per priced op), and an undeclared state
+      # bandwidth REPORTS recurrent-state traffic without bounding it.
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 8 GB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
+
+# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
+# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+mapping:
+  parallelism:
+    tp: 1
+  # D27 / Invariant W (HARD): the DENSE packer is the law every point of this
+  # sweep is placed under. It matters here in a way it does not on the shipped
+  # card: at bank_depth 1 the dense and dedicated laws SEPARATE (Granite: 4828
+  # macros against 5544), so a sweep that left the default dedicated law in
+  # place was pricing analog silicon D27 forbids and reporting no waste for it.
+  packing: dense
+  # ADJ-6: the decode series is a bounded window plus a disclosed
+  # extrapolation. Three steps give a first / median / last that are three
+  # different readings rather than one repeated.
+  decode_window: 3
+
+# --- the FRONTIER sweep block (QIF P7.4, D29-D32). Owned and strict-keyed by
+# --- tools/fws_qif_dse.py, which strips it before the config parser sees the
+# --- file.
+#
+# THE AXES (regime v2). Digital provisioning is NOT among them: D31 derives the
+# scan/vector engine from the beat at every point and D32 prices it, and the
+# per-macro pools, from the measured synthesis library.
+#
+#   layers_per_chip - STAGE GRANULARITY. The default stage plan is one stage per
+#     analog chip (fws_mapping.stage_partition), so this one number moves the
+#     chip split, the stage count, D, the beat and the per-stage state bill all
+#     at once. It is the only axis here that buys throughput. Granite-4.0-H-Tiny
+#     has 40 layers, so every rung divides 40.
+#   arrays_per_chip - CHIP CAPACITY: the macro slots a chip offers. Under
+#     Invariant W (D27) the dense packer decides the analog macro count and the
+#     mapper never chooses it, so the only way a POINT spends analog silicon is
+#     by enumerating slots no tensor lands on: this is the AREA axis. Note what
+#     the invariant does and does not say. The global cell floor is a LOWER
+#     BOUND (Granite: 2876 macros), not the packed count: a per-chip packer
+#     cannot reach it once the layers are split across chips, and every point of
+#     this sweep reports its own cell census - macros, floor and waste% - so the
+#     gap is a number and not a claim. It is also NOT what makes the analog term
+#     constant along the front: that is the ladder settling on one slot count on
+#     every non-dominated point, larger-capacity candidates being dominated
+#     because unowned slots buy no throughput. The rungs are the TIGHT DENSE
+#     capacity for each granularity rung, ESTIMATED and then checked by the
+#     sweep itself. Under the dense law a Granite layer costs about 120.6
+#     macros at bank_depth 1 - measured, not assumed: the packer places 483
+#     macros for a 4-layer chip and 965 for an 8-layer one - so the rungs are
+#     ceil(L x 120.625) for L in the layers_per_chip axis: 121, 242, 483, 604,
+#     965, 1207, 2413. Three more stand beside them: 640, the capacity the
+#     shipped machine declares (and the initializer's rung), and 1400 and 2800,
+#     which give the coarser plans room at bank_depth 2 and 4, where a layer
+#     costs 137.2 and 138.6 macros instead.
+#     A rung that falls a macro short is NOT a bug and is not hidden: the
+#     placement refuses it BY NAME with the slot count it actually wanted, and
+#     repair_axis retries at the smallest rung that admits it - both rows stay
+#     in the report. The checked-in curve shows exactly that happening, and the
+#     refusals are where the true tight capacities are written down: 4 layers
+#     need 484 (not 483), 5 need 605 (not 604) and 8 need 968 (not 965), the
+#     few-macro remainder being the per-chip tail the linear rate does not
+#     carry. Tightening the rungs to those three numbers is a REAL improvement
+#     to the area axis and is left for the next wave rather than done here on a
+#     curve nobody has re-walked.
+#   bank_depth - the analog card's allocation granularity in mux slots. The card
+#     declares adc_mux = 4, so 1, 2 and 4 are the depths it admits and a depth it
+#     does not divide is refused BY THE CARD.
+#
+# WHAT IS NOT AN AXIS HERE, AND WHY (D28 names digital chiplet count, engine
+# widths and pool widths as first-class sweep axes):
+#   * ENGINE WIDTH is retired by D31 - derived from the beat at every point.
+#   * POOL WIDTH is derived by D12 from the measured concurrency.
+#   * CHIPLET COUNT is a supported axis (mapping.shared_chiplets) and this sweep
+#     deliberately does not declare it: the count is DERIVED one-per-analog-chip,
+#     so it moves with layers_per_chip. Read the consequence honestly - the whole
+#     area SPREAD of this front is D x (per-chiplet composed area), because the
+#     analog term and the pool term are the same on every front point.
+#     arrays_per_chip is therefore a TRIM (it finds the tight capacity) rather
+#     than a spread-producing axis: extra capacity is unowned slots with no
+#     throughput return, so a larger-capacity candidate is always dominated.
+#
+# repair_axis: stage granularity and chip capacity are not independent - a chip
+# has to hold the layers its stage owns - so a granularity step the placement
+# refuses is retried at the SMALLEST declared capacity that admits it, and both
+# the refusal and the repaired point stay in the report.
+#
+# max_stage_state_bytes: 67108864 B is this config's own declared on-chip L2
+# tier (tech_param.SRAM-L2.size, 64 MiB), taken as the per-stage residency
+# BUDGET for this sweep. It is a DECLARED sweep constraint, not a measured
+# capacity and not a margin (D28); the evaluator's own residency verdict is
+# taken against this SAME on-chip tier (state_bill.onchip_tier_verdict) and the
+# 8 GiB activation stub (tech_param.DRAM.size) rides beside it as
+# state_bill.activation_tier_verdict. D29 makes this the question that decides a stage
+# plan: every stage holds ALL D streams' recurrent state and KV for its layers.
+mapping_dse:
+  label: "Granite-4.0-H-Tiny: the D29 frontier - stage granularity x chip capacity x bank depth"
+  objective: throughput
+  search: ladder
+  repair_axis: arrays_per_chip
+  max_stage_state_bytes: 67108864
+  initializer:
+    layers_per_chip: 4
+    arrays_per_chip: 640
+    bank_depth: 1
+  axes:
+    layers_per_chip: [20, 10, 8, 5, 4, 2, 1]
+    arrays_per_chip: [121, 242, 483, 604, 640, 965, 1207, 1400, 2413, 2800]
+    bank_depth: [1, 2, 4]

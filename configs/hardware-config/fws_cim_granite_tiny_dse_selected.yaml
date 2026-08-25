@@ -7,7 +7,7 @@
 # sweep base:  configs/hardware-config/fws_cim_granite_tiny_dse.yaml
 # model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
 # candidate:   c006 (vector_lanes = 4096, bank_depth = 1)
-# headline:    6110.95 tokens/s, measured on this point's own timeline by fws_eval
+# headline:    25673.8 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
@@ -40,6 +40,7 @@ cim:
       bank_depth: 1
     sa:
       kind: digital_chiplet
+      synthesis_library: 22nm
       vector_lanes: 4096
 sw_param:
   full_recomputation: false
@@ -157,4 +158,5 @@ inference:
 mapping:
   parallelism:
     tp: 1
+  packing: dense
   decode_window: 3

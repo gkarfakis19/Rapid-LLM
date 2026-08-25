@@ -1,0 +1,47 @@
+# Llama2-7B DECODE variant for the fws_cim MAPPED path (QIF P7.7, D29/D30).
+#
+# It is llama2_7b_fws_inf.yaml with the two fields the FILLED PIPELINE fixes:
+#
+#   global_batch_size: 1            — D29 removes batch size from the fws
+#     serving surface entirely. The pipeline is ALWAYS FULL: decode is
+#     independent streams staggered across the PP stages, one token exits per
+#     beat, every analog op fires at M = 1, and throughput comes from the
+#     resident stream count D, which IS the stage count and is DERIVED.
+#   disable_embedding_unembedding: true — D30 drops embedding and lm_head
+#     entirely on this path; declaring them is refused by name.
+#
+# The ORIGINAL file is untouched on purpose: it is the workload of the pass-1/2
+# CLOSED FORM and of the ADJ-8 bridge, which model the retired lockstep regime
+# (a batch of same-length requests stepping through the whole model together).
+# Changing its batch would have moved a frozen gate; this file is the D29 twin
+# instead, and the two are never used for one number.
+model_param:
+  mode: "LLM"  # Mode of operation
+  run_type: "inference" # Type of run: "training" or "inference"
+  tied_embeddings: true  # Share input and output embedding weights (WIP: affects memory estimation only)
+  model_type: "llama"  # llama assumes llama-style architecture with SwiGLU
+  global_batch_size: 1  # D29: the local batch is always 1 and a batch does not exist here
+  disable_embedding_unembedding: true  # D30: embedding and lm_head are dropped entirely
+  gradient_accumulation_steps: 1  # Number of gradient accumulation micro-steps per optimizer update
+  seq_len: 2048  # Total context length (prefill + decode_len for inference)
+  decode_len: 256 # Decode tokens; sample_every -1 prices only the first+last steps, and 256 spans several systolic tile bins so decode attention visibly grows with context
+  hidden_dim: 4096 # Transformer hidden dimension
+  attention: # Attention-related parameters
+    attention_type: "mha"  # fws_cim supports "mha" or "gqa" ("mla" is rejected)
+    num_heads: 32 # Total number of attention heads
+    kv_heads: 8  # Number of key/value heads (used only when attention_type = "gqa")
+    use_flashattention: false # fws_cim prices attention on the digital fabric; flash is rejected
+    attention_tile_size: 128  # Tile size used in attention computation
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0
+  intermediate_size: 11008 # Output dimension of the first FFN layer (typically 4×hidden_dim)
+  vocab_size: 32000  # Vocabulary size
+  num_layers: 32 # Number of transformer layers
+
+inference_param:
+  sample_every: -1  # Price only the first and last decode steps (fast smoke)

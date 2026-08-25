@@ -517,12 +517,39 @@ def print_comparison(t3_report, table):
 # ---------------------------------------------------------------------------
 
 
+def _exists_after_nfs_settle(path, attempts=6, delay=0.5):
+    """os.path.exists with a bounded retry (P7.9).
+
+    run_perf rmtree()s and recreates output/<mode> under the repo root and the
+    caller stats a path inside it the moment the subprocess returns. On this
+    NFS-backed checkout the directory intermittently reads back EMPTY even
+    though the write succeeded, which produced the misleading pair "run_perf
+    exit code: 0 / report written: NO" and turned the standing gate red for an
+    infrastructure reason (seen once in eight identical invocations). Re-stat
+    a few times, listing the parent to force revalidation of the cached
+    directory entry, before believing the absence. This changes no check's
+    MEANING: a report that was never written is still absent after the retries.
+    """
+    import time
+
+    for attempt in range(attempts):
+        if os.path.exists(path):
+            return True
+        try:
+            os.listdir(os.path.dirname(path) or ".")
+        except OSError:
+            pass
+        if attempt + 1 < attempts:
+            time.sleep(delay)
+    return os.path.exists(path)
+
+
 def _read_llm_report(name, table):
     """Read output/LLM/fws_cim_report.json right after a run (runs clobber it)."""
     if not table.boolean(
         "%s: fws_cim_report.json written (output/LLM)" % name,
         "exists",
-        os.path.exists(LLM_FWS_REPORT),
+        _exists_after_nfs_settle(LLM_FWS_REPORT),
     ):
         return None
     with open(LLM_FWS_REPORT) as handle:
@@ -863,6 +890,13 @@ QIF_DSE_TOOL = os.path.join(REPO_ROOT, "tools", "fws_qif_dse.py")
 QIF_DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_qif_dse")
 QIF_DSE_DEMO = os.path.join(
     REPO_ROOT, "docs", "qif", "dse", "granite_lanes_banks", "dse_report.json"
+)
+#: QIF P7.4/P7.5 — the regime-v2 FRONTIER curves (D29-D32). Read, not rerun:
+#: `tests/test_qif_frontier.py` re-walks each ladder and compares it, so the
+#: rows here are about WHAT THE FRONTIER FOUND.
+QIF_FRONTIER_CURVES = (
+    ("Granite-4.0-H-Tiny", "granite_4_0_h_tiny_frontier"),
+    ("Qwen3.5-4B", "qwen3_5_4b_frontier"),
 )
 QIF_DSE_DEMO_SELECTED = os.path.join(
     HW_DIR, "fws_cim_granite_tiny_dse_selected.yaml"
@@ -1245,7 +1279,9 @@ def check_bridge_gate(table):
             continue
         report_path = os.path.join(REPO_ROOT, "output", mode, "fws_cim_report.json")
         if not table.boolean(
-            "%s: closed-form report written" % label, "exists", os.path.exists(report_path)
+            "%s: closed-form report written" % label,
+            "exists",
+            _exists_after_nfs_settle(report_path),
         ):
             continue
         with open(report_path) as handle:
@@ -1381,12 +1417,31 @@ def check_qif_dse_selection(table):
         payload["selected_id"] in payload["front_ids"],
         "front=%s (%s)" % (payload["front_ids"], payload["front_shape"]),
     )
+    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: the shape is "flat_area" because
+    # every candidate carries the same silicon. That was true while the shared
+    # digital card declared area_mm2: 0 — Wave D's own note said so, and P7.6
+    # named the missing field. D32 composes the chiplet area from measured
+    # synthesis blocks, so a wider engine costs real mm2 and the front SPREADS.
+    # The row still checks that the shape is READ OFF THE DATA, which is what it
+    # was always for; it just no longer hard-codes which answer the data gives.
+    areas = {round(c["silicon"]["total_silicon_mm2"], 9) for c in payload["candidates"]}
     table.boolean(
         "%s: the front's shape is read off the data" % name,
-        "flat_area: every valid candidate carries the same silicon",
-        payload["front_shape"] == "flat_area"
-        and len({round(c["silicon"]["total_silicon_mm2"], 9) for c in payload["candidates"]}) == 1,
-        payload["front_shape"],
+        "spread when the candidates carry different silicon, flat_area when they do not",
+        (payload["front_shape"] == "spread" and len(areas) > 1)
+        or (payload["front_shape"] == "flat_area" and len(areas) == 1),
+        "%s over %d distinct silicon values" % (payload["front_shape"], len(areas)),
+    )
+    table.boolean(
+        "%s: the silicon axis moves with the DIGITAL term only" % name,
+        "Invariant W pins the analog floor, so every mm2 of the spread is digital",
+        len({round(c["silicon"]["analog_macro_silicon_mm2"], 9) for c in payload["candidates"]})
+        == 1
+        and all(
+            c["silicon"]["shared_digital_area_provenance"] == "composed-measured"
+            for c in payload["candidates"]
+        ),
+        "analog fixed, digital composed from measured synthesis (D32)",
     )
     table.boolean(
         "%s: infeasible candidates recorded, not dropped" % name,
@@ -1404,14 +1459,47 @@ def check_qif_dse_selection(table):
     note = payload["front_note"]
     slots = {c["silicon"]["analog_macro_slots"] for c in valid_rows}
     chiplets = {c["placement"]["shared_digital_chiplets"] for c in valid_rows}
+    # WAVE F REWRITE (D32, P7.8): the slot-count / chiplet-count clause belongs
+    # to the FLAT_AREA note, which is the only one Wave D could produce. The
+    # note must still be DERIVED from these rows whatever shape they take, so
+    # each shape is checked against its own claim.
+    if payload["front_shape"] == "flat_area":
+        note_ok = (
+            len(slots) == 1
+            and len(chiplets) == 1
+            and ("slot count is %d" % list(slots)[0]) in note
+            and ("chiplet count is %d" % list(chiplets)[0]) in note
+        )
+        note_says = "slots=%s chiplets=%s" % (sorted(slots), sorted(chiplets))
+    else:
+        corners = {
+            (
+                round(
+                    [c for c in valid_rows if c["id"] == pid][0]["metrics"]["tokens_per_s"],
+                    12,
+                ),
+                round(
+                    [c for c in valid_rows if c["id"] == pid][0]["silicon"]["total_silicon_mm2"],
+                    12,
+                ),
+            )
+            for pid in payload["front_ids"]
+        }
+        note_ok = (
+            len(corners) > 1
+            and ("%d non-dominated points" % len(payload["front_ids"])) in note
+            and ("%d distinct" % len(corners)) in note
+        )
+        note_says = "%d front points over %d corners" % (
+            len(payload["front_ids"]),
+            len(corners),
+        )
     table.boolean(
-        "%s: the front's note names the CONSTANT terms" % name,
-        "the enumerated slot count and the chiplet count, both read off the rows",
-        len(slots) == 1
-        and len(chiplets) == 1
-        and ("slot count is %d" % list(slots)[0]) in note
-        and ("chiplet count is %d" % list(chiplets)[0]) in note,
-        "slots=%s chiplets=%s" % (sorted(slots), sorted(chiplets)),
+        "%s: the front's note is DERIVED from its own shape" % name,
+        "flat_area names the constant slot and chiplet counts; spread names the "
+        "non-dominated points and the distinct corners it actually has",
+        note_ok,
+        note_says,
     )
     tile_counts = {c["placement"]["tiles"] for c in valid_rows}
     table.boolean(
@@ -1426,14 +1514,25 @@ def check_qif_dse_selection(table):
     # WAVE D AUDIT: what banking actually moves. ADJ-4 prices ACTIVE column
     # sets; the STRANDED columns do not move at all, so any account of the
     # banking win that credits wasted columns is wrong.
+    #
+    # P7.9 REWRITE. The old row also asserted the MACRO COUNT is identical
+    # across the sweep. That was a fact about the DEDICATED law, where every
+    # tensor rounds up to its own whole macros; this sweep now declares D27's
+    # DENSE law, under which a finer bank really does recover macros (4828 at
+    # bank_depth 1 against 5488 at 2). The claim that matters is unchanged and
+    # is the one kept here: the stranded columns and the enumerated SLOT count
+    # — the silicon a point buys — do not move, so the ENERGY win belongs to
+    # the active-column-set law and not to recovered waste.
     table.boolean(
-        "%s: unowned columns are IDENTICAL across the sweep" % name,
-        "banking changes active column sets, not stranded ones (ADJ-4)",
+        "%s: unowned columns and enumerated slots are IDENTICAL across the sweep" % name,
+        "banking changes active column sets, not stranded ones (ADJ-4); the "
+        "macro count DOES move, because D27's dense law is in force",
         len({c["placement"]["unowned_columns"] for c in valid_rows}) == 1
-        and len({c["placement"]["macros_holding_tiles"] for c in valid_rows}) == 1,
-        "unowned=%s macros=%s"
+        and len({c["placement"]["analog_macro_slots"] for c in valid_rows}) == 1,
+        "unowned=%s slots=%s macros=%s"
         % (
             sorted({c["placement"]["unowned_columns"] for c in valid_rows}),
+            sorted({c["placement"]["analog_macro_slots"] for c in valid_rows}),
             sorted({c["placement"]["macros_holding_tiles"] for c in valid_rows}),
         ),
     )
@@ -1459,23 +1558,42 @@ def check_qif_dse_selection(table):
 
     # WAVE D AUDIT: D21 wants the relaxation disclosed in the ARTIFACT, and
     # the MD is the artifact a human reads.
+    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: the accounting always has an
+    # uncovered term to name, because the digital card declared no area law.
+    # NEW CLAIM: the accounting always states its PROVENANCE — an uncovered
+    # term is named as an ABSENT law, a covered one names the measured library
+    # it was composed from. A silent number is what stays forbidden, in either
+    # direction.
     coverage = payload.get("silicon_coverage") or {}
+    uncovered = coverage.get("uncovered_terms") or []
     table.boolean(
-        "%s: the silicon accounting names its uncovered terms" % name,
-        "silicon_coverage.uncovered_terms is non-empty and named",
-        bool(coverage.get("uncovered_terms")),
-        "; ".join(coverage.get("uncovered_terms", [])) or "(none)",
+        "%s: the silicon accounting states its provenance" % name,
+        "uncovered terms are named as an absent law; a covered term names the "
+        "measured library it was COMPOSED from (D32)",
+        bool(uncovered)
+        or ("COMPOSED area" in coverage.get("basis", "") and "D32" in coverage.get("basis", "")),
+        "; ".join(uncovered) or "covered: composed from the measured 22nm library",
     )
     demo_md = os.path.join(os.path.dirname(QIF_DSE_DEMO), "dse_report.md")
     if os.path.exists(demo_md):
         with open(demo_md) as handle:
             md_text = handle.read()
+        if uncovered:
+            md_ok = (
+                "silicon_accounting" in md_text
+                and "silicon_uncovered" in md_text
+                and all(term in md_text for term in uncovered)
+            )
+        else:
+            md_ok = (
+                "silicon_accounting" in md_text
+                and "silicon_uncovered" not in md_text
+                and "COMPOSED area" in md_text
+            )
         table.boolean(
             "%s: the MD carries the coverage, not only the JSON" % name,
-            "silicon_accounting + silicon_uncovered in the Disclosures section",
-            "silicon_accounting" in md_text
-            and "silicon_uncovered" in md_text
-            and all(term in md_text for term in coverage.get("uncovered_terms", ["-"])),
+            "the Disclosures section states the accounting and its provenance",
+            md_ok,
             "%d chars" % len(md_text),
         )
 
@@ -1646,6 +1764,707 @@ def check_qif_dse_verify(table):
     )
 
 
+def check_qif_synthesis_library(table):
+    """QIF P7.8 rows: the measured synthesis library (D32) and derived sizing (D31).
+
+    In-process, on the ADJ-1 headline model, and deliberately after every row
+    that reads an artifact. Two questions: is the digital silicon a COMPOSITION
+    of measured blocks (and does it say what it does not cover), and is the
+    engine width DERIVED from the beat rather than declared (and is the derived
+    width the smallest one that holds it)?
+    """
+    name = "P7.8 library"
+    sys.path.insert(0, REPO_ROOT)
+    import cim_timing as _cim_timing
+    import config as _config
+    import fws_eval as _fws_eval
+    import fws_mapping as _fws_mapping
+    from program.fws_build import build_fws_program as _build_fws_program
+
+    lib = _cim_timing.SynthesisLibrary.load("22nm")
+    optima_lib = os.path.join(
+        "/app/nanocad/projects/cim_ctt_big_optima/perf_model/configs",
+        "digital_hw_components_22nm.yaml",
+    )
+    table.exact(
+        "%s: the checked-in library names its synthesis source" % name,
+        (optima_lib, True),
+        (lib.source, "reports_22nm" in lib.source_reports),
+    )
+    table.boolean(
+        "%s: every block carries a measured provenance" % name,
+        "area_um2 + power_W + 'measured via synthesis, 22nm' on all 13 blocks",
+        len(lib.blocks) == 13
+        and all(
+            block.provenance == "measured via synthesis, 22nm"
+            and block.area_um2 >= 0
+            and block.power_w >= 0
+            for block in lib.blocks.values()
+        ),
+        "%d blocks" % len(lib.blocks),
+    )
+    refused = ""
+    try:
+        lib.block("NO_SUCH_BLOCK")
+        refused = "a block the library does not name was ANSWERED"
+    except _cim_timing.SynthesisLibraryError as exc:
+        if "NO_SUCH_BLOCK" not in str(exc) or "no default block" not in str(exc):
+            refused = "the refusal does not name the block and the no-default rule"
+    table.boolean(
+        "%s: an unnamed block is refused BY NAME (D32/ADJ-4)" % name,
+        "no default block, no substitute, no zero-fill",
+        not refused,
+        refused or "refused, naming the block and the library",
+    )
+
+    # The compositions, checked against the same hand arithmetic the tests use.
+    lane_um2 = (
+        lib.block("FP_MULT").area_um2
+        + lib.block("FP_ADD").area_um2
+        + lib.block("M_REG").area_um2
+    )
+    table.close(
+        "%s: 220 scan lanes == 220 x (FP_MULT + FP_ADD + M_REG)" % name,
+        220 * lane_um2 / 1e6,
+        _cim_timing.compose_vector_engine(lib, 220).area_mm2,
+    )
+    fabric = _cim_timing.compose_sa_fabric(lib, 32, 64, 2, 1)
+    table.exact(
+        "%s: a 32x64 x2-array fabric is 4 measured GEMMINI blocks" % name,
+        {"GEMMINI_SYS_ARRAY": 4, "TRANSPOSER": 1},
+        dict(fabric.blocks),
+    )
+    softmax = _cim_timing.compose_softmax_engine(lib, 4, 2)
+    table.exact(
+        "%s: the softmax census is OPTIMA's, term for term" % name,
+        {"FP_COMP": 6, "FP_ADD": 14, "FP_MULT": 16, "BF16_EXP": 8, "BF16_RECIP": 2},
+        dict(softmax.blocks),
+    )
+    table.boolean(
+        "%s: OPTIMA's overhead pads are recorded and NOT applied (D28)" % name,
+        "composed area == the bare sum of count x measured area",
+        abs(
+            softmax.area_mm2
+            - sum(unit.count * unit.unit_area_mm2 for unit in softmax.units)
+        )
+        <= 1e-15
+        and _cim_timing.OPTIMA_COLLECTION_OVERHEADS["Softmax_Stage2"] == 0.2,
+        "the 0.2 softmax pad is named and dropped",
+    )
+
+    # The derivation, on the headline model's own run.
+    hw_path = os.path.join(HW_DIR, "fws_cim_granite_tiny.yaml")
+    model_path = os.path.join(MODEL_DIR, "granite_4_0_h_tiny_inf.yaml")
+    hw_raw = load_yaml(hw_path)
+    _config.convert(hw_raw)
+    hw = _config.HWConfig.from_dict(hw_raw)
+    model = _config.parse_config(model_path, "LLM")
+    mapping = _fws_mapping.build_mapping(hw, model)
+    evaluation = _fws_eval.evaluate_fws(_build_fws_program(mapping), mapping)
+    device = mapping.device
+    sizing = device.derived_engine
+
+    table.boolean(
+        "%s: the headline card DECLARES no engine, and one is DERIVED (D31)" % name,
+        "cim.cards.sa carries no vector_lanes; the width comes from the beat",
+        device.digital_card.has_vector_engine is False
+        and sizing is not None
+        and device.vector_lanes_provenance == _cim_timing.PROVENANCE_DERIVED_COUNT,
+        "vector_lanes = %s (%s)"
+        % (device.vector_lanes, device.vector_lanes_provenance),
+    )
+    binding = [row for row in sizing.per_stage if row.stage == sizing.binding_stage][0]
+    table.boolean(
+        "%s: the derived width HOLDS the analog beat" % name,
+        "the binding stage's own priced vector time fits inside the analog beat",
+        binding.time_s <= sizing.analog_beat_s
+        and binding.used_cycles <= binding.budget_cycles,
+        "%.6g s of digital in a %.6g s analog beat" % (binding.time_s, sizing.analog_beat_s),
+    )
+    table.boolean(
+        "%s: and it is the SMALLEST width that does (no margin, D28)" % name,
+        "one lane fewer overruns the beat on the binding stage",
+        _cim_timing.vector_cycles_at(
+            binding.ops, sizing.vector_lanes - 1, sizing.pipeline_depth
+        )
+        > binding.budget_cycles,
+        "%d lanes; %d would not fit" % (sizing.vector_lanes, sizing.vector_lanes - 1),
+    )
+    table.exact(
+        "%s: the derivation is the pricing law inverted" % name,
+        _cim_timing.vector_cycles_at(
+            binding.ops, sizing.vector_lanes, sizing.pipeline_depth
+        ),
+        binding.used_cycles,
+    )
+    table.boolean(
+        "%s: the derived sizing is REPORTED, not only applied (D31)" % name,
+        "a derived_engine_sizing disclosure and an evaluation.digital_silicon block",
+        any(
+            item.constraint == "derived_engine_sizing" for item in evaluation.disclosures
+        )
+        and _fws_eval.report_document(evaluation)["evaluation"]["digital_silicon"][
+            "vector_lanes"
+        ]
+        == sizing.vector_lanes,
+        "%d lanes, binding stage %d" % (sizing.vector_lanes, sizing.binding_stage),
+    )
+
+    silicon = _fws_eval.report_document(evaluation)["evaluation"]["digital_silicon"]
+    parts = device.shared_digital_compositions()
+    table.close(
+        "%s: the chiplet area IS the sum of its measured blocks" % name,
+        sum(part.area_mm2 for part in parts),
+        silicon["shared_digital_chiplet"]["area_mm2_per_chiplet"],
+    )
+    table.boolean(
+        "%s: digital area and power are labelled per component" % name,
+        "every composed row names where its COUNT and its per-unit silicon came from",
+        all(
+            unit["unit_provenance"].startswith("measured via synthesis")
+            and unit["count_provenance"]
+            in (
+                _cim_timing.PROVENANCE_DERIVED_COUNT,
+                _cim_timing.PROVENANCE_DECLARED_COUNT,
+            )
+            for engine in silicon["shared_digital_chiplet"]["engines"]
+            for unit in engine["units"]
+        ),
+        "%d engines composed" % len(silicon["shared_digital_chiplet"]["engines"]),
+    )
+    table.boolean(
+        "%s: the composed area says what it does NOT cover (D21/D28)" % name,
+        "activation SRAM / interconnect / control are named as absent, not padded",
+        any("LOWER BOUND" in note for note in silicon["disclosures"])
+        and any("activation SRAM" in note for note in silicon["disclosures"]),
+    )
+    digital_energy = [
+        component
+        for component in evaluation.energy
+        if component.key == "shared_digital_chiplet"
+    ][0]
+    table.boolean(
+        "%s: shared-digital ENERGY stopped being uncovered (D32)" % name,
+        "priced from the composed engine's measured power, labelled partial "
+        "because the library reports one average power and no leakage split",
+        digital_energy.energy_pj > 0 and digital_energy.coverage == "partial",
+        "%.6g pJ, %s" % (digital_energy.energy_pj, digital_energy.coverage),
+    )
+
+
+def check_qif_filled_pipeline(table):
+    """QIF P7.7 rows: the FILLED PIPELINE serving regime (D29/D30).
+
+    In-process, on the ADJ-1 headline model. Every row is a reading off the one
+    timeline or a refusal the surface makes by name; nothing here re-derives a
+    number the report already owns.
+    """
+    name = "P7.7 pipeline"
+    sys.path.insert(0, REPO_ROOT)
+    import config as _config
+    import fws_eval as _fws_eval
+    import fws_mapping as _fws_mapping
+    from program.fws_build import (
+        LAW_ANALOG_GEMM as _LAW_ANALOG_GEMM,
+        annotations_of as _annotations_of,
+        build_fws_program as _build_fws_program,
+    )
+
+    hw_path = os.path.join(HW_DIR, "fws_cim_granite_tiny.yaml")
+    model_path = os.path.join(MODEL_DIR, "granite_4_0_h_tiny_inf.yaml")
+    hw_raw = load_yaml(hw_path)
+    _config.convert(hw_raw)
+    hw = _config.HWConfig.from_dict(hw_raw)
+    model = _config.parse_config(model_path, "LLM")
+    mapping = _fws_mapping.build_mapping(hw, model)
+    evaluation = _fws_eval.evaluate_fws(_build_fws_program(mapping), mapping)
+    pipeline = evaluation.pipeline
+    residency = evaluation.state_residency
+    metrics = {metric.key: metric.value for metric in evaluation.metrics}
+
+    table.exact(
+        "%s: a mapped config is a filled pipeline (D29)" % name,
+        _fws_mapping.REGIME_FILLED,
+        mapping.regime,
+    )
+    table.exact(
+        "%s: D = the stage count = the analog chips" % name,
+        (len(mapping.analog_chips()), len(mapping.analog_chips())),
+        (mapping.resident_streams, len(mapping.stages)),
+    )
+    beat = float(pipeline["beat_s"])
+    table.close(
+        "%s: tokens/s == 1 / beat" % name, 1.0 / beat, metrics["sys.fws.tokens_per_s"]
+    )
+    table.close(
+        "%s: per-stream rate == 1 / (D x beat)" % name,
+        1.0 / (beat * mapping.resident_streams),
+        metrics["sys.fws.per_stream_tokens_per_s"],
+    )
+    table.exact(
+        "%s: one token exits per beat over the steady window" % name,
+        # steady + 2 traversals complete: the extra one is what makes the
+        # transient interval holdable-out and still leaves `steady` of them.
+        int(evaluation.serving.steady_beats) + 2,
+        int(pipeline["tokens_exited"]),
+    )
+    intervals = list(pipeline["steady_beat_intervals_s"])
+    spread = (
+        max(abs(value - beat) for value in intervals) / beat if intervals else 1.0
+    )
+    tail = (
+        abs(intervals[-1] - intervals[-2]) / beat if len(intervals) >= 2 else 1.0
+    )
+    # WAVE F REWRITE (D31, P7.8). OLD CLAIM: "every STEADY exit interval IS the
+    # beat" to 1e-3. That held while the digital side was fast enough to make
+    # every stage's service time nearly equal — Granite's card DECLARED 1024
+    # scan lanes. D31 derives the width instead (220 lanes), the digital half of
+    # a stage becomes comparable to the analog half, and the UNEVEN stage plan
+    # (4-layer and 3-layer stages) then shows up as a longer ramp: the fill
+    # allowance of D - 1 beats is exact only for equal stages. NEW CLAIM: the
+    # exits CONVERGE — they approach the beat monotonically and the last two
+    # agree to 1e-3 — and a run whose sample still contains ramp SAYS SO by
+    # name. That is a check on the measurement, not a tolerance widened to fit.
+    monotone = all(
+        intervals[i] <= intervals[i + 1] * (1 + 1e-12)
+        for i in range(len(intervals) - 1)
+    ) or all(
+        intervals[i] >= intervals[i + 1] * (1 - 1e-12)
+        for i in range(len(intervals) - 1)
+    )
+    table.boolean(
+        "%s: the exits CONVERGE to the beat inside the window" % name,
+        "the steady intervals approach the beat monotonically and the last two agree "
+        "to <= 1e-3; the fill allowance is D - 1 beats, which is exact only when every "
+        "stage has the same service time",
+        bool(intervals) and monotone and tail <= 1e-3,
+        "%d steady intervals, %d held out as the fill transient, spread %.2e, last two "
+        "agree to %.2e" % (
+            len(intervals),
+            len(pipeline["transient_beat_intervals_s"]),
+            spread,
+            tail,
+        ),
+    )
+    # P7.9 REWRITE. OLD CLAIM: beat_converged is true exactly when the WHOLE
+    # steady sample is within 1e-3, and a wider spread rides a
+    # pipeline_beat_still_converging disclosure. That pairing existed because
+    # the beat was the median of the whole sample, ramp included, which made
+    # the headline move 12% with the window size. NEW CLAIM: the beat is the
+    # median of the SETTLED TAIL, converged means that tail holds at least two
+    # intervals that agree, and every interval dropped as ramp is printed and
+    # rides beat_read_from_the_converged_tail. The spread of the whole sample is
+    # still reported and is still allowed to be large — it is the ramp, named.
+    ramp = list(pipeline["ramp_beat_intervals_s"])
+    settled = list(pipeline["converged_tail_intervals_s"])
+    table.boolean(
+        "%s: the beat is the SETTLED TAIL and every dropped ramp says so BY NAME" % name,
+        "beat_converged means >= 2 agreeing intervals; a dropped ramp interval rides a "
+        "beat_read_from_the_converged_tail disclosure and is printed in the pipeline block",
+        bool(pipeline["beat_converged"]) == (len(settled) >= 2)
+        and settled == list(pipeline["steady_beat_intervals_s"])[len(ramp):]
+        and bool(ramp)
+        == any(
+            item.constraint == "beat_read_from_the_converged_tail"
+            for item in evaluation.disclosures
+        ),
+        "converged=%s over %d settled interval(s), %d dropped as ramp, whole-sample "
+        "spread %.2e" % (pipeline["beat_converged"], len(settled), len(ramp), spread),
+    )
+    annotations = _annotations_of(evaluation.program)
+    analog_m = {a.tokens for a in annotations if a.law == _LAW_ANALOG_GEMM}
+    table.exact("%s: every analog op fires at M = 1" % name, {1.0}, analog_m)
+    table.boolean(
+        "%s: the streams sit at different contexts in one beat" % name,
+        "more than one context inside the last lowered beat (D29)",
+        len({a.context for a in annotations if a.beat == evaluation.serving.beats - 1})
+        > 1,
+    )
+    table.exact(
+        "%s: every stage holds all D streams (state residency)" % name,
+        (True, mapping.resident_streams, len(mapping.stages)),
+        (
+            bool(residency["measured"]),
+            int(residency["resident_streams"]),
+            int(residency["stages"]),
+        ),
+    )
+    table.close(
+        "%s: total state == D x per-stream model state" % name,
+        residency["total_state_bytes"],
+        residency["per_stream_model_state_bytes"] * mapping.resident_streams,
+    )
+    table.boolean(
+        "%s: the state verdict is named" % name,
+        "fits / VIOLATED / undeclared, per stage and in total",
+        residency["verdict"] in ("fits", "VIOLATED", "undeclared")
+        and all(
+            row["verdict"] in ("fits", "VIOLATED", "undeclared")
+            for row in residency["per_stage"]
+        ),
+        str(residency["verdict"]),
+    )
+    table.boolean(
+        "%s: D30 leaves no endpoint anywhere" % name,
+        "no lm_head owner, tile or op",
+        not mapping.endpoint_blocks
+        and not [t for t in mapping.tiles if t.owner.op == "lm_head"]
+        and not [a for a in annotations if a.block == "lm_head"],
+    )
+
+    # The refusals, by name.
+    refusals = []
+    batched = _config.parse_config(model_path, "LLM")
+    batched.model_config.global_batch_size = 4
+    try:
+        _config.validate_model_config(hw, batched)
+        refusals.append("global_batch_size NOT refused")
+    except ValueError as exc:
+        if "D29" not in str(exc) or "global_batch_size" not in str(exc):
+            refusals.append("batch refusal does not name the field and D29")
+    endpoints = _config.parse_config(model_path, "LLM")
+    endpoints.model_config.disable_embedding_unembedding = False
+    try:
+        _config.validate_model_config(hw, endpoints)
+        refusals.append("endpoints NOT refused")
+    except ValueError as exc:
+        if "D30" not in str(exc) or "disable_embedding_unembedding" not in str(exc):
+            refusals.append("endpoint refusal does not name the field and D30")
+    try:
+        _config.MappingConfig.from_dict({"batch": 4})
+        refusals.append("mapping.batch NOT refused")
+    except ValueError as exc:
+        if "refused BY NAME (D29)" not in str(exc):
+            refusals.append("mapping.batch refusal does not cite D29")
+    table.boolean(
+        "%s: batch and endpoints are refused BY NAME" % name,
+        "model_param.global_batch_size (D29), disable_embedding_unembedding (D30), "
+        "mapping.batch (D29)",
+        not refusals,
+        "; ".join(refusals) or "3 refusals, each naming its field",
+    )
+
+
+def check_qif_frontier(table):
+    """QIF P7.4/P7.5 rows: the (area, tokens/s) FRONTIER under regime v2.
+
+    Read, not rerun: `tests/test_qif_frontier.py` re-walks each ladder end to
+    end and compares the artifact, so the rows here are about WHAT THE SWEEP
+    FOUND — that the walk was a ladder and not a cross product, that every
+    point carries D29's own quantities (D, the beat, the per-stage state bill),
+    that the silicon accounting closes over its three terms with the digital
+    ones composed from measured synthesis, that the front is a front, that the
+    knee is the bend in it, and that a point refused for residency is refused
+    with its stage and its bytes rather than with a word.
+    """
+    for model_id, folder in QIF_FRONTIER_CURVES:
+        name = "P7.4 frontier %s" % model_id
+        path = os.path.join(REPO_ROOT, "docs", "qif", "dse", folder, "dse_report.json")
+        if not table.boolean(
+            "%s: checked-in curve exists" % name,
+            "docs/qif/dse/%s/dse_report.json" % folder,
+            os.path.exists(path),
+        ):
+            continue
+        with open(path) as handle:
+            payload = json.load(handle)
+        sweep = payload["sweep"]
+        valid = [c for c in payload["candidates"] if c["ok"]]
+
+        # (1) The walk. A ladder, from a declared initializer, that visited
+        # strictly fewer points than the cross product it did NOT enumerate.
+        table.exact("%s: search mode" % name, "ladder", sweep["search"])
+        table.boolean(
+            "%s: the ladder is directional, not a cross product" % name,
+            "visited < the declared cross product, and every visit priced in full",
+            len(payload["candidates"]) < _cross_product_size(sweep["axes"]),
+            "%d visited of %d declared points"
+            % (len(payload["candidates"]), _cross_product_size(sweep["axes"])),
+        )
+        table.boolean(
+            "%s: every accepted step moves ONE axis ONE rung" % name,
+            "|direction| == 1 on every accepted trail entry",
+            all(
+                abs(int(entry["direction"])) == 1
+                for entry in payload["ladder_trail"]
+                if entry.get("accepted") and entry.get("axis")
+            ),
+            "%d accepted steps" % sum(
+                1 for entry in payload["ladder_trail"] if entry.get("accepted")
+            ),
+        )
+
+        # (2) D31: digital provisioning is NOT an axis, and the engine is
+        # derived at every point.
+        table.boolean(
+            "%s: no retired axis is swept (D31)" % name,
+            "the scan/vector engine is derived per point, never declared",
+            not set(sweep["axes"]) & {"vector_lanes"},
+            "axes: %s" % ", ".join(sorted(sweep["axes"])),
+        )
+        table.boolean(
+            "%s: the engine width is DERIVED at every point (D31)" % name,
+            "vector_lanes_provenance is derived on every valid candidate",
+            bool(valid)
+            and all(
+                "derived" in str(c["derived_digital"]["vector_lanes_provenance"])
+                for c in valid
+            ),
+            ", ".join(
+                sorted({str(c["derived_digital"]["vector_lanes"]) for c in valid})
+            )
+            + " lanes over the front",
+        )
+
+        # (3) D29 on every row: tokens/s IS 1/beat, and D IS the stage count.
+        table.boolean(
+            "%s: tokens/s == 1/beat on every point (D29)" % name,
+            "one token exits per beat",
+            bool(valid)
+            and all(
+                abs(c["metrics"]["tokens_per_s"] * c["pipeline"]["beat_s"] - 1.0) < 1e-9
+                for c in valid
+            ),
+            "%d points" % len(valid),
+        )
+        table.boolean(
+            "%s: D is the stage count, derived from the stage plan" % name,
+            "resident_streams == stages on every point",
+            bool(valid)
+            and all(
+                c["state_bill"]["resident_streams"] == c["state_bill"]["stages"]
+                for c in valid
+            ),
+            "D over the sweep: %s"
+            % ", ".join(str(d) for d in sorted({c["state_bill"]["resident_streams"] for c in valid})),
+        )
+
+        # (4) The state bill, and the FINDING it carries: a finer stage plan
+        # holds more resident state, because every stage holds all D streams'.
+        bills = sorted(
+            (c["state_bill"]["resident_streams"], c["state_bill"]["max_stage_state_bytes"])
+            for c in payload["candidates"]
+            if (c.get("state_bill") or {}).get("measured")
+        )
+        table.boolean(
+            "%s: the per-stage state bill RISES with D (D29)" % name,
+            "more resident streams -> more state per stage",
+            bool(bills) and bills[0][1] < bills[-1][1],
+            "%.1f MiB at D=%d to %.1f MiB at D=%d"
+            % (
+                bills[0][1] / 1024.0 ** 2,
+                bills[0][0],
+                bills[-1][1] / 1024.0 ** 2,
+                bills[-1][0],
+            )
+            if bills
+            else "-",
+        )
+
+        # (5) The silicon accounting: three terms, and they close.
+        table.boolean(
+            "%s: total silicon == analog + chiplets + pools" % name,
+            "one accounting, three named terms (D21/D32)",
+            bool(valid)
+            and all(
+                abs(
+                    c["silicon"]["total_silicon_mm2"]
+                    - (
+                        c["silicon"]["analog_macro_silicon_mm2"]
+                        + c["silicon"]["shared_digital_silicon_mm2"]
+                        + c["silicon"]["macro_pool_silicon_mm2"]
+                    )
+                )
+                <= 1e-9 * max(1.0, c["silicon"]["total_silicon_mm2"])
+                for c in valid
+            ),
+            "%d points" % len(valid),
+        )
+        table.boolean(
+            "%s: both digital terms are COMPOSED from measured synthesis (D32)" % name,
+            "shared chiplet and per-macro pool, unit counts x measured area",
+            bool(valid)
+            and all(
+                c["silicon"]["shared_digital_area_provenance"] == "composed-measured"
+                and c["silicon"]["macro_pool_area_provenance"] == "composed-measured"
+                for c in valid
+            ),
+            "no declared placeholder anywhere on the front",
+        )
+        # THE GATE THAT WAS MISSING (P7.9). Nothing here compared an AREA: the
+        # rows above check the sum and the provenance STRING, so the sweep could
+        # (and did) compose the shared chiplet BEFORE pricing — dropping the
+        # D31-derived scan engine from every row while still calling itself
+        # composed-measured. This row compares the sweep's own per-chiplet area
+        # against the simulator's composition for the SAME point, which is the
+        # only reading that can catch it (D21: one accounting per metric).
+        mismatched = [
+            c["id"]
+            for c in valid
+            if (c.get("derived_digital") or {}).get("shared_digital_chiplet_area_mm2")
+            is not None
+            and abs(
+                c["silicon"]["shared_digital_area_mm2_per_chiplet"]
+                - c["derived_digital"]["shared_digital_chiplet_area_mm2"]
+            )
+            > 1e-9
+            * max(1.0, abs(c["derived_digital"]["shared_digital_chiplet_area_mm2"]))
+        ]
+        table.boolean(
+            "%s: the sweep's chiplet area IS the evaluator's composition (D21/D32)" % name,
+            "silicon.shared_digital_area_mm2_per_chiplet == "
+            "derived_digital.shared_digital_chiplet_area_mm2, so the D31 scan "
+            "engine cannot be missing from one of them",
+            bool(valid) and not mismatched,
+            "all %d points agree" % len(valid)
+            if not mismatched
+            else "%d point(s) disagree: %s" % (len(mismatched), ", ".join(mismatched[:5])),
+        )
+        table.boolean(
+            "%s: D27's CELL census rides every priced point" % name,
+            "packing.macros, cell_floor_macros and waste_pct, measured by the "
+            "dense packer at the point's own bank_depth",
+            bool(valid)
+            and all(
+                (c.get("packing") or {}).get("law") == "dense"
+                and c["packing"]["macros"] >= c["packing"]["cell_floor_macros"] > 0
+                and 0.0 <= c["packing"]["waste_pct"] < 100.0
+                for c in valid
+            ),
+            "%d points carry a cell census" % len(
+                [c for c in valid if (c.get("packing") or {}).get("macros")]
+            ),
+        )
+        table.boolean(
+            "%s: Invariant W pins the analog floor per macro (D27)" % name,
+            "one macro footprint over the whole sweep; area moves by SLOT COUNT",
+            len({round(c["silicon"]["macro_footprint_mm2"], 12) for c in valid}) == 1,
+            "%d distinct footprints" % len(
+                {round(c["silicon"]["macro_footprint_mm2"], 12) for c in valid}
+            ),
+        )
+
+        # (6) The front is a front: sorted by area, throughput is monotone and
+        # no point on it dominates another.
+        front = [c for c in payload["candidates"] if c["id"] in payload["front_ids"]]
+        front.sort(key=lambda c: c["silicon"]["total_silicon_mm2"])
+        rates = [c["metrics"]["tokens_per_s"] for c in front]
+        table.boolean(
+            "%s: the front is monotone in (area, tokens/s)" % name,
+            "sorted by area, throughput never falls",
+            len(front) >= 2 and rates == sorted(rates),
+            "%d points: %s"
+            % (len(front), " -> ".join("%.0f" % rate for rate in rates)),
+        )
+        table.exact(
+            "%s: front shape read off the data" % name,
+            True,
+            payload["front_shape"] in ("spread", "flat_area", "dominated_chain", "tied"),
+        )
+
+        # (7) The knee, recomputed here from the front's two axes only.
+        knee = payload["knee"]
+        if len(front) >= 3:
+            areas = [c["silicon"]["total_silicon_mm2"] for c in front]
+            span_a = areas[-1] - areas[0]
+            span_r = max(rates) - min(rates)
+            if span_a > 0 and span_r > 0:
+                distances = dict(
+                    (
+                        c["id"],
+                        (c["metrics"]["tokens_per_s"] - min(rates)) / span_r
+                        - (c["silicon"]["total_silicon_mm2"] - areas[0]) / span_a,
+                    )
+                    for c in front
+                )
+                expected = max(distances, key=lambda cid: distances[cid])
+                table.exact(
+                    "%s: the knee is the front point furthest above its chord" % name,
+                    expected if distances[expected] > 1e-9 else None,
+                    knee["point"],
+                )
+        table.boolean(
+            "%s: the knee is named or refused with a reason" % name,
+            "a point id, or None with the reason it has no bend",
+            knee["point"] is not None or bool(knee["basis"]),
+            str(knee["point"] or knee["basis"][:60]),
+        )
+
+        # (8) Infeasible by residency: a verdict with a stage and bytes.
+        summary = payload["state_bill_summary"]
+        refused = summary["infeasible_by_state"]
+        if summary["budget_bytes"] is None:
+            # No budget declared on this sweep. That is a CHOICE with a reason,
+            # and the row says which choice it is rather than passing a check
+            # that was never made (D21).
+            table.boolean(
+                "%s: no residency budget declared, and the bill is reported anyway" % name,
+                "max_stage_state_bytes absent -> no point refused for residency, "
+                "every point's measured bill still on its row",
+                not refused and summary["points_measured"] > 0,
+                "%d point(s) with a measured bill, 0 refused"
+                % summary["points_measured"],
+            )
+        else:
+            table.boolean(
+                "%s: residency refusals name the stage and the bytes (D29)" % name,
+                "every refused point lists the violating stage(s) over the budget",
+                bool(refused)
+                and all(
+                    row["violating_stages"]
+                    and all(
+                        stage["state_bytes"] > summary["budget_bytes"]
+                        for stage in row["violating_stages"]
+                    )
+                    for row in refused
+                ),
+                "%d point(s) refused by residency, %d by memory"
+                % (len(refused), len(summary["infeasible_by_memory"])),
+            )
+            table.boolean(
+                "%s: a refused point was PRICED before it was refused" % name,
+                "the state check is last, so an infeasible point still reports its "
+                "throughput and its bill",
+                bool(refused)
+                and all(
+                    row["max_stage_state_bytes"] and row["resident_streams"]
+                    for row in refused
+                ),
+                "%.1f MiB at D=%d on the worst refusal"
+                % (
+                    max(row["max_stage_state_bytes"] for row in refused) / 1024.0 ** 2,
+                    max(row["resident_streams"] for row in refused),
+                )
+                if refused
+                else "NO point was refused, although a budget is declared",
+            )
+
+        # (9) D28: utilization at every point, idle devices inside the mean.
+        table.boolean(
+            "%s: per-device-class utilization at every point (D28)" % name,
+            "every valid point carries a row per instantiated class",
+            bool(valid) and all(c["utilization"] for c in valid),
+            "classes: %s"
+            % ", ".join(sorted({row["device_class"] for row in valid[0]["utilization"]})),
+        )
+
+        # (10) The round trip: the emitted machine reproduces the selection.
+        verify = payload["verify"]
+        table.boolean(
+            "%s: --emit-config + --verify round trip" % name,
+            "run_perf on the emitted config reproduces the selected point (<=0.1%)",
+            bool(verify) and verify["pass"],
+            "%d checks" % len(verify["checks"]) if verify else "no verify block",
+        )
+
+
+def _cross_product_size(axes):
+    total = 1
+    for values in axes.values():
+        total *= len(values)
+    return total
+
+
 def main():
     table = CheckTable()
 
@@ -1729,6 +2548,25 @@ def main():
     print("Running the QIF P3.7 mapped-DSE rows (one live sweep + one --verify run_perf)...")
     check_qif_dse_selection(table)
     check_qif_dse_verify(table)
+
+    # QIF P7.7 rows: the filled-pipeline regime (D29/D30). In-process and last,
+    # so no artifact any earlier row reads is touched.
+    print()
+    print("Running the QIF P7.7 filled-pipeline rows (one in-process Granite run)...")
+    check_qif_filled_pipeline(table)
+
+    # QIF P7.8 rows: the measured synthesis library (D32) and the engine width
+    # D31 derives from the beat. In-process, after every artifact-reading row.
+    print()
+    print("Running the QIF P7.8 synthesis-library / derived-sizing rows...")
+    check_qif_synthesis_library(table)
+
+    # QIF P7.4/P7.5 rows: the regime-v2 frontier curves. They READ the two
+    # checked-in artifacts (the pytest suite re-walks and compares them), so
+    # nothing here touches an artifact an earlier row read.
+    print()
+    print("Running the QIF P7.4/P7.5 frontier rows (two checked-in curves, read)...")
+    check_qif_frontier(table)
 
     print()
     print("FWS-CIM validation vs OPTIMA — DESIGN section 5")

@@ -35,7 +35,16 @@ model_param:
   # SwiGLU, which is the `llama` stage shape. The mapping raises a
   # model_type_carrier disclosure that reconciles the two spellings.
   model_type: "llama"
-  global_batch_size: 4
+  # D29/D30 (the filled-pipeline pivot, 2026-08-24). This model runs on the
+  # fws_cim MAPPED path, where the pipeline is ALWAYS FULL: decode is
+  # independent streams staggered across the PP stages, one token exits per
+  # beat, and THE LOCAL BATCH IS ALWAYS 1 — batch size does not exist on that
+  # surface and a value other than 1 is refused by name. Throughput comes from
+  # the resident stream count D, which IS the stage count and is DERIVED.
+  # D30 drops embedding and lm_head entirely, so the endpoints are off and
+  # declaring them is refused by name too.
+  global_batch_size: 1
+  disable_embedding_unembedding: true
   gradient_accumulation_steps: 1
   seq_len: 2048
   decode_len: 256

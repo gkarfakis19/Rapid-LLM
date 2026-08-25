@@ -7,9 +7,13 @@ crash if it rots:
   1. ``mapping.packing`` — the placement law a config DECLARES. The default is
      today's dedicated placement, so nothing shipped moves; dense is opt-in.
   2. Co-residency. Dense packing puts several tensors, and several LAYERS, in
-     one macro. Fact 3 says the layers never get in each other's way because
-     decode runs them in sequence. That is measured here, not asserted — and
-     the same measurement reports what SAME-LAYER co-residency does cost.
+     one macro, and what that costs is MEASURED here, not asserted — including
+     what SAME-LAYER co-residency does cost. The measurement is taken on the
+     LOCKSTEP machine (see the regime note below), where the layers run in
+     sequence; D29's filled pipeline splits the same quantity into a
+     within-stage half and a cross-stage half, and tests/test_qif_pipeline.py
+     owns both claims, including a machine where the cross-stage term is
+     positive.
   3. The accumulator ops. A K stack that lives in one macro reduces on that
      macro's pool, priced by P7.2's law from the packer's own descriptor.
   4. Utilization. Per device class, on every run, idle devices inside the
@@ -58,6 +62,28 @@ GRANITE = MODEL_DIR / "granite_4_0_h_tiny_inf.yaml"
 
 #: The P7.3 artifact: Granite-4.0-H-Tiny decode under both placement laws.
 PACKING_ARTIFACT = PROJECT_ROOT / "docs" / "qif" / "folding" / "granite_dense_vs_dedicated.json"
+
+#: WAVE F (D29/D30). A DECLARED `mapping:` block is now a FILLED PIPELINE, and
+#: the filled pipeline refuses a declared batch and declared endpoints by name.
+#:
+#: EVERY fixture in this file is DELIBERATELY LOCKSTEP, and the reason is the
+#: subject: this module is about WHICH WEIGHTS LAND IN WHICH BANK and what that
+#: placement costs, which is a question about the packer and not about the
+#: serving regime — the same packing produces the same tiles, the same banks
+#: and the same accumulators under either one. Keeping the fixtures on the
+#: batch-4 lockstep workload is what keeps this file's hand arithmetic (445
+#: macros, 1776 bank passes, 684 accumulator ops) checkable against the numbers
+#: it was computed from. The regime-DEPENDENT claims — the beat, D, the state
+#: bill, and the within-stage / cross-stage split of bank sharing — belong to
+#: tests/test_qif_pipeline.py and are made there on real D29 machines.
+#:
+#: A P7.9 correction: this note previously said the RUN tests "run the D29
+#: machine through `_d29_model`". They never did — the helper it named was
+#: never called from anywhere, and the fixtures below build from
+#: configs/hardware-config/fws_cim_moe.yaml, which declares no `mapping:`
+#: block and therefore lowers under lockstep. The helper is gone and the note
+#: now describes what the file actually runs.
+LOCKSTEP = {"regime": "lockstep"}
 
 
 def _hw(path, mutate=None):
@@ -154,7 +180,7 @@ def test_a_declared_dense_packing_reaches_the_mapper():
     # names the law and build_mapping is what runs it.
     def declare_dense(raw):
         _fine_bank(1)(raw)
-        raw.setdefault("mapping", {})["packing"] = "dense"
+        raw.setdefault("mapping", {}).update(LOCKSTEP, packing="dense")
 
     mapping = _mapping(FWS_MOE, MOE_SMALL, declare_dense)
     assert mapping.packing == fws_mapping.PACKING_DENSE
@@ -167,7 +193,7 @@ def test_the_keyword_overrides_the_declared_law():
     # precedence table: the config declares it, an explicit keyword wins.
     def declare_dense(raw):
         _fine_bank(1)(raw)
-        raw.setdefault("mapping", {})["packing"] = "dense"
+        raw.setdefault("mapping", {}).update(LOCKSTEP, packing="dense")
 
     mapping = _mapping(
         FWS_MOE, MOE_SMALL, declare_dense, packing=fws_mapping.PACKING_DEDICATED
@@ -215,13 +241,18 @@ def test_a_pd_half_declares_its_own_law_and_the_prefill_half_is_refused():
     raw["cim"]["cards"] = {"ctt": {"kind": "analog_macro", "device": "ctt", "bank_depth": 1}}
     raw["mapping"] = {
         "pd": {
-            "prefill": {"layers_per_chip": 8, "shared_chiplets": 2},
-            "decode": {
-                "layers_per_chip": 4,
-                "shared_chiplets": 1,
-                "decode_window": 2,
-                "packing": "dense",
-            },
+            # WAVE F: the halves declare LOCKSTEP by name. The question here is
+            # which PLACEMENT LAW each half runs under, which the regime does
+            # not change, and the hand numbers below (408 macros against 424)
+            # are the batch-4 Llama2-7B placement they were computed on.
+            "prefill": dict(LOCKSTEP, layers_per_chip=8, shared_chiplets=2),
+            "decode": dict(
+                LOCKSTEP,
+                layers_per_chip=4,
+                shared_chiplets=1,
+                decode_window=2,
+                packing="dense",
+            ),
         }
     }
     config.convert(raw)
@@ -291,11 +322,21 @@ def test_dense_packing_actually_shares_banks_across_tensors_and_layers(moe_dense
     assert moe_dense.bank_sharing["macros_sharing_banks_across_layers"] == 8
 
 
-def test_cross_layer_bank_sharing_costs_exactly_zero_on_a_decode_step(moe_dense):
-    # FACT 3, MEASURED. Every op of the lowered decode step that started later
-    # than it was ready has its wait attributed to whatever else held its
-    # device. Not one picosecond of that wait belongs to a resident of another
-    # layer, because decode runs the layers in sequence.
+def test_cross_layer_bank_sharing_costs_exactly_zero_on_a_lockstep_decode_step(
+    moe_dense,
+):
+    # MEASURED, ON THE LOCKSTEP MACHINE. Every op of the lowered decode step
+    # that started later than it was ready has its wait attributed to whatever
+    # else held its device. Not one picosecond of that wait belongs to a
+    # resident of another layer, because THIS regime runs the layers in
+    # sequence.
+    #
+    # P7.9 RETITLE: this used to open "FACT 3, MEASURED". P7_folding.html marks
+    # Fact 3 [RETIRED] — D29's filled pipeline fires every stage every beat, so
+    # cross-layer sharing is free only WITHIN a stage. The measurement below is
+    # unchanged and still true of the machine it is taken on; only the claim it
+    # is offered as has narrowed, from a law about decode to a fact about the
+    # lockstep regime. The live D29 pair lives in tests/test_qif_pipeline.py.
     sharing = moe_dense.bank_sharing
     assert sharing["measured"] is True
     assert sharing["cross_layer_delay_s"] == 0.0
@@ -631,23 +672,33 @@ def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
     granite_packing_document,
 ):
     # THE HEADLINE, on the shipped Wave D winner (bank_depth = 1). Today's
-    # layers_per_chip placement reaches 5610 macros; Invariant W reaches 4894
-    # for the same weights, against a GLOBAL CELL FLOOR of 2941. What is left
-    # above the floor is chip granularity plus the 39.910% dimension-mismatch
+    # layers_per_chip placement reaches 5544 macros; Invariant W reaches 4828
+    # for the same weights, against a GLOBAL CELL FLOOR of 2876. What is left
+    # above the floor is chip granularity plus the 40.442% dimension-mismatch
     # remainder, which is the metric, not a rounding.
+    #
+    # WAVE F: every count here fell by the LM HEAD and by nothing else — D30
+    # drops it entirely, which is 66 macros under either placement law (5610 ->
+    # 5544, 4894 -> 4828) and 65 off the cell floor. The SAVING is unchanged at
+    # 716 macros: the endpoint filled whole macros, so packing it densely never
+    # bought anything.
     document = granite_packing_document
     dedicated, dense = document["points"]
-    assert dedicated["macros_holding_tiles"] == 5610
-    assert dense["macros_holding_tiles"] == 4894
+    assert dedicated["macros_holding_tiles"] == 5544
+    assert dense["macros_holding_tiles"] == 4828
     assert document["delta"]["macros_saved"] == 716
-    assert document["delta"]["cell_floor_macros"] == 2941
-    assert document["delta"]["macros_above_floor"] == 4894 - 2941
-    assert document["delta"]["waste_pct"] == pytest.approx(39.91026426917314)
-    # Fact 1: the same weights are read the same number of times per step.
+    assert document["delta"]["cell_floor_macros"] == 2876
+    assert document["delta"]["macros_above_floor"] == 4828 - 2876
+    assert document["delta"]["waste_pct"] == pytest.approx(40.44203949185308)
+    # Fact 1 under D29: the same weights are read the same number of times per
+    # BEAT — every stage fires every beat, so one beat reads the whole model
+    # once and one token leaves.
+    assert dense["serving_regime"] == dedicated["serving_regime"] == "filled_pipeline"
+    assert dense["bank_passes"]["unit"] == dedicated["bank_passes"]["unit"] == "beat"
     assert (
         dense["bank_passes"]["column_set_passes_charged"]
         == dedicated["bank_passes"]["column_set_passes_charged"]
-        == 19566.0
+        == 19304.0
     )
     # ... and every macro of both placements walked its own banks exactly once.
     for point in (dedicated, dense):
@@ -660,17 +711,25 @@ def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
 def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
     granite_packing_document,
 ):
-    # The step time is NOT assignment-invariant to the last digit and P7 says
-    # why: stacking K blocks in one macro buys an in-macro accumulator and
-    # sells a partial-sum transport. Dense is 288 accumulator ops richer and
-    # 0.244% faster per step; both numbers are on the artifact.
+    # The BEAT is NOT assignment-invariant to the last digit and P7 says why:
+    # stacking K blocks in one macro buys an in-macro accumulator and sells a
+    # partial-sum transport. Dense is 684 accumulator ops richer and 0.103%
+    # faster per beat; both numbers are on the artifact.
+    #
+    # WAVE F: the op count rose from 288 with the WINDOW, not with the packing —
+    # the filled pipeline lowers D - 1 fill beats plus the steady ones, so the
+    # same 72 local K stacks fire on more traversals (684 = 72 stacks x the
+    # traversals the window lowers, minus the ones truncated at its edge). The
+    # per-beat trade is what moved: the accumulator saving is now measured
+    # against a beat 17x shorter than the retired regime's step, so the same
+    # trade is a smaller PERCENTAGE of it.
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["accumulator_ops"] == 0
-    assert dense["accumulator_ops"] == 288
+    assert dense["accumulator_ops"] == 684
     assert document["delta"]["median_decode_step_delta_s"] < 0
     assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(
-        -0.24443787759676172
+        -0.10260106919069317
     )
     assert dense["tokens_per_s"] > dedicated["tokens_per_s"]
 
@@ -705,7 +764,7 @@ def test_the_comparison_refuses_a_pairing_that_is_not_one_experiment(
 
     def shorter_window(raw):
         _fine_bank(1)(raw)
-        raw.setdefault("mapping", {})["decode_window"] = 1
+        raw.setdefault("mapping", {}).update(LOCKSTEP, decode_window=1)
 
     windowed = _run(
         FWS_MOE, MOE_SMALL, shorter_window, packing=fws_mapping.PACKING_DENSE

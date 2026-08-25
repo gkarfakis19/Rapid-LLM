@@ -1,0 +1,286 @@
+# FWS-CIM FRONTIER SWEEP for Qwen3.5-4B (QIF P7.4/P7.5, the ADJ-1 second P0).
+#
+# This file is the SHIPPED Qwen machine (configs/hardware-config/
+# fws_cim_qwen3_5_4b.yaml) verbatim, plus the `mapping_dse:` block at the
+# bottom. Strip that block and it is the shipped single design point, runnable
+# through run_perf unchanged; a test pins the two documents equal outside it.
+#
+# THE REGIME IS D29: the pipeline is ALWAYS FULL. Decode is independent streams
+# staggered across the PP stages, one token exits per beat, the local batch is
+# always 1, and the resident-stream count D IS the stage count. Digital
+# provisioning is NOT an axis: D31 derives the engine per point from the beat
+# and D32 prices it, and the per-macro pools, from measured synthesis.
+
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 2560               # array rows (K per array tile) = hidden_dim
+    cols_adc: 640            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 38139.7556   # T1 point scaled by cell count (x4.0)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 5.61226     # T1 point scaled by cell count (x4.0)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 180     # worst chip: 3*20 + 19 = 79 under D30 (which DROPS
+                             # the lm_head; the +97 that used to sit here is
+                             # gone). 180 is deliberately held at the pre-D30
+                             # value, so 808 of the 1440 enumerated slots hold
+                             # no tensor - read the D32 pool total as the
+                             # machine's SLOTS, never as demand.
+    layers_per_chip: 4       # 32 layers -> 8 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # dense FFN on every layer; no expert spreading
+
+  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
+  # The shared digital chiplet card is what makes the DELTA RULE timeable, and
+  # under D31 it no longer DECLARES the engine: it names the measured synthesis
+  # library its silicon is composed from, and the width is derived from the
+  # beat (ADJ-4 still forbids deriving the state-update lanes from the systolic
+  # array or the softmax pipeline, which is why the beat is the only honest
+  # source).
+  cards:
+    ctt:
+      kind: analog_macro
+      device: ctt
+    sa:
+      kind: digital_chiplet
+      # D32: this chiplet's AREA and POWER are COMPOSED from the measured
+      # synthesis library checked in beside this file — the SA fabric from
+      # GEMMINI_SYS_ARRAY blocks, the softmax pipeline from
+      # FP_COMP/FP_ADD/FP_MULT/BF16_EXP/BF16_RECIP, the scan engine from
+      # FP_MULT/FP_ADD/M_REG. Nothing is declared and nothing is estimated;
+      # digital_components_22nm.yaml names the synthesis run every number
+      # came from.
+      synthesis_library: 22nm
+      # D31: vector_lanes is GONE as an input. The engine's width is DERIVED
+      # from the beat this run's ANALOG stages set — the smallest integer lane
+      # count whose own priced time fits that beat, with no margin (D28) — and
+      # it is REPORTED (evaluation.digital_silicon.derived_engine_sizing, plus
+      # a derived_engine_sizing disclosure). The 1024-lane "declared design
+      # point" this card used to carry was a number nobody measured; declaring
+      # one again is still possible and rides a disclosure naming it an
+      # OVERRIDE of a retired input. (P7.9 correction: that disclosure does not
+      # print what the beat would have derived. A declared width skips the
+      # probe pass entirely, so no derivation exists to compare it with, and
+      # claiming otherwise described a sentence no run can emit.)
+      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
+      # undeclared on purpose: the first two inherit the chiplet's own clock
+      # and softmax depth (disclosed per priced op), and an undeclared state
+      # bandwidth REPORTS recurrent-state traffic without bounding it.
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 8 GB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
+
+# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
+# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+mapping:
+  parallelism:
+    tp: 1
+  # D27 / Invariant W (HARD): the DENSE packer is the law every point of this
+  # sweep is placed under. It matters here in a way it does not on the shipped
+  # card: at bank_depth 1 the dense and dedicated laws SEPARATE (Granite: 4828
+  # macros against 5544), so a sweep that left the default dedicated law in
+  # place was pricing analog silicon D27 forbids and reporting no waste for it.
+  packing: dense
+  # ADJ-6: the decode series is a bounded window plus a disclosed
+  # extrapolation. Three steps give a first / median / last that are three
+  # different readings rather than one repeated.
+  decode_window: 3
+
+# --- the FRONTIER sweep block (QIF P7.4, D29-D32). Owned and strict-keyed by
+# --- tools/fws_qif_dse.py, which strips it before the config parser sees it.
+#
+#   layers_per_chip - STAGE GRANULARITY. The default stage plan is one stage per
+#     analog chip, so this number moves the chip split, the stage count, D, the
+#     beat and the per-stage state bill at once. Qwen3.5-4B has 32 layers, so
+#     every rung divides 32.
+#   arrays_per_chip - CHIP CAPACITY, the AREA axis: under Invariant W (D27) the
+#     dense packer decides the analog macro count, so a point spends analog
+#     silicon only on slots no tensor lands on. The global cell floor is a LOWER
+#     BOUND, not the packed count, and every point reports its own cell census
+#     (macros, floor, waste%) so the gap is measured rather than asserted. The
+#     rungs are the TIGHT capacity for each granularity rung. Under the DENSE
+#     law a Qwen layer costs 18.25 macros at bank_depth 1 (584 macros over 32
+#     layers, measured) against 20 for a linear-attention layer and 19 for a
+#     gated-attention one under the retired per-tensor placement, and D30 has
+#     removed the lm_head that arrays_per_chip 180 was sized around - so the
+#     rungs are 20, 40, 80, 160, 320 and 640, which admit 1, 2, 4, 8, 16 and 32
+#     layers per chip under either law, plus 180 itself, the capacity the
+#     shipped machine declares.
+#   bank_depth - the analog card's allocation granularity in mux slots; the card
+#     declares adc_mux = 4, so 1, 2 and 4 are the depths it admits.
+#
+# WHAT IS NOT AN AXIS HERE, AND WHY (D28 names digital chiplet count, engine
+# widths and pool widths as first-class sweep axes):
+#   * ENGINE WIDTH is retired by D31 - derived from the beat at every point.
+#   * POOL WIDTH is derived by D12 from the measured concurrency.
+#   * CHIPLET COUNT is a supported axis (mapping.shared_chiplets) and this sweep
+#     deliberately does not declare it: the count is DERIVED one-per-analog-chip,
+#     so it moves with layers_per_chip. Read the consequence honestly - the whole
+#     area SPREAD of this front is D x (per-chiplet composed area), because the
+#     analog term and the pool term are the same on every front point.
+#     arrays_per_chip is therefore a TRIM (it finds the tight capacity) rather
+#     than a spread-producing axis: extra capacity is unowned slots with no
+#     throughput return, so a larger-capacity candidate is always dominated.
+#
+# max_stage_state_bytes is DELIBERATELY NOT DECLARED here, and the reason is a
+# measured one. Qwen3.5-4B is 8 gated-attention layers in 32, with GQA q16/kv4
+# at head_dim 256 = 4096 B of KV per token per attention layer, so a stage's
+# resident KV is (layers in the stage) x (D streams) x that. For a COARSE stage
+# plan those two factors trade off and the MAX over stages barely moves: the
+# checked-in curve measures 68.1 MiB at D = 2, 4 and 8 alike. It is NOT
+# invariant, though - Qwen is a HYBRID (8 gated-attention layers in 32), so once
+# a stage holds a single attention layer the max stops averaging and climbs:
+# 120.5 MiB at D = 16 and 226.1 MiB at D = 32, a 3.3x spread over the visited
+# plans, and the validator gates exactly that rise. What matters for the budget
+# is the MINIMUM over the visited plans, and that minimum is 68.1 MiB - already
+# 6.5% ABOVE this config's own 64 MiB L2 tier (tech_param.SRAM-L2.size =
+# 67108864 B). No visited stage plan brings it down. Declaring that tier as the sweep budget would therefore refuse
+# EVERY point and produce no frontier at all, so this sweep declares no budget
+# and REPORTS the bill at every point instead (the evaluator's own residency
+# verdict is taken against the on-chip SRAM-L2 tier and rides every row as
+# state_bill.onchip_tier_verdict, with the 8 GiB activation-stub reading beside
+# it under activation_tier_verdict). That Qwen does not fit its own declared L2 at any stage plan is
+# the finding, and it is stated rather than tuned away. The Granite curve
+# (fws_cim_granite_tiny_frontier.yaml) DOES declare its tier as a budget, and
+# its refusals are what a residency-bound frontier looks like.
+mapping_dse:
+  label: "Qwen3.5-4B: the D29 frontier - stage granularity x chip capacity x bank depth"
+  objective: throughput
+  search: ladder
+  repair_axis: arrays_per_chip
+  initializer:
+    layers_per_chip: 4
+    arrays_per_chip: 180
+    bank_depth: 1
+  axes:
+    layers_per_chip: [16, 8, 4, 2, 1]
+    arrays_per_chip: [20, 40, 80, 160, 180, 320, 640]
+    bank_depth: [1, 2, 4]

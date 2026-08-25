@@ -58,8 +58,11 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from cim_timing import KStack, Tile, TileOwner
 from fws_mapping import (
     MAPPING_AXES,
+    REGIME_FILLED,
+    REGIME_LOCKSTEP,
     FwsMapping,
     MappingError,
+    PipelineStage,
     ShardCoord,
 )
 from program.ir import GroupKey, Program, ProgramBuilder, ProgramMeta
@@ -110,6 +113,16 @@ class FwsOpAnnotation:
     layer: Optional[int]
     block: str
     tokens: float
+    #: The filled pipeline (D29). ``stage`` is the PP stage this op belongs to,
+    #: ``stream`` the resident stream it serves, ``beat`` the beat of the
+    #: rotation it lands in, and ``context`` that stream's OWN decode context —
+    #: streams sit at different decode depths, so attention and scan are priced
+    #: per stream and never at one shared step index. All four are -1 / None
+    #: under the retired lockstep regime, where a step is the whole batch.
+    stage: int = -1
+    stream: int = -1
+    beat: int = -1
+    context: Optional[int] = None
     owner: Optional[TileOwner] = None
     tiles: Tuple[Tile, ...] = ()
     #: The packer's K-stack descriptor (P7.3), set on accumulation ops only.
@@ -133,16 +146,33 @@ class FwsOpAnnotation:
 
 @dataclass
 class ServingPoint:
-    """The serving semantics the DAG lowers (D15).
+    """The serving semantics the DAG lowers.
 
-    A batch of same-length requests: each prefills ``prefill_len`` tokens and
-    decodes ``decode_len``. ``decode_steps`` is the lowered WINDOW (ADJ-6).
+    Under the FILLED PIPELINE (D29, the mapped default) this is: ``streams``
+    (= D, the stage count) independent streams staggered one stage apart, a
+    LOCAL BATCH OF 1, ``beats`` beats lowered of which the first D - 1 fill the
+    pipeline, and ``steady_beats`` STEADY inter-exit intervals measured after
+    the transient one is held out. One token exits per beat. ``decode_steps`` is the number of pipeline
+    TRAVERSALS lowered (one enters per beat); a traversal is one stream
+    carrying one token through the stages.
+
+    Under the RETIRED lockstep regime it is D15: a batch of same-length
+    requests, each prefilling ``prefill_len`` tokens and decoding
+    ``decode_len``, with ``decode_steps`` the lowered WINDOW (ADJ-6).
     """
 
     batch: int
     prefill_len: int
     decode_len: int
     decode_steps: int
+    regime: str = REGIME_LOCKSTEP
+    #: D — resident streams, which IS the stage count (D29). 0 under lockstep.
+    streams: int = 0
+    #: Beats lowered (fill + steady). 0 under lockstep.
+    beats: int = 0
+    #: Beats of STEADY state the window measures (beats - streams). 0 under
+    #: lockstep.
+    steady_beats: int = 0
 
     @classmethod
     def from_mapping(cls, mapping: FwsMapping, decode_steps: Optional[int] = None) -> "ServingPoint":
@@ -150,11 +180,41 @@ class ServingPoint:
         decode_len = int(getattr(mapping.model, "decode_len", 0) or 0)
         prefill_len = max(0, int(params.seq_len) - decode_len)
         window = mapping.decode_window if decode_steps is None else int(decode_steps)
+        if getattr(mapping, "regime", REGIME_LOCKSTEP) == REGIME_FILLED:
+            streams = int(mapping.resident_streams)
+            if streams <= 0:
+                raise MappingError(
+                    "execution",
+                    "the filled-pipeline regime needs a stage plan and this mapping "
+                    "carries none: D IS the stage count (D29).",
+                )
+            steady = max(1, int(window))
+            # THE WINDOW, sized so that `steady` STEADY beats are actually
+            # measured. D - 1 beats fill the pipeline; `steady + 2` traversals
+            # then complete inside D + steady + 1 beats, giving `steady + 1`
+            # inter-exit intervals, of which the FIRST belongs to the traversal
+            # that travelled through the filling pipeline and is held out as
+            # the transient. What is left is exactly `steady` intervals and the
+            # beat is their median. Nothing is extrapolated to get there, and
+            # the extra beat is lowered rather than the transient being
+            # averaged in.
+            beats = streams + steady + 1
+            return cls(
+                batch=1,
+                prefill_len=prefill_len,
+                decode_len=decode_len,
+                decode_steps=beats,
+                regime=REGIME_FILLED,
+                streams=streams,
+                beats=beats,
+                steady_beats=steady,
+            )
         return cls(
             batch=int(params.batch_size),
             prefill_len=prefill_len,
             decode_len=decode_len,
             decode_steps=max(0, min(window, decode_len)),
+            regime=REGIME_LOCKSTEP,
         )
 
 
@@ -197,6 +257,20 @@ class _Lowering:
         #: would move a shipped number silently); P4 turns the count into a
         #: disclosure.
         self.undescribed_local_stacks: set = set()
+        #: THE ROTATION'S CURRENT POSITION (D29), stamped onto every op this
+        #: lowering emits. Threading four more arguments through every block
+        #: method would touch code that has nothing to do with the regime, so
+        #: the position lives here and :meth:`compute` / :meth:`transfer` read
+        #: it. Outside the filled pipeline it stays -1 / None, which is what a
+        #: lockstep annotation carries.
+        self._stage = -1
+        self._stream = -1
+        self._beat = -1
+        self._context: Optional[int] = None
+        #: (traversal, tp shard) -> the chip the traversal last touched, so a
+        #: STAGE boundary emits the same activation handoff a chip boundary
+        #: inside a stage does.
+        self._last_chip: Dict[Tuple[int, int], Optional[int]] = {}
 
     # -- helpers ---------------------------------------------------------
 
@@ -258,6 +332,10 @@ class _Lowering:
                 layer=layer,
                 block=block,
                 tokens=float(tokens),
+                stage=self._stage,
+                stream=self._stream,
+                beat=self._beat,
+                context=self._context,
                 owner=owner,
                 tiles=tuple(tiles),
                 k_stack=k_stack,
@@ -312,6 +390,10 @@ class _Lowering:
                 layer=layer,
                 block=block,
                 tokens=float(tokens),
+                stage=self._stage,
+                stream=self._stream,
+                beat=self._beat,
+                context=self._context,
                 bytes_moved=float(size_bytes),
                 src_device=src_device,
                 dst_device=dst_device,
@@ -327,6 +409,119 @@ class _Lowering:
     # -- the lowering ----------------------------------------------------
 
     def run(self) -> Program:
+        if self.serving.regime == REGIME_FILLED:
+            self._rotation()
+        else:
+            self._lockstep()
+        devices = tuple(sorted(dev.device_id for dev in self.mapping.devices))
+        program = self.builder.finish(devices=devices, validate=True)
+        program.meta.misc["fws_annotations"] = tuple(self.annotations)
+        program.meta.misc["fws_mapping"] = self.mapping
+        program.meta.misc["fws_serving"] = self.serving
+        program.meta.misc["fws_duration_basis"] = DURATION_BASIS
+        program.meta.misc["fws_shard_layout"] = self.mapping.shard_layout
+        program.meta.misc["fws_undescribed_local_k_stacks"] = len(
+            self.undescribed_local_stacks
+        )
+        return program
+
+    # -- the FILLED PIPELINE (D29) ---------------------------------------
+
+    def _rotation(self) -> None:
+        """The steady-state rotation: D staggered streams, one token per beat.
+
+        Traversal ``j`` (one stream carrying one token through every stage)
+        ENTERS at beat ``j`` and occupies stage ``d`` at beat ``j + d``, so at
+        any beat of the steady state all D stages are busy on D DIFFERENT
+        streams. Nothing here schedules that: the DAG says which work exists
+        and on which devices, and the timeline produces the stagger from the
+        contention, which is the only place a beat is allowed to come from
+        (A1).
+
+        Three things the window has to get right:
+
+        * **the fill.** The first D - 1 beats are the pipeline filling; a
+          traversal that entered before the window is lowered only from the
+          stage it has reached. The transient is DISCLOSED by P4 and never
+          averaged into the beat.
+        * **the stream's own context.** Resident streams sit at DIFFERENT
+          decode depths: stream i enters at context ``prefill_len + i`` and
+          advances one token every D beats, so attention and scan are priced
+          at each traversal's own context (P4 reads it off the annotation).
+        * **autoregression.** Traversal ``j`` and traversal ``j - D`` are the
+          SAME stream's consecutive tokens, so the second depends on the first.
+          That edge is real and it is in the graph.
+
+        One more edge is the regime itself: **a stage holds ONE stream at a
+        time.** D29's machine has D resident streams and D stages, one stream
+        per stage per beat — so stage ``d`` cannot start traversal ``j + 1``
+        before it has finished traversal ``j``. Without that edge the DAG would
+        let a stage's layers pipeline several streams at once, which is a
+        DIFFERENT machine: more streams in flight than the state/KV accounting
+        says are resident, and a beat shorter than the stage that produced it.
+        With it, the beat the timeline reports IS the slowest stage's service
+        time, which is what "one token per beat" means.
+        """
+        mapping = self.mapping
+        serving = self.serving
+        stages = mapping.stages
+        streams = int(serving.streams)
+        beats = int(serving.beats)
+        tp_count = max(1, int(mapping.degrees.get("tp", 1)))
+        traversal_tail: Dict[int, List[int]] = {}
+        stage_tail: Dict[Tuple[int, int], List[int]] = {}
+        for traversal in range(beats):
+            deps: List[int] = list(traversal_tail.get(traversal - streams, ()))
+            for stage in stages:
+                beat = traversal + stage.index
+                if beat >= beats:
+                    break  # the window ends; the rest of this traversal is outside it
+                self._stage = int(stage.index)
+                self._stream = int(traversal % streams)
+                self._beat = int(beat)
+                self._context = int(
+                    serving.prefill_len + (traversal % streams) + (traversal // streams) + 1
+                )
+                held = stage_tail.get((traversal - 1, stage.index), ())
+                deps = self._stage_pass(
+                    stage, traversal, list(deps) + list(held), tp_count
+                )
+                stage_tail[(traversal, stage.index)] = list(deps)
+            traversal_tail[traversal] = list(deps)
+        self._stage = -1
+        self._stream = -1
+        self._beat = -1
+        self._context = None
+
+    def _stage_pass(
+        self,
+        stage: PipelineStage,
+        traversal: int,
+        deps: Sequence[int],
+        tp_count: int,
+    ) -> List[int]:
+        """One stage's layers, for one traversal, at M = 1 (D29)."""
+        tails: List[int] = []
+        for tp_idx in range(tp_count):
+            pending = list(deps)
+            previous_chip = self._last_chip.get((traversal, tp_idx))
+            for layer in stage.layers:
+                chip_id = self._layer_chip(layer, tp_idx)
+                if previous_chip is not None and chip_id != previous_chip:
+                    pending = self._chip_boundary(
+                        previous_chip, chip_id, pending, "decode", traversal, 1.0, layer
+                    )
+                pending = self._layer(
+                    layer, chip_id, tp_idx, pending, "decode", traversal, 1.0
+                )
+                previous_chip = chip_id
+            self._last_chip[(traversal, tp_idx)] = previous_chip
+            tails.extend(pending)
+        return tails
+
+    # -- the RETIRED lockstep regime (D15), kept for the closed-form bridge
+
+    def _lockstep(self) -> None:
         serving = self.serving
         tail: List[int] = []
         if serving.prefill_len > 0:
@@ -342,17 +537,6 @@ class _Lowering:
             )
         for step in range(serving.decode_steps):
             tail = self._phase("decode", step, float(serving.batch), tail)
-        devices = tuple(sorted(dev.device_id for dev in self.mapping.devices))
-        program = self.builder.finish(devices=devices, validate=True)
-        program.meta.misc["fws_annotations"] = tuple(self.annotations)
-        program.meta.misc["fws_mapping"] = self.mapping
-        program.meta.misc["fws_serving"] = self.serving
-        program.meta.misc["fws_duration_basis"] = DURATION_BASIS
-        program.meta.misc["fws_shard_layout"] = self.mapping.shard_layout
-        program.meta.misc["fws_undescribed_local_k_stacks"] = len(
-            self.undescribed_local_stacks
-        )
-        return program
 
     def _phase(self, phase: str, step: int, tokens: float, seed: Sequence[int]) -> List[int]:
         """One prefill pass or one decode step, over every tp shard.
