@@ -210,6 +210,20 @@ EXCLUSIONS: Tuple[Tuple[str, str], ...] = (
         "disclosed non-comparison instead of a failure.",
     ),
     (
+        "derived_fabric_pinned_to_the_declared_seed",
+        "ADJ-10 DERIVES the attention fabric's array count and the softmax pipeline's "
+        "lane count on a mapped run, and the frozen closed form has no timeline to "
+        "derive them from. Without a pin the two sides of this gate would describe TWO "
+        "MACHINES and every attention row would compare a derived fabric against a "
+        "declared one. The gate therefore PINS both widths on the DAG side to the "
+        "config's own declared cim.fabric seed, using the same "
+        "cim.cards.<card>.fabric_num_arrays / fabric_softmax_lanes override a shipped "
+        "machine would use, and the pin rides its own disclosure in the evaluation. "
+        "Nothing else is pinned, no row is dropped and no tolerance is loosened: the "
+        "gate still compares every attention cycle count EXACTLY. The derivation itself "
+        "is gated elsewhere (the Granite/Qwen e2e suites and tests/test_fws_cim.py).",
+    ),
+    (
         "degenerate_case_only",
         "Fill and drain of the SYSTEM pipeline, contention, column sharing, bit-slicing, "
         "banking and the PD handoff are absent from the degenerate case by construction. "

@@ -107,9 +107,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.001721513022028735,
+          "value": 0.0016998707914952615,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -168,9 +168,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.0017165994907309583,
+          "value": 0.0016950190313114522,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -229,9 +229,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.001962156210770376,
+          "value": 0.0019374887022980119,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -290,9 +290,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.0019557755299189914,
+          "value": 0.0019311882370268633,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -351,9 +351,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.0021096025183176535,
+          "value": 0.0020830813689268566,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -412,9 +412,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.002102228656036461,
+          "value": 0.002075800208138693,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -473,9 +473,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.0021918711219211114,
+          "value": 0.0021643157218089602,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -534,9 +534,9 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.002183912010459195,
+          "value": 0.0021564566693781963,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -563,13 +563,16 @@
     },
     {
       "id": "ref.atlas",
-      "label": "vector_lanes 5479 (DERIVED to the ANALOG FLOOR), bank_depth 4",
+      "label": "vector_lanes 5479 + num_arrays 8 + softmax_lanes 12 (ALL DERIVED to the ANALOG FLOOR), bank_depth 4",
       "in_sweep": false,
       "knobs": {
         "vector_lanes": 5479,
+        "num_arrays": 8,
+        "softmax_lanes": 12,
         "bank_depth": 4,
         "shared_chiplets": 10,
-        "vector_lanes_provenance": "derived-count"
+        "vector_lanes_provenance": "derived-count",
+        "num_arrays_provenance": "derived-count"
       },
       "provisioning": {
         "analog_chips": 10,
@@ -579,26 +582,26 @@
         "basis": "the enumerated inventory of the candidate's own mapping (fws_qif_dse candidate rows); chips are integers (D21)."
       },
       "area": {
-        "total_mm2": 13132.03285604,
+        "total_mm2": 13224.82782164,
         "terms": {
           "analog_mm2": 12930.64704,
-          "shared_digital_mm2": 185.90790884,
+          "shared_digital_mm2": 278.70287444,
           "macro_pool_mm2": 15.477907199999999
         },
         "uncovered": [],
-        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 = 12930.6 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + 10 shared digital chiplets x the COMPOSED area 18.5908 mm2 + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead). This run's engine width is DERIVED to the ANALOG FLOOR (5479 lanes, derived-count, ADJ-9: the smallest width for which every stage's digital per-stage time fits that stage's own analog m-pass), which is why it is not one of the swept widths - and why it is now WIDER than any of them."
+        "basis": "6400 enumerated analog macro slots x macro_footprint_mm2 = 12930.6 mm2 (the P3.6 enumerated_macro_silicon accounting, measured) + 10 shared digital chiplets x the COMPOSED area 27.8703 mm2 + 6400 per-macro digital pools x the COMPOSED pool area 0.00241842 mm2 (D32: measured 22nm synthesis blocks, unit counts x measured area, no overhead). EVERY composable width on this run is DERIVED to the ANALOG FLOOR (ADJ-10): 5479 scan lanes, 8 attention arrays and 12 softmax lanes, each the smallest integer count of measured blocks for which its stage's digital time fits that stage's own analog m-pass, or the saturation width where no count reaches it. That is why this point is on none of the eight swept widths."
       },
       "throughput": {
-        "tokens_per_s": 25617.634781614706,
-        "decode_step_s": 3.903560998213938e-05,
+        "tokens_per_s": 62661.47911387107,
+        "decode_step_s": 1.5958767876876286e-05,
         "basis": "measured at the decode terminal off this candidate's OWN timeline (ADJ-6), fws_qif_dse mapped path. This point is the SHIPPED atlas run: the same hardware config file as the (now retired) sweep minus its mapping_dse block, so its bank_depth is the card's declared adc_mux = 4, the third value the card admits. Its 5544 placed tiles against the sweep's 19304 (depth 1) and 10972 (depth 2) are the evidence for that reading."
       },
       "utilization": [
         {
           "device_class": "analog_macro",
-          "value": 0.002187073003684206,
+          "value": 0.005282390357961163,
           "uncovered": null,
-          "basis": "analog active time per macro per BEAT 8.537372877428274e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
+          "basis": "analog active time per macro per BEAT 8.430044155775164e-08 s (the reference run's measured macros[].duty_cycle x its measured beat) divided by THIS point's beat. Under D29 every stage fires every beat, so at the cell floor every bank is read once per beat and the numerator does not move with the digital knobs (P7 Fact 1). On the reference point it reproduces the measured duty cycle exactly."
         },
         {
           "device_class": "shared_digital_chiplet",
@@ -620,14 +623,14 @@
         "exists": true,
         "basis": "the shipped P3.6/P4 artifact of this exact design point"
       },
-      "pareto": false,
+      "pareto": true,
       "knee": false
     }
   ],
   "knee": {
     "point": "c000",
     "basis": "the 4 measured BEATS at bank_depth 1 fit beat(lanes) = R + C / lanes to within 3.3e-05 relative - a FIT, not an identity: under D29 the beat is a MAX over the stages, so a reciprocal-in-lanes law describes it closely and does not define it (under the retired lockstep regime the same law was exact to 1e-13, because the step WAS the scan chain) - with residual R = 3.746985827911986e-05 s and C = 0.006227151879699244 s x lanes. The knee is the smallest swept width at which the digital term C / lanes has dropped BELOW the residual no vector-lane count moves: at 512 lanes the term is 0.325 x R. WAVE F (D32, P7.8): the x axis is now REAL - the shared digital chiplet's area is COMPOSED from the measured 22nm synthesis library, so a wider engine costs real silicon and the front is a SPREAD rather than the collapsed point Wave D reported. Across the swept widths 8x the lanes buys 1.273x the throughput for 101.406 mm2 more silicon, and every doubling past the knee pays area for a term that was never binding.",
-    "caveat": "the residual is NOT the analog m-pass time: analog activity is 8.537372877428274e-08 s per macro per beat, orders below R. What R actually contains is the part of the beat no vector-lane count moves, and decomposing it per device class is P7.4's job, not this fixture's. Note also that none of the swept widths is the width ADJ-9 DERIVES for this machine: every sweep point declares its lanes, which under D31 is an override that rides a disclosure, and the derived width is 5479 - WIDER than the widest swept point. The ninth point is where that lands on the picture. ADJ-9 UPDATE: the numerator above is the REGENERATED reference run's (duty x beat); the fitted law and its four beats are the FROZEN sweep's and are unchanged, because that sweep can no longer be re-walked."
+    "caveat": "the residual is NOT the analog m-pass time: analog activity is 8.430044155775164e-08 s per macro per beat, orders below R. What R actually contains is the part of the beat no vector-lane count moves, and decomposing it per device class is P7.4's job, not this fixture's. Note also that none of the swept widths is a width this repo would DERIVE for this machine: every sweep point declares its lanes and every one of them runs the DECLARED 2-array attention fabric, which under D31/ADJ-10 are overrides that ride a disclosure. ADJ-10 UPDATE, AND IT REVERSES ADJ-9's READING OF THIS PICTURE: with the fabric derived too (8 arrays, 12 softmax lanes) the reference run measures 62661.5 tokens/s - 2.4x the fastest swept point - for 131.926 mm2 more silicon than it, so it is back ON the front and is now its fastest point. Under ADJ-9 it was DOMINATED, because the scan engine went on widening past the width at which the underived attention fabric had become the whole beat. The numerator above is the REGENERATED reference run's (duty x beat); the fitted law and its four beats are the FROZEN sweep's and are unchanged, because that sweep can no longer be re-walked."
   },
   "relaxations": [
     {
@@ -643,7 +646,7 @@
     {
       "constraint": "waste_is_one_reference_mappings_cell_census",
       "value": "48.1339% of committed CELLS, on one mapping, carried on every row",
-      "reason": "P7.9 CORRECTION. This row used to carry the COLUMN census (28.1960%) and a note saying D27's cell census does not exist yet. It does: cim_timing.dense_pack emits it and P7.2 landed it in the same plan, and for this reference mapping it is 48.1339% — nearly twice the column figure, because a column census misses the row remainder of every tile whose K is below the card's rows. What is still a relaxation is the SCOPE: this is one mapping's census repeated on every row, not a per-point measurement. The per-point cell census is emitted by the frontier curves under docs/qif/dse/*_frontier."
+      "reason": "P7.9 CORRECTION. This row used to carry the COLUMN census (28.1960%) and a note saying D27's cell census does not exist yet. It does: cim_timing.dense_pack emits it and P7.2 landed it in the same plan, and for this reference mapping it is 48.1339% \u2014 nearly twice the column figure, because a column census misses the row remainder of every tile whose K is below the card's rows. What is still a relaxation is the SCOPE: this is one mapping's census repeated on every row, not a per-point measurement. The per-point cell census is emitted by the frontier curves under docs/qif/dse/*_frontier."
     },
     {
       "constraint": "ninth_point_is_not_a_sweep_candidate",

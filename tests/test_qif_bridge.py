@@ -88,10 +88,32 @@ def _dag(hw_path, model_path, mode):
     with open(hw_path) as handle:
         raw = yaml.safe_load(handle)
     config.convert(raw)
-    mapping = fws_mapping.build_mapping(
-        config.HWConfig.from_dict(raw), config.parse_config(model_path, mode)
-    )
-    return fws_eval.evaluate_fws(build_fws_program(mapping))
+    hw = config.HWConfig.from_dict(raw)
+    # ADJ-10 PIN, and it is the same pin the validator's bridge gate applies.
+    # The mapped path DERIVES the attention fabric's array count and the softmax
+    # pipeline's lane count; the frozen closed form has no timeline to derive
+    # them from and prices the DECLARED cim.fabric seed. Without the pin the two
+    # sides of this gate describe TWO MACHINES and every attention row compares a
+    # derived fabric against a declared one. Pinning uses the ordinary card
+    # override, so the run discloses it, and it drops no row and moves no
+    # tolerance — every attention cycle count below is still compared EXACTLY.
+    # Named in fws_bridge.EXCLUSIONS as
+    # derived_fabric_pinned_to_the_declared_seed; the derivation itself is gated
+    # by tests/test_fws_cim.py and the two e2e suites.
+    digital = hw.cim_config.cards.digital_card
+    digital.fabric_num_arrays = int(digital.fabric.num_arrays)
+    digital.fabric_softmax_lanes = int(digital.fabric.softmax_lanes)
+    mapping = fws_mapping.build_mapping(hw, config.parse_config(model_path, mode))
+    evaluation = fws_eval.evaluate_fws(build_fws_program(mapping))
+    device = mapping.device
+    # The pin is a claim about the run, so it is CHECKED here rather than
+    # assumed: the derivation must not have run, and the widths must be the
+    # declared ones.
+    assert device.derived_fabric is None
+    assert device.fabric_num_arrays == int(digital.fabric.num_arrays)
+    assert device.fabric_softmax_lanes == int(digital.fabric.softmax_lanes)
+    assert len(device.fabric_sizing_disclosures()) == 1
+    return evaluation
 
 
 @pytest.fixture(scope="module")

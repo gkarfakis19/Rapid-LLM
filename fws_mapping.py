@@ -2002,6 +2002,15 @@ def build_mapping(
         )
     digital_card_id = _digital_card_id(device)
     next_macro_id = len(chip_specs) * macro_slots
+    # THE PLACEMENT'S ENGINE-SLOT CENSUS, from the DECLARED geometry. ADJ-10
+    # DERIVES cim.fabric.num_arrays, but the derivation needs a priced timeline
+    # and this runs before one exists, so the slots enumerated here are the
+    # declared seed's. That is not a second accounting of the fabric's width:
+    # these slots hold no tile, carry no device (a chiplet is ONE device with
+    # one queue) and price no time — they are a placement record. The width
+    # that prices the silicon, the power and the attention time is the DERIVED
+    # one, and cim_timing.DerivedFabricSizing reconciles the two by name in its
+    # own disclosures (D21).
     engines_per_chiplet = max(
         1, int(device.fabric.num_arrays) * max(1, int(getattr(device.fabric, "replicas", 1) or 1))
     )

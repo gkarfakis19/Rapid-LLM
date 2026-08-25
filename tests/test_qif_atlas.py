@@ -1260,34 +1260,38 @@ def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
                  or q["throughput"]["tokens_per_s"] > p["throughput"]["tokens_per_s"])
             for q in front["points"]
         )
-    # ADJ-9 REWRITE, AND IT IS THE FINDING.
-    # OLD (Wave F, D31-v1): the front is the four bank_depth = 1 sweep points
-    # PLUS the reference atlas run, because its engine was DERIVED at 220 lanes
-    # and therefore carried less digital silicon than any declared point — "the
-    # derived point is the cheapest one on the frontier".
-    # NEW (D31-v2, ADJ-9): the derived width is 5479 lanes, WIDER than the
-    # widest declared point on this picture, so the reference run costs 39.1
-    # mm2 more than c006 (4096 declared lanes) and measures 56 tokens/s less.
-    # It is DOMINATED, and the front is the four swept points again.
-    #
-    # That is not a bug in the derivation and it is not an argument against
-    # ADJ-9; it is what ADJ-9 buys and what it does not. The criterion is
-    # per-STAGE (digital per-stage time <= that stage's analog m-pass) and it
-    # holds on all ten stages. The MACHINE is still bound by the attention
-    # systolic fabric — 18.6 us on the beat-setting stage against a 1.6 us
-    # analog m-pass — whose geometry is DECLARED card geometry that D31 derives
-    # no width for. Past the point where the scan fits under the attention
-    # term, lanes buy area and no throughput, and this assertion is where that
-    # is visible rather than argued.
+    # ADJ-10 REWRITE, AND IT REVERSES ADJ-9's READING OF THIS PICTURE.
+    # Wave F (D31-v1): the front is the four bank_depth = 1 sweep points PLUS
+    #   the reference run, because its engine was DERIVED at 220 lanes and
+    #   carried less digital silicon than any declared point.
+    # ADJ-9 (D31-v2): the derived width is 5479 lanes, WIDER than the widest
+    #   declared point, so the reference run cost 39.1 mm2 more than c006 and
+    #   measured 56 tokens/s LESS. It was DOMINATED. The cause was named at the
+    #   time: the machine was bound by the attention systolic fabric — 18.6 us
+    #   on the beat-setting stage against a 1.6 us analog m-pass — which was
+    #   DECLARED card geometry no derivation sized, so past the width at which
+    #   the scan fits under the attention term, lanes bought area and nothing.
+    # ADJ-10 (now): that fabric is DERIVED too — 8 arrays and 12 softmax lanes,
+    #   integer copies of measured blocks — the attention term falls to 6.88 us,
+    #   and the reference run measures 62661 tokens/s, 2.4x the fastest swept
+    #   point, for 131.9 mm2 more silicon than c006. It is BACK ON THE FRONT and
+    #   it is now its fastest point. The eight swept points are frozen at the
+    #   DECLARED 2-array fabric and can never be re-walked, which is exactly why
+    #   the comparison is worth drawing.
     assert sorted(p["id"] for p in front["points"] if p["pareto"]) == [
-        "c000", "c002", "c004", "c006"
+        "c000", "c002", "c004", "c006", "ref.atlas"
     ]
     ref = [p for p in front["points"] if p["id"] == "ref.atlas"][0]
     c006 = [p for p in front["points"] if p["id"] == "c006"][0]
     assert ref["knobs"]["vector_lanes"] > c006["knobs"]["vector_lanes"]
     assert ref["area"]["total_mm2"] > c006["area"]["total_mm2"]
-    assert ref["throughput"]["tokens_per_s"] < c006["throughput"]["tokens_per_s"]
-    assert ref["pareto"] is False
+    assert ref["throughput"]["tokens_per_s"] > 2.4 * c006["throughput"]["tokens_per_s"]
+    assert ref["pareto"] is True
+    # The reference point is the only one on this picture whose fabric is
+    # DERIVED; the eight swept points all ran the declared 2-array geometry.
+    assert ref["knobs"]["num_arrays"] == 8
+    assert ref["knobs"]["num_arrays_provenance"] == "derived-count"
+    assert all("num_arrays" not in p["knobs"] for p in front["points"] if p["in_sweep"])
     for point in front["points"]:
         assert point["pareto"] == (not dominated(point)), point["id"]
     # THE KNEE, REWRITTEN FOR D29 (Wave F). Under the retired lockstep regime

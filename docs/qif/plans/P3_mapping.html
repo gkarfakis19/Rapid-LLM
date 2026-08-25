@@ -300,9 +300,14 @@ valid, checked in under <code>docs/qif/dse/granite_lanes_banks/</code> with a re
 comparison ADJ-9 was adjudicated on and it is kept for that. The live demo is
 <code>docs/qif/dse/granite_capacity_banks/</code>: the same config over <code>arrays_per_chip</code>
 {604, 640, 965, 1207} &times; <code>bank_depth</code> {1, 2}, 8 of 8 valid, and its finding INVERTS the
-one below &mdash; at a fixed bank depth chip capacity moves NO throughput at all (26051.9 tokens/s on all
-four) and doubles the silicon (12433 &rarr; 24631 mm&sup2;), which is Invariant W (D27) drawn on a cross
-product.]</em>
+one below &mdash; at a fixed bank depth chip capacity moves NO throughput at all and doubles the
+silicon, which is Invariant W (D27) drawn on a cross product.]</em>
+<em>[REGENERATED 2026-08-25 for ADJ-10 (the attention fabric derives per point too): the same 8 of 8
+valid, 65325.1 tokens/s on all four <code>bank_depth</code>&nbsp;1 points over 12525.8 &rarr; 24723.4
+mm&sup2;, and 64474.5 on the four depth-2 twins. The one real trade left is still the BANKING axis:
+a finer bank shortens the analog m-pass, which IS the sizing target, so depth&nbsp;1 derives a wider
+scan engine (6509 lanes against 6125) that is faster and costs more. Every point derives the same
+8-array, 12-lane fabric and every point names <code>attention_qk</code> as what binds it.]</em>
 It found the headline rising SUB-linearly with the declared scan width (8&times; the lanes buys 1.79&times;
 the tokens/s, because only the Mamba-2 scan moves with the lane count &mdash; a decode step is priced by
 the per-token recurrence <code>ssm_recurrent_scan[mamba2]</code>, which is

@@ -624,8 +624,22 @@ def test_low_utilization_is_a_finding_the_report_surfaces(moe_dense):
     assert "idle" in banners[0].value
     assert "BINDING class here is shared_digital" in banners[0].reason
     # And the analog side really is the idle silicon this run should report.
-    assert moe_dense.utilization_of("analog_macro").mean_occupancy < 0.01
-    assert moe_dense.utilization_of("shared_digital").mean_occupancy > 0.2
+    #
+    # ADJ-10 REWRITE. OLD CLAIM: the shared chiplet runs above 0.2 mean
+    # occupancy. NEW CLAIM: it runs at ~0.084 — ADJ-10 derives this run's
+    # attention fabric (32 arrays, 64 softmax lanes) and the chiplet therefore
+    # finishes its work in a fraction of the time it used to, so its OWN
+    # occupancy over the makespan FALLS. That is not a regression and it is not
+    # a reason to lower a threshold quietly: it is D28's point, which is that
+    # idle silicon is a provisioning finding. What the test pins instead is the
+    # RELATION that carries the finding — the chiplet is still the binding
+    # class and still an order of magnitude busier than the analog macros —
+    # rather than an absolute number that every derivation moves.
+    analog = moe_dense.utilization_of("analog_macro").mean_occupancy
+    chiplet = moe_dense.utilization_of("shared_digital").mean_occupancy
+    assert analog < 0.01
+    assert chiplet > 0.05
+    assert chiplet > 10 * analog
 
 
 def test_the_text_report_prints_the_utilization_table(moe_dense):
@@ -724,20 +738,26 @@ def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
     # against a beat 17x shorter than the retired regime's step, so the same
     # trade is a smaller PERCENTAGE of it.
     #
-    # ADJ-9: -0.10260107% -> -0.10411058%. The trade in SECONDS is unchanged —
-    # it is analog and pool work either way — but D31-v2 derives a wider engine,
-    # the beat it is measured against is shorter, and the same saving is
-    # therefore a slightly larger percentage of it. The machine under this
-    # comparison also changed with the demo sweep's axes (arrays_per_chip 604
-    # instead of the shipped 640, and no declared vector_lanes), which is what
-    # the emitted config now carries.
+    # ADJ-9: -0.10260107% -> -0.10411058%. ADJ-10: -0.10411058% -> -0.26063724%.
+    # THE TRADE IN SECONDS IS UNCHANGED AND THAT IS THE WHOLE POINT — 40 ns
+    # either way, because it is analog and pool work and no digital derivation
+    # touches it. What moves is the DENOMINATOR: each derivation shortens the
+    # beat the saving is measured against (ADJ-9 widened the scan engine,
+    # ADJ-10 widened the attention fabric), so the same saving is a larger
+    # percentage of a smaller beat. A test that pinned only the percentage
+    # would read this as the packing law changing, which is why the SECONDS are
+    # pinned beside it. The machine under this comparison is the demo sweep's
+    # (arrays_per_chip 604 instead of the shipped 640, no declared vector_lanes),
+    # which is what the emitted config carries.
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["accumulator_ops"] == 0
     assert dense["accumulator_ops"] == 684
-    assert document["delta"]["median_decode_step_delta_s"] < 0
+    assert document["delta"]["median_decode_step_delta_s"] == pytest.approx(
+        -4.0e-08, rel=1e-6
+    )
     assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(
-        -0.1041105842826095
+        -0.26063723879889633
     )
     assert dense["tokens_per_s"] > dedicated["tokens_per_s"]
 

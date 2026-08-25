@@ -1296,10 +1296,40 @@ def check_bridge_gate(table):
 
         raw = load_yaml(hw_path)
         _config.convert(raw)
+        bridged_hw = _config.HWConfig.from_dict(raw)
+        # ADJ-10 PIN. The mapped path DERIVES the attention fabric's array count
+        # and the softmax pipeline's lane count; the frozen closed form has no
+        # timeline to derive them from and prices the DECLARED cim.fabric seed.
+        # Pinning the DAG side to that same seed is what makes the two sides one
+        # machine, and it uses the ordinary card override so the run discloses
+        # it. No row is dropped and no tolerance moves — every attention cycle
+        # count below is still compared EXACTLY. Named in
+        # fws_bridge.EXCLUSIONS as derived_fabric_pinned_to_the_declared_seed.
+        _digital = bridged_hw.cim_config.cards.digital_card
+        _digital.fabric_num_arrays = int(_digital.fabric.num_arrays)
+        _digital.fabric_softmax_lanes = int(_digital.fabric.softmax_lanes)
         mapping = _fws_mapping.build_mapping(
-            _config.HWConfig.from_dict(raw), _config.parse_config(model_path, mode)
+            bridged_hw, _config.parse_config(model_path, mode)
         )
         evaluation = _fws_eval.evaluate_fws(_build_fws_program(mapping))
+        device = mapping.device
+        table.boolean(
+            "%s: the DAG side is pinned to the closed form's own fabric (ADJ-10)" % label,
+            "num_arrays == %d and softmax_lanes == %d, DECLARED on both sides"
+            % (int(_digital.fabric.num_arrays), int(_digital.fabric.softmax_lanes)),
+            (
+                device.fabric_num_arrays == int(_digital.fabric.num_arrays)
+                and device.fabric_softmax_lanes == int(_digital.fabric.softmax_lanes)
+                and device.derived_fabric is None
+                and len(device.fabric_sizing_disclosures()) == 1
+            ),
+            "num_arrays %d, softmax_lanes %d, derivation skipped, %d disclosure(s)"
+            % (
+                device.fabric_num_arrays,
+                device.fabric_softmax_lanes,
+                len(device.fabric_sizing_disclosures()),
+            ),
+        )
         for row in _fws_bridge.bridge_rows(evaluation, closed_form, label):
             if row.kind == "exact":
                 table.exact(row.name, row.expected, row.measured)

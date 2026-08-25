@@ -52,7 +52,7 @@
       "bits_per_cell": null,
       "weight_bits": 16,
       "slicing": false,
-      "basis": "cim.fabric / cim.cards of the hardware config. It stores no weights: weight_bits is the activation width it computes on, and area_mm2 is null when the card declares none — the atlas draws the unknown hatch rather than a guess"
+      "basis": "cim.fabric / cim.cards of the hardware config. It stores no weights: weight_bits is the activation width it computes on, and area_mm2 is null when the card declares none \u2014 the atlas draws the unknown hatch rather than a guess"
     }
   },
   "systems": [
@@ -159,7 +159,7 @@
         "sys.fws.tile.000000"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 42,
@@ -176,7 +176,7 @@
         "sys.fws.tile.000001"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -193,7 +193,7 @@
         "sys.fws.tile.000002"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -210,7 +210,7 @@
         "sys.fws.tile.000003"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -227,7 +227,7 @@
         "sys.fws.tile.000004"
       ],
       "occupancy": 0.19791666666666666,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -244,7 +244,7 @@
         "sys.fws.tile.000005"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -261,7 +261,7 @@
         "sys.fws.tile.000006"
       ],
       "occupancy": 1.0,
-      "duty_cycle": 0.002187073003684206,
+      "duty_cycle": 0.005282390357961163,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -278,7 +278,7 @@
         "sys.fws.tile.000007"
       ],
       "occupancy": 0.041666666666666664,
-      "duty_cycle": 0.0021870730036842047,
+      "duty_cycle": 0.0052823903579611595,
       "digital_pool": {
         "shift_add_units": 0,
         "act_lanes": 21,
@@ -554,14 +554,14 @@
     {
       "key": "run.decode_step_median",
       "label": "beat of the WHOLE-model run",
-      "value": 4.3980873140034174e-05,
+      "value": 1.5958767876876286e-05,
       "unit": "s",
       "basis": "sys.fws.beat of granite_4_0_h_tiny.json - the D29 pipeline beat, one token out per beat - quoted as the time base the folding card's per-pass placeholder is derived from. It measures the whole 40-layer run, NOT this 8-macro excerpt."
     },
     {
       "key": "run.tokens_per_s",
       "label": "decode throughput of the WHOLE-model run",
-      "value": 22737.156600234404,
+      "value": 62661.47911387107,
       "unit": "tokens/s",
       "basis": "sys.fws.tokens_per_s of granite_4_0_h_tiny.json. It measures the whole 40-layer run, NOT this 8-macro excerpt, and no figure on this page is an excerpt throughput."
     }
