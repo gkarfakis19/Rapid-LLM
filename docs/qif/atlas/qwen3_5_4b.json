@@ -1853,7 +1853,7 @@
     "sys.fws.tile.000000"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -1870,7 +1870,7 @@
     "sys.fws.tile.000001"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1887,7 +1887,7 @@
     "sys.fws.tile.000002"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1904,7 +1904,7 @@
     "sys.fws.tile.000003"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1921,7 +1921,7 @@
     "sys.fws.tile.000004"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1938,7 +1938,7 @@
     "sys.fws.tile.000005"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1955,7 +1955,7 @@
     "sys.fws.tile.000006"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1972,7 +1972,7 @@
     "sys.fws.tile.000007"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -1989,7 +1989,7 @@
     "sys.fws.tile.000008"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2006,7 +2006,7 @@
     "sys.fws.tile.000009"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2023,7 +2023,7 @@
     "sys.fws.tile.000010"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2040,7 +2040,7 @@
     "sys.fws.tile.000011"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2057,7 +2057,7 @@
     "sys.fws.tile.000012"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2074,7 +2074,7 @@
     "sys.fws.tile.000013"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2091,7 +2091,7 @@
     "sys.fws.tile.000014"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2108,7 +2108,7 @@
     "sys.fws.tile.000015"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2125,7 +2125,7 @@
     "sys.fws.tile.000016"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2142,7 +2142,7 @@
     "sys.fws.tile.000017"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2159,7 +2159,7 @@
     "sys.fws.tile.000018"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2176,7 +2176,7 @@
     "sys.fws.tile.000019"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2193,7 +2193,7 @@
     "sys.fws.tile.000020"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -2210,7 +2210,7 @@
     "sys.fws.tile.000021"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2227,7 +2227,7 @@
     "sys.fws.tile.000022"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2244,7 +2244,7 @@
     "sys.fws.tile.000023"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2261,7 +2261,7 @@
     "sys.fws.tile.000024"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2278,7 +2278,7 @@
     "sys.fws.tile.000025"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2295,7 +2295,7 @@
     "sys.fws.tile.000026"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2312,7 +2312,7 @@
     "sys.fws.tile.000027"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2329,7 +2329,7 @@
     "sys.fws.tile.000028"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2346,7 +2346,7 @@
     "sys.fws.tile.000029"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2363,7 +2363,7 @@
     "sys.fws.tile.000030"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2380,7 +2380,7 @@
     "sys.fws.tile.000031"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2397,7 +2397,7 @@
     "sys.fws.tile.000032"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2414,7 +2414,7 @@
     "sys.fws.tile.000033"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2431,7 +2431,7 @@
     "sys.fws.tile.000034"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2448,7 +2448,7 @@
     "sys.fws.tile.000035"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2465,7 +2465,7 @@
     "sys.fws.tile.000036"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2482,7 +2482,7 @@
     "sys.fws.tile.000037"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2499,7 +2499,7 @@
     "sys.fws.tile.000038"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2516,7 +2516,7 @@
     "sys.fws.tile.000039"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2533,7 +2533,7 @@
     "sys.fws.tile.000040"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -2550,7 +2550,7 @@
     "sys.fws.tile.000041"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2567,7 +2567,7 @@
     "sys.fws.tile.000042"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2584,7 +2584,7 @@
     "sys.fws.tile.000043"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2601,7 +2601,7 @@
     "sys.fws.tile.000044"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2618,7 +2618,7 @@
     "sys.fws.tile.000045"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2635,7 +2635,7 @@
     "sys.fws.tile.000046"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2652,7 +2652,7 @@
     "sys.fws.tile.000047"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2669,7 +2669,7 @@
     "sys.fws.tile.000048"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2686,7 +2686,7 @@
     "sys.fws.tile.000049"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2703,7 +2703,7 @@
     "sys.fws.tile.000050"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2720,7 +2720,7 @@
     "sys.fws.tile.000051"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2737,7 +2737,7 @@
     "sys.fws.tile.000052"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2754,7 +2754,7 @@
     "sys.fws.tile.000053"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2771,7 +2771,7 @@
     "sys.fws.tile.000054"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2788,7 +2788,7 @@
     "sys.fws.tile.000055"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2805,7 +2805,7 @@
     "sys.fws.tile.000056"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2822,7 +2822,7 @@
     "sys.fws.tile.000057"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2839,7 +2839,7 @@
     "sys.fws.tile.000058"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2856,7 +2856,7 @@
     "sys.fws.tile.000059"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2873,7 +2873,7 @@
     "sys.fws.tile.000060"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -2890,7 +2890,7 @@
     "sys.fws.tile.000061"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2907,7 +2907,7 @@
     "sys.fws.tile.000062"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2924,7 +2924,7 @@
     "sys.fws.tile.000063"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2941,7 +2941,7 @@
     "sys.fws.tile.000064"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0011223237886870468,
+   "duty_cycle": 0.003179431607933491,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2958,7 +2958,7 @@
     "sys.fws.tile.000065"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2975,7 +2975,7 @@
     "sys.fws.tile.000066"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -2992,7 +2992,7 @@
     "sys.fws.tile.000067"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3009,7 +3009,7 @@
     "sys.fws.tile.000068"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3026,7 +3026,7 @@
     "sys.fws.tile.000069"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3043,7 +3043,7 @@
     "sys.fws.tile.000070"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3060,7 +3060,7 @@
     "sys.fws.tile.000071"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3077,7 +3077,7 @@
     "sys.fws.tile.000072"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3094,7 +3094,7 @@
     "sys.fws.tile.000073"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3111,7 +3111,7 @@
     "sys.fws.tile.000074"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3128,7 +3128,7 @@
     "sys.fws.tile.000075"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3145,7 +3145,7 @@
     "sys.fws.tile.000076"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3162,7 +3162,7 @@
     "sys.fws.tile.000077"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -3179,7 +3179,7 @@
     "sys.fws.tile.000078"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0011223237886869982,
+   "duty_cycle": 0.003179431607933533,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4711,7 +4711,7 @@
     "sys.fws.tile.000079"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -4728,7 +4728,7 @@
     "sys.fws.tile.000080"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4745,7 +4745,7 @@
     "sys.fws.tile.000081"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4762,7 +4762,7 @@
     "sys.fws.tile.000082"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4779,7 +4779,7 @@
     "sys.fws.tile.000083"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4796,7 +4796,7 @@
     "sys.fws.tile.000084"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4813,7 +4813,7 @@
     "sys.fws.tile.000085"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4830,7 +4830,7 @@
     "sys.fws.tile.000086"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4847,7 +4847,7 @@
     "sys.fws.tile.000087"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4864,7 +4864,7 @@
     "sys.fws.tile.000088"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4881,7 +4881,7 @@
     "sys.fws.tile.000089"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4898,7 +4898,7 @@
     "sys.fws.tile.000090"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4915,7 +4915,7 @@
     "sys.fws.tile.000091"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4932,7 +4932,7 @@
     "sys.fws.tile.000092"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4949,7 +4949,7 @@
     "sys.fws.tile.000093"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4966,7 +4966,7 @@
     "sys.fws.tile.000094"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -4983,7 +4983,7 @@
     "sys.fws.tile.000095"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5000,7 +5000,7 @@
     "sys.fws.tile.000096"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5017,7 +5017,7 @@
     "sys.fws.tile.000097"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5034,7 +5034,7 @@
     "sys.fws.tile.000098"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5051,7 +5051,7 @@
     "sys.fws.tile.000099"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -5068,7 +5068,7 @@
     "sys.fws.tile.000100"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5085,7 +5085,7 @@
     "sys.fws.tile.000101"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5102,7 +5102,7 @@
     "sys.fws.tile.000102"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5119,7 +5119,7 @@
     "sys.fws.tile.000103"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5136,7 +5136,7 @@
     "sys.fws.tile.000104"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5153,7 +5153,7 @@
     "sys.fws.tile.000105"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5170,7 +5170,7 @@
     "sys.fws.tile.000106"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5187,7 +5187,7 @@
     "sys.fws.tile.000107"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5204,7 +5204,7 @@
     "sys.fws.tile.000108"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5221,7 +5221,7 @@
     "sys.fws.tile.000109"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5238,7 +5238,7 @@
     "sys.fws.tile.000110"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5255,7 +5255,7 @@
     "sys.fws.tile.000111"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5272,7 +5272,7 @@
     "sys.fws.tile.000112"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5289,7 +5289,7 @@
     "sys.fws.tile.000113"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5306,7 +5306,7 @@
     "sys.fws.tile.000114"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5323,7 +5323,7 @@
     "sys.fws.tile.000115"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5340,7 +5340,7 @@
     "sys.fws.tile.000116"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5357,7 +5357,7 @@
     "sys.fws.tile.000117"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5374,7 +5374,7 @@
     "sys.fws.tile.000118"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5391,7 +5391,7 @@
     "sys.fws.tile.000119"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -5408,7 +5408,7 @@
     "sys.fws.tile.000120"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5425,7 +5425,7 @@
     "sys.fws.tile.000121"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5442,7 +5442,7 @@
     "sys.fws.tile.000122"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5459,7 +5459,7 @@
     "sys.fws.tile.000123"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5476,7 +5476,7 @@
     "sys.fws.tile.000124"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5493,7 +5493,7 @@
     "sys.fws.tile.000125"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5510,7 +5510,7 @@
     "sys.fws.tile.000126"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5527,7 +5527,7 @@
     "sys.fws.tile.000127"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5544,7 +5544,7 @@
     "sys.fws.tile.000128"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5561,7 +5561,7 @@
     "sys.fws.tile.000129"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5578,7 +5578,7 @@
     "sys.fws.tile.000130"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5595,7 +5595,7 @@
     "sys.fws.tile.000131"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5612,7 +5612,7 @@
     "sys.fws.tile.000132"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5629,7 +5629,7 @@
     "sys.fws.tile.000133"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5646,7 +5646,7 @@
     "sys.fws.tile.000134"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5663,7 +5663,7 @@
     "sys.fws.tile.000135"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5680,7 +5680,7 @@
     "sys.fws.tile.000136"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5697,7 +5697,7 @@
     "sys.fws.tile.000137"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5714,7 +5714,7 @@
     "sys.fws.tile.000138"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5731,7 +5731,7 @@
     "sys.fws.tile.000139"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -5748,7 +5748,7 @@
     "sys.fws.tile.000140"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5765,7 +5765,7 @@
     "sys.fws.tile.000141"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5782,7 +5782,7 @@
     "sys.fws.tile.000142"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5799,7 +5799,7 @@
     "sys.fws.tile.000143"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0010287968062964454,
+   "duty_cycle": 0.002914478973939057,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5816,7 +5816,7 @@
     "sys.fws.tile.000144"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5833,7 +5833,7 @@
     "sys.fws.tile.000145"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5850,7 +5850,7 @@
     "sys.fws.tile.000146"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5867,7 +5867,7 @@
     "sys.fws.tile.000147"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5884,7 +5884,7 @@
     "sys.fws.tile.000148"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5901,7 +5901,7 @@
     "sys.fws.tile.000149"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5918,7 +5918,7 @@
     "sys.fws.tile.000150"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5935,7 +5935,7 @@
     "sys.fws.tile.000151"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5952,7 +5952,7 @@
     "sys.fws.tile.000152"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5969,7 +5969,7 @@
     "sys.fws.tile.000153"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -5986,7 +5986,7 @@
     "sys.fws.tile.000154"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -6003,7 +6003,7 @@
     "sys.fws.tile.000155"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -6020,7 +6020,7 @@
     "sys.fws.tile.000156"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -6037,7 +6037,7 @@
     "sys.fws.tile.000157"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.001028796806296398,
+   "duty_cycle": 0.002914478973939102,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7569,7 +7569,7 @@
     "sys.fws.tile.000158"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -7586,7 +7586,7 @@
     "sys.fws.tile.000159"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7603,7 +7603,7 @@
     "sys.fws.tile.000160"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7620,7 +7620,7 @@
     "sys.fws.tile.000161"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7637,7 +7637,7 @@
     "sys.fws.tile.000162"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7654,7 +7654,7 @@
     "sys.fws.tile.000163"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7671,7 +7671,7 @@
     "sys.fws.tile.000164"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7688,7 +7688,7 @@
     "sys.fws.tile.000165"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7705,7 +7705,7 @@
     "sys.fws.tile.000166"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7722,7 +7722,7 @@
     "sys.fws.tile.000167"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7739,7 +7739,7 @@
     "sys.fws.tile.000168"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7756,7 +7756,7 @@
     "sys.fws.tile.000169"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7773,7 +7773,7 @@
     "sys.fws.tile.000170"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7790,7 +7790,7 @@
     "sys.fws.tile.000171"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7807,7 +7807,7 @@
     "sys.fws.tile.000172"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7824,7 +7824,7 @@
     "sys.fws.tile.000173"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7841,7 +7841,7 @@
     "sys.fws.tile.000174"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7858,7 +7858,7 @@
     "sys.fws.tile.000175"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7875,7 +7875,7 @@
     "sys.fws.tile.000176"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7892,7 +7892,7 @@
     "sys.fws.tile.000177"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7909,7 +7909,7 @@
     "sys.fws.tile.000178"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -7926,7 +7926,7 @@
     "sys.fws.tile.000179"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7943,7 +7943,7 @@
     "sys.fws.tile.000180"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7960,7 +7960,7 @@
     "sys.fws.tile.000181"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7977,7 +7977,7 @@
     "sys.fws.tile.000182"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -7994,7 +7994,7 @@
     "sys.fws.tile.000183"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8011,7 +8011,7 @@
     "sys.fws.tile.000184"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8028,7 +8028,7 @@
     "sys.fws.tile.000185"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8045,7 +8045,7 @@
     "sys.fws.tile.000186"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8062,7 +8062,7 @@
     "sys.fws.tile.000187"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8079,7 +8079,7 @@
     "sys.fws.tile.000188"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8096,7 +8096,7 @@
     "sys.fws.tile.000189"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8113,7 +8113,7 @@
     "sys.fws.tile.000190"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8130,7 +8130,7 @@
     "sys.fws.tile.000191"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8147,7 +8147,7 @@
     "sys.fws.tile.000192"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8164,7 +8164,7 @@
     "sys.fws.tile.000193"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8181,7 +8181,7 @@
     "sys.fws.tile.000194"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8198,7 +8198,7 @@
     "sys.fws.tile.000195"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8215,7 +8215,7 @@
     "sys.fws.tile.000196"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8232,7 +8232,7 @@
     "sys.fws.tile.000197"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8249,7 +8249,7 @@
     "sys.fws.tile.000198"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -8266,7 +8266,7 @@
     "sys.fws.tile.000199"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8283,7 +8283,7 @@
     "sys.fws.tile.000200"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8300,7 +8300,7 @@
     "sys.fws.tile.000201"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8317,7 +8317,7 @@
     "sys.fws.tile.000202"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8334,7 +8334,7 @@
     "sys.fws.tile.000203"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8351,7 +8351,7 @@
     "sys.fws.tile.000204"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8368,7 +8368,7 @@
     "sys.fws.tile.000205"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8385,7 +8385,7 @@
     "sys.fws.tile.000206"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8402,7 +8402,7 @@
     "sys.fws.tile.000207"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8419,7 +8419,7 @@
     "sys.fws.tile.000208"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8436,7 +8436,7 @@
     "sys.fws.tile.000209"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8453,7 +8453,7 @@
     "sys.fws.tile.000210"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8470,7 +8470,7 @@
     "sys.fws.tile.000211"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8487,7 +8487,7 @@
     "sys.fws.tile.000212"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8504,7 +8504,7 @@
     "sys.fws.tile.000213"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8521,7 +8521,7 @@
     "sys.fws.tile.000214"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8538,7 +8538,7 @@
     "sys.fws.tile.000215"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8555,7 +8555,7 @@
     "sys.fws.tile.000216"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8572,7 +8572,7 @@
     "sys.fws.tile.000217"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8589,7 +8589,7 @@
     "sys.fws.tile.000218"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -8606,7 +8606,7 @@
     "sys.fws.tile.000219"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8623,7 +8623,7 @@
     "sys.fws.tile.000220"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8640,7 +8640,7 @@
     "sys.fws.tile.000221"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8657,7 +8657,7 @@
     "sys.fws.tile.000222"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.000935269823905845,
+   "duty_cycle": 0.002649526339944626,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8674,7 +8674,7 @@
     "sys.fws.tile.000223"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8691,7 +8691,7 @@
     "sys.fws.tile.000224"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8708,7 +8708,7 @@
     "sys.fws.tile.000225"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8725,7 +8725,7 @@
     "sys.fws.tile.000226"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8742,7 +8742,7 @@
     "sys.fws.tile.000227"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8759,7 +8759,7 @@
     "sys.fws.tile.000228"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8776,7 +8776,7 @@
     "sys.fws.tile.000229"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8793,7 +8793,7 @@
     "sys.fws.tile.000230"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8810,7 +8810,7 @@
     "sys.fws.tile.000231"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8827,7 +8827,7 @@
     "sys.fws.tile.000232"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8844,7 +8844,7 @@
     "sys.fws.tile.000233"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8861,7 +8861,7 @@
     "sys.fws.tile.000234"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8878,7 +8878,7 @@
     "sys.fws.tile.000235"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -8895,7 +8895,7 @@
     "sys.fws.tile.000236"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0009352698239057817,
+   "duty_cycle": 0.0026495263399446706,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10427,7 +10427,7 @@
     "sys.fws.tile.000237"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -10444,7 +10444,7 @@
     "sys.fws.tile.000238"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10461,7 +10461,7 @@
     "sys.fws.tile.000239"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10478,7 +10478,7 @@
     "sys.fws.tile.000240"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10495,7 +10495,7 @@
     "sys.fws.tile.000241"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10512,7 +10512,7 @@
     "sys.fws.tile.000242"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10529,7 +10529,7 @@
     "sys.fws.tile.000243"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10546,7 +10546,7 @@
     "sys.fws.tile.000244"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10563,7 +10563,7 @@
     "sys.fws.tile.000245"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10580,7 +10580,7 @@
     "sys.fws.tile.000246"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10597,7 +10597,7 @@
     "sys.fws.tile.000247"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10614,7 +10614,7 @@
     "sys.fws.tile.000248"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10631,7 +10631,7 @@
     "sys.fws.tile.000249"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10648,7 +10648,7 @@
     "sys.fws.tile.000250"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10665,7 +10665,7 @@
     "sys.fws.tile.000251"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10682,7 +10682,7 @@
     "sys.fws.tile.000252"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10699,7 +10699,7 @@
     "sys.fws.tile.000253"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10716,7 +10716,7 @@
     "sys.fws.tile.000254"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10733,7 +10733,7 @@
     "sys.fws.tile.000255"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10750,7 +10750,7 @@
     "sys.fws.tile.000256"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10767,7 +10767,7 @@
     "sys.fws.tile.000257"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -10784,7 +10784,7 @@
     "sys.fws.tile.000258"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10801,7 +10801,7 @@
     "sys.fws.tile.000259"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10818,7 +10818,7 @@
     "sys.fws.tile.000260"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10835,7 +10835,7 @@
     "sys.fws.tile.000261"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10852,7 +10852,7 @@
     "sys.fws.tile.000262"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10869,7 +10869,7 @@
     "sys.fws.tile.000263"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10886,7 +10886,7 @@
     "sys.fws.tile.000264"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10903,7 +10903,7 @@
     "sys.fws.tile.000265"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10920,7 +10920,7 @@
     "sys.fws.tile.000266"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10937,7 +10937,7 @@
     "sys.fws.tile.000267"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10954,7 +10954,7 @@
     "sys.fws.tile.000268"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10971,7 +10971,7 @@
     "sys.fws.tile.000269"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -10988,7 +10988,7 @@
     "sys.fws.tile.000270"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11005,7 +11005,7 @@
     "sys.fws.tile.000271"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11022,7 +11022,7 @@
     "sys.fws.tile.000272"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11039,7 +11039,7 @@
     "sys.fws.tile.000273"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11056,7 +11056,7 @@
     "sys.fws.tile.000274"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11073,7 +11073,7 @@
     "sys.fws.tile.000275"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11090,7 +11090,7 @@
     "sys.fws.tile.000276"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11107,7 +11107,7 @@
     "sys.fws.tile.000277"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -11124,7 +11124,7 @@
     "sys.fws.tile.000278"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11141,7 +11141,7 @@
     "sys.fws.tile.000279"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11158,7 +11158,7 @@
     "sys.fws.tile.000280"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11175,7 +11175,7 @@
     "sys.fws.tile.000281"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11192,7 +11192,7 @@
     "sys.fws.tile.000282"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11209,7 +11209,7 @@
     "sys.fws.tile.000283"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11226,7 +11226,7 @@
     "sys.fws.tile.000284"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11243,7 +11243,7 @@
     "sys.fws.tile.000285"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11260,7 +11260,7 @@
     "sys.fws.tile.000286"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11277,7 +11277,7 @@
     "sys.fws.tile.000287"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11294,7 +11294,7 @@
     "sys.fws.tile.000288"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11311,7 +11311,7 @@
     "sys.fws.tile.000289"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11328,7 +11328,7 @@
     "sys.fws.tile.000290"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11345,7 +11345,7 @@
     "sys.fws.tile.000291"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11362,7 +11362,7 @@
     "sys.fws.tile.000292"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11379,7 +11379,7 @@
     "sys.fws.tile.000293"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11396,7 +11396,7 @@
     "sys.fws.tile.000294"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11413,7 +11413,7 @@
     "sys.fws.tile.000295"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11430,7 +11430,7 @@
     "sys.fws.tile.000296"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11447,7 +11447,7 @@
     "sys.fws.tile.000297"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -11464,7 +11464,7 @@
     "sys.fws.tile.000298"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11481,7 +11481,7 @@
     "sys.fws.tile.000299"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11498,7 +11498,7 @@
     "sys.fws.tile.000300"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11515,7 +11515,7 @@
     "sys.fws.tile.000301"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0008417428415152288,
+   "duty_cycle": 0.0023845737059501946,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11532,7 +11532,7 @@
     "sys.fws.tile.000302"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11549,7 +11549,7 @@
     "sys.fws.tile.000303"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11566,7 +11566,7 @@
     "sys.fws.tile.000304"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11583,7 +11583,7 @@
     "sys.fws.tile.000305"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11600,7 +11600,7 @@
     "sys.fws.tile.000306"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11617,7 +11617,7 @@
     "sys.fws.tile.000307"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11634,7 +11634,7 @@
     "sys.fws.tile.000308"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11651,7 +11651,7 @@
     "sys.fws.tile.000309"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11668,7 +11668,7 @@
     "sys.fws.tile.000310"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11685,7 +11685,7 @@
     "sys.fws.tile.000311"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11702,7 +11702,7 @@
     "sys.fws.tile.000312"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11719,7 +11719,7 @@
     "sys.fws.tile.000313"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11736,7 +11736,7 @@
     "sys.fws.tile.000314"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -11753,7 +11753,7 @@
     "sys.fws.tile.000315"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0008417428415151655,
+   "duty_cycle": 0.0023845737059502397,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13285,7 +13285,7 @@
     "sys.fws.tile.000316"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -13302,7 +13302,7 @@
     "sys.fws.tile.000317"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13319,7 +13319,7 @@
     "sys.fws.tile.000318"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13336,7 +13336,7 @@
     "sys.fws.tile.000319"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13353,7 +13353,7 @@
     "sys.fws.tile.000320"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13370,7 +13370,7 @@
     "sys.fws.tile.000321"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13387,7 +13387,7 @@
     "sys.fws.tile.000322"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13404,7 +13404,7 @@
     "sys.fws.tile.000323"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13421,7 +13421,7 @@
     "sys.fws.tile.000324"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13438,7 +13438,7 @@
     "sys.fws.tile.000325"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13455,7 +13455,7 @@
     "sys.fws.tile.000326"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13472,7 +13472,7 @@
     "sys.fws.tile.000327"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13489,7 +13489,7 @@
     "sys.fws.tile.000328"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13506,7 +13506,7 @@
     "sys.fws.tile.000329"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13523,7 +13523,7 @@
     "sys.fws.tile.000330"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13540,7 +13540,7 @@
     "sys.fws.tile.000331"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13557,7 +13557,7 @@
     "sys.fws.tile.000332"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13574,7 +13574,7 @@
     "sys.fws.tile.000333"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13591,7 +13591,7 @@
     "sys.fws.tile.000334"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13608,7 +13608,7 @@
     "sys.fws.tile.000335"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13625,7 +13625,7 @@
     "sys.fws.tile.000336"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -13642,7 +13642,7 @@
     "sys.fws.tile.000337"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13659,7 +13659,7 @@
     "sys.fws.tile.000338"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13676,7 +13676,7 @@
     "sys.fws.tile.000339"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13693,7 +13693,7 @@
     "sys.fws.tile.000340"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13710,7 +13710,7 @@
     "sys.fws.tile.000341"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13727,7 +13727,7 @@
     "sys.fws.tile.000342"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13744,7 +13744,7 @@
     "sys.fws.tile.000343"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13761,7 +13761,7 @@
     "sys.fws.tile.000344"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13778,7 +13778,7 @@
     "sys.fws.tile.000345"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13795,7 +13795,7 @@
     "sys.fws.tile.000346"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13812,7 +13812,7 @@
     "sys.fws.tile.000347"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13829,7 +13829,7 @@
     "sys.fws.tile.000348"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13846,7 +13846,7 @@
     "sys.fws.tile.000349"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13863,7 +13863,7 @@
     "sys.fws.tile.000350"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13880,7 +13880,7 @@
     "sys.fws.tile.000351"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13897,7 +13897,7 @@
     "sys.fws.tile.000352"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13914,7 +13914,7 @@
     "sys.fws.tile.000353"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13931,7 +13931,7 @@
     "sys.fws.tile.000354"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13948,7 +13948,7 @@
     "sys.fws.tile.000355"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13965,7 +13965,7 @@
     "sys.fws.tile.000356"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -13982,7 +13982,7 @@
     "sys.fws.tile.000357"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -13999,7 +13999,7 @@
     "sys.fws.tile.000358"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14016,7 +14016,7 @@
     "sys.fws.tile.000359"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14033,7 +14033,7 @@
     "sys.fws.tile.000360"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14050,7 +14050,7 @@
     "sys.fws.tile.000361"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14067,7 +14067,7 @@
     "sys.fws.tile.000362"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14084,7 +14084,7 @@
     "sys.fws.tile.000363"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14101,7 +14101,7 @@
     "sys.fws.tile.000364"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14118,7 +14118,7 @@
     "sys.fws.tile.000365"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14135,7 +14135,7 @@
     "sys.fws.tile.000366"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14152,7 +14152,7 @@
     "sys.fws.tile.000367"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14169,7 +14169,7 @@
     "sys.fws.tile.000368"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14186,7 +14186,7 @@
     "sys.fws.tile.000369"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14203,7 +14203,7 @@
     "sys.fws.tile.000370"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14220,7 +14220,7 @@
     "sys.fws.tile.000371"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14237,7 +14237,7 @@
     "sys.fws.tile.000372"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14254,7 +14254,7 @@
     "sys.fws.tile.000373"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14271,7 +14271,7 @@
     "sys.fws.tile.000374"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14288,7 +14288,7 @@
     "sys.fws.tile.000375"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14305,7 +14305,7 @@
     "sys.fws.tile.000376"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -14322,7 +14322,7 @@
     "sys.fws.tile.000377"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14339,7 +14339,7 @@
     "sys.fws.tile.000378"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14356,7 +14356,7 @@
     "sys.fws.tile.000379"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14373,7 +14373,7 @@
     "sys.fws.tile.000380"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0007482158591246127,
+   "duty_cycle": 0.0021196210719557633,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14390,7 +14390,7 @@
     "sys.fws.tile.000381"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14407,7 +14407,7 @@
     "sys.fws.tile.000382"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14424,7 +14424,7 @@
     "sys.fws.tile.000383"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14441,7 +14441,7 @@
     "sys.fws.tile.000384"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14458,7 +14458,7 @@
     "sys.fws.tile.000385"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14475,7 +14475,7 @@
     "sys.fws.tile.000386"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14492,7 +14492,7 @@
     "sys.fws.tile.000387"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14509,7 +14509,7 @@
     "sys.fws.tile.000388"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14526,7 +14526,7 @@
     "sys.fws.tile.000389"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14543,7 +14543,7 @@
     "sys.fws.tile.000390"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14560,7 +14560,7 @@
     "sys.fws.tile.000391"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14577,7 +14577,7 @@
     "sys.fws.tile.000392"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14594,7 +14594,7 @@
     "sys.fws.tile.000393"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -14611,7 +14611,7 @@
     "sys.fws.tile.000394"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0007482158591245493,
+   "duty_cycle": 0.0021196210719558084,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16143,7 +16143,7 @@
     "sys.fws.tile.000395"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -16160,7 +16160,7 @@
     "sys.fws.tile.000396"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16177,7 +16177,7 @@
     "sys.fws.tile.000397"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16194,7 +16194,7 @@
     "sys.fws.tile.000398"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16211,7 +16211,7 @@
     "sys.fws.tile.000399"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16228,7 +16228,7 @@
     "sys.fws.tile.000400"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16245,7 +16245,7 @@
     "sys.fws.tile.000401"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16262,7 +16262,7 @@
     "sys.fws.tile.000402"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16279,7 +16279,7 @@
     "sys.fws.tile.000403"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16296,7 +16296,7 @@
     "sys.fws.tile.000404"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16313,7 +16313,7 @@
     "sys.fws.tile.000405"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16330,7 +16330,7 @@
     "sys.fws.tile.000406"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16347,7 +16347,7 @@
     "sys.fws.tile.000407"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16364,7 +16364,7 @@
     "sys.fws.tile.000408"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16381,7 +16381,7 @@
     "sys.fws.tile.000409"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16398,7 +16398,7 @@
     "sys.fws.tile.000410"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16415,7 +16415,7 @@
     "sys.fws.tile.000411"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16432,7 +16432,7 @@
     "sys.fws.tile.000412"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16449,7 +16449,7 @@
     "sys.fws.tile.000413"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16466,7 +16466,7 @@
     "sys.fws.tile.000414"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16483,7 +16483,7 @@
     "sys.fws.tile.000415"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -16500,7 +16500,7 @@
     "sys.fws.tile.000416"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16517,7 +16517,7 @@
     "sys.fws.tile.000417"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16534,7 +16534,7 @@
     "sys.fws.tile.000418"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16551,7 +16551,7 @@
     "sys.fws.tile.000419"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16568,7 +16568,7 @@
     "sys.fws.tile.000420"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16585,7 +16585,7 @@
     "sys.fws.tile.000421"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16602,7 +16602,7 @@
     "sys.fws.tile.000422"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16619,7 +16619,7 @@
     "sys.fws.tile.000423"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16636,7 +16636,7 @@
     "sys.fws.tile.000424"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16653,7 +16653,7 @@
     "sys.fws.tile.000425"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16670,7 +16670,7 @@
     "sys.fws.tile.000426"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16687,7 +16687,7 @@
     "sys.fws.tile.000427"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16704,7 +16704,7 @@
     "sys.fws.tile.000428"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16721,7 +16721,7 @@
     "sys.fws.tile.000429"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16738,7 +16738,7 @@
     "sys.fws.tile.000430"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16755,7 +16755,7 @@
     "sys.fws.tile.000431"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16772,7 +16772,7 @@
     "sys.fws.tile.000432"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16789,7 +16789,7 @@
     "sys.fws.tile.000433"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16806,7 +16806,7 @@
     "sys.fws.tile.000434"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16823,7 +16823,7 @@
     "sys.fws.tile.000435"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -16840,7 +16840,7 @@
     "sys.fws.tile.000436"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16857,7 +16857,7 @@
     "sys.fws.tile.000437"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16874,7 +16874,7 @@
     "sys.fws.tile.000438"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16891,7 +16891,7 @@
     "sys.fws.tile.000439"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16908,7 +16908,7 @@
     "sys.fws.tile.000440"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16925,7 +16925,7 @@
     "sys.fws.tile.000441"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16942,7 +16942,7 @@
     "sys.fws.tile.000442"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16959,7 +16959,7 @@
     "sys.fws.tile.000443"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16976,7 +16976,7 @@
     "sys.fws.tile.000444"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -16993,7 +16993,7 @@
     "sys.fws.tile.000445"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17010,7 +17010,7 @@
     "sys.fws.tile.000446"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17027,7 +17027,7 @@
     "sys.fws.tile.000447"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17044,7 +17044,7 @@
     "sys.fws.tile.000448"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17061,7 +17061,7 @@
     "sys.fws.tile.000449"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17078,7 +17078,7 @@
     "sys.fws.tile.000450"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17095,7 +17095,7 @@
     "sys.fws.tile.000451"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17112,7 +17112,7 @@
     "sys.fws.tile.000452"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17129,7 +17129,7 @@
     "sys.fws.tile.000453"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17146,7 +17146,7 @@
     "sys.fws.tile.000454"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17163,7 +17163,7 @@
     "sys.fws.tile.000455"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -17180,7 +17180,7 @@
     "sys.fws.tile.000456"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17197,7 +17197,7 @@
     "sys.fws.tile.000457"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17214,7 +17214,7 @@
     "sys.fws.tile.000458"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17231,7 +17231,7 @@
     "sys.fws.tile.000459"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0006546888767339964,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17248,7 +17248,7 @@
     "sys.fws.tile.000460"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17265,7 +17265,7 @@
     "sys.fws.tile.000461"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17282,7 +17282,7 @@
     "sys.fws.tile.000462"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17299,7 +17299,7 @@
     "sys.fws.tile.000463"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17316,7 +17316,7 @@
     "sys.fws.tile.000464"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17333,7 +17333,7 @@
     "sys.fws.tile.000465"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17350,7 +17350,7 @@
     "sys.fws.tile.000466"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17367,7 +17367,7 @@
     "sys.fws.tile.000467"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17384,7 +17384,7 @@
     "sys.fws.tile.000468"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17401,7 +17401,7 @@
     "sys.fws.tile.000469"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17418,7 +17418,7 @@
     "sys.fws.tile.000470"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17435,7 +17435,7 @@
     "sys.fws.tile.000471"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17452,7 +17452,7 @@
     "sys.fws.tile.000472"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -17469,7 +17469,7 @@
     "sys.fws.tile.000473"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0006546888767339331,
+   "duty_cycle": 0.0018546684379613324,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19001,7 +19001,7 @@
     "sys.fws.tile.000474"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -19018,7 +19018,7 @@
     "sys.fws.tile.000475"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19035,7 +19035,7 @@
     "sys.fws.tile.000476"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19052,7 +19052,7 @@
     "sys.fws.tile.000477"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19069,7 +19069,7 @@
     "sys.fws.tile.000478"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19086,7 +19086,7 @@
     "sys.fws.tile.000479"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19103,7 +19103,7 @@
     "sys.fws.tile.000480"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19120,7 +19120,7 @@
     "sys.fws.tile.000481"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19137,7 +19137,7 @@
     "sys.fws.tile.000482"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19154,7 +19154,7 @@
     "sys.fws.tile.000483"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19171,7 +19171,7 @@
     "sys.fws.tile.000484"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19188,7 +19188,7 @@
     "sys.fws.tile.000485"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19205,7 +19205,7 @@
     "sys.fws.tile.000486"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19222,7 +19222,7 @@
     "sys.fws.tile.000487"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19239,7 +19239,7 @@
     "sys.fws.tile.000488"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19256,7 +19256,7 @@
     "sys.fws.tile.000489"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19273,7 +19273,7 @@
     "sys.fws.tile.000490"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19290,7 +19290,7 @@
     "sys.fws.tile.000491"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19307,7 +19307,7 @@
     "sys.fws.tile.000492"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19324,7 +19324,7 @@
     "sys.fws.tile.000493"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19341,7 +19341,7 @@
     "sys.fws.tile.000494"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -19358,7 +19358,7 @@
     "sys.fws.tile.000495"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19375,7 +19375,7 @@
     "sys.fws.tile.000496"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19392,7 +19392,7 @@
     "sys.fws.tile.000497"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19409,7 +19409,7 @@
     "sys.fws.tile.000498"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19426,7 +19426,7 @@
     "sys.fws.tile.000499"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19443,7 +19443,7 @@
     "sys.fws.tile.000500"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19460,7 +19460,7 @@
     "sys.fws.tile.000501"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19477,7 +19477,7 @@
     "sys.fws.tile.000502"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19494,7 +19494,7 @@
     "sys.fws.tile.000503"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19511,7 +19511,7 @@
     "sys.fws.tile.000504"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19528,7 +19528,7 @@
     "sys.fws.tile.000505"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19545,7 +19545,7 @@
     "sys.fws.tile.000506"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19562,7 +19562,7 @@
     "sys.fws.tile.000507"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19579,7 +19579,7 @@
     "sys.fws.tile.000508"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19596,7 +19596,7 @@
     "sys.fws.tile.000509"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19613,7 +19613,7 @@
     "sys.fws.tile.000510"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19630,7 +19630,7 @@
     "sys.fws.tile.000511"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19647,7 +19647,7 @@
     "sys.fws.tile.000512"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19664,7 +19664,7 @@
     "sys.fws.tile.000513"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19681,7 +19681,7 @@
     "sys.fws.tile.000514"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -19698,7 +19698,7 @@
     "sys.fws.tile.000515"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19715,7 +19715,7 @@
     "sys.fws.tile.000516"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19732,7 +19732,7 @@
     "sys.fws.tile.000517"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19749,7 +19749,7 @@
     "sys.fws.tile.000518"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19766,7 +19766,7 @@
     "sys.fws.tile.000519"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19783,7 +19783,7 @@
     "sys.fws.tile.000520"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19800,7 +19800,7 @@
     "sys.fws.tile.000521"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19817,7 +19817,7 @@
     "sys.fws.tile.000522"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19834,7 +19834,7 @@
     "sys.fws.tile.000523"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19851,7 +19851,7 @@
     "sys.fws.tile.000524"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19868,7 +19868,7 @@
     "sys.fws.tile.000525"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19885,7 +19885,7 @@
     "sys.fws.tile.000526"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19902,7 +19902,7 @@
     "sys.fws.tile.000527"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19919,7 +19919,7 @@
     "sys.fws.tile.000528"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19936,7 +19936,7 @@
     "sys.fws.tile.000529"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19953,7 +19953,7 @@
     "sys.fws.tile.000530"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19970,7 +19970,7 @@
     "sys.fws.tile.000531"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -19987,7 +19987,7 @@
     "sys.fws.tile.000532"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20004,7 +20004,7 @@
     "sys.fws.tile.000533"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20021,7 +20021,7 @@
     "sys.fws.tile.000534"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -20038,7 +20038,7 @@
     "sys.fws.tile.000535"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20055,7 +20055,7 @@
     "sys.fws.tile.000536"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20072,7 +20072,7 @@
     "sys.fws.tile.000537"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20089,7 +20089,7 @@
     "sys.fws.tile.000538"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0005611618943433803,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20106,7 +20106,7 @@
     "sys.fws.tile.000539"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20123,7 +20123,7 @@
     "sys.fws.tile.000540"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20140,7 +20140,7 @@
     "sys.fws.tile.000541"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20157,7 +20157,7 @@
     "sys.fws.tile.000542"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20174,7 +20174,7 @@
     "sys.fws.tile.000543"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20191,7 +20191,7 @@
     "sys.fws.tile.000544"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20208,7 +20208,7 @@
     "sys.fws.tile.000545"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20225,7 +20225,7 @@
     "sys.fws.tile.000546"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20242,7 +20242,7 @@
     "sys.fws.tile.000547"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20259,7 +20259,7 @@
     "sys.fws.tile.000548"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20276,7 +20276,7 @@
     "sys.fws.tile.000549"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20293,7 +20293,7 @@
     "sys.fws.tile.000550"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20310,7 +20310,7 @@
     "sys.fws.tile.000551"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -20327,7 +20327,7 @@
     "sys.fws.tile.000552"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0005611618943433169,
+   "duty_cycle": 0.0015897158039668562,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21859,7 +21859,7 @@
     "sys.fws.tile.000553"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -21876,7 +21876,7 @@
     "sys.fws.tile.000554"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21893,7 +21893,7 @@
     "sys.fws.tile.000555"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21910,7 +21910,7 @@
     "sys.fws.tile.000556"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21927,7 +21927,7 @@
     "sys.fws.tile.000557"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21944,7 +21944,7 @@
     "sys.fws.tile.000558"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21961,7 +21961,7 @@
     "sys.fws.tile.000559"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21978,7 +21978,7 @@
     "sys.fws.tile.000560"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -21995,7 +21995,7 @@
     "sys.fws.tile.000561"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22012,7 +22012,7 @@
     "sys.fws.tile.000562"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22029,7 +22029,7 @@
     "sys.fws.tile.000563"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22046,7 +22046,7 @@
     "sys.fws.tile.000564"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22063,7 +22063,7 @@
     "sys.fws.tile.000565"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22080,7 +22080,7 @@
     "sys.fws.tile.000566"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22097,7 +22097,7 @@
     "sys.fws.tile.000567"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22114,7 +22114,7 @@
     "sys.fws.tile.000568"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22131,7 +22131,7 @@
     "sys.fws.tile.000569"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22148,7 +22148,7 @@
     "sys.fws.tile.000570"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22165,7 +22165,7 @@
     "sys.fws.tile.000571"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22182,7 +22182,7 @@
     "sys.fws.tile.000572"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22199,7 +22199,7 @@
     "sys.fws.tile.000573"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -22216,7 +22216,7 @@
     "sys.fws.tile.000574"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22233,7 +22233,7 @@
     "sys.fws.tile.000575"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22250,7 +22250,7 @@
     "sys.fws.tile.000576"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22267,7 +22267,7 @@
     "sys.fws.tile.000577"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22284,7 +22284,7 @@
     "sys.fws.tile.000578"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22301,7 +22301,7 @@
     "sys.fws.tile.000579"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22318,7 +22318,7 @@
     "sys.fws.tile.000580"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22335,7 +22335,7 @@
     "sys.fws.tile.000581"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22352,7 +22352,7 @@
     "sys.fws.tile.000582"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22369,7 +22369,7 @@
     "sys.fws.tile.000583"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22386,7 +22386,7 @@
     "sys.fws.tile.000584"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22403,7 +22403,7 @@
     "sys.fws.tile.000585"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22420,7 +22420,7 @@
     "sys.fws.tile.000586"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22437,7 +22437,7 @@
     "sys.fws.tile.000587"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22454,7 +22454,7 @@
     "sys.fws.tile.000588"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22471,7 +22471,7 @@
     "sys.fws.tile.000589"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22488,7 +22488,7 @@
     "sys.fws.tile.000590"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22505,7 +22505,7 @@
     "sys.fws.tile.000591"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22522,7 +22522,7 @@
     "sys.fws.tile.000592"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22539,7 +22539,7 @@
     "sys.fws.tile.000593"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -22556,7 +22556,7 @@
     "sys.fws.tile.000594"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22573,7 +22573,7 @@
     "sys.fws.tile.000595"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22590,7 +22590,7 @@
     "sys.fws.tile.000596"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22607,7 +22607,7 @@
     "sys.fws.tile.000597"
    ],
    "occupancy": 0.8,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22624,7 +22624,7 @@
     "sys.fws.tile.000598"
    ],
    "occupancy": 0.025,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22641,7 +22641,7 @@
     "sys.fws.tile.000599"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22658,7 +22658,7 @@
     "sys.fws.tile.000600"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22675,7 +22675,7 @@
     "sys.fws.tile.000601"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22692,7 +22692,7 @@
     "sys.fws.tile.000602"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22709,7 +22709,7 @@
     "sys.fws.tile.000603"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22726,7 +22726,7 @@
     "sys.fws.tile.000604"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22743,7 +22743,7 @@
     "sys.fws.tile.000605"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22760,7 +22760,7 @@
     "sys.fws.tile.000606"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22777,7 +22777,7 @@
     "sys.fws.tile.000607"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22794,7 +22794,7 @@
     "sys.fws.tile.000608"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22811,7 +22811,7 @@
     "sys.fws.tile.000609"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22828,7 +22828,7 @@
     "sys.fws.tile.000610"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22845,7 +22845,7 @@
     "sys.fws.tile.000611"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22862,7 +22862,7 @@
     "sys.fws.tile.000612"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22879,7 +22879,7 @@
     "sys.fws.tile.000613"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 68,
@@ -22896,7 +22896,7 @@
     "sys.fws.tile.000614"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22913,7 +22913,7 @@
     "sys.fws.tile.000615"
    ],
    "occupancy": 0.4,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22930,7 +22930,7 @@
     "sys.fws.tile.000616"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22947,7 +22947,7 @@
     "sys.fws.tile.000617"
    ],
    "occupancy": 0.6,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22964,7 +22964,7 @@
     "sys.fws.tile.000618"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22981,7 +22981,7 @@
     "sys.fws.tile.000619"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -22998,7 +22998,7 @@
     "sys.fws.tile.000620"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23015,7 +23015,7 @@
     "sys.fws.tile.000621"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23032,7 +23032,7 @@
     "sys.fws.tile.000622"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23049,7 +23049,7 @@
     "sys.fws.tile.000623"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23066,7 +23066,7 @@
     "sys.fws.tile.000624"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23083,7 +23083,7 @@
     "sys.fws.tile.000625"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23100,7 +23100,7 @@
     "sys.fws.tile.000626"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23117,7 +23117,7 @@
     "sys.fws.tile.000627"
    ],
    "occupancy": 0.2,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23134,7 +23134,7 @@
     "sys.fws.tile.000628"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23151,7 +23151,7 @@
     "sys.fws.tile.000629"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23168,7 +23168,7 @@
     "sys.fws.tile.000630"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -23185,7 +23185,7 @@
     "sys.fws.tile.000631"
    ],
    "occupancy": 1.0,
-   "duty_cycle": 0.0004676349119527641,
+   "duty_cycle": 0.0013247631699723802,
    "digital_pool": {
     "shift_add_units": 0,
     "act_lanes": 34,
@@ -40877,21 +40877,21 @@
   {
    "key": "sys.fws.beat",
    "label": "pipeline beat (one token exits per beat)",
-   "value": 7.070601986533629e-05,
+   "value": 2.455970407586386e-05,
    "unit": "s",
    "basis": "the MEDIAN of the SETTLED TAIL of the measured intervals between consecutive token exits: 3 of the 4 measured interval(s). One interval is held out as the traversal that entered at beat 0 and travelled through a filling pipeline (nothing queued behind it, so its exit lands early), and a further 0 interval(s) are dropped as RAMP because they do not agree with the tail's own median to 1e-03. Both sets are printed above rather than smoothed in, and the tail rule is what makes the reported beat independent of how many beats the window lowered (P7.9). An exit is the finish of the last op of a completed traversal on the one timeline, so the beat is a difference of two timeline readings and never a max-stage-time formula (A1, P4 3)."
   },
   {
    "key": "sys.fws.tokens_per_s",
    "label": "steady throughput = 1 / beat (HEADLINE)",
-   "value": 14143.067335773643,
+   "value": 40717.10297937806,
    "unit": "tokens/s",
    "basis": "D29's identity, on the measured beat: the pipeline is always full, so exactly ONE token leaves the last stage per beat and the system rate is 1/beat. The beat is the median of the SETTLED TAIL (3 interval(s)) of the 4 measured inter-exit intervals; the fill transient and any still-ramping intervals are held out and printed beside it, and this headline is only a settled measurement when pipeline.beat_converged is true — the run says so by name when it is not. Nothing here is a period times a count."
   },
   {
    "key": "sys.fws.per_stream_tokens_per_s",
    "label": "per-stream token rate",
-   "value": 1767.8834169717054,
+   "value": 5089.637872422258,
    "unit": "tokens/s",
    "basis": "1 / (D x beat) with D = 8 resident streams (D29). A stream gets the machine once every D beats, which is the price of keeping the pipeline full."
   },
@@ -40905,37 +40905,37 @@
   {
    "key": "sys.fws.per_token_latency",
    "label": "per-token latency (one stream's traversal of the pipeline)",
-   "value": 0.0005726451028281729,
+   "value": 0.00020372720809133687,
    "unit": "s",
    "basis": "finish of traversal 4's last op minus the issue of its first, both read off the one timeline: the wall time one stream needs to walk every stage and emit one token. D29's identity says this is D x beat; the identity residual is reported in the pipeline block rather than replacing the measurement."
   },
   {
    "key": "sys.fws.utilization.analog_macro",
    "label": "analog_macro utilization (mean over the class)",
-   "value": 0.0003489076037515142,
+   "value": 0.0009884205207071359,
    "unit": "fraction of the makespan",
-   "basis": "632 of 1440 devices ran ops (808 idle, and idle devices are INSIDE this mean); peak 0.00112232, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+   "basis": "632 of 1440 devices ran ops (808 idle, and idle devices are INSIDE this mean); peak 0.00317943, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
   },
   {
    "key": "sys.fws.utilization.macro_pool",
    "label": "macro_pool utilization (mean over the class)",
-   "value": 3.5564865672215904e-05,
+   "value": 0.00010075172529526216,
    "unit": "fraction of the makespan",
-   "basis": "360 of 1440 devices ran ops (1080 idle, and idle devices are INSIDE this mean); peak 0.00113709, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+   "basis": "360 of 1440 devices ran ops (1080 idle, and idle devices are INSIDE this mean); peak 0.00322127, median 0. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
   },
   {
    "key": "sys.fws.utilization.shared_digital",
    "label": "shared_digital utilization (mean over the class)",
-   "value": 0.6601097498582957,
+   "value": 0.5709398071787559,
    "unit": "fraction of the makespan",
-   "basis": "8 of 8 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.931952, median 0.660164. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
+   "basis": "8 of 8 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.806056, median 0.570978. per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible — D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
   },
   {
    "key": "sys.fws.utilization.link",
    "label": "link utilization (mean over the class)",
-   "value": 0.01485776538417633,
+   "value": 0.04209057079772133,
    "unit": "fraction of the makespan",
-   "basis": "23 of 23 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.0436926, median 0.0113245. links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip link over the makespan — and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
+   "basis": "23 of 23 devices ran ops (0 idle, and idle devices are INSIDE this mean); peak 0.123777, median 0.0320813. links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio — the priced transfer time on one chip-to-chip link over the makespan — and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
   }
  ],
  "relaxations": [
@@ -41026,8 +41026,23 @@
   },
   {
    "constraint": "shared_digital_energy:attention",
-   "value": "attention engine at 3.71113 W (composed), charged for the op's own time",
-   "reason": "D32: the shared digital chiplet's energy is now COMPOSED from the measured synthesis library — the engine's block census times each block's own measured power gives 3.71113 W, and an op is charged that power for exactly as long as it runs. The label is PARTIAL, not COVERED, and here is why: the library reports ONE average power per block and does not separate dynamic from static, so (a) a block's power is charged at its synthesis toggle rate rather than at this op's activity, and (b) the chiplet's LEAKAGE while it is idle is not charged at all — an idle engine costs 0 pJ here, which is a floor, not a measurement. Both directions are named rather than folded into one adjusted number (D21, one accounting per metric)."
+   "value": "attention engine at 14.9042 W (composed), charged for the op's own time",
+   "reason": "D32: the shared digital chiplet's energy is now COMPOSED from the measured synthesis library — the engine's block census times each block's own measured power gives 14.9042 W, and an op is charged that power for exactly as long as it runs. The label is PARTIAL, not COVERED, and here is why: the library reports ONE average power per block and does not separate dynamic from static, so (a) a block's power is charged at its synthesis toggle rate rather than at this op's activity, and (b) the chiplet's LEAKAGE while it is idle is not charged at all — an idle engine costs 0 pJ here, which is a floor, not a measurement. Both directions are named rather than folded into one adjusted number (D21, one accounting per metric)."
+  },
+  {
+   "constraint": "derived_fabric_sizing",
+   "value": "cim.fabric.num_arrays = 8 (derived-count, declared seed 2), softmax_lanes = 16 (declared seed 1), on the DECLARED 32x64 array x 1 replica(s); binding stage 4, attention time 1235.457% of that stage's own 1.52e-06 s ANALOG m-pass; 0 of 8 stage(s) analog-bound",
+   "reason": "ADJ-10: EVERY digital engine whose width is a composition of MEASURED synthesis blocks derives to the analog floor, not just the scan engine. The attention fabric's ARRAY COUNT is derived here in integer copies of the measured GEMMINI 32x32 block and the softmax pipeline's LANE COUNT in copies of its measured per-lane census, as the smallest integers for which every stage's attention time — qk + fill/drain + softmax + pv, the three ops the lowering serializes — fits that stage's OWN measured analog m-pass time, with no margin (D28). The target is the same measurement ADJ-9 sizes the scan engine against, taken off the same probe pass. ONLY THE COUNT IS DERIVED: rows x cols per array stay as measured and as declared, because inventing array geometry is refused (ADJ-4). THE FOLD LAW: the arrays split into a QK group and a PV group and a call's folds (heads_per_replica x streams) are dealt across the group, so an array in a group of a carries ceil(folds / a) of them; at num_arrays = 2 the split is (1, 1) and the law is the pass-1 law bit for bit. Per stage: stage 0: qk 10149 + sm 20 + pv 7563 (+96 fill/drain) = 17828/1443 cycles, attention 1.877e-05 s vs analog 1.52e-06 s, stage 1: qk 10149 + sm 20 + pv 7559 (+96 fill/drain) = 17824/1443 cycles, attention 1.876e-05 s vs analog 1.52e-06 s, stage 2: qk 10149 + sm 20 + pv 7555 (+96 fill/drain) = 17820/1443 cycles, attention 1.876e-05 s vs analog 1.52e-06 s, stage 3: qk 10149 + sm 20 + pv 7551 (+96 fill/drain) = 17816/1443 cycles, attention 1.875e-05 s vs analog 1.52e-06 s, stage 4: qk 10149 + sm 20 + pv 7575 (+96 fill/drain) = 17840/1443 cycles, attention 1.878e-05 s vs analog 1.52e-06 s, stage 5: qk 10149 + sm 20 + pv 7571 (+96 fill/drain) = 17836/1443 cycles, attention 1.877e-05 s vs analog 1.52e-06 s. FOLD CONCURRENCY SATURATES on stage(s) 0, 1, 2, 3, 4, 5, 6, 7: past 2 x folds arrays another copy of the measured block carries no fold and buys no time, so those stages take the SATURATION width and the residue — the DECLARED rows x cols geometry's own floor, ceil(n / cols) column passes times the k + rows + cols - 2 pipeline term — is NAMED rather than clamped away. Splitting one fold's N across arrays would shrink it further and is NOT modelled: it is a claim about the fabric's dataflow that no recorded reference in this repo covers."
+  },
+  {
+   "constraint": "derived_fabric_area",
+   "value": "12.2879 mm2, 14.746 W",
+   "reason": "D32: the derived engine's silicon is a COMPOSITION of measured synthesis blocks — GEMMINI_SYS_ARRAY x 16, TRANSPOSER x 1 — at 22nm. ceil(32/32) * ceil(64/32) = 2 measured 32x32 blocks per array, x 8 arrays x 1 replicas = 16, plus 1 TRANSPOSER."
+  },
+  {
+   "constraint": "derived_softmax_area",
+   "value": "0.106031 mm2, 0.158153 W",
+   "reason": "D32: the derived engine's silicon is a COMPOSITION of measured synthesis blocks — FP_COMP x 15, FP_ADD x 31, FP_MULT x 32, BF16_EXP x 16, BF16_RECIP x 1 — at 22nm. OPTIMA create_softmax_collection at width 16, instantiated 1 time(s) (one per attention replica, matching CimDeviceModel.softmax_cycles which spends softmax_lanes x replicas)."
   },
   {
    "constraint": "derived_engine_sizing",
@@ -41037,7 +41052,7 @@
   {
    "constraint": "analog_floor_reachability",
    "value": "8 of 8 stage(s) analog-bound after the derivation; the beat-setting stage 4 spends 3.42284e-05 s on shared_digital/attention_qk against 1.52e-06 s of analog m-pass",
-   "reason": "ADJ-9 asks the ANALOG side to be the binding term wherever that is physically reachable. The derivation guarantees the half it can: the DERIVED scan/vector engine is sized so its per-stage time fits inside that stage's own analog m-pass time. It cannot guarantee the other half, because a stage also runs silicon D31 does not derive — the attention systolic fabric and the softmax pipeline are DECLARED card geometry (cim.fabric rows x cols x num_arrays, softmax_lanes, D13) and a sweep axis under D28, not a derived engine. This row is the measurement that says which it is on THIS machine: the largest term is NOT analog, so the beat is set by declared digital silicon and buying more scan lanes cannot move it. The terms are itemized in evaluation.digital_silicon.derived_engine_sizing.beat_setting_stage. Terms (union of busy intervals, probe slice): shared_digital/attention_qk 3.423e-05 s; shared_digital/attention_pv 3.071e-05 s; link/o_proj 1.076e-06 s; link/qkv 1.038e-06 s; macro_pool/ffn2 3.242e-07 s. Stage span 6.92544e-05 s."
+   "reason": "ADJ-9 asks the ANALOG side to be the binding term wherever that is physically reachable. The derivation guarantees the half it can: the DERIVED scan/vector engine is sized so its per-stage time fits inside that stage's own analog m-pass time. It cannot guarantee the other half on its own, because a stage also runs silicon D31 does not size. ADJ-10 then took the two that used to be DECLARED — the attention fabric's array count and the softmax pipeline's lane count — and derived them against this same per-stage target, so what is left underived is the array GEOMETRY (rows x cols) and the terms that are not engines. READ THIS ROW AS THE DERIVATION'S OWN INPUT, NOT AS THE MACHINE: it is measured on the PROBE pass, where the fabric still sits at its declared seed width. What binds the machine that gets BUILT is measured on the priced timeline and reported under its own name, evaluation.digital_silicon.binding_term. On the probe: the largest term is NOT analog, so no scan lane count could have moved the probe's beat. The terms are itemized in evaluation.digital_silicon.derived_engine_sizing.beat_setting_stage. Terms (union of busy intervals, probe slice): shared_digital/attention_qk 3.423e-05 s; shared_digital/attention_pv 3.071e-05 s; link/o_proj 1.076e-06 s; link/qkv 1.038e-06 s; macro_pool/ffn2 3.242e-07 s. Stage span 6.92544e-05 s."
   },
   {
    "constraint": "derived_engine_probe_beat",
@@ -41048,6 +41063,11 @@
    "constraint": "derived_engine_area",
    "value": "22.5533 mm2, 34.036 W",
    "reason": "D32: the derived engine's silicon is a COMPOSITION of measured synthesis blocks — FP_MULT x 7971, FP_ADD x 7971, M_REG x 7971 — at 22nm. 7971 lane(s) x (FP_MULT + FP_ADD + M_REG): one lane retires one scalar operation of EITHER kind per vector cycle, which is the peak CimDeviceModel.price_vector_work is bound to, so the lane holds both arithmetic units."
+  },
+  {
+   "constraint": "binding_term",
+   "value": "stage 4 spends 1.07842e-05 s on shared_digital/attention_qk against 1.52e-06 s of analog m-pass (stage span 2.45765e-05 s)",
+   "reason": "ADJ-10 requires that whatever binds AFTER every composable digital engine has been derived be a REAL limit and be named. This row is that name, measured on the PRICED timeline — the machine that gets built, with the derived fabric, the derived softmax width and the derived scan engine all installed — so it is a different quantity from the probe's beat-setting evidence, which describes the machine the derivation ran against. THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY. The largest term is the attention fabric's attention_qk, and it is at the floor ADJ-10's derivation walked it to: the fabric is 8 DERIVED arrays of 32 x 64, so every fold of the call already runs on its own array and another copy of the measured block would carry no fold. What is left is ONE array's own walk — ceil(n / 64) column passes, each costing k + 32 + 64 - 2 cycles, plus the fill/drain — and no COUNT of measured blocks shortens it. TWO LEVERS WOULD, AND BOTH ARE REFUSED HERE RATHER THAN TAKEN. (1) A WIDER ARRAY: cim.fabric.cols is what the ceil(n / cols) term divides by, and a wider array would also be a whole number of measured 32x32 blocks — but rows x cols is the geometry the systolic closed form was validated at, bit-exact against OPTIMA's recorded ScaleSim outputs, and the fill/drain surrogate is 3 x rows. Deriving a new geometry would move a VALIDATED law onto an unvalidated shape, which is a card change a human makes, not a derivation (ADJ-4, D21). (2) SPLITTING ONE FOLD'S N ACROSS ARRAYS, which needs a claim about how the K matrix is broadcast and how the column tiles are merged that no recorded reference in this repo covers. So it is REPORTED as the limit rather than derived away (D28: a limit named is a provisioning finding; a limit padded away is not). Terms (union of busy intervals, priced slice): shared_digital/attention_qk 1.078e-05 s; shared_digital/attention_pv 7.974e-06 s; shared_digital/delta_rule 1.519e-06 s; link/o_proj 1.076e-06 s; link/qkv 1.038e-06 s."
   },
   {
    "constraint": "activation_tier_is_per_chip",
@@ -41071,8 +41091,8 @@
   },
   {
    "constraint": "device_class_utilization",
-   "value": "analog_macro 0.035% mean / 0.112% peak (808 of 1440 idle), macro_pool 0.004% mean / 0.114% peak (1080 of 1440 idle), shared_digital 66.011% mean / 93.195% peak (0 of 8 idle), link 1.486% mean / 4.369% peak (0 of 23 idle)",
-   "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 93.195% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears — it always appears."
+   "value": "analog_macro 0.099% mean / 0.318% peak (808 of 1440 idle), macro_pool 0.010% mean / 0.322% peak (1080 of 1440 idle), shared_digital 57.094% mean / 80.606% peak (0 of 8 idle), link 4.209% mean / 12.378% peak (0 of 23 idle)",
+   "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 80.606% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears — it always appears."
   },
   {
    "constraint": "pipeline_fill_transient",

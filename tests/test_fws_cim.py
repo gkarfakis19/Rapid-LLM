@@ -3306,3 +3306,193 @@ def test_p6_2_degenerate_laws_match_the_pass_one_laws(hw_path, model_path, mode)
         tiles = explicit.enumerate_tiles(k, n, cim_timing.TileOwner(op=stage))
         assert explicit.price_tiled_op(64, tiles).time_s == base.analog_gemm_time(64), stage
         assert len(tiles) == base.arrays(k, n), stage
+
+
+# ---------------------------------------------------------------------------
+# ADJ-10: the attention fabric and the softmax pipeline derive too
+# ---------------------------------------------------------------------------
+
+
+def test_the_fold_split_reproduces_the_pass_one_law_at_two_arrays(cim_t1):
+    """ADJ-10's generalization must be INERT at the declared width.
+
+    NEW GATE. Every shipped card declares ``num_arrays: 2`` and every OPTIMA
+    parity configuration is priced through this law, so a fold split that moved
+    a cycle at 2 arrays would move a validated number. At 2 the only partition
+    is (1, 1), ``ceil(folds / 1) == folds``, and both expressions are the
+    pass-1 ones character for character.
+    """
+    assert cim_t1.fabric_num_arrays == 2
+    timing = cim_t1.attention_timing(seq_len=64, head_dim=64, kv_heads=16, tp=1)
+    h_rep = timing.heads_per_replica
+    assert (timing.qk_arrays, timing.pv_arrays) == (1, 1)
+    assert timing.qk_folds_per_array == timing.pv_folds_per_array == timing.folds
+    assert timing.qk_cycles == cim_t1.sa_cycles(64, 64, 64 * h_rep)
+    assert timing.pv_cycles == cim_t1.sa_cycles(64, 64, 64 * h_rep)
+
+
+def test_more_arrays_buy_more_concurrent_folds_and_then_stop(cim_t1):
+    """The fold law, hand-computed, including where it stops buying.
+
+    NEW GATE (ADJ-10). ``cim_t1`` is the OPTIMA T1 point: 32 x 64 arrays,
+    ViT-Huge at 16 kv heads and head_dim 64, one replica, so a prefill call at
+    seq 64 folds 16 heads into K.
+
+        R = 32, C = 64, m = n = 64, k = 64, folds = 16
+        QK(a) = ceil(64/32) * ceil(64/64) * (64 * ceil(16/a) + 32 + 64 - 2) - 1
+              = 2 * (64 * ceil(16/a) + 94) - 1
+
+        a = 1 -> 2 * (1024 + 94) - 1 = 2235
+        a = 2 -> 2 * ( 512 + 94) - 1 = 1211
+        a = 4 -> 2 * ( 256 + 94) - 1 =  699
+        a = 8 -> 2 * ( 128 + 94) - 1 =  443
+        a = 16 -> 2 * (  64 + 94) - 1 =  315
+        a = 17 -> ceil(16/17) = 1, still 315: the seventeenth array carries no
+                  fold, and 315 is the DECLARED 32 x 64 geometry's own floor.
+    """
+    demand = cim_timing.AttentionCallDemand(
+        m=64, k=64, n=64, folds=16, softmax_tokens=64, heads_chip=16
+    )
+    expected = {1: 2235, 2: 1211, 4: 699, 8: 443, 16: 315}
+    for group, cycles in expected.items():
+        # A group of `group` arrays on each side: num_arrays = 2 * group makes
+        # the balanced partition exactly that, and the two runs are symmetric
+        # here (m = n, k = n), so both sides land on the same number.
+        qk, pv, _sm, a_qk, a_pv = cim_t1.attention_cycles_at(demand, 2 * group, 1)
+        assert (a_qk, a_pv) == (group, group), group
+        assert qk == pv == cycles, group
+    assert demand.saturation_arrays == 32
+    # AND THE SATURATION IS THE POINT: past 2 x folds nothing moves, so the
+    # derivation has somewhere to stop that is not a cap. The 34-array and
+    # 4096-array partitions are TIES (every extra array is idle whichever
+    # group it joins), and the documented tie-break takes the smallest a_qk —
+    # deterministic, and it costs no cycle.
+    assert cim_t1.attention_cycles_at(demand, 32, 1)[:2] == (315, 315)
+    assert cim_t1.attention_cycles_at(demand, 34, 1)[:2] == (315, 315)
+    assert cim_t1.attention_cycles_at(demand, 4096, 1)[:2] == (315, 315)
+    assert cim_t1.attention_cycles_at(demand, 34, 1)[3] == 16
+
+
+def test_the_fold_split_minimises_the_serialised_pair(cim_t1):
+    """The partition's objective, stated and checked on an ASYMMETRIC call.
+
+    NEW GATE (ADJ-10). The lowering runs qk -> softmax -> pv in SERIES, so the
+    stage's measured fabric time is the SUM and the partition minimises the
+    sum. On a call where the two runs are lopsided the split must therefore be
+    lopsided too, and a balanced split must be measurably worse.
+    """
+    demand = cim_timing.AttentionCallDemand(
+        m=8, k=64, n=2048, folds=8, softmax_tokens=8, heads_chip=8
+    )
+    qk, pv, _sm, a_qk, a_pv = cim_t1.attention_cycles_at(demand, 6, 1)
+    assert a_qk + a_pv == 6
+    # Exhaustive: no other partition of 6 gives a smaller sum.
+    best = min(
+        cim_t1.sa_cycles(8, 2048, 64 * -(-8 // left))
+        + cim_t1.sa_cycles(8, 64, 2048 * -(-8 // (6 - left)))
+        for left in range(1, 6)
+    )
+    assert qk + pv == best
+    # ... and the chosen split really is the argmin, not a coincidence of ties.
+    assert (
+        cim_t1.sa_cycles(8, 2048, 64 * -(-8 // a_qk))
+        + cim_t1.sa_cycles(8, 64, 2048 * -(-8 // a_pv))
+    ) == best
+
+
+def test_a_card_that_pins_the_fabric_rides_a_disclosure_and_skips_the_derivation():
+    """ADJ-10 keeps a DECLARED width legal on ONE machine, with its name on it.
+
+    NEW GATE. D31 made a declared ``vector_lanes`` an OVERRIDE that rides a
+    disclosure; ADJ-10 gives the fabric the same seam, under its own card
+    fields, and the disclosure must say the word OVERRIDE and point at the
+    axis-level refusal. A machine that pins nothing must carry no such note —
+    a disclosure that always fires discloses nothing.
+    """
+    granite_hw = HW_DIR / "fws_cim_granite_tiny.yaml"
+    raw = _load_yaml(granite_hw)
+    plain = _hw_from_dict(raw)
+    plain_card = plain.cim_config.cards.digital_card
+    assert plain_card.has_fabric_override is False
+    pinned_raw = copy.deepcopy(raw)
+    card = pinned_raw["cim"]["cards"]["sa"]
+    card["fabric_num_arrays"] = 6
+    card["fabric_softmax_lanes"] = 3
+    pinned = _hw_from_dict(pinned_raw)
+    pinned_card = pinned.cim_config.cards.digital_card
+    assert pinned_card.has_fabric_override is True
+    assert pinned_card.fabric_num_arrays_effective == 6
+    assert pinned_card.fabric_softmax_lanes_effective == 3
+    model = config.parse_config(
+        str(MODEL_DIR / "granite_4_0_h_tiny_inf.yaml"), "LLM"
+    ).model_config
+    plain_device = cim_timing.CimDeviceModel(plain, model)
+    pinned_device = cim_timing.CimDeviceModel(pinned, model)
+    assert plain_device.fabric_sizing_disclosures() == ()
+    assert plain_device.fabric_num_arrays == 2
+    notes = pinned_device.fabric_sizing_disclosures()
+    assert len(notes) == 1 and "OVERRIDE" in notes[0]
+    assert "REFUSED_AXES" in notes[0]
+    assert pinned_device.fabric_num_arrays == 6
+    assert pinned_device.softmax_width == 3
+    # The pin WINS over a derivation, which is what makes it an override.
+    fake = cim_timing.DerivedFabricSizing(
+        analog_beat_s=1e-5, clock_hz=1e9, rows=32, cols=64, replicas=1,
+        num_arrays=64, softmax_lanes=64, declared_num_arrays=2,
+        declared_softmax_lanes=1, binding_stage=0, per_stage=(),
+    )
+    pinned_device.install_derived_fabric(fake)
+    assert pinned_device.fabric_num_arrays == 6
+    plain_device.install_derived_fabric(fake)
+    assert plain_device.fabric_num_arrays == 64
+
+
+def test_the_fabric_derivation_refuses_an_empty_demand_rather_than_inventing_one(cim_t1):
+    """ADJ-10 derives FROM measured demand; with none there is no width.
+
+    NEW GATE, and it is the ADJ-4 rule applied to a second engine: a run with
+    no attention call in the beat asks nothing of the fabric, and answering
+    with a number anyway would be an invention rather than a derivation.
+    """
+    with pytest.raises(cim_timing.FabricSizingError) as excinfo:
+        cim_t1.derive_fabric_sizing(1e-5, ())
+    assert "nothing to size" in str(excinfo.value)
+    # A demand whose every entry is call-less is the same case, by the same name.
+    with pytest.raises(cim_timing.FabricSizingError):
+        cim_t1.derive_fabric_sizing(
+            1e-5, (cim_timing.FabricDemand(stage=0, calls=(), analog_time_s=1e-6),)
+        )
+
+
+def test_the_fabric_derivation_stops_at_the_smallest_width_that_meets_the_target(cim_t1):
+    """No margin (D28): reachable targets get the SMALLEST width, not the floor.
+
+    NEW GATE. The saturation rule only applies where the analog m-pass cannot
+    be reached. Where it CAN, ADJ-10 must behave exactly like ADJ-9 and stop at
+    the first integer that fits — this test hands the same call a target it can
+    reach and checks that the answer is smaller than the saturation width and
+    that one array fewer would miss.
+    """
+    demand = cim_timing.FabricDemand(
+        stage=0,
+        calls=(
+            cim_timing.AttentionCallDemand(
+                m=64, k=64, n=64, folds=16, softmax_tokens=64, heads_chip=16
+            ),
+        ),
+        # 699 + 699 + softmax fits in 1600 cycles at 4 arrays a side but not at 2.
+        analog_time_s=1600 / cim_t1.f_fabric_hz,
+    )
+    sizing = cim_t1.derive_fabric_sizing(1e-3, (demand,), compose=False)
+    assert sizing.num_arrays == 8
+    assert sizing.saturated_stages == ()
+    assert sizing.analog_bound_stages == (0,)
+    assert sizing.target_ratio < 1.0
+    row = sizing.binding_row
+    assert row.qk_cycles == row.pv_cycles == 699
+    assert row.used_cycles <= row.budget_cycles
+    # One array fewer misses the budget, which is what "smallest" means.
+    narrower = cim_t1._stage_attention_cycles(demand.calls, 7, row.softmax_width)[0]
+    assert narrower > row.budget_cycles
+    # ONLY THE COUNT MOVED: the array geometry is the declared one.
+    assert (sizing.rows, sizing.cols) == (cim_t1.fabric.rows, cim_t1.fabric.cols)

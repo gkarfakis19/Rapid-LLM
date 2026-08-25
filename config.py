@@ -3680,11 +3680,50 @@ class CIMDigitalChipletCardConfig:
     #: BOUNDS nothing, which is a disclosed relaxation, not a silent zero
     #: (AUDIT finding 3 is the precedent for saying so out loud).
     state_bytes_per_cycle: float = 0.0
+    #: --- ADJ-10: the ATTENTION FABRIC's OVERRIDE knobs -------------------
+    #: ADJ-10 extends D31 from the scan engine to every digital engine whose
+    #: width is a composition of MEASURED blocks: the SA fabric's ARRAY COUNT
+    #: and the softmax pipeline's LANE COUNT are DERIVED on a mapped run —
+    #: sized up until every stage's attention time fits that stage's own analog
+    #: m-pass — and REPORTED. Absent (the default, 0) is "DERIVE IT".
+    #:
+    #: A DECLARED value here is honoured as an OVERRIDE that rides a disclosure
+    #: (`cim_timing.CimDeviceModel.fabric_sizing_disclosures`), exactly as a
+    #: declared `vector_lanes` overrides D31. Declaring EITHER skips the whole
+    #: fabric derivation, because the two are sized against one target and
+    #: deriving half of a pinned pair would report a width nobody asked for.
+    #:
+    #: `cim.fabric.num_arrays` and `cim.fabric.softmax_lanes` are NOT these
+    #: knobs. They stay required, because the SA and softmax laws have to be
+    #: evaluable outside a mapped run (the closed-form and OPTIMA-parity paths
+    #: have no beat to derive from). On a mapped run they are the SEED the
+    #: derivation replaces; here is where a machine PINS them instead.
+    fabric_num_arrays: int = 0
+    fabric_softmax_lanes: int = 0
 
     @property
     def has_vector_engine(self) -> bool:
         """True when the card declares a vector/scan engine at all."""
         return int(self.vector_lanes) > 0
+
+    @property
+    def has_fabric_override(self) -> bool:
+        """True when the card PINS the attention fabric ADJ-10 would derive."""
+        return int(self.fabric_num_arrays) > 0 or int(self.fabric_softmax_lanes) > 0
+
+    @property
+    def fabric_num_arrays_effective(self) -> int:
+        """The pinned array count, else the fabric block's declared seed."""
+        if int(self.fabric_num_arrays) > 0:
+            return int(self.fabric_num_arrays)
+        return int(self.fabric.num_arrays)
+
+    @property
+    def fabric_softmax_lanes_effective(self) -> int:
+        """The pinned softmax lane count, else the fabric block's declared seed."""
+        if int(self.fabric_softmax_lanes) > 0:
+            return int(self.fabric_softmax_lanes)
+        return int(self.fabric.softmax_lanes)
 
     @property
     def vector_clock_ghz_effective(self) -> float:
@@ -3743,6 +3782,16 @@ class CIMDigitalChipletCardConfig:
             ),
             state_bytes_per_cycle=_parse_cim_float(
                 card_dict, context, "state_bytes_per_cycle", default=0.0
+            ),
+            fabric_num_arrays=_coerce_int(
+                card_dict.get("fabric_num_arrays", 0),
+                f"{context}.fabric_num_arrays",
+                min_value=0,
+            ),
+            fabric_softmax_lanes=_coerce_int(
+                card_dict.get("fabric_softmax_lanes", 0),
+                f"{context}.fabric_softmax_lanes",
+                min_value=0,
             ),
         )
 

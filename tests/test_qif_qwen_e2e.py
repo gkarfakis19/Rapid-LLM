@@ -622,32 +622,37 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
     )
     analog = sum(c.duration_s for c in prefill if c.device_class == "analog_macro")
 
-    # ADJ-9 REWRITE (D31-v2). This split has now been read at three engine
-    # widths and it says something different at each, which is the point of
-    # writing the width down.
-    #   1024 DECLARED lanes: delta 50-60%, attention 30-40%.
-    #   178 lanes (D31-v1, sized to the analog BEAT): delta 80-95%, attention
-    #     5-20%, and one attention layer CHEAPER than one delta layer.
-    #   5479-class widths (D31-v2, sized to the ANALOG FLOOR): 7676 lanes here,
-    #     delta falls to ~13%, ATTENTION owns ~67%, and the per-layer ratio
-    #     reverses back and then some — one attention layer costs ~15x one
-    #     delta-rule layer.
-    # NEW CLAIM, and it is the honest one: with the scan engine no longer
-    # under-provisioned, this stack is bound by the ATTENTION SYSTOLIC FABRIC,
-    # whose geometry is DECLARED on the card and which D31 does not derive. The
-    # analog macros are no longer a minor term either: at ~63% of the summed
-    # prefill work they are now comparable to the digital side, which is what
-    # deriving the engine to the analog floor was supposed to expose.
+    # ADJ-10 REWRITE. This split has now been read at FOUR provisionings and it
+    # says something different at each, which is the point of writing the
+    # provisioning down beside it.
+    #   1024 DECLARED lanes, 2 DECLARED arrays: delta 50-60%, attention 30-40%.
+    #   178 lanes (D31-v1, scan sized to the analog BEAT), 2 arrays: delta
+    #     80-95%, attention 5-20%, one attention layer CHEAPER than one delta.
+    #   7676 lanes (D31-v2/ADJ-9, scan sized to the ANALOG FLOOR), 2 arrays:
+    #     delta ~13%, ATTENTION ~67%, one attention layer ~15x one delta layer.
+    #   7676 lanes AND 32 DERIVED arrays / 64 DERIVED softmax lanes (ADJ-10):
+    #     the numbers below.
+    # OLD CLAIM (ADJ-9's): this stack is bound by the attention systolic
+    # fabric, whose geometry is DECLARED and which nothing derives.
+    # NEW CLAIM: the fabric is derived too — 16 concurrent folds per side on
+    # this batch — and the picture INVERTS. Attention falls from ~67% to ~13%
+    # of the summed prefill work, delta rule RISES to ~34% (it is unchanged in
+    # absolute terms; the denominator shrank), and one attention layer now
+    # costs only ~1.1x one delta-rule layer instead of ~15x. The two digital
+    # blocks together are under half the work and the ANALOG macros are the
+    # largest term by far.
     #
     # The shares are sums of OP DURATIONS over parallel device classes, so they
-    # are shares of WORK and not of one serial path; they do not sum to 1 and
-    # are not claimed to.
-    assert 0.10 < delta / latency < 0.18
-    assert 0.60 < attention / latency < 0.75
-    assert 0.70 < (delta + attention) / latency < 0.90
-    assert 0.55 < analog / latency < 0.70
-    # per-layer: 24 linear layers vs 8 attention layers — attention wins hard.
-    assert (attention / 8) / (delta / 24) > 10.0
+    # are shares of WORK and not of one serial path; they do not sum to 1, they
+    # can exceed 1 (hundreds of macros run concurrently), and neither is
+    # claimed otherwise.
+    assert 0.28 < delta / latency < 0.40
+    assert 0.10 < attention / latency < 0.17
+    assert 0.40 < (delta + attention) / latency < 0.55
+    assert 1.4 < analog / latency < 1.9
+    # per-layer: 24 linear layers vs 8 attention layers — and with the fabric
+    # derived they are now within ~13% of each other, which is the reversal.
+    assert 1.0 < (attention / 8) / (delta / 24) < 1.4
 
 
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):

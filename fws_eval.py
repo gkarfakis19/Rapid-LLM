@@ -74,11 +74,14 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from cim_timing import (
     LAW_UNVALIDATED,
     PROVENANCE_DERIVED_COUNT,
+    AttentionCallDemand,
     CimDeviceModel,
     DerivedEngineSizing,
+    DerivedFabricSizing,
     DigitalPoolSizing,
     EngineDemand,
     EngineSizingError,
+    FabricDemand,
     ReductionOpDescriptor,
 )
 from fws_mapping import REGIME_FILLED, FwsMapping, MappingError, Relaxation
@@ -787,6 +790,29 @@ class _Pricer:
         )
         self._fabric_energy_disclosure("attention")
         energy_pj, coverage = self._fabric_energy("attention", cycles / f_fabric)
+        detail = OrderedDict(
+            (
+                ("cycles", float(cycles)),
+                ("heads_chip", float(timing.heads_chip)),
+                ("context", float(self._context_of(a))),
+            )
+        )
+        if a.block == "attention_qk":
+            # ADJ-10 sizes the fabric from CALL DIMS, not from a duration: a
+            # duration measured at the declared width cannot be re-priced at a
+            # candidate one. They ride the QK op because that is the op the
+            # lowering charges the array's fill/drain to, so ONE record per
+            # attention call carries the whole call (D21).
+            detail.update(
+                (
+                    ("call_m", float(timing.call_m)),
+                    ("call_k", float(timing.call_k)),
+                    ("call_n", float(timing.call_n)),
+                    ("folds", float(timing.folds)),
+                    ("softmax_tokens", float(timing.softmax_tokens)),
+                    ("fill_drain_cycles", float(fill_drain)),
+                )
+            )
         return self._cost(
             a,
             duration_s=cycles / f_fabric,
@@ -797,13 +823,7 @@ class _Pricer:
             energy_pj=energy_pj,
             energy_component="shared_digital_chiplet",
             coverage=coverage,
-            detail=OrderedDict(
-                (
-                    ("cycles", float(cycles)),
-                    ("heads_chip", float(timing.heads_chip)),
-                    ("context", float(self._context_of(a))),
-                )
-            ),
+            detail=detail,
         )
 
     def _attention_law_name(self, a: FwsOpAnnotation) -> str:
@@ -1186,6 +1206,14 @@ class FwsEvaluation:
     pipeline: Mapping[str, object] = field(default_factory=OrderedDict)
     #: Per-stage resident state/KV for all D streams, with its verdict (D29).
     state_residency: Mapping[str, object] = field(default_factory=OrderedDict)
+    #: ADJ-10's HEADLINE MEASUREMENT: which stage sets the beat of the machine
+    #: that GETS BUILT — every derived width installed, every op timed — and
+    #: what it spends the beat on, itemized by op block. Empty when the run has
+    #: no lowered slice to read it from. The probe's own beat-setting evidence
+    #: is a different quantity under a different name (it rides
+    #: :attr:`DerivedEngineSizing.beat_setting_stage` and describes the machine
+    #: the derivation ran AGAINST), and the two are never merged (D21).
+    binding_term: Mapping[str, object] = field(default_factory=OrderedDict)
 
     # -- projections a consumer asks for by name ------------------------
 
@@ -3530,6 +3558,60 @@ def _engine_demand(
     )
 
 
+def _fabric_demand(
+    serving: ServingPoint,
+    annotations: Sequence[FwsOpAnnotation],
+    costs: Sequence[OpCost],
+    timeline: CoarseEvalResult,
+) -> Tuple[FabricDemand, ...]:
+    """Per-stage ATTENTION demand AND analog m-pass time in ONE beat (ADJ-10).
+
+    The twin of :func:`_engine_demand`, over the same measurement slice and
+    against the same target. An attention call is one ``attention_qk`` cost:
+    the lowering places three ops per call and charges the array's fill/drain
+    to the QK op, so the QK op is the one record that carries the whole call.
+    What is collected is the CALL DIMS — ``m``, ``k``, ``n``, the fold count,
+    the softmax token count — because ADJ-10 re-prices the call at candidate
+    widths and a duration measured at the declared width cannot be re-priced.
+
+    ``analog_time_s`` is read exactly as :func:`_engine_demand` reads it: the
+    UNION of the busy intervals of the stage's ``analog_macro`` ops in the
+    slice. One measurement, one target, two engines sized against it (D21).
+    """
+    select, _ = _measurement_slice(serving)
+    calls: "OrderedDict[int, List[AttentionCallDemand]]" = OrderedDict()
+    analog: "OrderedDict[int, List[Tuple[float, float]]]" = OrderedDict()
+    for annotation, cost in zip(annotations, costs):
+        if not select(annotation):
+            continue
+        stage = int(annotation.stage)
+        if cost.block == "attention_qk" and "call_m" in cost.detail:
+            calls.setdefault(stage, []).append(
+                AttentionCallDemand(
+                    m=int(cost.detail["call_m"]),
+                    k=int(cost.detail["call_k"]),
+                    n=int(cost.detail["call_n"]),
+                    folds=int(cost.detail["folds"]),
+                    softmax_tokens=int(cost.detail["softmax_tokens"]),
+                    heads_chip=int(cost.detail["heads_chip"]),
+                    fill_drain_cycles=int(cost.detail["fill_drain_cycles"]),
+                )
+            )
+        if cost.device_class == "analog_macro":
+            start = float(timeline.start_times[cost.uid])
+            finish = float(timeline.finish_times[cost.uid])
+            if start >= 0 and finish >= start:
+                analog.setdefault(stage, []).append((start, finish))
+    return tuple(
+        FabricDemand(
+            stage=stage,
+            calls=tuple(rows),
+            analog_time_s=_union_busy_s(analog.get(stage, ())),
+        )
+        for stage, rows in calls.items()
+    )
+
+
 #: The convergence state of the LAST probe beat a derivation was taken from
 #: (D31). Written by :func:`_derive_engine` and read by
 #: :func:`engine_sizing_disclosures` in the same call chain.
@@ -3541,6 +3623,8 @@ def _beat_setting_stage_terms(
     annotations: Sequence[FwsOpAnnotation],
     costs: Sequence[OpCost],
     timeline: CoarseEvalResult,
+    *,
+    slice_name: str = "PROBE",
 ) -> "OrderedDict[str, object]":
     """WHICH stage sets the probe beat, and WHAT it spends the beat on (ADJ-9).
 
@@ -3617,7 +3701,17 @@ def _beat_setting_stage_terms(
             (
                 "basis",
                 "the stage with the longest first-issue-to-last-finish span in the "
-                "PROBE slice (every vector op counted and untimed), with each term the "
+                f"{slice_name} slice"
+                + (
+                    " (every vector op counted and untimed, and the fabric at its "
+                    "DECLARED seed width — this is the evidence the derivation RAN "
+                    "AGAINST, not the machine it produced; for the machine that gets "
+                    "built see evaluation.digital_silicon.binding_term)"
+                    if slice_name == "PROBE"
+                    else " — the machine that gets BUILT, with every derived width "
+                    "installed and every op timed"
+                )
+                + ", with each term the "
                 "UNION of the busy intervals of its op block on that stage. A union, "
                 "not a sum: devices of one class fire in parallel and a sum would "
                 "report a stage's analog time as the total of hundreds of macros.",
@@ -3631,7 +3725,7 @@ def _derive_engine(
     mapping: FwsMapping,
     serving: ServingPoint,
     capacity_overrides: Optional[Mapping[int, int]],
-) -> Optional[DerivedEngineSizing]:
+) -> Tuple[Optional[DerivedFabricSizing], Optional[DerivedEngineSizing]]:
     """Size the scan/vector engine from this run's own beat (D31), or do nothing.
 
     THE CIRCULARITY AND HOW IT IS BROKEN. The engine's width sets the time its
@@ -3655,9 +3749,29 @@ def _derive_engine(
     run in SERIES and the beat pass B reports is their sum. What ADJ-9 buys is
     that the analog half dominates the sum — not that the sum equals it.
 
-    Returns None when there is nothing to derive — a card that declares an
-    explicit ``vector_lanes`` override (D31 honours it, with a disclosure), or a
-    run with no vector op in it at all.
+    ADJ-10 PUTS A SECOND ENGINE ON THE SAME PROBE. The attention fabric's
+    array count and the softmax pipeline's lane count are derived from the same
+    pass, against the same per-stage analog m-pass times, and installed before
+    the run is priced. ONE probe still suffices, and for the same reason: both
+    targets are properties of the ANALOG side, and an analog op's duration does
+    not move with an array count any more than it moves with a lane count. The
+    attention CALL DIMS the fabric derivation needs are likewise invariant —
+    they are the model's shapes, not the fabric's.
+
+    WHAT THE PROBE'S OWN BEAT THEN IS. It is measured with the fabric at its
+    DECLARED seed width, so it is the beat of the machine BEFORE either
+    derivation. It is used for exactly two things and neither depends on the
+    widths: the fallback budget for a stage ADJ-9's criterion cannot reach, and
+    the printed reference. What the machine that gets BUILT is bound by is
+    measured on the PRICED timeline instead and reported under its own name
+    (``evaluation.digital_silicon.binding_term``), because that is the question
+    ADJ-10 asks and the probe cannot answer it.
+
+    Returns ``(fabric_sizing, engine_sizing)``; either is None when there is
+    nothing to derive — a card that PINS the fabric
+    (``cim.cards.<card>.fabric_num_arrays``) or the scan engine
+    (``vector_lanes``), a run with no attention call, or a run with no vector
+    op in it at all.
     """
     device = mapping.device
     # Always CLEAR first. The sizing belongs to one program's beat and one
@@ -3668,16 +3782,16 @@ def _derive_engine(
     # so an override card reusing a device could publish another run's
     # derivation in evaluation.digital_silicon.
     device.install_derived_engine(None)
-    if device.digital_card.has_vector_engine:
-        return None
+    device.install_derived_fabric(None)
+    pins_fabric = device.digital_card.has_fabric_override
+    pins_engine = device.digital_card.has_vector_engine
+    if pins_fabric and pins_engine:
+        return None, None
     annotations = annotations_of(program)
     device.begin_engine_probe()
     try:
         probe = price_program(program, mapping, capacity_overrides=capacity_overrides)
-        if not device.end_engine_probe():
-            # No vector op was priced: this run has no scan, no delta rule and
-            # no RG-LRU, so it needs no scan engine and none is invented.
-            return None
+        saw_vector_op = bool(device.end_engine_probe())
     finally:
         # Idempotent: a probe that raised must not leave the device probing.
         device.end_engine_probe()
@@ -3690,20 +3804,32 @@ def _derive_engine(
         require_pipeline=False,
     )
     beat, convergence = _analog_beat_of(mapping, serving, probe, timeline)
+    # ADJ-10 FIRST: the fabric is derived and installed before the scan engine,
+    # so a report that prints both prints them in the order they were taken.
+    # The ORDER MOVES NO NUMBER — both are sized against the per-stage analog
+    # m-pass times, which are properties of the analog side and invariant to
+    # either width — and it is fixed here only so the derivation is
+    # deterministic and re-runnable.
+    fabric_sizing = None
+    if not pins_fabric and beat > 0:
+        fabric_demand = _fabric_demand(serving, annotations, probe.costs, timeline)
+        if fabric_demand:
+            fabric_sizing = device.derive_fabric_sizing(beat, fabric_demand)
+            device.install_derived_fabric(fabric_sizing)
+    engine_sizing = None
     demand = _engine_demand(serving, annotations, probe.costs, timeline)
-    if beat <= 0 or not demand:
-        return None
-    sizing = device.derive_engine_sizing(beat, demand)
-    # ADJ-9's reachability evidence rides the SIZING, not a module global: a
-    # report is written long after the derivation ran, and a global would hand
-    # one run's evidence to another run's report (D21).
-    sizing = replace(
-        sizing,
-        beat_setting_stage=_beat_setting_stage_terms(
-            serving, annotations, probe.costs, timeline
-        ),
-    )
-    device.install_derived_engine(sizing)
+    if saw_vector_op and not pins_engine and beat > 0 and demand:
+        engine_sizing = device.derive_engine_sizing(beat, demand)
+        # ADJ-9's reachability evidence rides the SIZING, not a module global: a
+        # report is written long after the derivation ran, and a global would hand
+        # one run's evidence to another run's report (D21).
+        engine_sizing = replace(
+            engine_sizing,
+            beat_setting_stage=_beat_setting_stage_terms(
+                serving, annotations, probe.costs, timeline
+            ),
+        )
+        device.install_derived_engine(engine_sizing)
     # The PROBE's own convergence, carried out so the disclosure can say
     # whether the width was derived from a settled number. A shorter probe beat
     # means a tighter cycle budget and therefore MORE lanes, so a probe still
@@ -3711,7 +3837,196 @@ def _derive_engine(
     # to see that this run's was not.
     _PROBE_BEAT_CONVERGENCE.clear()
     _PROBE_BEAT_CONVERGENCE.update(convergence)
-    return sizing
+    return fabric_sizing, engine_sizing
+
+
+def fabric_sizing_disclosures(
+    sizing: Optional[DerivedFabricSizing],
+) -> List[Relaxation]:
+    """The ADJ-10 fabric derivation, stated in the artifact (not only stdout)."""
+    if sizing is None:
+        return []
+    rows = ", ".join(
+        f"stage {row.stage}: qk {row.qk_cycles} + sm {row.softmax_cycles} + pv "
+        f"{row.pv_cycles} (+{row.fill_drain_cycles} fill/drain) = {row.used_cycles}/"
+        f"{row.budget_cycles} cycles, attention {row.time_s:.4g} s vs analog "
+        f"{row.analog_time_s:.4g} s"
+        for row in sizing.per_stage[:6]
+    )
+    binding = sizing.binding_row
+    saturated = sizing.saturated_stages
+    out = [
+        Relaxation(
+            constraint="derived_fabric_sizing",
+            value=(
+                f"cim.fabric.num_arrays = {int(sizing.num_arrays)} "
+                f"({PROVENANCE_DERIVED_COUNT}, declared seed "
+                f"{int(sizing.declared_num_arrays)}), softmax_lanes = "
+                f"{int(sizing.softmax_lanes)} (declared seed "
+                f"{int(sizing.declared_softmax_lanes)}), on the DECLARED "
+                f"{int(sizing.rows)}x{int(sizing.cols)} array x "
+                f"{int(sizing.replicas)} replica(s); binding stage "
+                f"{int(sizing.binding_stage)}, attention time "
+                f"{sizing.target_ratio * 100:.3f}% of that stage's own "
+                f"{(binding.target_s if binding is not None else 0.0):.6g} s ANALOG "
+                f"m-pass; {len(sizing.analog_bound_stages)} of {len(sizing.per_stage)} "
+                "stage(s) analog-bound"
+            ),
+            reason=(
+                "ADJ-10: EVERY digital engine whose width is a composition of MEASURED "
+                "synthesis blocks derives to the analog floor, not just the scan engine. "
+                "The attention fabric's ARRAY COUNT is derived here in integer copies of "
+                "the measured GEMMINI 32x32 block and the softmax pipeline's LANE COUNT "
+                "in copies of its measured per-lane census, as the smallest integers for "
+                "which every stage's attention time — qk + fill/drain + softmax + pv, "
+                "the three ops the lowering serializes — fits that stage's OWN measured "
+                "analog m-pass time, with no margin (D28). The target is the same "
+                "measurement ADJ-9 sizes the scan engine against, taken off the same "
+                "probe pass. ONLY THE COUNT IS DERIVED: rows x cols per array stay as "
+                "measured and as declared, because inventing array geometry is refused "
+                "(ADJ-4). THE FOLD LAW: the arrays split into a QK group and a PV group "
+                "and a call's folds (heads_per_replica x streams) are dealt across the "
+                "group, so an array in a group of a carries ceil(folds / a) of them; at "
+                "num_arrays = 2 the split is (1, 1) and the law is the pass-1 law bit "
+                f"for bit. Per stage: {rows}."
+                + (
+                    " FOLD CONCURRENCY SATURATES on stage(s) "
+                    + ", ".join(str(int(stage)) for stage in saturated)
+                    + ": past 2 x folds arrays another copy of the measured block "
+                    "carries no fold and buys no time, so those stages take the "
+                    "SATURATION width and the residue — the DECLARED rows x cols "
+                    "geometry's own floor, ceil(n / cols) column passes times the "
+                    "k + rows + cols - 2 pipeline term — is NAMED rather than clamped "
+                    "away. Splitting one fold's N across arrays would shrink it further "
+                    "and is NOT modelled: it is a claim about the fabric's dataflow "
+                    "that no recorded reference in this repo covers."
+                    if saturated
+                    else " Every stage's criterion was reachable."
+                )
+            ),
+        )
+    ]
+    for composition, label in (
+        (sizing.composition, "derived_fabric_area"),
+        (sizing.softmax_composition, "derived_softmax_area"),
+    ):
+        if composition is None:
+            continue
+        out.append(
+            Relaxation(
+                constraint=label,
+                value=(
+                    f"{composition.area_mm2:.6g} mm2, {composition.power_w:.6g} W"
+                ),
+                reason=(
+                    "D32: the derived engine's silicon is a COMPOSITION of measured "
+                    "synthesis blocks — "
+                    + ", ".join(
+                        f"{name} x {count}"
+                        for name, count in composition.blocks.items()
+                    )
+                    + f" — at {composition.technology}. "
+                    + composition.basis
+                    + "."
+                ),
+            )
+        )
+    return out
+
+
+def binding_term_disclosures(
+    binding_term: Mapping[str, object], mapping: FwsMapping
+) -> List[Relaxation]:
+    """WHAT BINDS THE MACHINE THAT GETS BUILT — ADJ-10's required answer.
+
+    ADJ-10 says that whatever binds after every composable engine has been
+    derived must be a REAL limit — unscalable declared geometry or a bandwidth
+    term — and must be NAMED in the artifact. This is where it is named, with
+    the arithmetic that produced it, measured on the PRICED timeline rather
+    than on the probe.
+    """
+    terms = list(binding_term.get("terms") or ())
+    if not terms:
+        return []
+    largest = terms[0]
+    device_class = str(largest.get("device_class", "?"))
+    block = str(largest.get("block", "?"))
+    busy = float(largest.get("busy_s", 0.0))
+    analog_s = float(binding_term.get("analog_time_s", 0.0))
+    span_s = float(binding_term.get("span_s", 0.0))
+    device = mapping.device
+    if device_class == "analog_macro":
+        verdict = (
+            "THE ANALOG M-PASS IS THE LARGEST TERM of the beat-setting stage: this "
+            "machine runs at the analog floor, which is what ADJ-9 and ADJ-10 were "
+            "adjudicated to reach."
+        )
+    elif block in ("attention_qk", "attention_pv", "attention_softmax"):
+        rows = int(device.fabric.rows)
+        cols = int(device.fabric.cols)
+        verdict = (
+            "THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY. The largest term is "
+            f"the attention fabric's {block}, and it is at the floor ADJ-10's derivation "
+            f"walked it to: the fabric is {device.fabric_num_arrays} DERIVED arrays of "
+            f"{rows} x {cols}, so every fold of the call already runs on its own array "
+            "and another copy of the measured block would carry no fold. What is left "
+            f"is ONE array's own walk — ceil(n / {cols}) column passes, each costing "
+            f"k + {rows} + {cols} - 2 cycles, plus the fill/drain — and no COUNT of "
+            "measured blocks shortens it. TWO LEVERS WOULD, AND BOTH ARE REFUSED HERE "
+            "RATHER THAN TAKEN. (1) A WIDER ARRAY: cim.fabric.cols is what the "
+            "ceil(n / cols) term divides by, and a wider array would also be a whole "
+            "number of measured 32x32 blocks — but rows x cols is the geometry the "
+            "systolic closed form was validated at, bit-exact against OPTIMA's recorded "
+            "ScaleSim outputs, and the fill/drain surrogate is 3 x rows. Deriving a new "
+            "geometry would move a VALIDATED law onto an unvalidated shape, which is a "
+            "card change a human makes, not a derivation (ADJ-4, D21). (2) SPLITTING ONE "
+            "FOLD'S N ACROSS ARRAYS, which needs a claim about how the K matrix is "
+            "broadcast and how the column tiles are merged that no recorded reference in "
+            "this repo covers. So it is REPORTED as the limit rather than derived away "
+            "(D28: a limit named is a provisioning finding; a limit padded away is not)."
+        )
+    elif device_class == "link":
+        verdict = (
+            "THE NEXT REAL LIMIT IS A BANDWIDTH TERM: the largest term is a priced "
+            f"boundary transfer on the {block} link, which is bytes over the declared "
+            "p2p law (D17) and moves with the network card, not with any engine width."
+        )
+    elif device_class == "macro_pool":
+        verdict = (
+            "THE NEXT REAL LIMIT IS THE PER-MACRO POOL (D12), which is sized per unit "
+            "from the macro's own result rate and is not one of ADJ-10's composable "
+            "shared-chiplet engines."
+        )
+    else:
+        verdict = (
+            f"THE NEXT REAL LIMIT is {device_class}/{block}, which no ADJ-10 derivation "
+            "sizes."
+        )
+    return [
+        Relaxation(
+            constraint="binding_term",
+            value=(
+                f"stage {int(binding_term.get('stage', -1))} spends {busy:.6g} s on "
+                f"{device_class}/{block} against {analog_s:.6g} s of analog m-pass "
+                f"(stage span {span_s:.6g} s)"
+            ),
+            reason=(
+                "ADJ-10 requires that whatever binds AFTER every composable digital "
+                "engine has been derived be a REAL limit and be named. This row is that "
+                "name, measured on the PRICED timeline — the machine that gets built, "
+                "with the derived fabric, the derived softmax width and the derived "
+                "scan engine all installed — so it is a different quantity from the "
+                "probe's beat-setting evidence, which describes the machine the "
+                "derivation ran against. " + verdict + " Terms (union of busy intervals, "
+                "priced slice): "
+                + "; ".join(
+                    f"{row['device_class']}/{row['block']} {row['busy_s']:.4g} s"
+                    for row in terms
+                )
+                + "."
+            ),
+        )
+    ]
 
 
 def engine_sizing_disclosures(
@@ -3800,19 +4115,23 @@ def engine_sizing_disclosures(
                     "physically reachable. The derivation guarantees the half it can: "
                     "the DERIVED scan/vector engine is sized so its per-stage time fits "
                     "inside that stage's own analog m-pass time. It cannot guarantee "
-                    "the other half, because a stage also runs silicon D31 does not "
-                    "derive — the attention systolic fabric and the softmax pipeline "
-                    "are DECLARED card geometry (cim.fabric rows x cols x num_arrays, "
-                    "softmax_lanes, D13) and a sweep axis under D28, not a derived "
-                    "engine. This row is the measurement that says which it is on THIS "
-                    "machine: "
+                    "the other half on its own, because a stage also runs silicon D31 "
+                    "does not size. ADJ-10 then took the two that used to be DECLARED — "
+                    "the attention fabric's array count and the softmax pipeline's lane "
+                    "count — and derived them against this same per-stage target, so "
+                    "what is left underived is the array GEOMETRY (rows x cols) and the "
+                    "terms that are not engines. READ THIS ROW AS THE DERIVATION'S OWN "
+                    "INPUT, NOT AS THE MACHINE: it is measured on the PROBE pass, where "
+                    "the fabric still sits at its declared seed width. What binds the "
+                    "machine that gets BUILT is measured on the priced timeline and "
+                    "reported under its own name, "
+                    "evaluation.digital_silicon.binding_term. On the probe: "
                     + (
                         "the analog m-pass IS the largest term of the beat-setting "
-                        "stage, so the machine runs at the analog floor."
+                        "stage."
                         if setter.get("analog_is_largest_term")
-                        else "the largest term is NOT analog, so the beat is set by "
-                        "declared digital silicon and buying more scan lanes cannot "
-                        "move it. The terms are itemized in "
+                        else "the largest term is NOT analog, so no scan lane count "
+                        "could have moved the probe's beat. The terms are itemized in "
                         "evaluation.digital_silicon.derived_engine_sizing."
                         "beat_setting_stage."
                     )
@@ -3901,8 +4220,11 @@ def evaluate_fws(
     # installs the width that holds it. A caller that passes its own `pricing`
     # has already priced the run and is not re-sized under it.
     engine_sizing = None
+    fabric_sizing = None
     if pricing is None:
-        engine_sizing = _derive_engine(program, mapping, serving, capacity_overrides)
+        fabric_sizing, engine_sizing = _derive_engine(
+            program, mapping, serving, capacity_overrides
+        )
     pricing = pricing or price_program(
         program, mapping, capacity_overrides=capacity_overrides
     )
@@ -3925,6 +4247,13 @@ def evaluate_fws(
         )
     occupancy, duty = _build_occupancy(mapping, pricing, timeline, program)
     annotations = annotations_of(program)
+    # ADJ-10's headline: WHAT BINDS THE MACHINE THAT GETS BUILT. Measured on
+    # THIS timeline — every derived width installed, every op timed — which is
+    # a different question from the probe evidence the derivations ran against,
+    # and it gets a different name (D21).
+    binding_term = _beat_setting_stage_terms(
+        serving, annotations, pricing.costs, timeline, slice_name="PRICED"
+    )
     utilization = _build_utilization(
         mapping, pricing, occupancy, annotations, makespan_of(timeline)
     )
@@ -3943,7 +4272,9 @@ def evaluate_fws(
     # exists, which is its own kind of dishonesty.
     disclosures = [item for item in disclosures if item.constraint != "op_durations"]
     disclosures.extend(pricing.disclosures)
+    disclosures.extend(fabric_sizing_disclosures(fabric_sizing))
     disclosures.extend(engine_sizing_disclosures(engine_sizing))
+    disclosures.extend(binding_term_disclosures(binding_term, mapping))
     disclosures.extend(memory_disclosures)
     disclosures.extend(
         _utilization_disclosures(
@@ -4080,6 +4411,7 @@ def evaluate_fws(
         decode_step_times_s=step_times,
         pipeline=pipeline,
         state_residency=residency,
+        binding_term=binding_term,
     )
 
 
@@ -4242,6 +4574,17 @@ def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, objec
     # ADJ-9's beat-setting evidence rides derived_engine_sizing itself, so the
     # block carries no second copy of it (D21).
     out["derived_engine_sizing"] = sizing.summary() if sizing is not None else None
+    # ADJ-10's twin: the attention fabric and the softmax pipeline, derived
+    # against the SAME per-stage analog m-pass times. None = the card PINS them
+    # (an override riding its own disclosure) or the run runs no attention.
+    fabric = device.derived_fabric
+    out["derived_fabric_sizing"] = fabric.summary() if fabric is not None else None
+    out["fabric_num_arrays"] = int(device.fabric_num_arrays)
+    out["fabric_num_arrays_provenance"] = device.fabric_provenance
+    out["fabric_softmax_lanes"] = int(device.fabric_softmax_lanes)
+    # ADJ-10's headline: what binds the machine that GETS BUILT, measured on
+    # the priced timeline. Not the probe's evidence and never merged with it.
+    out["binding_term"] = dict(evaluation.binding_term or {}) or None
     # None = no vector op ran, so no engine was derived and none is invented (D31).
     out["vector_lanes"] = device.resolved_vector_lanes()
     out["vector_lanes_provenance"] = device.vector_lanes_provenance

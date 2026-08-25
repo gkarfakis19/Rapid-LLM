@@ -281,21 +281,20 @@ def test_no_op_exceeds_the_engine_peak_its_law_declares(granite):
 
 
 def test_the_scan_engine_runs_at_peak_and_is_no_longer_what_binds(granite):
-    """ADJ-9 REWRITE. The scan still runs at its declared peak — and stops binding.
+    """ADJ-10 REWRITE of an ADJ-9 rewrite. The scan is still not the binder.
 
-    OLD CLAIM (test_the_scan_engine_is_the_binding_resource_and_says_so): the
-    SSD scan is the binding resource; it runs at >98% of the declared peak and
-    costs >10x the analog projection that feeds it. Both halves were true of a
-    220-lane engine sized against the analog BEAT.
+    OLD CLAIM (ADJ-9's version of this test): the scan fits inside its stage's
+    analog m-pass, and what sets the beat is the attention fabric at 18.60 us
+    of `attention_qk` — more than 40x the scan and more than 10x the whole
+    analog m-pass of its stage.
 
-    NEW CLAIM: D31-v2 sizes the engine to the ANALOG FLOOR, so the scan is by
-    construction NOT the binding term of its own stage — its priced time fits
-    inside that stage's analog m-pass — and the machine's beat is set by a
-    third party entirely, the attention systolic fabric, which is DECLARED card
-    geometry and not a derived engine. The peak claim survives with a smaller
-    number and a hand-checkable cause: a wider engine pays the same pipeline
-    fill over fewer streaming cycles, so the fill is a bigger share of the
-    call.
+    NEW CLAIM: ADJ-10 derives the fabric too, so the attention term falls from
+    18.60 us to 6.88 us (`num_arrays` 2 -> 8, one fold per array) and the
+    ratios move with it: `attention_qk` is now ~17x the scan, not 40x. The two
+    halves that do NOT move are the ones that matter — the scan still runs at
+    its declared peak, and the analog m-pass STILL does not bind, because the
+    attention floor is 4.3x it. What changed is that the excess is now the
+    DECLARED array geometry's own floor rather than an underived width.
 
         ops = 1 972 224, lanes = 5479, depth = 20, clock = 0.95 GHz
         cycles = 20 + ceil(1972224 / 5479) - 1 = 19 + 360 = 379
@@ -322,15 +321,128 @@ def test_the_scan_engine_runs_at_peak_and_is_no_longer_what_binds(granite):
         cost for cost in granite.pricing.costs if cost.block == "ssm_in_proj"
     )
     assert scan.duration_s < 6 * in_proj.duration_s
-    # And what DOES set the beat is measured and named: the attention fabric,
-    # 47x the scan and 12x the whole analog m-pass of its stage.
+    # And what DOES set the beat is measured and named — still the attention
+    # fabric, but at the floor ADJ-10 walked it to rather than at a width
+    # nobody derived. The ratio to the scan fell from >40x to ~17x purely
+    # because the fabric got 4 concurrent folds per side.
     qk = next(cost for cost in granite.pricing.costs if cost.block == "attention_qk")
-    assert qk.duration_s > 40 * scan.duration_s
+    assert 15 < qk.duration_s / scan.duration_s < 20
+    # The PROBE's own evidence is what the derivation ran against, and it is a
+    # DIFFERENT quantity from what binds the machine that gets built. Both are
+    # reported and neither is merged into the other (D21).
     setter = sizing.beat_setting_stage
     assert setter["analog_is_largest_term"] is False
     assert setter["terms"][0]["block"] == "attention_qk"
     assert setter["terms"][0]["device_class"] == "shared_digital"
-    assert setter["terms"][0]["busy_s"] > 10 * setter["analog_time_s"]
+    assert "the evidence the derivation RAN AGAINST" in setter["basis"]
+    binding = granite.binding_term
+    assert binding["terms"][0]["block"] == "attention_qk"
+    assert binding["terms"][0]["busy_s"] == pytest.approx(qk.duration_s, rel=1e-12)
+    # The machine that gets built is FASTER than the one the derivation looked
+    # at, on exactly the term ADJ-10 derived.
+    assert binding["terms"][0]["busy_s"] < 0.4 * setter["terms"][0]["busy_s"]
+
+
+def test_the_attention_fabric_derives_by_integer_copies_of_the_measured_block(granite):
+    """ADJ-10's core claim, hand-computed on the shipped Granite machine.
+
+    NEW GATE (ADJ-10). `cim.fabric.num_arrays` used to be a DECLARED 2 and the
+    beat-setter; it is now DERIVED to 8 and `softmax_lanes` from 1 to 12, both
+    in integer copies of MEASURED synthesis blocks. The array's 32 x 64
+    geometry is NOT derived and must not become derivable.
+
+    THE HAND COMPUTATION (Granite decode, one attention layer, stream at
+    context 1800; rows R = 32, cols C = 64, f = 0.95 GHz, fill/drain = 96):
+
+        heads_chip = kv_heads = 4, replicas = 1 -> heads_per_replica = 4
+        streams = 1 (D29: local batch is always 1) -> folds = 4 x 1 = 4
+        score call dims: m = shared_heads = 12/4 = 3, k = head_dim = 128,
+                         n = context = 1800
+
+      AT THE DECLARED num_arrays = 2, groups (1, 1), all 4 folds on one array:
+        QK = ceil(3/32) * ceil(1800/64) * (128*4 + 32 + 64 - 2) - 1
+           = 1 * 29 * 606 - 1 = 17573 cycles  (+96 = 17669 -> 18.60 us)
+        PV = ceil(3/32) * ceil(128/64) * (1800*4 + 94) - 1
+           = 1 * 2 * 7294 - 1 = 14587 cycles          (-> 15.35 us)
+
+      AT THE DERIVED num_arrays = 8, groups (4, 4), ONE fold per array:
+        QK = 1 * 29 * (128 + 94) - 1 = 29 * 222 - 1 = 6437  (+96 -> 6.88 us)
+        PV = 1 * 2 * (1800 + 94) - 1 = 2 * 1894 - 1 = 3787       (-> 3.99 us)
+
+      AND THAT IS THE FLOOR. A ninth array joins one of the groups and carries
+      NO fold (ceil(4/5) = ceil(4/4) = 1), so it buys nothing. What is left is
+      one array's own walk: 29 column passes of ceil(1800/64), each costing
+      k + R + C - 2 cycles. Only a wider C would shorten it, and C is the
+      geometry the systolic law was validated at — a card change, not a
+      derivation (ADJ-4).
+    """
+    device = granite.mapping.device
+    fabric = device.derived_fabric
+    assert fabric is not None
+    assert device.fabric.num_arrays == 2 and device.fabric.softmax_lanes == 1
+    assert fabric.num_arrays == 8 and device.fabric_num_arrays == 8
+    assert fabric.softmax_lanes == 12 and device.softmax_width == 12
+    assert device.fabric_provenance == "derived-count"
+    # ONLY THE COUNT IS DERIVED.
+    assert (fabric.rows, fabric.cols) == (32, 64)
+    assert (device.fabric.rows, device.fabric.cols) == (32, 64)
+    # The hand computation above, taken through the pricing law itself.
+    timing = device.decode_attention_timing(1800, batch_size=1, tp=1)
+    assert (timing.heads_chip, timing.heads_per_replica, timing.folds) == (4, 4, 4)
+    assert (timing.qk_arrays, timing.pv_arrays) == (4, 4)
+    assert (timing.qk_folds_per_array, timing.pv_folds_per_array) == (1, 1)
+    assert timing.qk_cycles == 6437
+    assert timing.pv_cycles == 3787
+    # A NINTH ARRAY BUYS NOTHING: the saturation claim, measured.
+    from cim_timing import AttentionCallDemand
+
+    call = AttentionCallDemand(
+        m=3, k=128, n=1800, folds=4, softmax_tokens=3, heads_chip=4,
+        fill_drain_cycles=96,
+    )
+    assert call.saturation_arrays == 8
+    at_8 = device.attention_cycles_at(call, 8, 12)
+    at_9 = device.attention_cycles_at(call, 9, 12)
+    at_64 = device.attention_cycles_at(call, 64, 12)
+    assert at_8[:3] == at_9[:3] == at_64[:3] == (6437, 3787, 20)
+    # And the declared-width law is the pass-1 law, bit for bit.
+    at_2 = device.attention_cycles_at(call, 2, 1)
+    assert at_2[:3] == (17573, 14587, 31)
+    assert at_2[3:] == (1, 1)
+
+
+def test_the_fabric_derivation_names_its_floor_instead_of_clamping_it(granite):
+    """ADJ-10: an unreachable target SATURATES and is NAMED, never clamped.
+
+    NEW GATE. Granite's attention stages cannot reach their own 1.60 us analog
+    m-pass at any array count — the floor is 10.88 us — so every one of them is
+    counted in `saturated_stages`, carries `target_kind` naming the reason, and
+    keeps the SATURATION width. The thing this test forbids is the two ways of
+    lying about it: clamping the width down to something that "fits" a wider
+    budget, and padding it up past the point where copies stop buying time.
+    """
+    fabric = granite.mapping.device.derived_fabric
+    assert fabric.saturated_stages == fabric.unreachable_stages
+    assert len(fabric.saturated_stages) == fabric_stages(fabric)
+    assert fabric.analog_bound_stages == ()
+    for row in fabric.per_stage:
+        assert row.target_kind == "fold_concurrency_saturated_below_analog_time"
+        # SATURATED means: at the installed width the stage is already at its
+        # floor, and the floor is above the target. Both halves, measured.
+        assert row.time_s == pytest.approx(row.floor_time_s, rel=1e-12)
+        assert row.floor_time_s > row.analog_time_s
+        assert row.num_arrays == 8
+    # NOT PADDED: the ratio to the target is reported ABOVE 1 rather than
+    # capped, which is the number a reader needs to see the residual at all.
+    assert fabric.target_ratio == pytest.approx(6.8026, rel=1e-4)
+    # The disclosure says the words, so the artifact carries the finding.
+    text = " ".join(fabric.disclosures)
+    assert "FOLD CONCURRENCY SATURATES" in text
+    assert "never clamped and never padded" in text
+
+
+def fabric_stages(fabric):
+    return len(fabric.per_stage)
 
 
 def test_the_other_derived_width_is_at_the_analog_floor_too(granite):
@@ -778,21 +890,21 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     assert mapping["resident_streams"] == 10
     metrics = {metric["key"]: metric["value"] for metric in document["evaluation"]["metrics"]}
     assert "sys.fws.prefill_latency" not in metrics
-    # ADJ-9 REWRITE (D31-v2). OLD CLAIM: beat 66.21 us / 15103.6 tokens/s on a
-    # 220-lane engine — the smallest width that held the analog BEAT. NEW CLAIM:
-    # beat 39.04 us / 25617.6 tokens/s on a 5479-lane engine — the smallest
-    # width for which every stage's digital per-stage time fits that stage's
-    # OWN analog m-pass. (Before D31 the same headline read 43.98 us / 22737 on
-    # a card that DECLARED 1024 lanes nobody measured.)
+    # ADJ-10 REWRITE. OLD CLAIM (ADJ-9): beat 39.04 us / 25617.6 tokens/s on a
+    # 5479-lane scan engine, with the fabric left at its DECLARED 2 arrays and
+    # setting the beat at 18.60 us of attention_qk. NEW CLAIM: the fabric
+    # derives too — num_arrays 2 -> 8, softmax_lanes 1 -> 12 — and the beat
+    # falls to 15.96 us / 62661.5 tokens/s. (The two rewrites before it: beat
+    # 66.21 us / 15103.6 on a 220-lane engine sized against the analog BEAT,
+    # and 43.98 us / 22737 on a card that DECLARED 1024 lanes nobody measured.)
     #
-    # +69.6% tokens/s for +148.8 mm2 of digital silicon, which is +1.16% of the
-    # machine: the trade ADJ-9 was adjudicated on, measured here rather than
-    # assumed. The width stops being the SMALLEST that keeps the digital side
-    # off the critical path and becomes the smallest at which the ANALOG side
-    # is the term that sets each stage's pace.
-    assert metrics["sys.fws.beat"] == pytest.approx(3.903561e-05, rel=1e-3)
-    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(25617.6, rel=1e-3)
-    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(2561.76, rel=1e-3)
+    # +144.6% tokens/s for +92.8 mm2 of digital silicon, which is +0.70% of the
+    # machine — the same trade ADJ-9 was adjudicated on, on the engine ADJ-9
+    # did not size. The scan width does NOT move (5479 either way): its target
+    # is the analog m-pass, and the analog m-pass did not move.
+    assert metrics["sys.fws.beat"] == pytest.approx(1.5958768e-05, rel=1e-3)
+    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(62661.5, rel=1e-3)
+    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(6266.15, rel=1e-3)
     assert metrics["sys.fws.resident_streams"] == 10.0
     # The engine is REPORTED, which is the other half of D31, and its silicon is
     # COMPOSED from the measured 22nm synthesis library (D32).
@@ -800,13 +912,36 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     assert silicon["vector_lanes"] == 5479
     assert silicon["vector_lanes_provenance"] == "derived-count"
     assert silicon["library"]["technology"] == "22nm"
-    assert silicon["digital_area_mm2_total"] == pytest.approx(201.3858, rel=1e-4)
+    assert silicon["digital_area_mm2_total"] == pytest.approx(294.18078, rel=1e-4)
     # ADJ-9's fixed point, on the shipped headline machine: all ten stages.
     sizing = silicon["derived_engine_sizing"]
     assert sizing["sizing_target"] == "analog_stage_time"
     assert sizing["analog_bound_stages"] == list(range(10))
     assert sizing["unreachable_stages"] == []
     assert sizing["engine_duty_at_target"] == pytest.approx(0.997368, rel=1e-4)
+    # ADJ-10's fixed point beside it, and ADJ-10's honest failure: the fabric
+    # is derived to 8 arrays and 12 softmax lanes, and it still cannot reach
+    # the analog floor on any of its four attention stages.
+    fabric = silicon["derived_fabric_sizing"]
+    assert silicon["fabric_num_arrays"] == 8
+    assert silicon["fabric_num_arrays_provenance"] == "derived-count"
+    assert silicon["fabric_softmax_lanes"] == 12
+    assert fabric["num_arrays_declared"] == 2 and fabric["softmax_lanes_declared"] == 1
+    assert fabric["array_rows"] == 32 and fabric["array_cols"] == 64
+    assert fabric["array_geometry_provenance"] == "declared-count"
+    assert fabric["saturated_stages"] == [1, 3, 6, 8]
+    assert fabric["analog_bound_stages"] == []
+    # WHAT BINDS THE MACHINE THAT GETS BUILT, in the artifact, with numbers.
+    binding = silicon["binding_term"]
+    assert binding["stage"] == 6
+    assert binding["analog_is_largest_term"] is False
+    assert binding["terms"][0]["block"] == "attention_qk"
+    assert binding["terms"][0]["busy_s"] == pytest.approx(6.876842e-06, rel=1e-4)
+    assert binding["analog_time_s"] == pytest.approx(1.6e-06, rel=1e-6)
+    named = next(
+        item for item in document["disclosures"] if item["constraint"] == "binding_term"
+    )
+    assert "THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY" in named["reason"]
     # The energy is the WINDOW's, and the window is D - 1 fill beats plus the
     # steady sample: a longer window is more beats of real work, not a
     # different machine. It is reported per run, never per token here.
@@ -816,7 +951,7 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     # engine's measured power for their own duration, which is a term that
     # always existed and used to report zero.
     assert document["evaluation"]["energy"]["total_pj"] == pytest.approx(
-        9.42996e09, rel=1e-3
+        1.0785821e10, rel=1e-3
     )
     digital = next(
         c

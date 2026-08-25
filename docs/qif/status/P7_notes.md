@@ -638,3 +638,124 @@ hops are named as absent rather than estimated; (6) the derived engine's duty ag
 the MEASURED beat is now very low (Granite's binding stage spends 1.596 us of a 39.04 us
 beat) — that is idle silicon, it is what ADJ-9 bought, and D28 requires it to be visible,
 which the per-device-class utilization banner and the beat_setting_stage block both do.
+
+
+## P7.11 — ADJ-10: ALL composable digital engines derive to the ANALOG FLOOR
+
+WHAT ADJ-9 LEFT BEHIND. ADJ-9 derived the scan/vector engine to each stage's own analog
+m-pass and then MEASURED that the machine was still not analog-bound: the beat-setting
+Granite stage spent 18.60 us on `attention_qk` and 15.35 us on `attention_pv` against a
+1.60 us analog m-pass (Qwen 34.23 / 30.71 against 1.52). That fabric was DECLARED card
+geometry — `cim.fabric.num_arrays: 2`, `softmax_lanes: 1` — and no derivation sized it.
+ADJ-10 is the extension: every digital engine whose width is a COMPOSITION OF MEASURED
+SYNTHESIS BLOCKS derives up until the analog m-pass binds, or until copies stop buying
+time. The SA fabric derives by integer copies of the measured `GEMMINI_SYS_ARRAY` 32x32
+block and the softmax pipeline by copies of OPTIMA's measured per-lane census. `rows` and
+`cols` per array are NOT derived and are not swept: they are the geometry the systolic
+closed form was validated at, bit-exact against recorded ScaleSim outputs, and the
+fill/drain surrogate is `3 x rows` — deriving a new geometry would move a VALIDATED law
+onto an unvalidated shape (ADJ-4). The per-macro pool needed no retarget: D12 already
+sizes it from the macro's own result rate, which is the analog floor by construction.
+
+THE FOLD LAW, EXTENDED HONESTLY. The pass-1 law folds heads and streams into K to model
+back-to-back dual-buffered runs: `QK = sa(m, n, k x folds)`, `PV = sa(m, k, n x folds)`
+with `folds = heads_per_replica x streams`. ADJ-10 makes `num_arrays` a COUNT OF
+CONCURRENT FOLDS: the arrays split into a QK group of `a_qk` and a PV group of `a_pv`,
+the folds are dealt across the group, and an array in a group of `a` carries
+`ceil(folds / a)` of them, so its contraction dim is that many folds instead of all of
+them. `fold_group_split` picks the partition that MINIMISES `QK + PV`, because the
+lowering places three SERIAL ops (qk -> softmax -> pv) and the sum is what the timeline
+measures and what the criterion is taken on; ties break toward the balanced split and
+then toward the smaller `a_qk`, so the answer is deterministic. AT `num_arrays = 2` THE
+SPLIT IS (1, 1) AND THE LAW IS THE PASS-1 LAW BIT FOR BIT, which is why no OPTIMA parity
+number moves — every shipped card declares 2.
+
+WHERE IT STOPS, AND WHY THAT IS NOT A CAP. Fold concurrency SATURATES at `2 x folds`:
+past that another copy of the measured block carries no fold. What is left is one array's
+own walk — `ceil(n / cols)` column passes, each costing `k + rows + cols - 2` cycles —
+and no COUNT of measured blocks shortens it. Stages where the analog m-pass is still not
+reached at saturation are counted in `saturated_stages`, named by
+`target_kind = fold_concurrency_saturated_below_analog_time`, and given the SATURATION
+width. THIS IS DELIBERATELY NOT ADJ-9's RULE. ADJ-9 hands an unreachable scan stage the
+analog BEAT as its budget, which is right there because its unreachable cases (no analog
+work at all; analog time under the engine's own pipeline fill) have no floor to walk to.
+The fabric has one, and falling back to the wider beat budget would derive a NARROWER
+fabric than the machine can use — leaving measured throughput on the table for silicon
+that buys time, the trade ADJ-9's own rationale rejects. Neither rule pads and neither
+clamps.
+
+THE NUMBERS. GRANITE-4.0-H-TINY: `num_arrays` 2 -> 8 and `softmax_lanes` 1 -> 12; the
+scan width does NOT move (5479 either way — its target is the analog m-pass, which did
+not move). Beat 39.04 -> 15.96 us = 25617.6 -> 62661.5 tokens/s (+144.6%); shared
+chiplet 18.5908 -> 27.8703 mm2, digital total 201.386 -> 294.181 mm2, machine
+13132.0 -> 13224.8 mm2 (+0.71%). QWEN3.5-4B: 2 -> 8 arrays, 1 -> 16 softmax lanes, 7971
+lanes unchanged; 70.71 -> 24.56 us = 14143.1 -> 40717.1 tokens/s (+187.9%), digital
+210.772 -> 285.216 mm2, machine 8292.4 -> 8366.9 mm2 (+0.90%). Both headline reports and
+atlases, the PD atlas, the packing comparison, both frontier curves, the capacity/banks
+demo sweep and the two hand fixtures were regenerated.
+
+THE FINDING, AND IT IS THE HEADLINE. THE MACHINE IS STILL NOT ANALOG-BOUND, AND WHAT
+BINDS IT NOW IS A REAL LIMIT WITH ARITHMETIC BEHIND IT: THE DECLARED 32 x 64 ARRAY
+GEOMETRY. Granite's beat-setting stage 6 spends 6.877 us on `attention_qk` against a
+1.600 us analog m-pass — 4.3x, down from 11.6x — and that 6.877 us is the FLOOR:
+`folds = heads_per_replica 4 x streams 1 = 4`, so at 8 arrays each of the 4 QK arrays
+carries exactly one fold and sees `k = head_dim = 128`; the run costs
+`ceil(3/32) x ceil(1800/64) x (128 + 32 + 64 - 2) - 1 = 1 x 29 x 222 - 1 = 6437` cycles
+plus the 96-cycle fill/drain, at 0.95 GHz. A ninth array carries no fold. Qwen is the
+same shape at `k = 256`: `29 x 350 - 1 = 10149` cycles = 10.784 us against 1.520 us.
+The residue is the `ceil(n / cols) = 29` COLUMN PASSES of a 64-column array, and only two
+things move it: a wider `cols` (a CARD CHANGE a human makes, because rows x cols is the
+validated geometry) or splitting one fold's N across arrays (a DATAFLOW CLAIM — how the K
+matrix is broadcast, how the column tiles merge — that no recorded reference in this repo
+covers). Both are named and neither is taken. A new MEASURED block carries it:
+`evaluation.digital_silicon.binding_term` names the beat-setting stage of the PRICED
+timeline — the machine that gets BUILT, every derived width installed — and itemises its
+terms by op block, with a `binding_term` disclosure that says which real limit it is in
+words. It is a DIFFERENT quantity from `derived_engine_sizing.beat_setting_stage`, which
+describes the machine the derivation ran AGAINST, and the two are never merged (D21).
+
+WHAT IT REVERSES. The atlas frontier fixture's ninth point was DOMINATED under ADJ-9
+(5479 lanes, 13132.0 mm2, 25617.6 tokens/s against c006's 4096 declared lanes at
+13092.9 mm2 and 25673.8). With the fabric derived it measures 62661.5 tokens/s — 2.4x the
+fastest swept point — for 131.9 mm2 more silicon, so it is BACK ON THE FRONT and is now
+its fastest point. The eight swept points are frozen at the declared 2-array fabric and
+can never be re-walked, which is exactly what makes the comparison worth drawing.
+
+THE AXES. `num_arrays` and `softmax_lanes` join `vector_lanes` in
+`tools/fws_qif_dse.py REFUSED_AXES`: a sweep that declares one raises at parse with the
+axis named and ADJ-10 quoted. `rows` and `cols` are in neither register — neither swept
+nor derived. A SINGLE MACHINE may still pin the two derived widths through the new card
+knobs `cim.cards.<card>.fabric_num_arrays` / `fabric_softmax_lanes`, which skip the
+derivation and ride `CimDeviceModel.fabric_sizing_disclosures` naming themselves an
+OVERRIDE (the same seam D31 gives `vector_lanes`, and it does not print what the
+derivation would have returned, because a pinned card never runs one — the P7.9
+correction applies for the same reason).
+
+THE BRIDGE GATE, AND WHY IT MOVED WITHOUT WEAKENING. The ADJ-8 bridge compares the frozen
+CLOSED FORM against the placed DAG on the degenerate case. The closed form has no timeline
+and prices the DECLARED fabric; the DAG now derives one, so the two sides began describing
+TWO MACHINES and every attention row compared a derived fabric against a declared one.
+The gate now PINS both widths on the DAG side to the config's own declared seed, using the
+ordinary card override, and the pin is named in `fws_bridge.EXCLUSIONS` as
+`derived_fabric_pinned_to_the_declared_seed`. No row is dropped, no tolerance moves, every
+attention cycle count is still compared EXACTLY, and the gate GAINED five rows (one per
+bridge point) asserting the pin took effect — 519 checks became 524.
+
+ASSUMPTIONS / DISCLOSED: (1) a stage's attention calls SUM, because the lowering puts a
+chip's fabric ops on one chiplet and decode runs a stage's layers in sequence; a stage
+plan spread over several chips would make the sum an upper bound, and the docstring says
+so; (2) the partition minimises the SERIAL sum while the closed-form
+`attention_call_timing` still reports `max(qk, pv) + fill_drain` over the same partition —
+that is the already-disclosed `attention_op_folding` divergence (ADJ-8: the DAG wins), and
+at saturation, where both shipped machines land, the two objectives agree because each run
+is at its own floor; (3) `qk_arrays` / `pv_arrays` on a per-stage row are the LAST call's
+partition and a report field only — a stage's calls are its attention layers and share
+their dims on every shipped machine; (4) fws_mapping still enumerates
+`num_arrays x replicas` engine SLOTS per chiplet from the DECLARED seed, because it places
+before any beat is measured; those slots hold no tile, carry no device and price no time,
+and the derivation's own disclosures reconcile the two spellings by name; (5) the fabric
+derivation is taken on the same probe pass and the same per-stage analog m-pass
+measurement as ADJ-9's, and the order (fabric first, then scan) moves no number because
+both targets are properties of the analog side; (6) `replicas` is untouched and remains a
+declared knob — it replicates the WHOLE fabric including the softmax pipeline, where
+`num_arrays` is the finer grain, and ADJ-10 names `num_arrays` as the quantity to derive.

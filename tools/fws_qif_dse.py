@@ -57,8 +57,15 @@ point is, so it changes what this tool sweeps:
 as a declared or swept knob: it is DERIVED per point — sized UP until every
 stage's digital per-stage time fits that stage's own ANALOG m-pass time — and
 D32 prices it (and the per-macro pools) from the measured synthesis library.
-``vector_lanes`` therefore lives in :data:`REFUSED_AXES` and a sweep that
-declares it is REFUSED BY NAME at parse.
+ADJ-10 extends that to EVERY digital engine whose width is a composition of
+MEASURED blocks: the attention fabric's ``num_arrays`` (integer copies of the
+measured GEMMINI 32x32 block) and the softmax pipeline's ``softmax_lanes`` are
+derived against the same per-stage target and reported. All three live in
+:data:`REFUSED_AXES` and a sweep that declares one is REFUSED BY NAME at parse.
+What is left on the sweep is what ADJ-10 asks for: only knobs with a genuine
+physical trade. ``rows`` and ``cols`` per array are neither swept nor derived —
+they are the geometry the systolic closed form was validated at, and changing
+them is a card change a human makes (ADJ-4).
 
 Every point reports: total area (analog floor + composed shared chiplets +
 composed per-macro pools), tokens/s = 1/beat, D, the per-stage state bytes with
@@ -118,6 +125,8 @@ config carrying it stays runnable through ``run_perf`` unchanged.
         # column_sets_per_tile: [1]             # cim.allocation (D10)
         # shared_chiplets: [1, 10]              # ADJ-5's declared count
         # vector_lanes: [...]                   # REFUSED BY NAME (D31/ADJ-9)
+        # num_arrays: [...]                     # REFUSED BY NAME (ADJ-10)
+        # softmax_lanes: [...]                  # REFUSED BY NAME (ADJ-10)
 
 Axis -> the config field it moves (one field each, never two):
   ``bank_depth``            ``cim.cards.<analog card>.bank_depth``
@@ -188,8 +197,9 @@ DSE_BLOCK = "mapping_dse"
 
 #: Axis name -> a human sentence naming the ONE config field it moves.
 #:
-#: ``vector_lanes`` is NOT here: ADJ-9 refuses it by name (:data:`REFUSED_AXES`),
-#: and an axis this table lists is an axis the tool offers to sweep.
+#: ``vector_lanes``, ``num_arrays`` and ``softmax_lanes`` are NOT here: ADJ-9
+#: and ADJ-10 refuse all three by name (:data:`REFUSED_AXES`), and an axis this
+#: table lists is an axis the tool offers to sweep.
 AXIS_TARGETS = {
     "bank_depth": "cim.cards.<analog card>.bank_depth",
     "column_sets_per_tile": "cim.allocation.column_sets_per_tile",
@@ -214,6 +224,27 @@ AXIS_TARGETS = {
 #: derived. The Wave-D demo sweep that swept this axis was regenerated on
 #: D31-legal axes when ADJ-9 landed.
 REFUSED_AXES = {
+    "num_arrays": (
+        "ADJ-10 retires the attention fabric's ARRAY COUNT as a swept or declared "
+        "knob, for the same reason D31/ADJ-9 retired the scan engine's lane count: it "
+        "is a count of MEASURED synthesis blocks, so it is DERIVED — sized UP in "
+        "integer copies of the measured GEMMINI 32x32 block until every stage's "
+        "attention time fits that stage's own ANALOG m-pass time — and REPORTED "
+        "(evaluation.digital_silicon.derived_fabric_sizing). Sweeping it would sweep "
+        "the answer. Only the COUNT is derived: rows x cols per array stay as measured "
+        "and as declared, because inventing array geometry is refused (ADJ-4). An "
+        "explicit cim.cards.<card>.fabric_num_arrays on a SINGLE machine is still an "
+        "OVERRIDE that rides its own disclosure; what is refused here is making it an "
+        "AXIS."
+    ),
+    "softmax_lanes": (
+        "ADJ-10 retires the softmax pipeline's LANE COUNT as a swept or declared knob "
+        "on the same grounds as num_arrays: the lane is a MEASURED per-lane census "
+        "(OPTIMA's softmax collection, block for block), so the width is DERIVED "
+        "against the same per-stage analog m-pass target and REPORTED. "
+        "cim.cards.<card>.fabric_softmax_lanes pins ONE machine with a disclosure; as "
+        "an AXIS it is refused."
+    ),
     "vector_lanes": (
         "D31/ADJ-9 retire the scan/vector engine as a swept or declared knob: its "
         "width is DERIVED — sized UP until every stage's digital per-stage time fits "
@@ -760,6 +791,9 @@ def _digital_block(evaluation):
     if not block.get("composed"):
         return None
     sizing = block.get("derived_engine_sizing") or {}
+    fabric = block.get("derived_fabric_sizing") or {}
+    binding = block.get("binding_term") or {}
+    largest = (binding.get("terms") or [{}])[0]
     return {
         "library_technology": (block.get("library") or {}).get("technology"),
         "vector_lanes": block.get("vector_lanes"),
@@ -769,6 +803,21 @@ def _digital_block(evaluation):
         "analog_bound_stages": len(sizing.get("analog_bound_stages") or ()),
         "stages_sized": sizing.get("stages_sized"),
         "analog_beat_s": sizing.get("analog_beat_s"),
+        # ADJ-10: the fabric derives at every point too, so what it derived TO
+        # is a reported quantity of the point, and so is what binds afterwards.
+        "fabric_num_arrays": block.get("fabric_num_arrays"),
+        "fabric_num_arrays_provenance": block.get("fabric_num_arrays_provenance"),
+        "fabric_softmax_lanes": block.get("fabric_softmax_lanes"),
+        "fabric_time_over_target": fabric.get("attention_time_over_analog_target"),
+        "fabric_analog_bound_stages": len(fabric.get("analog_bound_stages") or ()),
+        "fabric_saturated_stages": len(fabric.get("saturated_stages") or ()),
+        "fabric_stages_sized": fabric.get("stages_sized"),
+        "binding_stage": binding.get("stage"),
+        "binding_device_class": largest.get("device_class"),
+        "binding_block": largest.get("block"),
+        "binding_busy_s": largest.get("busy_s"),
+        "binding_analog_time_s": binding.get("analog_time_s"),
+        "binding_is_analog": binding.get("analog_is_largest_term"),
         "shared_digital_chiplet_area_mm2": (
             block.get("shared_digital_chiplet") or {}
         ).get("area_mm2_per_chiplet"),
@@ -2079,11 +2128,27 @@ def render_markdown(payload):
         digital = selected.get("derived_digital")
         if digital:
             lines.append(
-                f"- derived digital (D31/D32): {digital['vector_lanes']} vector lanes "
-                f"({digital['vector_lanes_provenance']}), "
+                f"- derived digital (D31/D32/ADJ-10): {digital['vector_lanes']} vector "
+                f"lanes ({digital['vector_lanes_provenance']}), "
+                f"{digital['fabric_num_arrays']} attention array(s) and "
+                f"{digital['fabric_softmax_lanes']} softmax lane(s) "
+                f"({digital['fabric_num_arrays_provenance']}), "
                 f"{_fmt(digital['digital_area_mm2_total'])} mm2 and "
                 f"{_fmt(digital['digital_power_W_total'])} W composed from the measured "
                 f"{digital['library_technology']} synthesis library"
+            )
+            lines.append(
+                "- WHAT BINDS AFTER THE DERIVATION (ADJ-10, measured on the priced "
+                f"timeline): stage {digital['binding_stage']} spends "
+                f"{_fmt(digital['binding_busy_s'], '.4g')} s on "
+                f"{digital['binding_device_class']}/{digital['binding_block']} against "
+                f"{_fmt(digital['binding_analog_time_s'], '.4g')} s of analog m-pass"
+                + (
+                    " - the ANALOG FLOOR is the limit"
+                    if digital["binding_is_analog"]
+                    else " - the analog floor is NOT the limit; see the binding_term "
+                    "disclosure for which real limit is"
+                )
             )
         lines.append(f"- energy {_fmt(metrics['total_energy_pj'])} pJ over the timeline")
         lines.append(f"- wall time to evaluate this candidate: {_fmt(selected['wall_s'], '.3g')} s")

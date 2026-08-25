@@ -294,27 +294,43 @@ def test_a_front_with_no_interior_has_no_knee():
 def test_stage_granularity_and_chip_capacity_are_axes_and_the_engine_is_not():
     """D31/ADJ-9: the scan/vector engine is not a design point any more.
 
-    ADJ-9 REWRITE. OLD CLAIM: ``vector_lanes`` stays SPELLABLE and is named in
-    a RETIRED register, and a candidate that sets it carries the retirement in
-    its own notes. That is what Wave F built, and the labelled axis went on
-    producing a checked-in artifact whose whole spread came from overriding the
-    derivation. NEW CLAIM: it is REFUSED BY NAME at parse and it has no field
-    to write, so no sweep can carry it at all — the frozen Wave-D artifact is
-    frozen precisely because it can never be re-walked.
+    ADJ-10 REWRITE of an ADJ-9 rewrite. OLD CLAIM (ADJ-9): ``vector_lanes`` is
+    the ONE refused axis — the scan engine is derived and nothing else is.
+    NEW CLAIM: ADJ-10 derives every digital engine whose width is a composition
+    of MEASURED blocks, so the attention fabric's ``num_arrays`` and the
+    softmax pipeline's ``softmax_lanes`` join it. All three are refused BY NAME
+    at parse and none has a field to write, so no sweep can carry any of them.
+    (The claim before both: the axes stayed SPELLABLE in a RETIRED register,
+    and the labelled axis went on producing a checked-in artifact whose whole
+    spread came from overriding the derivation.)
+
+    What is NOT refused, and must not be: ``rows`` and ``cols``. They are not
+    derived either — they are the geometry the systolic law was validated at,
+    and a machine that wants a different one changes the card by hand.
     """
     assert "layers_per_chip" in DSE.AXIS_TARGETS
     assert "layers_per_stage" in DSE.AXIS_TARGETS
     assert "arrays_per_chip" in DSE.AXIS_TARGETS
     assert "bank_depth" in DSE.AXIS_TARGETS
-    assert set(DSE.REFUSED_AXES) == {"vector_lanes"}
-    assert "vector_lanes" not in DSE.AXIS_TARGETS
+    assert set(DSE.REFUSED_AXES) == {"vector_lanes", "num_arrays", "softmax_lanes"}
+    assert not set(DSE.REFUSED_AXES) & set(DSE.AXIS_TARGETS)
     assert not hasattr(DSE, "RETIRED_AXES")
     reason = DSE.REFUSED_AXES["vector_lanes"]
     assert "D31/ADJ-9" in reason and "ANALOG m-pass" in reason
-    with pytest.raises(DSE.QifDseUsageError, match="REFUSED"):
-        DSE.SweepSpec.from_raw(
-            {DSE.DSE_BLOCK: {"axes": {"vector_lanes": [512]}}}, "test"
-        )
+    for axis in ("num_arrays", "softmax_lanes"):
+        reason = DSE.REFUSED_AXES[axis]
+        assert "ADJ-10" in reason and "DERIVED" in reason
+        # The refusal names the OVERRIDE that stays legal, so a reader is told
+        # what to do instead of being told only what not to do.
+        assert "cim.cards.<card>.fabric_" in reason
+    # rows/cols are neither an axis nor a refusal: they are geometry.
+    assert "rows" not in DSE.REFUSED_AXES and "cols" not in DSE.REFUSED_AXES
+    assert "rows" not in DSE.AXIS_TARGETS and "cols" not in DSE.AXIS_TARGETS
+    for axis in DSE.REFUSED_AXES:
+        with pytest.raises(DSE.QifDseUsageError, match="REFUSED"):
+            DSE.SweepSpec.from_raw(
+                {DSE.DSE_BLOCK: {"axes": {axis: [512]}}}, "test"
+            )
     # The frontier sweeps declare no refused axis, and every sweep's payload
     # carries the refusal register so a reader of the artifact sees it too.
     for path in (GRANITE_FRONTIER_HW, QWEN_FRONTIER_HW):
@@ -676,6 +692,28 @@ def test_the_checked_in_curve_is_a_real_frontier_with_its_state_bill(
         assert derived["stages_sized"] >= 1
         assert derived["analog_bound_stages"] == derived["stages_sized"]
         assert 0.0 < derived["engine_duty"] <= 1.0
+        # ADJ-10: the FABRIC derives at every point of the curve too, and what
+        # binds after it is NAMED on every point. A curve that derived the scan
+        # engine and left the fabric declared would be a picture of a machine
+        # nobody would build, which is exactly what ADJ-9's curve was.
+        assert derived["fabric_num_arrays_provenance"] == "derived-count"
+        assert derived["fabric_num_arrays"] >= 2
+        assert derived["fabric_softmax_lanes"] >= 1
+        assert derived["fabric_stages_sized"] >= 1
+        assert derived["binding_block"] and derived["binding_busy_s"] > 0
+        assert derived["binding_analog_time_s"] > 0
+        # Every one of these machines is still bound by the DECLARED array
+        # geometry rather than by the analog floor, and the row says so instead
+        # of the reader having to infer it from a throughput number.
+        assert derived["binding_is_analog"] is False
+        assert derived["binding_block"].startswith("attention_")
+        assert derived["fabric_saturated_stages"] == derived["fabric_stages_sized"]
+        named = [
+            item for item in candidate["disclosures"]
+            if item["constraint"] == "binding_term"
+        ]
+        assert len(named) == 1
+        assert "THE NEXT REAL LIMIT" in named[0]["reason"]
     # Invariant W (D27): the analog term is the cell floor, so every mm2 the
     # front spends over its cheapest point is DIGITAL or enumerated-but-unowned
     # analog slots — never a bigger model footprint.

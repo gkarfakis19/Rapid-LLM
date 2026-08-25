@@ -65,6 +65,34 @@ Systolic-array (SA) attention law (``cim.fabric.model: sa``)
       ``total_cycles = max(QK, PV) + fill_drain_penalty`` (config, default
       3*R — a hand-picked surrogate inherited from OPTIMA);
       ``T = total_cycles / f_fabric``.
+    - ARRAY GROUPS AND FOLD CONCURRENCY (ADJ-10). ``num_arrays`` is now a
+      COUNT OF CONCURRENT FOLDS, not a flag. The fabric's arrays are
+      partitioned into a QK group of ``a_qk`` and a PV group of ``a_pv``
+      (``a_qk + a_pv = num_arrays``, each at least 1); the
+      ``folds = heads_per_replica * streams`` back-to-back runs of a call
+      are dealt round-robin across that group, so an array in the QK group
+      carries ``ceil(folds / a_qk)`` of them and the folded contraction dim
+      it sees is ``k * ceil(folds / a_qk)`` instead of ``k * folds``:
+
+        ``QK = sa_cycles(m, n, k * ceil(folds / a_qk))``
+        ``PV = sa_cycles(m, k, n * ceil(folds / a_pv))``
+
+      At ``num_arrays = 2`` the split is (1, 1) and both expressions
+      reproduce the pass-1 law BIT FOR BIT, which is why every OPTIMA parity
+      configuration is untouched by this generalization. The partition is
+      chosen per call by :func:`fold_group_split` (see its docstring for the
+      objective and the tie-break). CONCURRENCY SATURATES AT ``folds``: a
+      group wider than the fold count leaves arrays with nothing to carry,
+      so ``num_arrays = 2 * folds`` is the width past which no further copy
+      of the measured block shortens the call, and the residue
+      ``sa_cycles(m, n, k)`` is the DECLARED ``rows x cols`` geometry's own
+      floor. WHAT IS NOT MODELLED, BY NAME: splitting ONE fold's N across
+      arrays (the ``ceil(n / cols)`` column passes) would keep shrinking the
+      call past that floor, and it is not modelled because it is a claim
+      about the fabric's dataflow — how the K matrix is broadcast and how
+      the column tiles are merged — that no recorded ScaleSim reference in
+      this repo covers. Inventing it would be inventing geometry (ADJ-4), so
+      the floor stands and ADJ-10's derivation NAMES it instead.
 
 GQA / decode folding semantics (our stated generalization; OPTIMA refuses GQA)
     The folded-K call-dims law prices GQA prefill (score call
@@ -498,6 +526,29 @@ class AttentionTiming:
     stage_time_s: float     # max(sa_time_s, softmax_time_s) — report stage 2
     heads_chip: int
     heads_per_replica: int
+    #: ADJ-10's fold concurrency, as it was actually spent on this call.
+    #: ``folds`` = heads_per_replica * streams (the back-to-back runs folded
+    #: into K); ``qk_arrays``/``pv_arrays`` are the two array groups the
+    #: fabric's ``num_arrays`` was partitioned into, and
+    #: ``qk_folds_per_array``/``pv_folds_per_array`` are the ceil-divisions
+    #: that multiply the contraction dim. All five default to the pass-1
+    #: values, so a hand-built AttentionTiming still reads as the old law.
+    folds: int = 1
+    qk_arrays: int = 1
+    pv_arrays: int = 1
+    qk_folds_per_array: int = 1
+    pv_folds_per_array: int = 1
+    #: The softmax width the call was priced on: ``softmax_lanes * replicas``,
+    #: with ``softmax_lanes`` DERIVED under ADJ-10 when a derivation is
+    #: installed and declared otherwise.
+    softmax_width: int = 1
+    #: The CALL DIMS this timing was taken at, carried so ADJ-10's derivation
+    #: can re-price the same call at a candidate width. A duration cannot be
+    #: re-priced; dims can.
+    call_m: int = 0
+    call_k: int = 0
+    call_n: int = 0
+    softmax_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -2555,6 +2606,357 @@ def derive_vector_lanes(
     return int(low)
 
 
+# --- ADJ-10: the FABRIC derives to the analog floor too ---------------------
+
+
+def fold_group_split(
+    num_arrays: int, qk_at, pv_at
+) -> Tuple[int, int]:
+    """Partition ``num_arrays`` into a QK group and a PV group (ADJ-10).
+
+    ``qk_at(a)`` / ``pv_at(a)`` return the cycles that run costs on a group of
+    ``a`` arrays. The partition returned MINIMISES ``qk_at(a_qk) +
+    pv_at(a_pv)``, and the sum is the objective for one reason: the lowered
+    DAG places attention as THREE SERIAL OPS (qk -> softmax -> pv, P3's
+    placement, disclosed as ``attention_op_folding``), so the sum is the time
+    the timeline measures on the stage, and it is the quantity ADJ-10's
+    criterion is taken on. Choosing a partition against one number and judging
+    it against another would be two accountings of one metric (D21).
+
+    THE CLOSED FORM READS THE SAME PARTITION DIFFERENTLY, and that is the
+    already-disclosed ADJ-8 divergence rather than a second law:
+    :meth:`CimDeviceModel.attention_call_timing` reports
+    ``max(qk, pv) + fill_drain`` on exactly the groups chosen here, which is
+    the smaller of the two readings. Where the derivation lands on both
+    shipped machines — both groups at or above the fold count — the two
+    objectives agree anyway, because each run is at its own floor and no
+    partition can improve either.
+
+    Ties break toward the more BALANCED split (smallest ``max`` of the pair),
+    then toward the smaller ``a_qk``, so the answer is deterministic and does
+    not depend on iteration order. ``num_arrays < 2`` returns (1, 1): a
+    one-array fabric cannot run the pair concurrently at all, which is the
+    case :class:`CimDeviceModel` already warns about at construction and which
+    this function does not silently repair.
+    """
+    num_arrays = int(num_arrays)
+    if num_arrays < 2:
+        return 1, 1
+    best: Optional[Tuple[int, int, int, int]] = None
+    for a_qk in range(1, num_arrays):
+        a_pv = num_arrays - a_qk
+        qk = int(qk_at(a_qk))
+        pv = int(pv_at(a_pv))
+        key = (qk + pv, max(qk, pv), a_qk)
+        if best is None or key < best[:3]:
+            best = (key[0], key[1], key[2], a_pv)
+    assert best is not None
+    return int(best[2]), int(best[3])
+
+
+#: Why one stage's FABRIC width is what it is (ADJ-10). The first three mirror
+#: :data:`TARGET_ANALOG_STAGE` and friends; the fourth is ADJ-10's own and has
+#: no ADJ-9 twin.
+TARGET_FABRIC_ANALOG_STAGE = "analog_stage_time"
+TARGET_FABRIC_NO_ANALOG_WORK = "no_analog_work_in_stage"
+TARGET_FABRIC_SATURATED = "fold_concurrency_saturated_below_analog_time"
+
+
+@dataclass(frozen=True)
+class AttentionCallDemand:
+    """ONE attention call of one stage, in the dims its cycles depend on.
+
+    Kept as CALL DIMS rather than as a duration because ADJ-10 has to re-price
+    the call at a candidate width, and a duration measured at the declared
+    width cannot be re-priced. Every field is what
+    :meth:`CimDeviceModel.attention_call_timing` was handed, so
+    :meth:`CimDeviceModel.attention_cycles_at` reconstructs the same numbers
+    the run will later be priced with — the derivation IS the pricing law,
+    inverted, exactly as ADJ-9's is.
+    """
+
+    m: int
+    k: int
+    n: int
+    folds: int
+    softmax_tokens: int
+    heads_chip: int
+    #: Cycles this stage pays ONCE for the array's fill/drain, charged on the
+    #: QK op by the lowering. It is a constant of the call and no width moves
+    #: it, so it is carried explicitly rather than folded into a cycle count.
+    fill_drain_cycles: int = 0
+
+    @property
+    def saturation_arrays(self) -> int:
+        """The width past which no further array shortens THIS call.
+
+        ``2 * folds``: each group saturates at one fold per array, and a
+        group wider than that owns arrays with nothing to carry. Not a
+        margin and not a cap — it is where the derivative goes to zero.
+        """
+        return 2 * max(1, int(self.folds))
+
+    @property
+    def saturation_softmax_width(self) -> int:
+        """The softmax width past which no further lane shortens THIS call."""
+        return max(1, int(self.softmax_tokens) * int(self.heads_chip))
+
+
+@dataclass(frozen=True)
+class FabricDemand:
+    """What ONE stage asks of its ATTENTION fabric in ONE beat (ADJ-10).
+
+    The twin of :class:`EngineDemand`, and deliberately the same shape: a
+    stage, its calls, and ``analog_time_s`` — the wall time that stage's own
+    analog macros spend passing weights in the beat, measured as the UNION of
+    their busy intervals off the probe timeline. One target, one measurement,
+    two engines.
+    """
+
+    stage: int
+    calls: Tuple[AttentionCallDemand, ...]
+    analog_time_s: float = 0.0
+
+    @property
+    def saturation_arrays(self) -> int:
+        return max((call.saturation_arrays for call in self.calls), default=2)
+
+    @property
+    def saturation_softmax_width(self) -> int:
+        return max(
+            (call.saturation_softmax_width for call in self.calls), default=1
+        )
+
+
+@dataclass(frozen=True)
+class StageFabricSizing:
+    """One stage's derived fabric width, its target, and the cycles it spends."""
+
+    stage: int
+    calls: int
+    num_arrays: int
+    qk_arrays: int
+    pv_arrays: int
+    softmax_width: int
+    qk_cycles: int
+    pv_cycles: int
+    softmax_cycles: int
+    fill_drain_cycles: int
+    used_cycles: int
+    budget_cycles: int
+    time_s: float
+    slack_s: float
+    #: The stage's own measured ANALOG m-pass time in one beat (0.0 = none).
+    analog_time_s: float = 0.0
+    target_s: float = 0.0
+    target_kind: str = TARGET_FABRIC_ANALOG_STAGE
+    #: The stage's attention time at FULL fold concurrency — the floor the
+    #: declared rows x cols geometry leaves behind. Equal to ``time_s``
+    #: whenever the derivation saturated.
+    floor_time_s: float = 0.0
+
+    @property
+    def analog_bound(self) -> bool:
+        """Does the ANALOG m-pass set this stage's time rather than the fabric?"""
+        return self.analog_time_s > 0.0 and self.time_s <= self.analog_time_s
+
+    @property
+    def duty_at_target(self) -> float:
+        return (self.time_s / self.target_s) if self.target_s > 0 else 0.0
+
+
+class FabricSizingError(ValueError):
+    """A fabric width was asked for where no attention call exists to size it.
+
+    ADJ-10 derives the fabric FROM MEASURED DEMAND. With no attention call in
+    the beat there is no demand, no target and no width — and a number here
+    would be an invention, not a derivation (ADJ-4).
+    """
+
+
+@dataclass(frozen=True)
+class DerivedFabricSizing:
+    """The attention fabric ADJ-10 derives to the ANALOG FLOOR, with its basis.
+
+    ``num_arrays`` is the width the WORST stage needs, in INTEGER COPIES of the
+    measured ``GEMMINI_SYS_ARRAY`` block; ``rows`` and ``cols`` per array are
+    NEVER derived — they stay as declared and as measured, because inventing
+    array geometry is refused (ADJ-4/D32) and only the COUNT is a composition
+    of measured blocks. ``softmax_lanes`` is the same exercise on the softmax
+    pipeline's own measured-lane composition.
+
+    WHERE ADJ-10 DIFFERS FROM ADJ-9, AND WHY. ADJ-9's scan derivation falls
+    back to the analog BEAT for a stage whose criterion is unreachable. That is
+    right there: an unreachable scan stage is one with NO analog work, or one
+    whose analog time is under the engine's own pipeline fill, and in neither
+    case is there a floor to walk to. The fabric has one. Its concurrency
+    SATURATES at ``2 * folds`` — past that, another copy of the measured block
+    carries no fold and buys no time — so where the analog m-pass cannot be
+    reached this derivation goes to SATURATION and names the residue, rather
+    than falling back to a larger budget that would buy a NARROWER fabric than
+    the machine can use. Neither rule pads and neither clamps: ADJ-9 stops at
+    the smallest width that meets its target, ADJ-10 stops at the smallest
+    width that meets its target OR at the smallest width past which no width
+    helps, whichever comes first.
+    """
+
+    analog_beat_s: float
+    clock_hz: float
+    rows: int
+    cols: int
+    replicas: int
+    num_arrays: int
+    softmax_lanes: int
+    declared_num_arrays: int
+    declared_softmax_lanes: int
+    binding_stage: int
+    per_stage: Tuple[StageFabricSizing, ...]
+    composition: Optional[EngineComposition] = None
+    softmax_composition: Optional[EngineComposition] = None
+    basis: str = ""
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def binding_row(self) -> Optional[StageFabricSizing]:
+        for row in self.per_stage:
+            if row.stage == self.binding_stage:
+                return row
+        return None
+
+    @property
+    def target_ratio(self) -> float:
+        """Binding stage's attention time DIVIDED BY its analog target.
+
+        Deliberately NOT called a duty or a utilization, and deliberately not
+        capped at 1: below 1 the analog m-pass is the longer term and the
+        remainder is the integer-copy remainder (never a margin, D28); ABOVE 1
+        the fabric saturated before it reached the target and the number says
+        by how much. A capped 'utilization' would hide exactly the case ADJ-10
+        exists to expose.
+        """
+        row = self.binding_row
+        return row.duty_at_target if row is not None else 0.0
+
+    @property
+    def analog_bound_stages(self) -> Tuple[int, ...]:
+        return tuple(int(row.stage) for row in self.per_stage if row.analog_bound)
+
+    @property
+    def saturated_stages(self) -> Tuple[int, ...]:
+        """Stages the analog floor could not be reached on, at any width."""
+        return tuple(
+            int(row.stage)
+            for row in self.per_stage
+            if row.target_kind == TARGET_FABRIC_SATURATED
+        )
+
+    @property
+    def unreachable_stages(self) -> Tuple[int, ...]:
+        return tuple(
+            int(row.stage)
+            for row in self.per_stage
+            if row.target_kind != TARGET_FABRIC_ANALOG_STAGE
+        )
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("analog_beat_s", self.analog_beat_s),
+                ("num_arrays", int(self.num_arrays)),
+                ("num_arrays_declared", int(self.declared_num_arrays)),
+                ("softmax_lanes", int(self.softmax_lanes)),
+                ("softmax_lanes_declared", int(self.declared_softmax_lanes)),
+                ("array_provenance", PROVENANCE_DERIVED_COUNT),
+                ("array_rows", int(self.rows)),
+                ("array_cols", int(self.cols)),
+                ("array_geometry_provenance", PROVENANCE_DECLARED_COUNT),
+                ("replicas", int(self.replicas)),
+                ("binding_stage", int(self.binding_stage)),
+                ("fabric_clock_hz", self.clock_hz),
+                ("sizing_target", "analog_stage_time"),
+                ("attention_time_over_analog_target", self.target_ratio),
+                ("analog_bound_stages", list(self.analog_bound_stages)),
+                ("stages_sized", len(self.per_stage)),
+                ("saturated_stages", list(self.saturated_stages)),
+                ("unreachable_stages", list(self.unreachable_stages)),
+                ("basis", self.basis),
+                (
+                    "per_stage",
+                    [
+                        OrderedDict(
+                            (
+                                ("stage", int(row.stage)),
+                                ("attention_calls", int(row.calls)),
+                                ("num_arrays", int(row.num_arrays)),
+                                ("qk_arrays", int(row.qk_arrays)),
+                                ("pv_arrays", int(row.pv_arrays)),
+                                ("softmax_width", int(row.softmax_width)),
+                                ("qk_cycles", int(row.qk_cycles)),
+                                ("pv_cycles", int(row.pv_cycles)),
+                                ("softmax_cycles", int(row.softmax_cycles)),
+                                ("fill_drain_cycles", int(row.fill_drain_cycles)),
+                                ("used_cycles", int(row.used_cycles)),
+                                ("budget_cycles", int(row.budget_cycles)),
+                                ("analog_time_s", row.analog_time_s),
+                                ("target_s", row.target_s),
+                                ("target_kind", row.target_kind),
+                                ("analog_bound", bool(row.analog_bound)),
+                                ("time_s", row.time_s),
+                                ("floor_time_s", row.floor_time_s),
+                                ("slack_s", row.slack_s),
+                            )
+                        )
+                        for row in self.per_stage
+                    ],
+                ),
+                (
+                    "composition",
+                    self.composition.summary() if self.composition else None,
+                ),
+                (
+                    "softmax_composition",
+                    self.softmax_composition.summary()
+                    if self.softmax_composition
+                    else None,
+                ),
+                ("disclosures", list(self.disclosures)),
+            )
+        )
+
+    def report(self) -> str:
+        lines = [
+            "[FWS-CIM] derived attention fabric (ADJ-10 — every composable digital "
+            "engine derives to the ANALOG FLOOR)",
+            f"  analog beat             {self.analog_beat_s:.6g} s",
+            f"  num_arrays              {self.num_arrays} (DERIVED, integer copies of "
+            f"the measured {self.rows}x{self.cols} array; declared "
+            f"{self.declared_num_arrays})",
+            f"  softmax_lanes           {self.softmax_lanes} (DERIVED; declared "
+            f"{self.declared_softmax_lanes})",
+            f"  analog-bound stages     {len(self.analog_bound_stages)} of "
+            f"{len(self.per_stage)}"
+            + (
+                f" (saturated: {list(self.saturated_stages)})"
+                if self.saturated_stages
+                else ""
+            ),
+        ]
+        for row in self.per_stage:
+            lines.append(
+                f"  stage {row.stage:<3d} {row.calls:>3d} call(s)  qk {row.qk_cycles:>9d} "
+                f"+ pv {row.pv_cycles:>9d} + sm {row.softmax_cycles:>6d} cycles"
+                f"  digital {row.time_s:.6g} s vs analog {row.analog_time_s:.6g} s"
+                f"  ({'ANALOG-BOUND' if row.analog_bound else row.target_kind})"
+            )
+        if self.composition is not None:
+            lines.append(self.composition.report())
+        if self.softmax_composition is not None:
+            lines.append(self.softmax_composition.report())
+        for note in self.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+
 # --- MLA (D6): the pricing seam and the KV-replication area consequence ----
 
 
@@ -2617,6 +3019,10 @@ class CimDeviceModel:
         #: :meth:`engine_probe`.
         self._engine_probe = False
         self._probe_ops: List[float] = []
+        #: ADJ-10: the attention fabric DERIVED from this run's per-stage
+        #: analog m-pass times, installed by :meth:`install_derived_fabric`.
+        #: None means "not derived yet" — never "no arrays".
+        self._derived_fabric: Optional[DerivedFabricSizing] = None
         if self.fabric.model == "sa" and int(self.fabric.num_arrays) < 2:
             print(
                 "[WARNING]: cim.fabric.num_arrays < 2 — the folded attention law "
@@ -2663,6 +3069,98 @@ class CimDeviceModel:
     def f_fabric_hz(self) -> float:
         return float(self.fabric.clock_ghz) * 1e9
 
+    # -- ADJ-10: the fabric's DERIVED width (declared stays a legal override) --
+
+    @property
+    def fabric_num_arrays(self) -> int:
+        """Arrays of the attention fabric — DERIVED (ADJ-10), or declared.
+
+        TWO SOURCES, IN THIS ORDER, and the report says which:
+
+        1. the sizing :meth:`install_derived_fabric` put here once the
+           per-stage analog m-pass times were measured — the ADJ-10 answer and
+           the default;
+        2. ``cim.fabric.num_arrays`` as DECLARED. ADJ-10 retires it as a design
+           input the way D31 retired ``vector_lanes``, so a declared value that
+           the derivation did not produce is an OVERRIDE riding a disclosure
+           (:meth:`fabric_sizing_disclosures`), and as a SWEEP AXIS it is
+           refused by name in tools/fws_qif_dse.py.
+
+        There is no third case and no refusal: unlike a scan lane count, an
+        array count always has a declared value to fall back on, because the
+        SA law cannot be evaluated without one and every shipped card carries
+        it. What ADJ-10 changes is which of the two a mapped run uses.
+        """
+        card = self.digital_card
+        if card.has_fabric_override:
+            return int(card.fabric_num_arrays_effective)
+        if self._derived_fabric is not None:
+            return int(self._derived_fabric.num_arrays)
+        return int(self.fabric.num_arrays)
+
+    @property
+    def fabric_softmax_lanes(self) -> int:
+        """Softmax lanes PER REPLICA — DERIVED (ADJ-10), pinned, or declared."""
+        card = self.digital_card
+        if card.has_fabric_override:
+            return int(card.fabric_softmax_lanes_effective)
+        if self._derived_fabric is not None:
+            return int(self._derived_fabric.softmax_lanes)
+        return int(self.fabric.softmax_lanes)
+
+    @property
+    def softmax_width(self) -> int:
+        """The softmax law's own width: lanes x replicas (ADJ-10 or declared)."""
+        return max(1, self.fabric_softmax_lanes * int(self.fabric.replicas))
+
+    @property
+    def fabric_provenance(self) -> str:
+        """Where this run's array count came from: derived or declared."""
+        if self.digital_card.has_fabric_override:
+            return PROVENANCE_DECLARED_COUNT
+        return (
+            PROVENANCE_DERIVED_COUNT
+            if self._derived_fabric is not None
+            else PROVENANCE_DECLARED_COUNT
+        )
+
+    def fabric_sizing_disclosures(self) -> Tuple[str, ...]:
+        """What the attention fabric's width rests on (ADJ-10, D21).
+
+        A card that PINS the fabric says so here, under its own name and with
+        the decision it overrides quoted, exactly as a declared ``vector_lanes``
+        rides :meth:`vector_engine_disclosures`. It does NOT print what the
+        derivation would have returned: a pinned card skips the derivation
+        entirely, so no such number exists to compare with (the P7.9 correction
+        applies here for the same reason).
+        """
+        card = self.digital_card
+        if not card.has_fabric_override:
+            return ()
+        return (
+            f"cim.cards.{card.name}.fabric_num_arrays = "
+            f"{int(card.fabric_num_arrays_effective)} and .fabric_softmax_lanes = "
+            f"{int(card.fabric_softmax_lanes_effective)} are DECLARED, so they are an "
+            "OVERRIDE: ADJ-10 retires both as design inputs on a mapped run, because "
+            "each is a count of MEASURED synthesis blocks and each is derived up until "
+            "every stage's attention time fits that stage's own analog m-pass. This "
+            "machine pins them instead, and the run is priced on the pinned width. The "
+            "derivation did not run, so this line cannot say what it would have "
+            "returned. As a SWEEP AXIS the same knob is refused by name "
+            "(tools/fws_qif_dse.py REFUSED_AXES); what is legal here is pinning ONE "
+            "machine, with this disclosure attached.",
+        )
+
+    def install_derived_fabric(
+        self, sizing: Optional["DerivedFabricSizing"]
+    ) -> None:
+        """Install (or clear) the fabric ADJ-10 derived from this run's stages."""
+        self._derived_fabric = sizing
+
+    @property
+    def derived_fabric(self) -> Optional["DerivedFabricSizing"]:
+        return self._derived_fabric
+
     def sa_cycles(self, m: int, n: int, k: int) -> int:
         """Systolic-array closed form: ceil(M/R)*ceil(N/C)*(K+R+C-2) - 1."""
         r = int(self.fabric.rows)
@@ -2679,12 +3177,14 @@ class CimDeviceModel:
         """Softmax-lanes law: pipeline_depth + ceil(tokens_q*heads_chip/lanes) - 1.
 
         tokens_q is the query-row count of the score call (prefill: S — the
-        pass-1 form is unchanged; decode: B * shared_heads).
+        pass-1 form is unchanged; decode: B * shared_heads). The width is
+        :attr:`softmax_width` — ``softmax_lanes * replicas`` with the lane
+        count DERIVED under ADJ-10 when a derivation is installed and DECLARED
+        otherwise, so this law and the derivation cannot drift apart.
         """
-        lanes = int(self.fabric.softmax_lanes) * int(self.fabric.replicas)
         return (
             int(self.fabric.softmax_pipeline_depth)
-            + _ceil_div(int(tokens_q) * int(heads_chip), lanes)
+            + _ceil_div(int(tokens_q) * int(heads_chip), self.softmax_width)
             - 1
         )
 
@@ -2713,8 +3213,19 @@ class CimDeviceModel:
         h_chip = self.heads_chip(kv_heads, tp)
         h_rep = _ceil_div(h_chip, self.fabric.replicas)
         s_fold = max(1, int(streams))
-        qk = self.sa_cycles(m, n, int(k) * h_rep * s_fold)
-        pv = self.sa_cycles(m, k, int(n) * h_rep * s_fold)
+        folds = max(1, h_rep * s_fold)
+        # ADJ-10: the arrays are a POOL of concurrent folds, partitioned per
+        # call. At num_arrays = 2 the split is (1, 1) and the two expressions
+        # below are the pass-1 law bit for bit.
+        a_qk, a_pv = fold_group_split(
+            self.fabric_num_arrays,
+            lambda arrays: self.sa_cycles(m, n, int(k) * _ceil_div(folds, arrays)),
+            lambda arrays: self.sa_cycles(m, k, int(n) * _ceil_div(folds, arrays)),
+        )
+        qk_per_array = _ceil_div(folds, a_qk)
+        pv_per_array = _ceil_div(folds, a_pv)
+        qk = self.sa_cycles(m, n, int(k) * qk_per_array)
+        pv = self.sa_cycles(m, k, int(n) * pv_per_array)
         total = max(qk, pv) + int(self.fabric.fill_drain_penalty_cycles)
         sa_time = total / self.f_fabric_hz
         sm_tokens = int(s_fold * m if softmax_tokens is None else softmax_tokens)
@@ -2730,6 +3241,16 @@ class CimDeviceModel:
             stage_time_s=max(sa_time, sm_time),
             heads_chip=h_chip,
             heads_per_replica=h_rep,
+            folds=folds,
+            qk_arrays=a_qk,
+            pv_arrays=a_pv,
+            qk_folds_per_array=qk_per_array,
+            pv_folds_per_array=pv_per_array,
+            softmax_width=self.softmax_width,
+            call_m=int(m),
+            call_k=int(k),
+            call_n=int(n),
+            softmax_tokens=sm_tokens,
         )
 
     def attention_timing(
@@ -3686,21 +4207,31 @@ class CimDeviceModel:
         )
 
     def softmax_engine_composition(self) -> EngineComposition:
-        """The softmax pipeline of ONE shared digital chiplet, in blocks (D32)."""
+        """The softmax pipeline of ONE shared digital chiplet, in blocks (D32).
+
+        ADJ-10: the WIDTH is the derived lane count when a derivation is
+        installed, so the composed silicon is the silicon the softmax law was
+        actually priced on. The per-lane census is unchanged.
+        """
         return compose_softmax_engine(
             self.synthesis_library(),
-            int(self.fabric.softmax_lanes),
+            self.fabric_softmax_lanes,
             int(self.fabric.replicas),
-            count_provenance=PROVENANCE_DECLARED_COUNT,
+            count_provenance=self.fabric_provenance,
         )
 
     def sa_fabric_composition(self) -> EngineComposition:
-        """The attention systolic fabric of ONE shared digital chiplet (D32)."""
+        """The attention systolic fabric of ONE shared digital chiplet (D32).
+
+        ADJ-10: ``num_arrays`` is DERIVED (integer copies of the measured
+        32x32 block); ``rows`` and ``cols`` stay declared, because array
+        geometry is never invented (ADJ-4).
+        """
         return compose_sa_fabric(
             self.synthesis_library(),
             int(self.fabric.rows),
             int(self.fabric.cols),
-            int(self.fabric.num_arrays),
+            self.fabric_num_arrays,
             int(self.fabric.replicas),
             count_provenance=PROVENANCE_DERIVED_COUNT,
         )
@@ -3763,6 +4294,7 @@ class CimDeviceModel:
             )
         library = self.synthesis_library()
         notes = [library.provenance_line()]
+        notes.extend(self.fabric_sizing_disclosures())
         for composition in self.shared_digital_compositions():
             notes.extend(composition.disclosures)
         if self.resolved_vector_lanes() is None:
@@ -3824,6 +4356,348 @@ class CimDeviceModel:
         for note in self.shared_digital_area_disclosures():
             lines.append(f"  [NOTE] {note}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # ADJ-10: derive the ATTENTION FABRIC to the ANALOG FLOOR
+    # ------------------------------------------------------------------
+
+    def attention_cycles_at(
+        self,
+        call: "AttentionCallDemand",
+        num_arrays: int,
+        softmax_width: int,
+    ) -> Tuple[int, int, int, int, int]:
+        """One attention call's cycles at a candidate width — THE PRICING LAW.
+
+        Returns ``(qk, pv, softmax, a_qk, a_pv)`` computed with exactly the
+        expressions :meth:`attention_call_timing` uses, so a width this method
+        accepts is a width the run's own laws will reproduce. The DAG places
+        the three ops in SERIES (``attention_op_folding``), so the stage cost
+        the derivation compares against a target is
+        ``qk + fill_drain + softmax + pv``.
+        """
+        folds = max(1, int(call.folds))
+        a_qk, a_pv = fold_group_split(
+            num_arrays,
+            lambda arrays: self.sa_cycles(
+                call.m, call.n, int(call.k) * _ceil_div(folds, arrays)
+            ),
+            lambda arrays: self.sa_cycles(
+                call.m, call.k, int(call.n) * _ceil_div(folds, arrays)
+            ),
+        )
+        qk = self.sa_cycles(call.m, call.n, int(call.k) * _ceil_div(folds, a_qk))
+        pv = self.sa_cycles(call.m, call.k, int(call.n) * _ceil_div(folds, a_pv))
+        softmax = (
+            int(self.fabric.softmax_pipeline_depth)
+            + _ceil_div(
+                int(call.softmax_tokens) * int(call.heads_chip),
+                max(1, int(softmax_width)),
+            )
+            - 1
+        )
+        return int(qk), int(pv), int(softmax), int(a_qk), int(a_pv)
+
+    def _stage_attention_cycles(
+        self,
+        calls: Sequence["AttentionCallDemand"],
+        num_arrays: int,
+        softmax_width: int,
+    ) -> Tuple[int, int, int, int, int, int]:
+        """A stage's whole attention bill at a candidate width.
+
+        ``(total, qk, pv, softmax, a_qk, a_pv)``. The calls of one stage run on
+        ONE chiplet (the lowering assigns a chip's fabric ops to
+        ``engines[chip_id % len(engines)]``) and decode runs a stage's layers
+        in sequence, so they SUM. A stage plan that spread one stage over
+        several chips would have its attention on several chiplets and this sum
+        would then be an upper bound; that case is named here rather than
+        assumed away.
+
+        ``a_qk``/``a_pv`` are the LAST call's partition, and they are a report
+        field only — the cycle totals above are each call's own. A stage's
+        calls are its attention LAYERS, which share head count, head dim and
+        context inside one beat, so the partition is the same for all of them
+        on every machine this repo ships; a stage whose layers really differed
+        would still be priced call by call and only this one reported field
+        would speak for the last of them.
+        """
+        total = qk_t = pv_t = sm_t = 0
+        a_qk = a_pv = 1
+        for call in calls:
+            qk, pv, softmax, a_qk, a_pv = self.attention_cycles_at(
+                call, num_arrays, softmax_width
+            )
+            total += qk + pv + softmax + int(call.fill_drain_cycles)
+            qk_t += qk
+            pv_t += pv
+            sm_t += softmax
+        return total, qk_t, pv_t, sm_t, a_qk, a_pv
+
+    def derive_fabric_sizing(
+        self,
+        analog_beat_s: float,
+        demand: Sequence["FabricDemand"],
+        *,
+        compose: Optional[bool] = None,
+    ) -> "DerivedFabricSizing":
+        """Size the ATTENTION FABRIC up until the ANALOG m-pass binds (ADJ-10).
+
+        THE CRITERION, EXACTLY. For every stage: *the stage's attention time
+        (qk + fill/drain + softmax + pv, summed over the stage's calls) <= that
+        stage's OWN measured ANALOG m-pass time*. Identical in shape to ADJ-9's
+        scan criterion and taken against the identical measurement — the union
+        of the busy intervals of the stage's analog macros in the probe beat —
+        so the two derivations are one accounting asked of two engines (D21).
+
+        WHAT IS DERIVED AND WHAT IS NOT. ``num_arrays`` is derived, in INTEGER
+        COPIES of the measured ``GEMMINI_SYS_ARRAY`` block, and so is
+        ``softmax_lanes`` in copies of the softmax pipeline's measured per-lane
+        census. ``rows`` and ``cols`` per array are NOT derived and never will
+        be: the block's geometry is a measurement, and a fabric of some other
+        shape would be an invented number (ADJ-4). This is the whole difference
+        between "compose more of what was measured" and "invent silicon".
+
+        THE LADDER, AND WHY IT IS EXACT RATHER THAN GREEDY. Both widths
+        SATURATE — arrays at ``2 * folds`` (one fold per array in each group)
+        and softmax at ``softmax_tokens * heads_chip`` (one element per lane) —
+        so the candidate lattice is finite and small, and the search enumerates
+        it. The order is LEXICOGRAPHIC, arrays first: a ``GEMMINI_SYS_ARRAY``
+        is the largest block in the library by three orders of magnitude and
+        the two systolic runs are the dominant terms, so buying softmax lanes
+        to avoid buying arrays would be buying the wrong silicon. Within that
+        order both answers are the SMALLEST width that meets the target, so
+        there is no margin (D28).
+
+        WHERE THE ANALOG FLOOR IS NOT REACHABLE, IT SATURATES AND SAYS SO. Fold
+        concurrency runs out: past ``2 * folds`` another copy of the measured
+        block carries no fold, and what is left is
+        ``sa_cycles(m, n, k) + sa_cycles(m, k, n)`` — the DECLARED
+        ``rows x cols`` geometry's own floor, made of the ``ceil(n / cols)``
+        column passes and the ``k + rows + cols - 2`` pipeline term. Those
+        stages are counted in :attr:`DerivedFabricSizing.saturated_stages`,
+        named by ``target_kind``, and given the SATURATION width — the smallest
+        width past which no width helps. They are not clamped to a narrower
+        fabric and no margin is added to a wider one.
+
+        ONE CARD, ONE FABRIC: the provisioned width is the maximum over the
+        stages, every stage is then RE-PRICED on it, and the slack the
+        non-binding stages run with is printed rather than smoothed (D28).
+        """
+        clock = self.f_fabric_hz
+        beat_s = float(analog_beat_s)
+        ordered = sorted(demand, key=lambda item: int(item.stage))
+        ordered = [entry for entry in ordered if entry.calls]
+        if not ordered:
+            raise FabricSizingError(
+                "derive_fabric_sizing was given no per-stage attention demand. ADJ-10 "
+                "sizes the fabric from the attention a stage runs in a beat; with no "
+                "call there is nothing to size and a width would be an invention."
+            )
+        rows: List[StageFabricSizing] = []
+        for entry in ordered:
+            analog_s = max(0.0, float(entry.analog_time_s or 0.0))
+            target_s, target_kind = analog_s, TARGET_FABRIC_ANALOG_STAGE
+            if analog_s <= 0:
+                target_s, target_kind = beat_s, TARGET_FABRIC_NO_ANALOG_WORK
+            sat_arrays = max(2, int(entry.saturation_arrays))
+            sat_width = max(1, int(entry.saturation_softmax_width))
+            budget = int(math.floor(max(0.0, target_s) * clock))
+            floor_cycles = self._stage_attention_cycles(
+                entry.calls, sat_arrays, sat_width
+            )[0]
+            if floor_cycles > budget:
+                arrays, width = sat_arrays, sat_width
+                target_kind = TARGET_FABRIC_SATURATED
+            else:
+                arrays = next(
+                    candidate
+                    for candidate in range(2, sat_arrays + 1)
+                    if self._stage_attention_cycles(
+                        entry.calls, candidate, sat_width
+                    )[0]
+                    <= budget
+                )
+                width = next(
+                    candidate
+                    for candidate in range(1, sat_width + 1)
+                    if self._stage_attention_cycles(entry.calls, arrays, candidate)[0]
+                    <= budget
+                )
+            total, qk, pv, softmax, a_qk, a_pv = self._stage_attention_cycles(
+                entry.calls, arrays, width
+            )
+            fill = sum(int(call.fill_drain_cycles) for call in entry.calls)
+            rows.append(
+                StageFabricSizing(
+                    stage=int(entry.stage),
+                    calls=len(entry.calls),
+                    num_arrays=int(arrays),
+                    qk_arrays=int(a_qk),
+                    pv_arrays=int(a_pv),
+                    softmax_width=int(width),
+                    qk_cycles=int(qk),
+                    pv_cycles=int(pv),
+                    softmax_cycles=int(softmax),
+                    fill_drain_cycles=int(fill),
+                    used_cycles=int(total),
+                    budget_cycles=budget,
+                    time_s=total / clock,
+                    slack_s=target_s - total / clock,
+                    analog_time_s=analog_s,
+                    target_s=target_s,
+                    target_kind=target_kind,
+                    floor_time_s=floor_cycles / clock,
+                )
+            )
+        replicas = max(1, int(self.fabric.replicas))
+        provisioned = max(int(row.num_arrays) for row in rows)
+        width = max(int(row.softmax_width) for row in rows)
+        lanes = _ceil_div(width, replicas)
+        binding = max(
+            rows, key=lambda row: (int(row.num_arrays), int(row.used_cycles))
+        ).stage
+        # Re-price every stage on the PROVISIONED fabric: one card carries one
+        # width, so a stage that asked for less actually runs on the wider
+        # fabric and finishes early. The slack printed is the slack of the
+        # machine that gets built.
+        repriced: List[StageFabricSizing] = []
+        for row, entry in zip(rows, ordered):
+            total, qk, pv, softmax, a_qk, a_pv = self._stage_attention_cycles(
+                entry.calls, provisioned, lanes * replicas
+            )
+            repriced.append(
+                StageFabricSizing(
+                    stage=row.stage,
+                    calls=row.calls,
+                    num_arrays=provisioned,
+                    qk_arrays=int(a_qk),
+                    pv_arrays=int(a_pv),
+                    softmax_width=lanes * replicas,
+                    qk_cycles=int(qk),
+                    pv_cycles=int(pv),
+                    softmax_cycles=int(softmax),
+                    fill_drain_cycles=row.fill_drain_cycles,
+                    used_cycles=int(total),
+                    budget_cycles=row.budget_cycles,
+                    time_s=total / clock,
+                    slack_s=row.target_s - total / clock,
+                    analog_time_s=row.analog_time_s,
+                    target_s=row.target_s,
+                    target_kind=row.target_kind,
+                    floor_time_s=row.floor_time_s,
+                )
+            )
+        rows = repriced
+        composition = softmax_composition = None
+        want = self.has_synthesis_library() if compose is None else bool(compose)
+        if want:
+            composition = compose_sa_fabric(
+                self.synthesis_library(),
+                int(self.fabric.rows),
+                int(self.fabric.cols),
+                provisioned,
+                replicas,
+                count_provenance=PROVENANCE_DERIVED_COUNT,
+            )
+            softmax_composition = compose_softmax_engine(
+                self.synthesis_library(),
+                lanes,
+                replicas,
+                count_provenance=PROVENANCE_DERIVED_COUNT,
+            )
+        analog_bound = [row for row in rows if row.analog_bound]
+        saturated = [row for row in rows if row.target_kind == TARGET_FABRIC_SATURATED]
+        declared_arrays = int(self.fabric.num_arrays)
+        declared_lanes = int(self.fabric.softmax_lanes)
+        disclosures = [
+            "ADJ-10: cim.fabric.num_arrays and cim.fabric.softmax_lanes are no longer "
+            "declared design points on a mapped run. Both are DERIVED here as the "
+            "smallest integer counts of MEASURED blocks for which every stage's "
+            "attention time fits that stage's own ANALOG m-pass time, and both are "
+            f"reported ({declared_arrays} -> {provisioned} array(s), "
+            f"{declared_lanes} -> {lanes} softmax lane(s) per replica). Only the COUNT "
+            f"is derived: the array stays the measured {int(self.fabric.rows)} x "
+            f"{int(self.fabric.cols)} geometry, because inventing array geometry is "
+            "refused (ADJ-4).",
+            "FOLD SEMANTICS (the law ADJ-10 extends). The arrays are partitioned into a "
+            "QK group and a PV group and the call's folds — heads_per_replica x streams "
+            "— are dealt across the group, so an array in a group of a carries "
+            "ceil(folds / a) of them and sees a contraction dim of that many folds "
+            "instead of all of them. At num_arrays = 2 the split is (1, 1) and the law "
+            "is the pass-1 law bit for bit, which is why no OPTIMA parity number moves.",
+            f"ANALOG-BOUND BY CONSTRUCTION: {len(analog_bound)} of {len(rows)} stage(s) "
+            "run with the analog m-pass longer than the fabric's own attention time"
+            + (
+                ". FOLD CONCURRENCY SATURATES on stage(s) "
+                + ", ".join(
+                    f"{int(row.stage)} (floor {row.floor_time_s:.6g} s against a "
+                    f"{row.analog_time_s:.6g} s analog m-pass)"
+                    for row in saturated
+                )
+                + ": past 2 x folds arrays another copy of the measured block carries no "
+                "fold and buys no time, so the residue is the DECLARED rows x cols "
+                "geometry — ceil(n / cols) column passes and the k + rows + cols - 2 "
+                "pipeline term — which integer copies cannot shorten. Those stages take "
+                "the SATURATION width and the residue is NAMED, never clamped and never "
+                "padded."
+                if saturated
+                else ", and there is no stage the criterion could not reach."
+            ),
+            "WHY SATURATION RATHER THAN ADJ-9'S BEAT FALLBACK. ADJ-9 hands an "
+            "unreachable scan stage the analog BEAT as its budget, which is right there: "
+            "its unreachable cases are a stage with no analog work at all and a stage "
+            "under the engine's own pipeline fill, and neither has a floor to walk to. "
+            "The fabric has one. Falling back to the wider beat budget here would derive "
+            "a NARROWER fabric than the machine can use and leave measured throughput on "
+            "the table for silicon that buys time, which is the trade ADJ-9's own "
+            "rationale rejects.",
+            "the derivation inverts the pricing law exactly — same sa_cycles, same "
+            "fold split, same softmax law, same serialization of the three lowered ops "
+            "— so the fabric sized here is the fabric the run is then priced on. No "
+            "margin is added (D28).",
+            "one card, one fabric: the provisioned width is the maximum over the "
+            "stages, so every non-binding stage runs with the slack printed beside it. "
+            "That slack is idle silicon and D28 requires it to be visible.",
+            "THE P3 SLOT CENSUS IS NOT THIS NUMBER. fws_mapping enumerates "
+            "num_arrays x replicas engine SLOTS per shared chiplet from the DECLARED "
+            f"geometry ({declared_arrays} x {replicas}) when it PLACES, which is before "
+            "any beat has been measured. Those slots hold no tile, carry no device and "
+            "price no time — the chiplet is ONE device with one queue — so the "
+            "derivation does not move them. The silicon, the power and the timing all "
+            "use the derived width; the placement record is a placement record, and the "
+            "two are reconciled here rather than left for a reader to notice (D21).",
+        ]
+        return DerivedFabricSizing(
+            analog_beat_s=beat_s,
+            clock_hz=clock,
+            rows=int(self.fabric.rows),
+            cols=int(self.fabric.cols),
+            replicas=replicas,
+            num_arrays=provisioned,
+            softmax_lanes=lanes,
+            declared_num_arrays=declared_arrays,
+            declared_softmax_lanes=declared_lanes,
+            binding_stage=int(binding),
+            per_stage=tuple(rows),
+            composition=composition,
+            softmax_composition=softmax_composition,
+            basis=(
+                "smallest integer array count (then softmax lane count) whose priced "
+                "attention time — qk + fill/drain + softmax + pv, the three ops the "
+                "lowering serializes — fits the stage's own measured ANALOG m-pass "
+                f"time (ADJ-10); binding stage {int(binding)}, "
+                f"{int(self.fabric.rows)}x{int(self.fabric.cols)} arrays at "
+                f"{clock / 1e9:.4g} GHz over {len(rows)} stage(s), "
+                f"{len(analog_bound)} of them analog-bound"
+                + (
+                    f"; fold concurrency saturated on {len(saturated)}"
+                    if saturated
+                    else ""
+                )
+            ),
+            disclosures=tuple(disclosures),
+        )
 
     # ------------------------------------------------------------------
     # D31-v2 (ADJ-9): derive the engine width to the ANALOG FLOOR
@@ -4034,13 +4908,14 @@ class CimDeviceModel:
             "stage holds one stream at a time, so its analog passes and its scan run in "
             "SERIES and the beat is their sum at any width. What ADJ-9 buys is that the "
             "sum is dominated by the analog half. A stage's measured time can still be "
-            "set by a term this derivation does not size — the attention systolic "
-            "fabric and the softmax pipeline are DECLARED card geometry (rows x cols x "
-            "num_arrays, softmax_lanes), not derived engines — and when that term is "
-            "the larger one the machine is bound by declared digital silicon rather "
-            "than by the analog floor. That is a property of the CARD, reported here "
-            "and in the per-device-class utilization, not something a lane count can "
-            "fix.",
+            "set by a term THIS derivation does not size. ADJ-10 closed the two that "
+            "used to be declared — the attention fabric's array count and the softmax "
+            "pipeline's lane count now derive against this same per-stage target — so "
+            "what is left is the array GEOMETRY (rows x cols, the shape the systolic "
+            "law was validated at) and the terms that are not engines at all. Which one "
+            "actually binds the machine that gets BUILT is measured and named under its "
+            "own name, evaluation.digital_silicon.binding_term, and no lane count moves "
+            "it.",
         ]
         return DerivedEngineSizing(
             analog_beat_s=beat_s,

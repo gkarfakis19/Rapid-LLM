@@ -223,6 +223,9 @@ def test_the_engine_width_is_refused_as_an_axis_by_name():
     name, at parse, exactly as D26 refuses a dead fold.
     """
     assert "vector_lanes" in DSE.REFUSED_AXES
+    # ADJ-10 put the fabric's two composable widths in the same register.
+    assert "num_arrays" in DSE.REFUSED_AXES
+    assert "softmax_lanes" in DSE.REFUSED_AXES
     assert "vector_lanes" not in DSE.AXIS_TARGETS
     with pytest.raises(DSE.QifDseUsageError) as excinfo:
         DSE.SweepSpec.from_raw(
