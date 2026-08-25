@@ -232,3 +232,15 @@ Process and scope:
   against the Invariant-W analog floor, so the machine must never be left
   digital-bound by a minimal derivation. The Wave-D demo sweep's
   vector_lanes axis retires when this lands.
+
+- **ADJ-10 (2026-08-25, adjudicated from George's doctrine; he may overrule):
+  ALL composable digital engines derive to the analog floor.** ADJ-9's scan
+  derivation left the attention SA fabric as the beat-setter (declared
+  geometry, underived). Extension: every digital engine whose width is a
+  composition of MEASURED synthesis blocks derives up until the analog
+  m-pass binds — SA fabric by integer copies of the measured GEMMINI 32x32
+  block (rows/cols stay as measured; inventing geometry stays refused),
+  softmax by its measured-lane composition, scan per ADJ-9, pool per D12.
+  Whatever binds after that must be a REAL limit (unscalable declared
+  geometry or a bandwidth term) and is named in the artifact. The frontier
+  sweeps only knobs with genuine physical trades left.
