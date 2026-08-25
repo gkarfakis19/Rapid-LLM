@@ -284,13 +284,25 @@ so the ADJ-6 headline in each row is a timeline reading and never a period. The 
 tool-owned <code>mapping_dse:</code> block &mdash; explicit candidate lists only, no search (D19) &mdash;
 with six axes that each move exactly one field: shared-chiplet <code>vector_lanes</code>, analog
 <code>bank_depth</code>, <code>column_sets_per_tile</code>, <code>arrays_per_chip</code>,
-<code>layers_per_chip</code> and <code>shared_chiplets</code>. The established conventions all hold:
+<code>layers_per_chip</code> and <code>shared_chiplets</code>.
+<em>[SUPERSEDED 2026-08-25 by ADJ-9: <code>vector_lanes</code> is REFUSED BY NAME as an axis
+(<code>REFUSED_AXES</code>) &mdash; D31-v2 derives the engine to the analog floor, so sweeping the
+width would sweep the answer. Six axes became five, and <code>layers_per_stage</code> (P7.4) is the
+sixth.]</em> The established conventions all hold:
 stage-tagged infeasibility (<code>config &lt; mapping &lt; budget &lt; lowering &lt; pricing &lt;
 memory</code>) carrying each refusal&rsquo;s own message, a Pareto front of headline throughput vs total
 silicon, a printed lexicographic pick, <code>dse_report.md</code>/<code>.json</code>,
 <code>--emit-config</code> and a <code>--verify</code> run_perf round trip that matched at rel_err 0.0.
 THE DEMO: Granite-4.0-H-Tiny over vector_lanes {512, 1024, 2048, 4096} &times; bank_depth {1, 2}, 8 of 8
 valid, checked in under <code>docs/qif/dse/granite_lanes_banks/</code> with a regenerate-and-compare gate.
+<em>[SUPERSEDED 2026-08-25 by ADJ-9. The lane axis is refused, so this artifact is FROZEN and labelled at
+<code>docs/qif/dse/granite_lanes_banks_retired/</code> &mdash; it is the +27%-tokens/s-for-+0.78%-silicon
+comparison ADJ-9 was adjudicated on and it is kept for that. The live demo is
+<code>docs/qif/dse/granite_capacity_banks/</code>: the same config over <code>arrays_per_chip</code>
+{604, 640, 965, 1207} &times; <code>bank_depth</code> {1, 2}, 8 of 8 valid, and its finding INVERTS the
+one below &mdash; at a fixed bank depth chip capacity moves NO throughput at all (26051.9 tokens/s on all
+four) and doubles the silicon (12433 &rarr; 24631 mm&sup2;), which is Invariant W (D27) drawn on a cross
+product.]</em>
 It found the headline rising SUB-linearly with the declared scan width (8&times; the lanes buys 1.79&times;
 the tokens/s, because only the Mamba-2 scan moves with the lane count &mdash; a decode step is priced by
 the per-token recurrence <code>ssm_recurrent_scan[mamba2]</code>, which is

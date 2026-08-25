@@ -596,6 +596,7 @@ def export_atlas(
     extra_metrics: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
     pool_sizing: Optional[Sequence[Optional[Mapping[int, Mapping[str, object]]]]] = None,
     extra_relaxations: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
+    service_links: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
 ) -> Dict[str, object]:
     """Build one ``fws_atlas/1`` document from one or two real mappings.
 
@@ -608,6 +609,13 @@ def export_atlas(
     labeled timing metrics beside the placement figures. Omitting both leaves
     the document byte-identical to a placement-only export — P3 has no timeline
     (A1) and must never print one.
+
+    ``service_links`` is P4's too: ``FwsEvaluation.atlas_service_links()``
+    returns the ``svc`` rows — one per (shared digital chiplet -> analog chip)
+    service relationship, carrying the MEASURED per-beat bytes that chip's act
+    x act work moves in both directions. They are PRICED rows and therefore
+    appear only on a priced export; a placement-only document has no timeline
+    to measure them on and prints none.
     """
     if not mappings:
         raise ValueError("export_atlas needs at least one mapping")
@@ -634,16 +642,19 @@ def export_atlas(
     metrics_per_system = list(extra_metrics or [()] * len(mappings))
     pool_per_system = list(pool_sizing or [None] * len(mappings))
     relax_per_system = list(extra_relaxations or [()] * len(mappings))
+    service_per_system = list(service_links or [()] * len(mappings))
     if (
         len(duty_per_system) != len(mappings)
         or len(metrics_per_system) != len(mappings)
         or len(pool_per_system) != len(mappings)
         or len(relax_per_system) != len(mappings)
+        or len(service_per_system) != len(mappings)
     ):
         raise ValueError(
             "export_atlas: duty_cycles / extra_metrics / pool_sizing / "
-            "extra_relaxations take ONE entry per mapping, so a PD pair cannot "
-            "silently borrow the prefill system's timeline for its decode half."
+            "extra_relaxations / service_links take ONE entry per mapping, so a PD "
+            "pair cannot silently borrow the prefill system's timeline for its "
+            "decode half."
         )
     priced = any(entry is not None for entry in duty_per_system) or any(
         bool(entry) for entry in metrics_per_system
@@ -671,6 +682,9 @@ def export_atlas(
         macros.extend(block["macros"])
         tiles.extend(block["tiles"])
         links.extend(block["links"])
+        # The svc rows are already atlas-shaped: they are MEASURED off P4's
+        # timeline (bytes per beat), which _system_document has no access to.
+        links.extend(OrderedDict(entry) for entry in service_per_system[index])
         metrics.extend(_metrics(mapping, rows))
         metrics.extend(OrderedDict(entry) for entry in metrics_per_system[index])
         for relaxation in mapping.relaxations(rows):
@@ -779,7 +793,16 @@ def export_atlas(
                                     else "macros[].digital_pool is the derived per-macro "
                                     "pool sizing (P2.5, D12)"
                                 ),
-                                "links[] are the P3.5 boundary table's link-crossing rows",
+                                (
+                                    "links[] are the P3.5 boundary table's "
+                                    "link-crossing rows, plus one MEASURED svc row per "
+                                    "(shared digital chiplet -> analog chip) service "
+                                    "relationship whose bytes are read off P4's "
+                                    "timeline"
+                                    if priced
+                                    else "links[] are the P3.5 boundary table's "
+                                    "link-crossing rows"
+                                ),
                                 (
                                     "metrics[] are placement counts plus P4's timing "
                                     "metrics, every one read off ONE timeline and every "
@@ -849,6 +872,7 @@ def export_pd_atlas(
     extra_metrics: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
     pool_sizing: Optional[Sequence[Optional[Mapping[int, Mapping[str, object]]]]] = None,
     extra_relaxations: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
+    service_links: Optional[Sequence[Sequence[Mapping[str, object]]]] = None,
 ):
     """The two-system document of a PD machine (D16, ADJ-7).
 
@@ -867,6 +891,7 @@ def export_pd_atlas(
         extra_metrics=extra_metrics,
         pool_sizing=pool_sizing,
         extra_relaxations=extra_relaxations,
+        service_links=service_links,
     )
 
 

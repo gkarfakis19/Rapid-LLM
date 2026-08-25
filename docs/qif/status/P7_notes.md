@@ -499,3 +499,142 @@ would buy (+27% tokens/s for +0.78% area on the Wave-D demo) is a DECISION for
 George, not a defect: D31 is explicit that the engine is derived and never swept,
 and the sizing criterion is disclosed. It is raised in the report rather than
 acted on.
+
+
+## P7.10 — ADJ-9: derive the engine to the ANALOG FLOOR (D31-v2)
+
+THE TARGET MOVED, AND NOTHING ELSE DID. D31-v1 sized the scan/vector engine to the
+analog BEAT — the slowest stage's probe time — so a stage faster than the beat got an
+engine sized against somebody else's stage and became its own binding term. ADJ-9
+retargets it to each stage's OWN analog m-pass: `derive_engine_sizing` now takes an
+`EngineDemand.analog_time_s` per stage and answers the smallest integer width for which
+`vector_cycles_at(ops, lanes, depth) <= floor(analog_time_s x clock)` on EVERY stage,
+which is the same law inverted against a 24x tighter budget. The law, the probe pass,
+the two-pass argument and the no-margin rule are untouched; only the number the
+inversion is evaluated against changed.
+
+THE TARGET IS A MEASUREMENT, AND IT IS WIDTH-INVARIANT. `_engine_demand` reads each
+stage's analog time off the PROBE timeline as the UNION of the busy intervals of that
+stage's `analog_macro` ops in the measurement beat — a union and never a sum, because
+macros of one stage fire in parallel and a sum would report Granite's 1.6 us stage as
+44.5 us. Two properties make it the right target: an analog op's duration does not move
+with a lane count and the union ignores the gaps the engine's own time opens between
+those ops, so D31's two-pass argument survives intact and no iteration is needed; and
+the union EXCLUDES the gaps, so it is the strictly smaller of the two candidate
+readings (union vs. first-issue-to-last-finish span) and therefore the tighter target.
+Sizing against the span would let the engine hide inside time the analog side is not
+working, which is the margin D28 forbids.
+
+WHERE THE CRITERION CANNOT BE REACHED, IT SAYS SO. Two cases fall back to the analog
+beat and are counted in `unreachable_stages` and named in the disclosures by
+`target_kind`: a stage with NO analog work in the beat (`no_analog_work_in_stage`) has
+no analog time to be bound by at any width, and a stage whose analog time is shorter
+than the engine's own pipeline FILL (`analog_stage_time_below_engine_fill`) cannot be
+held at any width because lanes shorten the streaming term and never the fill. Neither
+is clamped and neither is padded. On the shipped Granite and Qwen machines neither case
+occurs: 10 of 10 and 8 of 8 stages are analog-bound.
+
+THE NUMBERS. GRANITE-4.0-H-TINY: 5479 lanes derived against D31-v1's 220, binding stage
+2 at 99.737% duty inside its own 1.6 us analog m-pass, measured beat 66.21 -> 39.04 us
+= 15103.6 -> 25617.6 tokens/s (+69.6%), digital silicon 52.587 -> 201.386 mm2 and
+62.94 -> 287.50 W, total 12983.2 -> 13132.0 mm2 (+1.15%). QWEN3.5-4B: 7971 lanes
+against 169, binding stage 0 at 99.931%, 138.05 -> 70.71 us = 7244 -> 14143.1 tokens/s
+(+95.2%), digital 34.17 -> 210.772 mm2, total 8115.8 -> 8292.4 mm2 (+2.18%). Both
+headline artifacts, both atlases, the PD atlas, the packing comparison, both frontier
+curves and the demo sweep were regenerated.
+
+THE FINDING, AND IT CHANGES THE PHYSICS STORY. ADJ-9 asks for the analog side to be the
+binding term "wherever physically reachable". The derivation guarantees the half it can
+— the DERIVED engine fits inside every stage's analog m-pass — and it cannot guarantee
+the other half, because a stage also runs silicon D31 derives no width for. A new
+MEASURED block says which: `derived_engine_sizing.beat_setting_stage` names the stage
+with the longest span in the probe slice and itemizes its terms by op block, and an
+`analog_floor_reachability` disclosure carries the verdict. On Granite the beat-setting
+stage spends 18.60 us on `attention_qk` and 15.35 us on `attention_pv` against 1.60 us
+of analog m-pass; on Qwen it is 34.23 us and 30.71 us against 1.52 us. THE MACHINE IS
+BOUND BY THE ATTENTION SYSTOLIC FABRIC, whose geometry is DECLARED card knobs
+(`cim.fabric` rows x cols x num_arrays, softmax_lanes) and a D28 sweep axis, not a D31
+derived engine. The consequence is visible on the atlas frontier: the ADJ-9-derived
+Granite point (5479 lanes, 13132.0 mm2, 25617.6 tokens/s) is WIDER than the retired
+sweep's widest declared point (4096 lanes, 13092.9 mm2, 25673.8 tokens/s) and is
+DOMINATED by it — past the width at which the scan fits under the attention term, lanes
+buy area and no throughput. That is not a defect in the derivation and not an argument
+against ADJ-9; it is what ADJ-9 buys and what it does not, and it is the question P7.9's
+open item now becomes: whether SA geometry joins the frontier's axes.
+
+THE AXIS IS REFUSED BY NAME. `vector_lanes` moved from `RETIRED_AXES` (spellable,
+labelled) to `REFUSED_AXES` in tools/fws_qif_dse.py and out of `AXIS_TARGETS` and
+`apply_point` entirely: a sweep that declares it now raises at parse with the axis named
+and ADJ-9 quoted, exactly as D26 refuses a dead fold. An explicit
+`cim.cards.<card>.vector_lanes` on ONE machine is still a legal override riding its own
+disclosure (D31); what is refused is making it an axis. The Wave-D demo sweep is FROZEN
+and labelled at `docs/qif/dse/granite_lanes_banks_retired/` — its payload carries a
+`retired` block naming the decision, why it is kept and how to read it — because it is
+the +27%-for-+0.78% comparison ADJ-9 was adjudicated on and the atlas frontier fixture is
+grounded on its eight rows. Its D31-legal successor is
+`docs/qif/dse/granite_capacity_banks/`: the same config over `arrays_per_chip`
+{604, 640, 965, 1207} x `bank_depth` {1, 2}, 8 of 8 valid, and its finding INVERTS the
+old one — at a fixed bank depth CHIP CAPACITY MOVES NO THROUGHPUT AT ALL (26051.9
+tokens/s on all four) and doubles the silicon (12433 -> 24631 mm2), which is Invariant W
+(D27) drawn on a cross product. The one real trade left on it is the BANKING axis, and
+it is now a two-term trade: a finer bank shortens the analog m-pass, which under D31-v2
+IS the sizing target, so bank_depth 1 derives a WIDER engine (6509 lanes against 6125)
+that is faster and costs more.
+
+THE ATLAS GAINED `svc` LINKS (charter addendum). The atlas drew the `act` chip boundary
+and nothing at all for the relationship between an analog chip and the shared digital
+chiplet that runs its attention and its scan (D13), so the pipeline map had no wires to
+the silicon doing half the work. `FwsEvaluation.atlas_service_links` emits one `svc` row
+per (chiplet -> analog chip) service relationship, read off the LOWERED DAG rather than
+by re-implementing the builder's assignment rule: every shared-digital op names its
+chiplet and the LAYER it serves, and the placement names the chip that holds that layer.
+The bytes are MEASURED — every priced `link` op in the measurement beat whose two
+endpoints are an analog chip and a chiplet, summed with the two directions kept apart
+(Granite: 5120 B of operands out + 3072 B of results back per beat on each of the four
+attention stages). SIX OF TEN GRANITE WIRES CARRY 0 B AND SAY WHY: `_recurrent_block`
+places the scan on the chiplet with no transfer op on either side, so the recurrent
+hops are an UNPRICED COMPONENT named in every basis string (`_UNPRICED_SERVICE_BLOCKS`)
+rather than a total absorbing an estimate. `role: svc` is documented in
+docs/qif/atlas/SCHEMA.md, accepted by atlas.html's loader with its own dash pattern and
+legend row, and an undocumented role still refuses (R6).
+
+REGIME-CHANGE REWRITES (old claim -> new claim -> why), each named in the source:
+(a) synthesis_library's `test_derive_vector_lanes_is_the_exact_inverse_of_the_pricing_law`
+    24 lanes against a 43.98 us BEAT -> 667 lanes against a 1.6 us analog M-PASS, same
+    law, 28x tighter budget, with the old number kept beside it as what it replaced;
+(b) `test_one_card_carries_one_width_and_the_slack_stays_visible` -> 
+    `test_every_stage_is_sized_to_its_own_analog_m_pass`: the binding stage is no longer
+    the one with the most work, it is the one with the worst work/analog-time ratio;
+(c) granite_e2e's `test_the_scan_engine_is_the_binding_resource_and_says_so` ->
+    `..._runs_at_peak_and_is_no_longer_what_binds`: the peak claim survives at 0.9498
+    (a wider engine pays the same fill over fewer streaming cycles) and the binding claim
+    is replaced by the measured attention term;
+(d) the Granite headline 66.21 us / 15103.6 -> 39.04 us / 25617.6, 220 -> 5479 lanes,
+    52.587 -> 201.386 mm2, energy 9.27615e9 -> 9.42996e9 pJ;
+(e) qwen's delta-rule HAND CHECK 178 lanes / 148,285,160 cycles -> 7676 / 3,438,628 on
+    the lockstep fixture, and its prefill split REVERSES AGAIN — delta 87% -> 13%,
+    attention 10% -> 67%, analog 6% -> 63% — because a properly sized scan engine leaves
+    the stack attention-bound, which is the same finding as (c) on the other model;
+(f) the demo sweep's axes and finding (above), and its banking energy delta, which was
+    "the whole delta is analog_arrays" and is now two terms of opposite sign because the
+    derived width follows the bank depth;
+(g) the atlas frontier fixture's ninth point: "the derived point is the cheapest one on
+    the frontier" -> it is DOMINATED, and the relaxation
+    `the_eight_swept_points_sweep_a_RETIRED_axis` became `..._a_REFUSED_axis`.
+
+ASSUMPTIONS / DISCLOSED: (1) the analog stage time is a UNION of busy intervals, so it
+measures the stage's analog OCCUPANCY and not its analog critical path — the two differ
+by the gaps, and the union is the smaller and therefore the stricter target; (2) it is
+read on the PROBE pass, in which vector ops cost nothing, so a stage whose analog ops
+would OVERLAP differently once the engine's time is priced could measure a slightly
+different union in pass B — the DAG serializes them on every shipped card and the
+quantity is invariant there; (3) the fallback for an unreachable stage is the analog
+BEAT, which is the widest budget this derivation uses, and it is named rather than
+clamped; (4) D31 still derives only the scan/vector engine — the per-macro pool is
+already sized to the macro's own result rate (D12) and is therefore at the analog floor
+by construction, and the SA fabric and softmax pipeline are declared card geometry; (5)
+the `svc` link bytes cover only traffic this repo LOWERS as a link op, and the recurrent
+hops are named as absent rather than estimated; (6) the derived engine's duty against
+the MEASURED beat is now very low (Granite's binding stage spends 1.596 us of a 39.04 us
+beat) — that is idle silicon, it is what ADJ-9 bought, and D28 requires it to be visible,
+which the per-device-class utilization banner and the beat_setting_stage block both do.

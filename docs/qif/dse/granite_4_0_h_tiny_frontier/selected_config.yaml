@@ -7,7 +7,7 @@
 # sweep base:  configs/hardware-config/fws_cim_granite_tiny_frontier.yaml
 # model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
 # candidate:   c003 (layers_per_chip = 4, arrays_per_chip = 604, bank_depth = 1)
-# headline:    15299 tokens/s, measured on this point's own timeline by fws_eval
+# headline:    26051.9 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:

@@ -280,26 +280,98 @@ def test_no_op_exceeds_the_engine_peak_its_law_declares(granite):
     assert checked > 0, "no vector-engine op was audited"
 
 
-def test_the_scan_engine_is_the_binding_resource_and_says_so(granite):
-    """The SSD scan runs AT the declared peak: the engine, not the array, binds.
+def test_the_scan_engine_runs_at_peak_and_is_no_longer_what_binds(granite):
+    """ADJ-9 REWRITE. The scan still runs at its declared peak — and stops binding.
 
-    WAVE F: the run is DECODE ONLY (D25/D29), so this is the recurrent scan of
-    ONE token of ONE stream (M = 1). The engine still runs at its declared peak
-    to within the pipeline drain it pays once, and it still dwarfs the analog
-    projection that feeds it — by 25x here rather than the prefill's larger
-    factor, because the analog side also fell to M = 1.
+    OLD CLAIM (test_the_scan_engine_is_the_binding_resource_and_says_so): the
+    SSD scan is the binding resource; it runs at >98% of the declared peak and
+    costs >10x the analog projection that feeds it. Both halves were true of a
+    220-lane engine sized against the analog BEAT.
+
+    NEW CLAIM: D31-v2 sizes the engine to the ANALOG FLOOR, so the scan is by
+    construction NOT the binding term of its own stage — its priced time fits
+    inside that stage's analog m-pass — and the machine's beat is set by a
+    third party entirely, the attention systolic fabric, which is DECLARED card
+    geometry and not a derived engine. The peak claim survives with a smaller
+    number and a hand-checkable cause: a wider engine pays the same pipeline
+    fill over fewer streaming cycles, so the fill is a bigger share of the
+    call.
+
+        ops = 1 972 224, lanes = 5479, depth = 20, clock = 0.95 GHz
+        cycles = 20 + ceil(1972224 / 5479) - 1 = 19 + 360 = 379
+        peak-relative = 1972224 / (5479 x 379) = 0.94976...
     """
     device = granite.mapping.device
     peak = device.vector_lanes * device.vector_clock_hz
     scan = next(
         cost for cost in granite.pricing.costs if cost.block == "ssm_scan"
     )
-    utilisation = float(scan.detail["ops"]) / scan.duration_s / peak
-    assert 0.98 < utilisation <= 1.0
+    ops = float(scan.detail["ops"])
+    cycles = device.vector_pipeline_depth + math.ceil(ops / device.vector_lanes) - 1
+    assert cycles == 379
+    utilisation = ops / scan.duration_s / peak
+    assert utilisation == pytest.approx(ops / (device.vector_lanes * cycles), rel=1e-12)
+    assert 0.94 < utilisation <= 1.0
+    # THE FIXED POINT: the scan no longer dwarfs the analog side it shares a
+    # stage with. It is now under a fifth of the stage's analog m-pass, which
+    # is what "analog-bound by construction" means op by op.
+    sizing = device.derived_engine
+    for row in sizing.per_stage:
+        assert row.time_s <= row.analog_time_s
     in_proj = next(
         cost for cost in granite.pricing.costs if cost.block == "ssm_in_proj"
     )
-    assert scan.duration_s > 10 * in_proj.duration_s
+    assert scan.duration_s < 6 * in_proj.duration_s
+    # And what DOES set the beat is measured and named: the attention fabric,
+    # 47x the scan and 12x the whole analog m-pass of its stage.
+    qk = next(cost for cost in granite.pricing.costs if cost.block == "attention_qk")
+    assert qk.duration_s > 40 * scan.duration_s
+    setter = sizing.beat_setting_stage
+    assert setter["analog_is_largest_term"] is False
+    assert setter["terms"][0]["block"] == "attention_qk"
+    assert setter["terms"][0]["device_class"] == "shared_digital"
+    assert setter["terms"][0]["busy_s"] > 10 * setter["analog_time_s"]
+
+
+def test_the_other_derived_width_is_at_the_analog_floor_too(granite):
+    """ADJ-9 covers EVERY derived engine width, and D12's pool is the other one.
+
+    NEW GATE. The scan/vector engine is the width ADJ-9 retargets, but it is
+    not the only DERIVED one: D12 sizes each analog macro's digital pool from
+    that macro's own peak RESULT RATE, which is already the analog floor by
+    construction — a pool that consumes exactly what its macro emits can never
+    be the term that sets a stage's time. This test is the measurement that
+    says so on the shipped machine rather than leaving it to the derivation's
+    docstring, and it is the reason ADJ-9 needed no second retarget.
+
+    The comparison is deliberately harsh: the SUM of the stage's pool-op
+    durations (not their union) against the stage's analog m-pass. Pools run in
+    parallel across macros, so the sum over-counts by roughly the macro count,
+    and the claim survives it anyway.
+    """
+    import fws_eval as _fws_eval
+
+    select, _ = _fws_eval._measurement_slice(granite.serving)
+    sizing = granite.mapping.device.derived_engine
+    analog_by_stage = {row.stage: row.analog_time_s for row in sizing.per_stage}
+    pool_by_stage = {}
+    for annotation, cost in zip(
+        _fws_eval.annotations_of(granite.program), granite.pricing.costs
+    ):
+        if cost.device_class != "macro_pool" or not select(annotation):
+            continue
+        stage = int(annotation.stage)
+        pool_by_stage[stage] = pool_by_stage.get(stage, 0.0) + float(cost.duration_s)
+    assert pool_by_stage, "the run prices no pool work at all"
+    for stage, pool_s in pool_by_stage.items():
+        analog_s = analog_by_stage[stage]
+        assert analog_s > 0.0
+        assert pool_s < analog_s, (stage, pool_s, analog_s)
+    # D12's derivation is REPORTED beside the number, which is the other half
+    # of the decision (the sizing is a report, never a constraint).
+    pool = granite.mapping.device.digital_pool_sizing()
+    assert pool.lanes >= 1 and pool.result_rate_per_s > 0
+    assert pool.lanes == math.ceil(pool.result_rate_per_s / pool.pool_clock_hz)
 
 
 def test_an_analog_op_matches_the_M_law_computed_by_hand(granite):
@@ -494,6 +566,51 @@ def test_the_shipped_granite_atlas_validates_through_the_real_loader(tmp_path):
     assert verdict["warnings"] == []
 
 
+def test_the_atlas_draws_a_service_wire_to_every_analog_chip():
+    """NEW GATE (results.html pipeline map): the `svc` links, and their bytes.
+
+    The atlas drew the `act` boundary between consecutive analog chips and
+    NOTHING for the relationship between an analog chip and the shared digital
+    chiplet that runs its attention and its scan (D13) — so the picture showed
+    a pipeline with no wires to the silicon doing half its work. One `svc` row
+    now exists per (chiplet -> analog chip) service relationship, read off the
+    LOWERED DAG (each shared-digital op names its chiplet and the layer it
+    serves; the placement names the chip that holds that layer), with bytes
+    MEASURED off P4's timeline.
+    """
+    path = os.path.join(PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json")
+    document = json.load(open(path, encoding="utf-8"))
+    svc = [link for link in document["links"] if link["role"] == "svc"]
+    analog_chips = [c for c in document["chips"] if c["pool"] == "analog"]
+    digital_chips = {c["id"] for c in document["chips"] if c["pool"] == "digital"}
+    # One wire per analog chip, and every wire runs from a chiplet to a chip.
+    assert len(svc) == len(analog_chips) == 10
+    assert {link["to"] for link in svc} == {c["id"] for c in analog_chips}
+    assert {link["from"] for link in svc} <= digital_chips
+    for link in svc:
+        assert link["per"] == "beat"
+        assert link["bytes"] >= 0.0
+        assert "MEASURED on beat" in link["basis"]
+        assert "operands out" in link["basis"] and "results back" in link["basis"]
+    # The attention stages carry real bytes; the SSD-only stages carry none,
+    # and the basis says WHICH component is unpriced rather than the total
+    # absorbing an estimate (D21, D28).
+    carrying = [link for link in svc if link["bytes"] > 0]
+    empty = [link for link in svc if link["bytes"] == 0]
+    assert len(carrying) == 4 and len(empty) == 6
+    assert {link["bytes"] for link in carrying} == {8192.0}
+    for link in svc:
+        assert "UNPRICED COMPONENT: ssm_scan" in link["basis"]
+        assert "absent op, not a measured zero" in link["basis"]
+    for link in carrying:
+        assert "qkv 5120 B" in link["basis"] and "o_proj 3072 B" in link["basis"]
+    # And the byte total is the evaluator's own accounting, not a second one:
+    # 5120 out + 3072 back is exactly what the lowering annotated.
+    assert all(
+        link["bytes"] == 5120.0 + 3072.0 for link in carrying
+    )
+
+
 def test_the_shipped_granite_atlas_carries_p4s_duty_cycles():
     """--priced is what makes it the FULL artifact rather than a placement."""
     path = os.path.join(PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json")
@@ -661,26 +778,35 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     assert mapping["resident_streams"] == 10
     metrics = {metric["key"]: metric["value"] for metric in document["evaluation"]["metrics"]}
     assert "sys.fws.prefill_latency" not in metrics
-    # WAVE F REWRITE (D31/D32, P7.8). OLD: beat 43.98 us / 22737 tokens/s on a
-    # card that DECLARED 1024 vector lanes nobody measured. NEW: the card
-    # declares no engine at all — the width is DERIVED from the beat the analog
-    # stages set (220 lanes here, the smallest integer that holds it, no margin)
-    # — and the beat is 66.21 us because the derived engine is by construction
-    # only as fast as it must be. The old number was not more accurate; it was
-    # a machine somebody guessed. D31 is exactly this trade: the width stops
-    # being a choice and starts being a consequence, and the headline moves to
-    # whatever the consequence is.
-    assert metrics["sys.fws.beat"] == pytest.approx(6.620929e-05, rel=1e-3)
-    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(15103.6, rel=1e-3)
-    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(1510.36, rel=1e-3)
+    # ADJ-9 REWRITE (D31-v2). OLD CLAIM: beat 66.21 us / 15103.6 tokens/s on a
+    # 220-lane engine — the smallest width that held the analog BEAT. NEW CLAIM:
+    # beat 39.04 us / 25617.6 tokens/s on a 5479-lane engine — the smallest
+    # width for which every stage's digital per-stage time fits that stage's
+    # OWN analog m-pass. (Before D31 the same headline read 43.98 us / 22737 on
+    # a card that DECLARED 1024 lanes nobody measured.)
+    #
+    # +69.6% tokens/s for +148.8 mm2 of digital silicon, which is +1.16% of the
+    # machine: the trade ADJ-9 was adjudicated on, measured here rather than
+    # assumed. The width stops being the SMALLEST that keeps the digital side
+    # off the critical path and becomes the smallest at which the ANALOG side
+    # is the term that sets each stage's pace.
+    assert metrics["sys.fws.beat"] == pytest.approx(3.903561e-05, rel=1e-3)
+    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(25617.6, rel=1e-3)
+    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(2561.76, rel=1e-3)
     assert metrics["sys.fws.resident_streams"] == 10.0
     # The engine is REPORTED, which is the other half of D31, and its silicon is
     # COMPOSED from the measured 22nm synthesis library (D32).
     silicon = document["evaluation"]["digital_silicon"]
-    assert silicon["vector_lanes"] == 220
+    assert silicon["vector_lanes"] == 5479
     assert silicon["vector_lanes_provenance"] == "derived-count"
     assert silicon["library"]["technology"] == "22nm"
-    assert silicon["digital_area_mm2_total"] == pytest.approx(52.5867, rel=1e-4)
+    assert silicon["digital_area_mm2_total"] == pytest.approx(201.3858, rel=1e-4)
+    # ADJ-9's fixed point, on the shipped headline machine: all ten stages.
+    sizing = silicon["derived_engine_sizing"]
+    assert sizing["sizing_target"] == "analog_stage_time"
+    assert sizing["analog_bound_stages"] == list(range(10))
+    assert sizing["unreachable_stages"] == []
+    assert sizing["engine_duty_at_target"] == pytest.approx(0.997368, rel=1e-4)
     # The energy is the WINDOW's, and the window is D - 1 fill beats plus the
     # steady sample: a longer window is more beats of real work, not a
     # different machine. It is reported per run, never per token here.
@@ -690,7 +816,7 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     # engine's measured power for their own duration, which is a term that
     # always existed and used to report zero.
     assert document["evaluation"]["energy"]["total_pj"] == pytest.approx(
-        9.27615e09, rel=1e-3
+        9.42996e09, rel=1e-3
     )
     digital = next(
         c

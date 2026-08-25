@@ -358,7 +358,7 @@ function pipelineSVG(m){
   out.appendChild(svg);
   if (!svc.length){
     var n=document.createElement('p'); n.className='note';
-    n.innerHTML='Digital&rarr;analog service wires: <b>not present in this artifact</b> — the export gains <code>role: "svc"</code> links in the in-flight regeneration; this map draws them automatically once the artifact carries them. Only the real boundary links are drawn.';
+    n.innerHTML='Digital&rarr;analog service wires: <b>not present in this artifact</b> — <code>role: "svc"</code> links are PRICED rows, so a placement-only export carries none (P3 has no timeline, A1). Re-emit with <code>--priced</code> to get them. Only the real boundary links are drawn.';
     out.appendChild(n);
   }
   return out;

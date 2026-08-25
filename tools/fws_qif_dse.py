@@ -53,12 +53,12 @@ point is, so it changes what this tool sweeps:
   cell floor, so the only way a point spends analog silicon is by enumerating
   slots no tensor lands on.
 
-**Digital provisioning is NOT an axis.** D31 retires the scan/vector engine as
-a declared or swept knob: it is DERIVED per point from the beat the analog
-stages set, and D32 prices it (and the per-macro pools) from the measured
-synthesis library. ``vector_lanes`` therefore lives in :data:`RETIRED_AXES` —
-still spellable, because the frozen Wave-D demo sweep is built on it, but every
-candidate that sets it carries the retirement by name.
+**Digital provisioning is NOT an axis.** D31/ADJ-9 retire the scan/vector engine
+as a declared or swept knob: it is DERIVED per point — sized UP until every
+stage's digital per-stage time fits that stage's own ANALOG m-pass time — and
+D32 prices it (and the per-macro pools) from the measured synthesis library.
+``vector_lanes`` therefore lives in :data:`REFUSED_AXES` and a sweep that
+declares it is REFUSED BY NAME at parse.
 
 Every point reports: total area (analog floor + composed shared chiplets +
 composed per-macro pools), tokens/s = 1/beat, D, the per-stage state bytes with
@@ -117,10 +117,9 @@ config carrying it stays runnable through ``run_perf`` unchanged.
         # layers_per_stage: [4, 2]              # stages decoupled from chips (D29)
         # column_sets_per_tile: [1]             # cim.allocation (D10)
         # shared_chiplets: [1, 10]              # ADJ-5's declared count
-        # vector_lanes: [...]                   # RETIRED by D31; see RETIRED_AXES
+        # vector_lanes: [...]                   # REFUSED BY NAME (D31/ADJ-9)
 
 Axis -> the config field it moves (one field each, never two):
-  ``vector_lanes``          ``cim.cards.<digital card>.vector_lanes`` (RETIRED, D31)
   ``bank_depth``            ``cim.cards.<analog card>.bank_depth``
   ``column_sets_per_tile``  ``cim.allocation.column_sets_per_tile``
   ``arrays_per_chip``       ``cim.chip.arrays_per_chip``
@@ -188,8 +187,10 @@ import config as config_module  # noqa: E402
 DSE_BLOCK = "mapping_dse"
 
 #: Axis name -> a human sentence naming the ONE config field it moves.
+#:
+#: ``vector_lanes`` is NOT here: ADJ-9 refuses it by name (:data:`REFUSED_AXES`),
+#: and an axis this table lists is an axis the tool offers to sweep.
 AXIS_TARGETS = {
-    "vector_lanes": "cim.cards.<digital card>.vector_lanes",
     "bank_depth": "cim.cards.<analog card>.bank_depth",
     "column_sets_per_tile": "cim.allocation.column_sets_per_tile",
     "arrays_per_chip": "cim.chip.arrays_per_chip",
@@ -198,22 +199,30 @@ AXIS_TARGETS = {
     "shared_chiplets": "mapping.shared_chiplets",
 }
 
-#: Axes RETIRED as design points, with the decision that retired them (D31).
+#: Axes REFUSED BY NAME, with the decision that killed them (D31, ADJ-9).
 #:
-#: A retired axis is still SPELLABLE — the frozen Wave-D demo sweep in
-#: ``configs/hardware-config/fws_cim_granite_tiny_dse.yaml`` is built on one and
-#: the validator reruns it — but every candidate that sets it carries a
-#: ``retired_axis`` note by name, and no P7.4/P7.5 frontier declares one. The
-#: axis is not deleted because deleting it would silently turn a shipped sweep
-#: into a usage error; it is LABELLED, which is what a retirement is.
-RETIRED_AXES = {
+#: A refused axis is spellable only far enough to be REFUSED: the parser raises
+#: with the axis named and the decision quoted, exactly as D26 refuses a dead
+#: fold. It is not silently ignored (that would sweep something else) and it is
+#: not merely labelled (Wave F did that, and the labelled axis went on
+#: producing a checked-in artifact whose whole spread came from overriding the
+#: derivation).
+#:
+#: ADJ-9 is the decision that closed it: the engine is now derived to the
+#: ANALOG FLOOR, so a wider declared width is not a design point the frontier
+#: may carry — it is a machine whose digital side was chosen instead of
+#: derived. The Wave-D demo sweep that swept this axis was regenerated on
+#: D31-legal axes when ADJ-9 landed.
+REFUSED_AXES = {
     "vector_lanes": (
-        "D31 retires the scan/vector engine as a swept or declared knob: its width "
-        "is DERIVED from the beat the analog stages set and REPORTED "
-        "(evaluation.digital_silicon.derived_engine_sizing). A candidate that sets "
-        "this axis is a DECLARED OVERRIDE and its own run says so; the frontier "
-        "(P7.4) sweeps stage granularity, mux/bank depth and chip capacity, and "
-        "derives the digital side at every point."
+        "D31/ADJ-9 retire the scan/vector engine as a swept or declared knob: its "
+        "width is DERIVED — sized UP until every stage's digital per-stage time fits "
+        "that stage's own ANALOG m-pass time — and REPORTED "
+        "(evaluation.digital_silicon.derived_engine_sizing). Sweeping it would sweep "
+        "the answer. The frontier (P7.4) sweeps stage granularity, mux/bank depth and "
+        "chip capacity, and derives the digital side at every point. An explicit "
+        "cim.cards.<card>.vector_lanes on a single machine is still an OVERRIDE that "
+        "rides its own disclosure (D31); what is refused here is making it an AXIS."
     ),
 }
 
@@ -374,9 +383,7 @@ class SweepSpec:
             "max_stage_state_bytes": self.max_stage_state_bytes,
             "axes": {name: list(values) for name, values in self.axes.items()},
             "axis_targets": {name: AXIS_TARGETS[name] for name in self.axes},
-            "retired_axes": {
-                name: RETIRED_AXES[name] for name in self.axes if name in RETIRED_AXES
-            },
+            "refused_axes": dict(REFUSED_AXES),
             "enumeration": (
                 "full cross product in declaration order; explicit candidate "
                 "lists only, no search and no sampling (D19, D10)"
@@ -421,6 +428,12 @@ class SweepSpec:
                 "ignored knob silently sweeps something else."
             )
         axes_raw = _require_mapping(f"{DSE_BLOCK}.axes", block.get("axes"))
+        refused = [name for name in axes_raw if name in REFUSED_AXES]
+        if refused:
+            raise QifDseUsageError(
+                f"{DSE_BLOCK}.axes declares the REFUSED axis/axes {refused}. "
+                + " ".join(REFUSED_AXES[name] for name in refused)
+            )
         unknown_axes = [name for name in axes_raw if name not in AXIS_TARGETS]
         if unknown_axes:
             raise QifDseUsageError(
@@ -573,6 +586,11 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
     does not declare is refused BY NAME here rather than being invented,
     because inventing a card block would sweep a device the config never
     described.
+
+    ``digital_card`` is unused since ADJ-9 refused ``vector_lanes``, which was
+    the only axis that wrote a digital-card field. The parameter stays because
+    the tool resolves the two card names together (:func:`_card_names`) and
+    both call sites pass the pair; dropping it here would split them.
     """
     raw = copy.deepcopy(raw_base)
     cim = raw.get("cim")
@@ -590,9 +608,7 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
         return cards[name]
 
     for axis, value in point.items():
-        if axis == "vector_lanes":
-            _card("digital", digital_card)["vector_lanes"] = int(value)
-        elif axis == "bank_depth":
+        if axis == "bank_depth":
             _card("analog", analog_card)["bank_depth"] = int(value)
         elif axis == "column_sets_per_tile":
             cim.setdefault("allocation", {})["column_sets_per_tile"] = int(value)
@@ -748,7 +764,10 @@ def _digital_block(evaluation):
         "library_technology": (block.get("library") or {}).get("technology"),
         "vector_lanes": block.get("vector_lanes"),
         "vector_lanes_provenance": block.get("vector_lanes_provenance"),
-        "engine_duty": sizing.get("engine_utilization_at_beat"),
+        "engine_duty": sizing.get("engine_duty_at_target"),
+        "sizing_target": sizing.get("sizing_target"),
+        "analog_bound_stages": len(sizing.get("analog_bound_stages") or ()),
+        "stages_sized": sizing.get("stages_sized"),
         "analog_beat_s": sizing.get("analog_beat_s"),
         "shared_digital_chiplet_area_mm2": (
             block.get("shared_digital_chiplet") or {}
@@ -810,12 +829,6 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         "metrics": {},
         "notes": [],
     }
-    for axis in point:
-        if axis in RETIRED_AXES:
-            candidate["notes"].append(
-                f"axis {axis!r} is RETIRED as a design point: {RETIRED_AXES[axis]}"
-            )
-
     # Stage: config — the candidate's own YAML, parsed and validated exactly
     # as run_perf would parse it (card admissibility lives here: a bank_depth
     # that does not divide the card's mux is refused by the card, by name).
@@ -2756,14 +2769,18 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
                 "candidates": [cand["id"] for cand in valid],
             },
         )
-    retired = [axis for axis in spec.axes if axis in RETIRED_AXES]
-    if retired:
+    if valid:
         disclosures.insert(
             0,
             {
-                "constraint": "retired_axis_swept",
-                "value": ", ".join(retired),
-                "reason": "; ".join(RETIRED_AXES[axis] for axis in retired),
+                "constraint": "digital_provisioning_is_not_an_axis",
+                "value": (
+                    "refused axes: " + ", ".join(sorted(REFUSED_AXES))
+                    + "; the engine is DERIVED at every point"
+                ),
+                "reason": "; ".join(
+                    REFUSED_AXES[axis] for axis in sorted(REFUSED_AXES)
+                ),
                 "candidates": [cand["id"] for cand in valid],
             },
         )

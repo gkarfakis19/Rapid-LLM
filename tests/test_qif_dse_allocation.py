@@ -42,7 +42,9 @@ GRANITE_MODEL = MODEL_DIR / "granite_4_0_h_tiny_inf.yaml"
 GRANITE_SELECTED = HW_DIR / "fws_cim_granite_tiny_dse_selected.yaml"
 
 #: The checked-in demo sweep (the one George asked for).
-DEMO_DIR = DSE_DIR / "granite_lanes_banks"
+DEMO_DIR = DSE_DIR / "granite_capacity_banks"
+#: The Wave-D sweep this one replaced (ADJ-9): FROZEN, and pinned as frozen.
+RETIRED_DEMO_DIR = DSE_DIR / "granite_lanes_banks_retired"
 DEMO_JSON = DEMO_DIR / "dse_report.json"
 DEMO_MD = DEMO_DIR / "dse_report.md"
 
@@ -140,7 +142,9 @@ def test_missing_sweep_block_is_refused_by_name(tmp_path):
     message = str(excinfo.value)
     assert DSE.DSE_BLOCK in message
     # The message must name the axes, or the reader has to read the source.
-    assert "vector_lanes" in message and "bank_depth" in message
+    assert "arrays_per_chip" in message and "bank_depth" in message
+    # ADJ-9: and it must NOT offer the axis it refuses.
+    assert "vector_lanes" not in message
 
 
 def test_unknown_key_and_unknown_axis_are_refused(tmp_path):
@@ -194,18 +198,44 @@ def test_cross_product_is_complete_and_declaration_ordered():
     spec = DSE.SweepSpec.from_raw(
         {
             DSE.DSE_BLOCK: {
-                "axes": {"vector_lanes": [512, 1024, 2048, 4096], "bank_depth": [1, 2]}
+                "axes": {"arrays_per_chip": [604, 640, 965, 1207], "bank_depth": [1, 2]}
             }
         },
         "test",
     )
     points = list(spec.points)
     assert spec.size == 8 == len(points)
-    assert points[0] == {"vector_lanes": 512, "bank_depth": 1}
-    assert points[1] == {"vector_lanes": 512, "bank_depth": 2}
-    assert points[-1] == {"vector_lanes": 4096, "bank_depth": 2}
+    assert points[0] == {"arrays_per_chip": 604, "bank_depth": 1}
+    assert points[1] == {"arrays_per_chip": 604, "bank_depth": 2}
+    assert points[-1] == {"arrays_per_chip": 1207, "bank_depth": 2}
     # The LAST axis varies fastest, so a reader can find a point by counting.
-    assert [p["vector_lanes"] for p in points] == [512, 512, 1024, 1024, 2048, 2048, 4096, 4096]
+    assert [p["arrays_per_chip"] for p in points] == [
+        604, 604, 640, 640, 965, 965, 1207, 1207
+    ]
+
+
+def test_the_engine_width_is_refused_as_an_axis_by_name():
+    """ADJ-9: D31-v2 derives the engine, so sweeping it would sweep the answer.
+
+    NEW GATE. Wave F LABELLED this axis (RETIRED_AXES) and let it run, and the
+    labelled axis went on producing a checked-in artifact whose whole spread
+    came from overriding the derivation. ADJ-9 closed it: the refusal is by
+    name, at parse, exactly as D26 refuses a dead fold.
+    """
+    assert "vector_lanes" in DSE.REFUSED_AXES
+    assert "vector_lanes" not in DSE.AXIS_TARGETS
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        DSE.SweepSpec.from_raw(
+            {DSE.DSE_BLOCK: {"axes": {"vector_lanes": [512, 4096]}}}, "test"
+        )
+    message = str(excinfo.value)
+    assert "REFUSED" in message
+    assert "vector_lanes" in message
+    assert "ADJ-9" in message and "DERIVED" in message
+    # A DECLARED width on one machine is still a legal override (D31); what is
+    # refused is making it an axis. The message says so rather than leaving a
+    # reader to guess which of the two it just hit.
+    assert "OVERRIDE" in message
 
 
 def test_every_axis_writes_exactly_one_documented_field():
@@ -213,7 +243,9 @@ def test_every_axis_writes_exactly_one_documented_field():
     sweep two knobs under one name."""
     base = _llama_base()
     fields = {
-        "vector_lanes": lambda raw: raw["cim"]["cards"]["sa"]["vector_lanes"],
+        # ADJ-9 REWRITE. OLD: seven axes, `vector_lanes` among them, writing
+        # cim.cards.<digital>.vector_lanes. NEW: six, because that axis is
+        # refused by name and no longer has a field to write.
         "bank_depth": lambda raw: raw["cim"]["cards"]["ctt"]["bank_depth"],
         "column_sets_per_tile": lambda raw: raw["cim"]["allocation"]["column_sets_per_tile"],
         "arrays_per_chip": lambda raw: raw["cim"]["chip"]["arrays_per_chip"],
@@ -226,7 +258,6 @@ def test_every_axis_writes_exactly_one_documented_field():
     }
     assert set(fields) == set(DSE.AXIS_TARGETS)
     values = {
-        "vector_lanes": 2048,
         "bank_depth": 2,
         "column_sets_per_tile": 2,
         "arrays_per_chip": 200,
@@ -242,8 +273,6 @@ def test_every_axis_writes_exactly_one_documented_field():
         restored = copy.deepcopy(moved)
         if axis == "column_sets_per_tile":
             restored["cim"].pop("allocation")
-        elif axis == "vector_lanes":
-            restored["cim"]["cards"]["sa"]["vector_lanes"] = 1024
         elif axis == "bank_depth":
             restored["cim"]["cards"]["ctt"].pop("bank_depth")
         elif axis == "arrays_per_chip":
@@ -475,13 +504,13 @@ def test_pareto_front_is_two_axis_dominance_and_the_shape_is_read_off_the_data()
     flat = [_fake("a", 100.0, 10.0, tiles=7), _fake("b", 200.0, 10.0, tiles=99)]
     front = DSE.pareto_front_ids(flat)
     assert front == ["b"]
-    shape, note = DSE.front_shape(flat, front, axes=("vector_lanes", "bank_depth"))
+    shape, note = DSE.front_shape(flat, front, axes=("arrays_per_chip", "bank_depth"))
     assert shape == "flat_area" and "SAME total silicon" in note
     # The note DERIVES the flatness from the two counts the accounting
     # multiplies, and it names the axes it read them over.
     assert "ENUMERATED analog macro slot count is 64" in note
     assert "shared digital chiplet count is 2" in note
-    assert "vector_lanes, bank_depth" in note
+    assert "arrays_per_chip, bank_depth" in note
     # ... and it never claims a mechanism the payload contradicts. These two
     # candidates place 7 and 99 tiles; a note asserting the same tiles are
     # placed either way, or that the analog term is the model's weights,
@@ -680,72 +709,110 @@ def _normalized(payload):
 
 def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
     """Content gate on the checked-in artifact (cheap): the axes, the
-    scaling, the pick and the round trip."""
+    scaling, the pick and the round trip.
+
+    ADJ-9 REWRITE, AXES AND FINDING BOTH.
+    OLD AXES: `vector_lanes {512,1024,2048,4096} x bank_depth {1,2}`.
+    OLD FINDING: at a fixed bank depth the headline rises strictly with every
+    doubling of the DECLARED lane count, sub-linearly (1.28x over 8x lanes).
+    NEW AXES: `arrays_per_chip {604,640,965,1207} x bank_depth {1,2}` — both
+    D31-legal, because D31-v2 derives the engine to the analog floor and
+    tools/fws_qif_dse.py refuses the lane axis by name.
+    NEW FINDING, and it is a stronger one: at a fixed bank depth CHIP CAPACITY
+    MOVES NO THROUGHPUT AT ALL. All four capacities measure the identical
+    tokens/s, and the silicon doubles across them. That is Invariant W (D27)
+    drawn on a cross product: the analog macro count is the global cell floor,
+    so capacity buys enumerated-but-unowned SLOTS and nothing else.
+
+    The frozen Wave-D artifact this replaced is preserved at
+    docs/qif/dse/granite_lanes_banks_retired/ — it is the +27%-for-+0.78%
+    comparison ADJ-9 itself quotes, and it is labelled as a machine whose
+    digital side was chosen rather than derived.
+    """
     payload = json.loads(DEMO_JSON.read_text())
     assert payload["sweep"]["axes"] == {
-        "vector_lanes": [512, 1024, 2048, 4096],
+        "arrays_per_chip": [604, 640, 965, 1207],
         "bank_depth": [1, 2],
     }
     assert payload["num_candidates"] == 8 and payload["num_valid"] == 8
     assert payload["model_id"] == "Granite-4.0-H-Tiny"
+    # ADJ-9: the refused axis is refused, and the payload says so at sweep
+    # level rather than only in a source file.
+    assert "vector_lanes" not in payload["sweep"]["axes"]
+    assert "vector_lanes" in payload["sweep"]["refused_axes"]
+    refusal = [
+        d for d in payload["disclosures"]
+        if d["constraint"] == "digital_provisioning_is_not_an_axis"
+    ]
+    assert len(refusal) == 1 and "ADJ-9" in refusal[0]["reason"]
 
-    # THE FINDING: the headline scales with the declared design point. At a
-    # fixed bank depth, more declared vector lanes is strictly more tokens/s.
+    # THE FINDING: at a fixed bank depth, capacity moves the silicon and NOT
+    # the headline. Every candidate derives its own engine (D31-v2), and the
+    # derived width does not depend on how many empty slots a chip enumerates.
     for bank in (1, 2):
-        series = [
-            c["metrics"]["tokens_per_s"]
-            for c in payload["candidates"]
-            if c["knobs"]["bank_depth"] == bank
-        ]
-        assert len(series) == 4
-        assert all(b > a for a, b in zip(series, series[1:])), series
-    # ... and it is sub-linear: 8x the lanes is well under 8x the headline,
-    # because the analog GEMMs and the transfers do not move with them.
-    #
-    # WAVE F (D29): the machine under this sweep is now a FILLED PIPELINE, and
-    # the ratio fell from 1.79x to 1.28x for a reason the sweep itself shows.
-    # Under the retired lockstep regime a decode step WAS the scan chain of 36
-    # Mamba layers, so the vector engine owned the critical path and buying
-    # lanes bought throughput. In the filled pipeline every stage fires every
-    # beat: the scan is one stage's work inside a beat, the beat is the SLOWEST
-    # stage, and widening the engine moves only the part of the beat that stage
-    # owns. Idle silicon is the finding (D28), and it is now visible one level
-    # up: the lanes are less binding than they looked.
+        rows = sorted(
+            (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == bank),
+            key=lambda c: c["knobs"]["arrays_per_chip"],
+        )
+        assert len(rows) == 4
+        rates = {c["metrics"]["tokens_per_s"] for c in rows}
+        assert len(rates) == 1, rates
+        lanes = {c["derived_digital"]["vector_lanes"] for c in rows}
+        assert len(lanes) == 1, lanes
+        silicon = [c["silicon"]["total_silicon_mm2"] for c in rows]
+        assert all(b > a for a, b in zip(silicon, silicon[1:])), silicon
+        # ... and the term that moves is the ANALOG one, because capacity
+        # enumerates slots (D27). The digital side is constant along the row.
+        digital = {
+            round(c["silicon"]["shared_digital_silicon_mm2"], 9) for c in rows
+        }
+        assert len(digital) == 1, digital
+    # The whole sweep spans 2x the silicon for ZERO extra throughput at a
+    # fixed bank depth: the number that used to read "8x the lanes is
+    # sub-linear" now reads "2x the capacity is flat".
+    biggest = max(c["silicon"]["total_silicon_mm2"] for c in payload["candidates"])
+    smallest = min(c["silicon"]["total_silicon_mm2"] for c in payload["candidates"])
+    assert biggest / smallest > 1.9
     slowest = min(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
     fastest = max(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
-    assert 1.2 < fastest / slowest < 8.0
+    assert 1.0 < fastest / slowest < 1.02
     assert all(
         c["metrics"]["serving_regime"] == "filled_pipeline"
         and c["metrics"]["resident_streams"] == 10.0
         for c in payload["candidates"]
     )
+    # ADJ-9's fixed point holds at every point of the sweep, not only on the
+    # shipped machine: every stage of every candidate is analog-bound.
+    for candidate in payload["candidates"]:
+        derived = candidate["derived_digital"]
+        assert derived["sizing_target"] == "analog_stage_time"
+        assert derived["analog_bound_stages"] == derived["stages_sized"] == 10
+        assert derived["vector_lanes_provenance"] == "derived-count"
 
     assert payload["headline_metric"] == "tokens_per_s"
-    assert payload["selected"]["knobs"] == {"vector_lanes": 4096, "bank_depth": 1}
+    assert payload["selected"]["knobs"] == {"arrays_per_chip": 604, "bank_depth": 1}
 
-    # WAVE F REWRITE (D32, P7.8). OLD CLAIM: `front_ids == [selected_id]` and
-    # `front_shape == "flat_area"` — every candidate carried the same silicon,
-    # so the front collapsed to the fastest point and nothing traded area for
-    # speed. That was TRUE of a machine whose shared digital chiplet declared
-    # `area_mm2: 0`; Wave D's own front_shape note and P7.6's hand-off both
-    # said so by name. NEW CLAIM: the chiplet's silicon is COMPOSED from the
-    # measured synthesis library, so a wider engine costs real mm2 and the
-    # front is a SPREAD. This is the axis P7 said was missing, and it is now
-    # in the artifact rather than in a note about the artifact.
+    # The front is a real 2-point trade, and it is the BANKING axis that makes
+    # it: bank_depth 2 packs a shorter analog m-pass, derives a narrower engine
+    # and lands cheaper AND slower than bank_depth 1 at the same capacity.
     assert payload["front_shape"] == "spread"
-    assert len(payload["front_ids"]) > 1
+    assert payload["front_ids"] == ["c000", "c001"]
     assert payload["selected_id"] in payload["front_ids"]
-    # The trade is REAL and monotone: more lanes, more silicon, more tokens/s.
-    by_lanes = sorted(
-        (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == 1),
-        key=lambda c: c["knobs"]["vector_lanes"],
+    cheap = next(c for c in payload["candidates"] if c["id"] == "c001")
+    fast = next(c for c in payload["candidates"] if c["id"] == "c000")
+    assert cheap["knobs"]["bank_depth"] == 2 and fast["knobs"]["bank_depth"] == 1
+    assert cheap["silicon"]["total_silicon_mm2"] < fast["silicon"]["total_silicon_mm2"]
+    assert cheap["metrics"]["tokens_per_s"] < fast["metrics"]["tokens_per_s"]
+    assert (
+        cheap["derived_digital"]["vector_lanes"]
+        < fast["derived_digital"]["vector_lanes"]
     )
-    silicon = [c["silicon"]["total_silicon_mm2"] for c in by_lanes]
-    assert all(b > a for a, b in zip(silicon, silicon[1:])), silicon
-    # ... and the digital term is the one that moved: the analog floor is fixed
-    # (Invariant W), so every mm2 of the spread is digital silicon.
-    analog = {c["silicon"]["analog_macro_silicon_mm2"] for c in payload["candidates"]}
-    assert len(analog) == 1
+    # ... and every mm2 of THAT trade is digital: the analog term is identical
+    # on the two, because Invariant W pins it to the same capacity.
+    assert (
+        cheap["silicon"]["analog_macro_silicon_mm2"]
+        == fast["silicon"]["analog_macro_silicon_mm2"]
+    )
     assert all(
         c["silicon"]["shared_digital_area_provenance"] == "composed-measured"
         for c in payload["candidates"]
@@ -758,11 +825,18 @@ def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
 def test_checked_in_selected_config_is_the_winner_and_runs_the_mapped_path():
     """The emitted machine is the selection, and it is a MAPPED config: the
     `mapping:` block is what makes run_perf price a DAG instead of the frozen
-    closed form (ADJ-6)."""
+    closed form (ADJ-6).
+
+    ADJ-9 REWRITE. OLD CLAIM: the emitted card declares `vector_lanes: 4096`.
+    NEW CLAIM: it declares NO vector_lanes at all — the winning point no
+    longer has a lane count to write down, because the width is derived from
+    the machine's own analog m-pass every time it runs.
+    """
     payload = json.loads(DEMO_JSON.read_text())
     raw = yaml.safe_load(GRANITE_SELECTED.read_text())
     assert DSE.DSE_BLOCK not in raw
-    assert raw["cim"]["cards"]["sa"]["vector_lanes"] == 4096
+    assert "vector_lanes" not in raw["cim"]["cards"]["sa"]
+    assert raw["cim"]["chip"]["arrays_per_chip"] == 604
     assert raw["cim"]["cards"]["ctt"]["bank_depth"] == 1
     assert "mapping" in raw
     converted = copy.deepcopy(raw)
@@ -770,6 +844,41 @@ def test_checked_in_selected_config_is_the_winner_and_runs_the_mapped_path():
     hw = config_module.HWConfig.from_dict(converted)
     assert hw.mapping_config is not None
     assert payload["emitted_config"].endswith("fws_cim_granite_tiny_dse_selected.yaml")
+
+
+def test_the_retired_wave_d_sweep_is_frozen_and_says_so():
+    """ADJ-9: the historical comparison is KEPT, and kept LABELLED.
+
+    NEW GATE. The Wave-D sweep is the measurement ADJ-9 was adjudicated on
+    (+27% tokens/s for +0.78% silicon from declaring lane widths), and
+    docs/qif/atlas/fixture_frontier_granite.json is grounded on its eight rows,
+    so deleting it would delete the evidence. It cannot be regenerated either:
+    its config declared an axis the tool now refuses by name. A frozen artifact
+    with no label is a rotting one, so the label is what this pins.
+    """
+    payload = json.loads((RETIRED_DEMO_DIR / "dse_report.json").read_text())
+    retired = payload["retired"]
+    assert retired["decision"].startswith("ADJ-9")
+    assert "FROZEN" in retired["status"]
+    assert "REFUSES that axis by name" in retired["status"]
+    assert "granite_capacity_banks" in retired["successor"]
+    assert "DERIVED" in retired["read_it_as"]
+    # It really is the lane sweep, and the tool really would refuse it now.
+    assert payload["sweep"]["axes"] == {
+        "vector_lanes": [512, 1024, 2048, 4096],
+        "bank_depth": [1, 2],
+    }
+    with pytest.raises(DSE.QifDseUsageError):
+        DSE.SweepSpec.from_raw({DSE.DSE_BLOCK: payload["sweep"]}, "retired")
+    # And the comparison it is kept FOR is still readable off it.
+    at_depth_one = sorted(
+        (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == 1),
+        key=lambda c: c["knobs"]["vector_lanes"],
+    )
+    rates = [c["metrics"]["tokens_per_s"] for c in at_depth_one]
+    silicon = [c["silicon"]["total_silicon_mm2"] for c in at_depth_one]
+    assert rates[-1] / rates[0] == pytest.approx(1.273, rel=1e-2)
+    assert silicon[-1] / silicon[0] == pytest.approx(1.0078, rel=1e-3)
 
 
 def test_checked_in_demo_sweep_regenerates_identically(tmp_path):
@@ -843,9 +952,18 @@ def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
     chiplets = {
         c["placement"]["shared_digital_chiplets"] for c in payload["candidates"] if c["ok"]
     }
-    assert len(slots) == 1 and len(chiplets) == 1
+    # ADJ-9 REWRITE. OLD CLAIM: the slot count is constant across the sweep,
+    # because the old axes (lane width, bank depth) moved neither the chip
+    # capacity nor the chip count. NEW CLAIM: the CHIPLET count is constant and
+    # the SLOT count is not, because arrays_per_chip is now an axis and
+    # enumerating slots is exactly what it does. The flat_area branch below is
+    # therefore unreachable on this sweep and the assertion says so instead of
+    # pretending both branches are live.
+    assert len(chiplets) == 1
+    assert len(slots) == 4
     uncovered = payload["silicon_coverage"]["uncovered_terms"]
     if shape == "flat_area":
+        assert len(slots) == 1
         assert f"slot count is {slots.pop()}" in note
         assert f"chiplet count is {chiplets.pop()}" in note
         for term in uncovered:
@@ -886,17 +1004,26 @@ def test_banking_moves_active_column_sets_and_not_wasted_columns():
     (D27), a finer bank lets one macro's banks hold blocks of DIFFERENT tensors,
     so bank_depth 1 places 4828 macros against bank_depth 2's 5488. WHY THE
     ENERGY CLAIM SURVIVES ANYWAY: the silicon a point buys is its enumerated
-    SLOTS (6400 either way, asserted below), not the macros a mapping fills, so
-    the two wins stay separate — energy from the active-column-set law, macros
-    from Invariant W — and neither is the other's cause.
+    SLOTS, not the macros a mapping fills, so the two wins stay separate —
+    energy from the active-column-set law, macros from Invariant W — and
+    neither is the other's cause.
+
+    ADJ-9 REWRITE. OLD CLAIM: the enumerated slot count and the unowned-column
+    census are constant across the WHOLE sweep, and the silicon moves with
+    vector_lanes. NEW CLAIM: both censuses are constant across the BANK DEPTHS
+    at a fixed capacity, and they move with the capacity axis that replaced the
+    lane axis — which is the same statement about banking, scoped to the axis
+    that actually holds capacity still.
     """
     payload = json.loads(DEMO_JSON.read_text())
     valid = [c for c in payload["candidates"] if c["ok"]]
-    assert len({c["placement"]["unowned_columns"] for c in valid}) == 1
-    assert len({c["placement"]["analog_macro_slots"] for c in valid}) == 1
+    at_capacity = [c for c in valid if c["knobs"]["arrays_per_chip"] == 604]
+    assert len(at_capacity) == 2
+    assert len({c["placement"]["unowned_columns"] for c in at_capacity}) == 1
+    assert len({c["placement"]["analog_macro_slots"] for c in at_capacity}) == 1
     assert len({c["silicon"]["total_silicon_mm2"] for c in valid}) > 1, (
-        "the silicon still moves across this sweep — with vector_lanes, not with "
-        "the bank depth"
+        "the silicon still moves across this sweep — with arrays_per_chip, and "
+        "only marginally with the bank depth"
     )
     # The macro count moves with the BANK DEPTH and with nothing else.
     by_depth = {}
@@ -918,14 +1045,38 @@ def test_banking_moves_active_column_sets_and_not_wasted_columns():
             if e["component"] == name
         )
 
-    bank1 = next(c for c in valid if c["knobs"] == {"vector_lanes": 4096, "bank_depth": 1})
-    bank2 = next(c for c in valid if c["knobs"] == {"vector_lanes": 4096, "bank_depth": 2})
-    # The whole energy delta is the analog arrays; the links do not move.
+    bank1 = next(
+        c for c in valid if c["knobs"] == {"arrays_per_chip": 604, "bank_depth": 1}
+    )
+    bank2 = next(
+        c for c in valid if c["knobs"] == {"arrays_per_chip": 604, "bank_depth": 2}
+    )
+    # ADJ-9 REWRITE. OLD CLAIM: the WHOLE energy delta between the two bank
+    # depths is the analog arrays. NEW CLAIM: it is two terms, and the second
+    # one is a consequence of ADJ-9 rather than a defect. A finer bank shortens
+    # the analog m-pass a stage spends, and under D31-v2 that m-pass IS the
+    # engine's sizing target — so bank_depth 1 derives a WIDER engine (6509
+    # lanes against 6125), whose composed power is higher. The links still do
+    # not move, and the analog term still moves the way the active-column-set
+    # law says. The two terms have opposite signs and the total is their sum.
     assert component(bank1, "link_traffic") == component(bank2, "link_traffic")
     assert component(bank1, "analog_arrays") < component(bank2, "analog_arrays")
+    assert component(bank1, "shared_digital_chiplet") > component(
+        bank2, "shared_digital_chiplet"
+    )
+    assert (
+        bank1["derived_digital"]["vector_lanes"]
+        > bank2["derived_digital"]["vector_lanes"]
+    )
     delta = bank2["metrics"]["total_energy_pj"] - bank1["metrics"]["total_energy_pj"]
     array_delta = component(bank2, "analog_arrays") - component(bank1, "analog_arrays")
-    assert abs(delta - array_delta) < 1e-3
+    engine_delta = component(bank2, "shared_digital_chiplet") - component(
+        bank1, "shared_digital_chiplet"
+    )
+    assert abs(delta - (array_delta + engine_delta)) < 1e-3
+    # The analog term is still the DOMINANT half of the move; the derived
+    # engine's is a 6.5% counterweight, not a wash.
+    assert abs(engine_delta) < 0.1 * abs(array_delta)
     # A finer bank makes MORE tiles, each narrower — not the same tiles.
     assert bank1["placement"]["tiles"] > bank2["placement"]["tiles"]
 

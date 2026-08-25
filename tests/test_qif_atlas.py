@@ -266,6 +266,10 @@ def test_schema_md_states_the_self_tests_real_case_count(tmp_path):
         ("R26", "role", 'd.systems[0].role = "mixed";'),
         ("R27", "duty_cycle", "d.macros[0].duty_cycle = 5.0;"),
         ("R6", "basis", 'd.links[0].basis = "";'),
+        # The `svc` role is DOCUMENTED and ACCEPTED (see the svc test below);
+        # an undocumented role still refuses, so widening the list did not
+        # turn R6 into a rubber stamp.
+        ("R6", "role", 'd.links[0].role = "wire";'),
         ("R18", "value", 'd.metrics[0].value = "lots";'),
     ],
 )
@@ -282,6 +286,35 @@ def test_declared_schema_rules_are_enforced_not_just_documented(rule, field, mut
     )
     hits = [e for e in json.loads(out) if e.startswith(rule + " ") and field in e]
     assert hits, json.loads(out)
+
+
+def test_the_svc_role_is_accepted_by_the_loader_and_documented(tmp_path):
+    """NEW GATE: role `svc` loads clean, draws its own dash, and is in SCHEMA.md.
+
+    A role the exporter emits and the viewer rejects is a broken page, and a
+    role the viewer accepts and SCHEMA.md never mentions is an undocumented
+    field. Both halves are pinned here, in the loader's own words.
+    """
+    out = _run_core(
+        """
+        const d = JSON.parse(JSON.stringify(doc));
+        d.links[0].role = "svc";
+        const v = ATLAS.validate(d);
+        console.log(JSON.stringify(v.errors.map(e => e.rule + ' ' + e.field)));
+        """,
+        tmp_path,
+    )
+    assert [e for e in json.loads(out) if e.startswith("R6 ") and "role" in e] == []
+    html = _html()
+    # Its own dash pattern, so it is distinguishable from `act` on the picture.
+    assert 'svc: "4 2 1 2"' in html
+    # ... and it is in the legend's role list, so a reader is told it exists.
+    assert '["tp", "ep", "pp", "pd", "act", "svc"].forEach' in html
+    schema = SCHEMA_MD.read_text(encoding="utf-8")
+    assert "`svc`" in schema
+    assert "shared digital chiplet and each" in schema
+    assert "operands out" in schema and "results back" in schema
+    assert "PRICED rows" in schema
 
 
 # --- P5.4 duty cycle, and the PD two-system document (D16) ------------------
@@ -1148,7 +1181,9 @@ def test_the_frontier_refuses_a_safety_margin_under_any_of_its_names(tmp_path):
 def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
     """The nine points are the Wave D candidates, checked against their source.
 
-    The eight swept points are copied from docs/qif/dse/granite_lanes_banks;
+    The eight swept points are copied from the FROZEN Wave-D sweep at
+    docs/qif/dse/granite_lanes_banks_retired (ADJ-9 refuses its axis by name, so
+    it can never be regenerated and is labelled as frozen where it lives);
     the ninth is the shipped Granite atlas run. The front is the four
     bank_depth = 1 points (a bank_depth = 2 twin costs the same silicon and runs
     slower, so it is dominated), and the knee is c002, where the digital term of
@@ -1156,7 +1191,7 @@ def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
     move.
     """
     dse = json.loads(
-        (PROJECT_ROOT / "docs/qif/dse/granite_lanes_banks/dse_report.json").read_text(encoding="utf-8")
+        (PROJECT_ROOT / "docs/qif/dse/granite_lanes_banks_retired/dse_report.json").read_text(encoding="utf-8")
     )
     measured = {}
     for candidate in dse["candidates"]:
@@ -1225,15 +1260,34 @@ def test_the_frontier_front_and_knee_are_the_real_sweeps_own_numbers(tmp_path):
                  or q["throughput"]["tokens_per_s"] > p["throughput"]["tokens_per_s"])
             for q in front["points"]
         )
-    # WAVE F REWRITE (D32, P7.8). OLD: the front is exactly the four
-    # bank_depth = 1 sweep points. NEW: the reference atlas run joins it. Its
-    # engine width is DERIVED from its own beat (D31) rather than declared, so
-    # it carries LESS digital silicon than any swept point and is non-dominated
-    # on the area axis. That is the whole content of D31 drawn on the picture:
-    # the derived point is the cheapest one on the frontier.
+    # ADJ-9 REWRITE, AND IT IS THE FINDING.
+    # OLD (Wave F, D31-v1): the front is the four bank_depth = 1 sweep points
+    # PLUS the reference atlas run, because its engine was DERIVED at 220 lanes
+    # and therefore carried less digital silicon than any declared point — "the
+    # derived point is the cheapest one on the frontier".
+    # NEW (D31-v2, ADJ-9): the derived width is 5479 lanes, WIDER than the
+    # widest declared point on this picture, so the reference run costs 39.1
+    # mm2 more than c006 (4096 declared lanes) and measures 56 tokens/s less.
+    # It is DOMINATED, and the front is the four swept points again.
+    #
+    # That is not a bug in the derivation and it is not an argument against
+    # ADJ-9; it is what ADJ-9 buys and what it does not. The criterion is
+    # per-STAGE (digital per-stage time <= that stage's analog m-pass) and it
+    # holds on all ten stages. The MACHINE is still bound by the attention
+    # systolic fabric — 18.6 us on the beat-setting stage against a 1.6 us
+    # analog m-pass — whose geometry is DECLARED card geometry that D31 derives
+    # no width for. Past the point where the scan fits under the attention
+    # term, lanes buy area and no throughput, and this assertion is where that
+    # is visible rather than argued.
     assert sorted(p["id"] for p in front["points"] if p["pareto"]) == [
-        "c000", "c002", "c004", "c006", "ref.atlas"
+        "c000", "c002", "c004", "c006"
     ]
+    ref = [p for p in front["points"] if p["id"] == "ref.atlas"][0]
+    c006 = [p for p in front["points"] if p["id"] == "c006"][0]
+    assert ref["knobs"]["vector_lanes"] > c006["knobs"]["vector_lanes"]
+    assert ref["area"]["total_mm2"] > c006["area"]["total_mm2"]
+    assert ref["throughput"]["tokens_per_s"] < c006["throughput"]["tokens_per_s"]
+    assert ref["pareto"] is False
     for point in front["points"]:
         assert point["pareto"] == (not dominated(point)), point["id"]
     # THE KNEE, REWRITTEN FOR D29 (Wave F). Under the retired lockstep regime
@@ -1321,10 +1375,17 @@ def test_the_frontier_marks_the_field_no_producer_emits():
     # reference mapping's census repeated on every row).
     assert "waste_is_the_column_census" not in constraints
     assert "waste_is_one_reference_mappings_cell_census" in constraints
-    # P7.9: the eight swept points sweep vector_lanes, which D31 retires. That
-    # is a fact about the document and it is named ON the document, not only in
-    # a status file a chart reader never opens.
-    assert "the_eight_swept_points_sweep_a_RETIRED_axis" in constraints
+    # ADJ-9 REWRITE. OLD: the axis is RETIRED (still spellable, labelled).
+    # NEW: it is REFUSED BY NAME at parse, so the eight points can never be
+    # regenerated and their artifact is frozen. Same place, stronger word.
+    assert "the_eight_swept_points_sweep_a_REFUSED_axis" in constraints
+    assert "the_eight_swept_points_sweep_a_RETIRED_axis" not in constraints
+    refused = [
+        r for r in front["relaxations"]
+        if r["constraint"] == "the_eight_swept_points_sweep_a_REFUSED_axis"
+    ][0]
+    assert "granite_lanes_banks_retired" in refused["reason"]
+    assert "REFUSES the axis by name" in refused["reason"]
     cells = [
         r for r in front["relaxations"]
         if r["constraint"] == "waste_is_one_reference_mappings_cell_census"

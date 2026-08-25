@@ -95,13 +95,11 @@ cim:
       # undeclared on purpose: the first two inherit the chiplet's own clock
       # and softmax depth (disclosed per priced op), and an undeclared state
       # bandwidth REPORTS recurrent-state traffic without bounding it.
-      # NOTE (D31, P7.8): the mapping_dse block at the end of this file still
-      # SWEEPS vector_lanes. Under D31 that axis is retired — the engine is not
-      # a free knob — so every candidate that sets it is a DECLARED OVERRIDE and
-      # each one's report carries the override disclosure by name. The axis is
-      # left standing only because this sweep and its checked-in artifact are
-      # P7.4/P7.5's deliverable; retiring it belongs to that wave, not to a
-      # silent edit here.
+      # NOTE (ADJ-9): the mapping_dse block at the end of this file no longer
+      # sweeps vector_lanes. D31-v2 derives the engine to the ANALOG FLOOR and
+      # the axis is REFUSED BY NAME by tools/fws_qif_dse.py; the sweep that
+      # declared it is frozen and labelled at
+      # docs/qif/dse/granite_lanes_banks_retired.
 
 sw_param:
   full_recomputation: false
@@ -239,29 +237,38 @@ mapping:
 # --- file — so this config still runs through run_perf unchanged, as the
 # --- single design point its `cim:` and `mapping:` blocks declare.
 #
-# THE DEMO SWEEP: vector lanes x banking on the headline model. Every entry is
-# an EXPLICIT candidate; there is no search phase (D19, and D10 keeps the
-# automatic allocator future work). The cross product is 8 points and every one
-# of them is placed by P3 and priced by P4 on its OWN timeline (ADJ-6) — the
-# sweep costs about two minutes of wall clock and nothing in it is sampled.
+# THE DEMO SWEEP: chip capacity x analog banking on the headline model. Every
+# entry is an EXPLICIT candidate; there is no search phase (D19, and D10 keeps
+# the automatic allocator future work). The cross product is 8 points and every
+# one of them is placed by P3 and priced by P4 on its OWN timeline (ADJ-6) —
+# the sweep costs about two minutes of wall clock and nothing in it is sampled.
 #
-#   vector_lanes: the shared digital chiplet's DECLARED scan-engine width
-#     (cim.cards.sa.vector_lanes, D13). Granite-4.0-H-Tiny is 36 Mamba-2
-#     layers, so the Mamba-2 scan is on the critical path of every decode step
-#     and the headline moves with this number. A DECODE step is priced by the
-#     per-token recurrence ssm_recurrent_scan[mamba2] (validated =
-#     optima_m3_reference); the chunked SSD form (ssd_chunked_scan, UNVALIDATED)
-#     prices prefill only, because fws_eval chunks on phase == 'prefill' and
-#     the scan law falls back to the recurrence at tokens <= 1. Both forms run
-#     on this same vector engine. 1024 is the point the shipped config
-#     declares; the other three are design points, not measured silicon.
+# ADJ-9 RETIRED THIS SWEEP'S FIRST AXIS. It used to be `vector_lanes`, and its
+# whole spread came from DECLARING a scan-engine width. D31-v2 derives that
+# width to the ANALOG FLOOR — up until every stage's digital per-stage time
+# fits that stage's own analog m-pass time — so a declared width is not a
+# design point, it is the answer chosen instead of derived. The axis is now
+# REFUSED BY NAME by tools/fws_qif_dse.py (REFUSED_AXES), and the sweep it fed
+# is preserved, frozen and labelled, at docs/qif/dse/granite_lanes_banks_retired
+# because it is the historical comparison ADJ-9 itself quotes (+27% tokens/s
+# for +0.78% silicon). The two axes below are both D31-legal.
+#
+#   arrays_per_chip: CHIP CAPACITY — the macro slots one chip offers
+#     (cim.chip.arrays_per_chip). Under Invariant W (D27) the analog macro
+#     count is the global CELL FLOOR, so capacity does not change how many
+#     macros hold weights; it changes how many slots the machine ENUMERATES,
+#     and every enumerated-but-unowned slot is real silicon. This is therefore
+#     the AREA axis, and the finding this sweep exists to draw is that at a
+#     fixed stage plan it buys area and nothing else. The four values are the
+#     shipped 640 plus ceil(L x 120.625) for L = 5, 8 and 10 — the same rungs
+#     the P7.4 frontier walks, so the two artifacts price comparable machines.
 #   bank_depth: the analog card's allocation granularity in mux slots
 #     (cim.cards.ctt.bank_depth, A3/D10 — spatial column allocation). The card
 #     declares adc_mux = 4, so 1, 2 and 4 are the values it admits; 3 is
 #     refused BY THE CARD, which is the refusal path this axis rides.
 mapping_dse:
-  label: "Granite-4.0-H-Tiny: shared-chiplet vector lanes x analog banking"
+  label: "Granite-4.0-H-Tiny: chip capacity x analog banking (D31-legal axes)"
   objective: throughput
   axes:
-    vector_lanes: [512, 1024, 2048, 4096]
+    arrays_per_chip: [604, 640, 965, 1207]
     bank_depth: [1, 2]

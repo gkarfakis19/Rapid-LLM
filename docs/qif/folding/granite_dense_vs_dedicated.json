@@ -22,26 +22,26 @@
   "points": [
     {
       "packing": "dedicated",
-      "analog_macro_slots": 6400,
+      "analog_macro_slots": 6040,
       "macros_holding_tiles": 5544,
-      "unowned_macro_slots": 856,
+      "unowned_macro_slots": 496,
       "tiles": 19304,
       "packing_accounting": {
         "packing": "dedicated",
         "waste_reported": false,
         "basis": "the dedicated placement law: each weight matrix starts on a fresh macro. No packer ran, so this run has no waste accounting \u2014 Invariant W's waste% is the DENSE packer's metric (D27) and a number here would be invented. Set mapping.packing: dense to get it."
       },
-      "makespan_s": 0.0005115512039482792,
+      "makespan_s": 0.0005034490986851221,
       "serving_regime": "filled_pipeline",
       "resident_streams": 10,
       "decode_step_times_s": [
-        3.43952330120345e-05,
-        3.898173797836803e-05,
-        3.8990159030999555e-05,
-        3.8998580083631136e-05
+        3.4583654064666066e-05,
+        3.84164748204733e-05,
+        3.842489587310493e-05,
+        3.843331692573651e-05
       ],
-      "median_decode_step_s": 3.898594850468379e-05,
-      "tokens_per_s": 25647.4973391347,
+      "median_decode_step_s": 3.8420685346789114e-05,
+      "tokens_per_s": 26024.79401121653,
       "bank_passes": {
         "measured": true,
         "decode_step": 13,
@@ -78,29 +78,29 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "devices": 6400,
+          "devices": 6040,
           "devices_used": 5544,
-          "idle_devices": 856,
-          "idle_share": 0.13375,
+          "idle_devices": 496,
+          "idle_share": 0.08211920529801324,
           "ops": 183388,
-          "busy_s": 0.003667759999999203,
-          "mean_occupancy": 0.0011202935220885881,
-          "median_occupancy": 0.0011729031138410118,
-          "max_occupancy": 0.0021894191458360682,
+          "busy_s": 0.003667759999999247,
+          "mean_occupancy": 0.001206169669780766,
+          "median_occupancy": 0.0012712307990443957,
+          "max_occupancy": 0.0022246538983285015,
           "min_occupancy": 0.0,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
         {
           "device_class": "macro_pool",
-          "devices": 6400,
+          "devices": 6040,
           "devices_used": 2716,
-          "idle_devices": 3684,
-          "idle_share": 0.575625,
+          "idle_devices": 3324,
+          "idle_share": 0.5503311258278145,
           "ops": 27968,
-          "busy_s": 2.7359999999994737e-05,
-          "mean_occupancy": 8.356934686114833e-06,
+          "busy_s": 2.7359999999995093e-05,
+          "mean_occupancy": 8.997535870722897e-06,
           "median_occupancy": 0.0,
-          "max_occupancy": 0.0021894191458360682,
+          "max_occupancy": 0.0022246538983285015,
           "min_occupancy": 0.0,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
@@ -111,11 +111,11 @@
           "idle_devices": 0,
           "idle_share": 0.0,
           "ops": 456,
-          "busy_s": 0.0014707789473684197,
-          "mean_occupancy": 0.2875135345233444,
-          "median_occupancy": 0.05360784547681265,
-          "max_occupancy": 0.9032382838955518,
-          "min_occupancy": 0.020618402106466004,
+          "busy_s": 0.0014063389473684222,
+          "mean_occupancy": 0.2793408412173968,
+          "median_occupancy": 0.03500902713685918,
+          "max_occupancy": 0.9031781201195614,
+          "min_occupancy": 0.01346501043725353,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
         {
@@ -126,10 +126,10 @@
           "idle_share": 0.0,
           "ops": 313,
           "busy_s": 0.00031615666198730465,
-          "mean_occupancy": 0.036355013069260374,
-          "median_occupancy": 0.0020107669018333226,
-          "max_occupancy": 0.17910208713911532,
-          "min_occupancy": 0.0020107669018333226,
+          "mean_occupancy": 0.036940081437641395,
+          "median_occupancy": 0.002043126568661359,
+          "max_occupancy": 0.1819844122175436,
+          "min_occupancy": 0.002043126568661359,
           "basis": "links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio \u2014 the priced transfer time on one chip-to-chip link over the makespan \u2014 and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
         }
       ],
@@ -137,9 +137,9 @@
     },
     {
       "packing": "dense",
-      "analog_macro_slots": 6400,
+      "analog_macro_slots": 6040,
       "macros_holding_tiles": 4828,
-      "unowned_macro_slots": 1572,
+      "unowned_macro_slots": 1212,
       "tiles": 19304,
       "packing_accounting": {
         "packing": "dense",
@@ -162,17 +162,17 @@
         "spread_k_stacks": 72,
         "basis": "cim_timing.dense_pack per chip (Invariant W, D27): real + remainder + tail == committed, against the GLOBAL cell floor ceil(real_cells / cells_per_macro). dedicated_macros is what the same tensors reach under the per-tensor placement, so macros_saved == 0 IS the degenerate identity."
       },
-      "makespan_s": 0.0005105112039482799,
+      "makespan_s": 0.0005024090986851228,
       "serving_regime": "filled_pipeline",
       "resident_streams": 10,
       "decode_step_times_s": [
-        3.435523301203449e-05,
-        3.894173797836813e-05,
-        3.8950159030999576e-05,
-        3.8958580083631156e-05
+        3.454365406466606e-05,
+        3.8376474820473426e-05,
+        3.838489587310495e-05,
+        3.839331692573653e-05
       ],
-      "median_decode_step_s": 3.8945948504683854e-05,
-      "tokens_per_s": 25673.836124882622,
+      "median_decode_step_s": 3.838068534678919e-05,
+      "tokens_per_s": 26051.913838866694,
       "bank_passes": {
         "measured": true,
         "decode_step": 13,
@@ -195,7 +195,7 @@
         "macros_sharing_banks_across_layers": 4,
         "macros_sharing_banks_across_stages": 0,
         "delayed_ops": 10440,
-        "same_owner_delay_s": 0.0003136799999998599,
+        "same_owner_delay_s": 0.00031367999999986035,
         "cross_layer_delay_s": 0.0,
         "cross_stage_delay_s": 0.0,
         "within_stage_cross_layer_delay_s": 0.0,
@@ -209,29 +209,29 @@
       "utilization": [
         {
           "device_class": "analog_macro",
-          "devices": 6400,
+          "devices": 6040,
           "devices_used": 4828,
-          "idle_devices": 1572,
-          "idle_share": 0.245625,
+          "idle_devices": 1212,
+          "idle_share": 0.20066225165562915,
           "ops": 182704,
-          "busy_s": 0.0036677599999992145,
-          "mean_occupancy": 0.0011225757545919345,
-          "median_occupancy": 0.0012536453559685388,
-          "max_occupancy": 0.002193879372945979,
+          "busy_s": 0.003667759999999252,
+          "mean_occupancy": 0.001208666472605108,
+          "median_occupancy": 0.001273862280111358,
+          "max_occupancy": 0.0022292589901957154,
           "min_occupancy": 0.0,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
         {
           "device_class": "macro_pool",
-          "devices": 6400,
+          "devices": 6040,
           "devices_used": 4036,
-          "idle_devices": 2364,
-          "idle_share": 0.369375,
+          "idle_devices": 2004,
+          "idle_share": 0.33178807947019867,
           "ops": 40128,
-          "busy_s": 2.735999999999479e-05,
-          "mean_occupancy": 8.373959213698841e-06,
+          "busy_s": 2.7359999999995093e-05,
+          "mean_occupancy": 9.016161005757347e-06,
           "median_occupancy": 0.0,
-          "max_occupancy": 0.0010969396864728962,
+          "max_occupancy": 0.0011146294950977493,
           "min_occupancy": 0.0,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
@@ -242,11 +242,11 @@
           "idle_devices": 0,
           "idle_share": 0.0,
           "ops": 456,
-          "busy_s": 0.0014707789473684197,
-          "mean_occupancy": 0.2880992495352609,
-          "median_occupancy": 0.05371705396991656,
-          "max_occupancy": 0.9050783371754518,
-          "min_occupancy": 0.020660405373044425,
+          "busy_s": 0.0014063389473684225,
+          "mean_occupancy": 0.279919084078894,
+          "median_occupancy": 0.03508149674045036,
+          "max_occupancy": 0.9050477224961547,
+          "min_occupancy": 0.013492883361711675,
           "basis": "per DEVICE CLASS, over every device of the class the mapping instantiated (idle devices included in the average, which is what makes idle silicon visible \u2014 D28). A device's occupancy is its busy union over the makespan, the same projection the per-device occupancy table prints, so the two are one accounting (D21)."
         },
         {
@@ -257,10 +257,10 @@
           "idle_share": 0.0,
           "ops": 313,
           "busy_s": 0.00031615666198730465,
-          "mean_occupancy": 0.0364290745458736,
-          "median_occupancy": 0.002014863183289502,
-          "max_occupancy": 0.1794669492012679,
-          "min_occupancy": 0.002014863183289502,
+          "mean_occupancy": 0.03701654837423881,
+          "median_occupancy": 0.0020473558941989886,
+          "max_occupancy": 0.1823611247197683,
+          "min_occupancy": 0.0020473558941989886,
           "basis": "links are NOT devices: D17 fixes the fabric at fully-connected p2p with no congestion model, so a link occupies no resource on the timeline. This row is therefore a DEMAND ratio \u2014 the priced transfer time on one chip-to-chip link over the makespan \u2014 and a value above 1.0 would mean the link is oversubscribed rather than that it was busy that long."
         }
       ],
@@ -272,8 +272,8 @@
     "cell_floor_macros": 2876,
     "macros_above_floor": 1952,
     "waste_pct": 40.44203949185308,
-    "median_decode_step_delta_s": -3.999999999993863e-08,
-    "median_decode_step_delta_pct": -0.10260106919069317,
+    "median_decode_step_delta_s": -3.999999999992508e-08,
+    "median_decode_step_delta_pct": -0.1041105842826095,
     "basis": "macros_saved is dense against the SAME tensors under the per-tensor placement, measured on both mappings rather than predicted. macros_above_floor is what dense packing still costs over the global cell floor: the floor is a whole-model quantity and this packing is per chip, so the difference is chip granularity plus the dimension-mismatch remainder, which waste_pct itemizes. The step delta is the two timelines' median lowered decode steps, and it is the accumulator/partial-transport trade (P7 Fact 1), not an analog speed-up: both laws charge the same column-set passes per step. Under the filled pipeline (D29) that step IS the beat and the passes are counted per beat, which is the same statement one level up: every stored weight is read once per beat and one token leaves."
   },
   "disclosures": [
@@ -308,9 +308,9 @@
       "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
     },
     {
-      "constraint": "vector_engine:vector_lanes = 4096 is DECLARED on card 'sa' and",
+      "constraint": "vector_engine:vector_lanes = 6509 is DERIVED (D31-v2, ADJ-9) t",
       "value": "declared relaxation",
-      "reason": "vector_lanes = 4096 is DECLARED on card 'sa' and is therefore an OVERRIDE: D31 retires the scan/vector engine as a design input, because its width is derived from the pipeline beat and reported, never chosen or swept. The run honours the declaration; this line is the disclosure it rides on."
+      "reason": "vector_lanes = 6509 is DERIVED (D31-v2, ADJ-9) to the ANALOG FLOOR: the smallest width for which every stage's digital per-stage time fits that stage's own measured ANALOG m-pass time, with no margin (D28). Stage 0 is binding at a 1.36e-06 s analog m-pass and the engine runs at 99.690% duty inside it; 10 of 10 stage(s) are analog-bound by construction."
     },
     {
       "constraint": "vector_engine:vector_clock_ghz undeclared: inherited cim.fabri",
@@ -329,8 +329,8 @@
     },
     {
       "constraint": "shared_digital_energy:vector",
-      "value": "vector engine at 17.4898 W (composed), charged for the op's own time",
-      "reason": "D32: the shared digital chiplet's energy is now COMPOSED from the measured synthesis library \u2014 the engine's block census times each block's own measured power gives 17.4898 W, and an op is charged that power for exactly as long as it runs. The label is PARTIAL, not COVERED, and here is why: the library reports ONE average power per block and does not separate dynamic from static, so (a) a block's power is charged at its synthesis toggle rate rather than at this op's activity, and (b) the chiplet's LEAKAGE while it is idle is not charged at all \u2014 an idle engine costs 0 pJ here, which is a floor, not a measurement. Both directions are named rather than folded into one adjusted number (D21, one accounting per metric)."
+      "value": "vector engine at 27.7933 W (composed), charged for the op's own time",
+      "reason": "D32: the shared digital chiplet's energy is now COMPOSED from the measured synthesis library \u2014 the engine's block census times each block's own measured power gives 27.7933 W, and an op is charged that power for exactly as long as it runs. The label is PARTIAL, not COVERED, and here is why: the library reports ONE average power per block and does not separate dynamic from static, so (a) a block's power is charged at its synthesis toggle rate rather than at this op's activity, and (b) the chiplet's LEAKAGE while it is idle is not charged at all \u2014 an idle engine costs 0 pJ here, which is a floor, not a measurement. Both directions are named rather than folded into one adjusted number (D21, one accounting per metric)."
     },
     {
       "constraint": "row_block_partial_sum_law",
@@ -351,6 +351,26 @@
       "constraint": "shared_digital_energy:attention",
       "value": "attention engine at 3.71113 W (composed), charged for the op's own time",
       "reason": "D32: the shared digital chiplet's energy is now COMPOSED from the measured synthesis library \u2014 the engine's block census times each block's own measured power gives 3.71113 W, and an op is charged that power for exactly as long as it runs. The label is PARTIAL, not COVERED, and here is why: the library reports ONE average power per block and does not separate dynamic from static, so (a) a block's power is charged at its synthesis toggle rate rather than at this op's activity, and (b) the chiplet's LEAKAGE while it is idle is not charged at all \u2014 an idle engine costs 0 pJ here, which is a floor, not a measurement. Both directions are named rather than folded into one adjusted number (D21, one accounting per metric)."
+    },
+    {
+      "constraint": "derived_engine_sizing",
+      "value": "vector_lanes = 6509 (derived-count), binding stage 0, engine duty 99.690% of that stage's own 1.36e-06 s ANALOG m-pass; 10 of 10 stage(s) analog-bound",
+      "reason": "D31-v2 (ADJ-9): the scan/vector engine is never a swept or declared free knob, and it is sized to the ANALOG FLOOR rather than to the beat. Its width is DERIVED here as the smallest integer lane count for which EVERY stage's digital per-stage time fits that stage's OWN measured analog m-pass time, with no margin (D28). Both targets come from a PROBE pass in which every vector op is counted and costs nothing, so nothing the engine is sized against depends on the engine. The derivation inverts CimDeviceModel.price_vector_work exactly, so the engine sized here is the engine the run is then priced on. THE CRITERION IS digital-per-stage <= the stage's ANALOG m-pass time: the analog side is the binding term by construction wherever it can be. It does not make the MEASURED beat equal the analog time and cannot \u2014 a D29 stage holds one stream at a time, so its analog passes and its scan run in series and the measured beat is their sum at any width (here 1.35579e-06 s of digital against a 1.36e-06 s analog m-pass on the binding stage). Per stage: stage 0: 1288/1291 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 1: 966/1291 cycles, digital 1.017e-06 s vs analog 1.36e-06 s, stage 2: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 3: 966/1291 cycles, digital 1.017e-06 s vs analog 1.36e-06 s, stage 4: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 5: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s. Every stage's criterion was reachable. ALSO DISCLOSED under this same constraint by a second producer: D31-v2 (ADJ-9): the scan/vector engine is never a swept or declared free knob, and it is sized to the ANALOG FLOOR rather than to the beat. Its width is DERIVED here as the smallest integer lane count for which EVERY stage's digital per-stage time fits that stage's OWN measured analog m-pass time, with no margin (D28). Both targets come from a PROBE pass in which every vector op is counted and costs nothing, so nothing the engine is sized against depends on the engine. The derivation inverts CimDeviceModel.price_vector_work exactly, so the engine sized here is the engine the run is then priced on. THE CRITERION IS digital-per-stage <= the stage's ANALOG m-pass time: the analog side is the binding term by construction wherever it can be. It does not make the MEASURED beat equal the analog time and cannot \u2014 a D29 stage holds one stream at a time, so its analog passes and its scan run in series and the measured beat is their sum at any width (here 1.35579e-06 s of digital against a 1.36e-06 s analog m-pass on the binding stage). Per stage: stage 0: 1288/1291 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 1: 966/1215 cycles, digital 1.017e-06 s vs analog 1.28e-06 s, stage 2: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 3: 966/1253 cycles, digital 1.017e-06 s vs analog 1.32e-06 s, stage 4: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s, stage 5: 1288/1292 cycles, digital 1.356e-06 s vs analog 1.36e-06 s. Every stage's criterion was reachable."
+    },
+    {
+      "constraint": "analog_floor_reachability",
+      "value": "10 of 10 stage(s) analog-bound after the derivation; the beat-setting stage 6 spends 1.85989e-05 s on shared_digital/attention_qk against 1.36e-06 s of analog m-pass",
+      "reason": "ADJ-9 asks the ANALOG side to be the binding term wherever that is physically reachable. The derivation guarantees the half it can: the DERIVED scan/vector engine is sized so its per-stage time fits inside that stage's own analog m-pass time. It cannot guarantee the other half, because a stage also runs silicon D31 does not derive \u2014 the attention systolic fabric and the softmax pipeline are DECLARED card geometry (cim.fabric rows x cols x num_arrays, softmax_lanes, D13) and a sweep axis under D28, not a derived engine. This row is the measurement that says which it is on THIS machine: the largest term is NOT analog, so the beat is set by declared digital silicon and buying more scan lanes cannot move it. The terms are itemized in evaluation.digital_silicon.derived_engine_sizing.beat_setting_stage. Terms (union of busy intervals, probe slice): shared_digital/attention_qk 1.86e-05 s; shared_digital/attention_pv 1.535e-05 s; link/qkv 1.067e-06 s; link/o_proj 1.029e-06 s; analog_macro/ffn2_routed 3.2e-07 s. Stage span 3.74417e-05 s. ALSO DISCLOSED under this same constraint by a second producer: ADJ-9 asks the ANALOG side to be the binding term wherever that is physically reachable. The derivation guarantees the half it can: the DERIVED scan/vector engine is sized so its per-stage time fits inside that stage's own analog m-pass time. It cannot guarantee the other half, because a stage also runs silicon D31 does not derive \u2014 the attention systolic fabric and the softmax pipeline are DECLARED card geometry (cim.fabric rows x cols x num_arrays, softmax_lanes, D13) and a sweep axis under D28, not a derived engine. This row is the measurement that says which it is on THIS machine: the largest term is NOT analog, so the beat is set by declared digital silicon and buying more scan lanes cannot move it. The terms are itemized in evaluation.digital_silicon.derived_engine_sizing.beat_setting_stage. Terms (union of busy intervals, probe slice): shared_digital/attention_qk 1.86e-05 s; shared_digital/attention_pv 1.534e-05 s; link/qkv 1.067e-06 s; link/o_proj 1.029e-06 s; analog_macro/ffn2_routed 3.2e-07 s. Stage span 3.73849e-05 s."
+    },
+    {
+      "constraint": "derived_engine_probe_beat",
+      "value": "probe beat 3.74081e-05 s, CONVERGED (3 settled interval(s), 0 dropped as ramp, whole steady sample spread 0.0225%)",
+      "reason": "The probe pass is where BOTH of ADJ-9's inputs are measured: each stage's analog m-pass time (the sizing target) and this beat (the fallback budget for a stage the criterion cannot reach). The beat is a measurement like any other, so this line is where a reader sees whether it settled. Under D31-v2 the beat no longer sizes any stage that has analog work, so a still-ramping beat can only move a FALLBACK row; the analog stage times themselves are sums of op durations and do not ramp. The beat is read off the same settled tail the priced pass uses (P7.9), so it does not move with the window."
+    },
+    {
+      "constraint": "derived_engine_area",
+      "value": "18.4167 mm2, 27.7933 W",
+      "reason": "D32: the derived engine's silicon is a COMPOSITION of measured synthesis blocks \u2014 FP_MULT x 6509, FP_ADD x 6509, M_REG x 6509 \u2014 at 22nm. 6509 lane(s) x (FP_MULT + FP_ADD + M_REG): one lane retires one scalar operation of EITHER kind per vector cycle, which is the peak CimDeviceModel.price_vector_work is bound to, so the lane holds both arithmetic units."
     },
     {
       "constraint": "activation_tier_is_per_chip",
@@ -374,8 +394,8 @@
     },
     {
       "constraint": "device_class_utilization",
-      "value": "analog_macro 0.112% mean / 0.219% peak (856 of 6400 idle), macro_pool 0.001% mean / 0.219% peak (3684 of 6400 idle), shared_digital 28.751% mean / 90.324% peak (0 of 10 idle), link 3.636% mean / 17.910% peak (0 of 17 idle)",
-      "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 90.324% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears. ALSO DISCLOSED under this same constraint by a second producer: D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 90.508% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+      "value": "analog_macro 0.121% mean / 0.222% peak (496 of 6040 idle), macro_pool 0.001% mean / 0.222% peak (3324 of 6040 idle), shared_digital 27.934% mean / 90.318% peak (0 of 10 idle), link 3.694% mean / 18.198% peak (0 of 17 idle)",
+      "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 90.318% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears. ALSO DISCLOSED under this same constraint by a second producer: D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 90.505% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
     },
     {
       "constraint": "pipeline_fill_transient",

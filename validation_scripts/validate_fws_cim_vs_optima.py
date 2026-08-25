@@ -889,7 +889,14 @@ DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_cim_dse")
 QIF_DSE_TOOL = os.path.join(REPO_ROOT, "tools", "fws_qif_dse.py")
 QIF_DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_qif_dse")
 QIF_DSE_DEMO = os.path.join(
-    REPO_ROOT, "docs", "qif", "dse", "granite_lanes_banks", "dse_report.json"
+    REPO_ROOT, "docs", "qif", "dse", "granite_capacity_banks", "dse_report.json"
+)
+#: The Wave-D sweep the one above replaced (ADJ-9). FROZEN and labelled: its
+#: config declared `vector_lanes` as an axis and tools/fws_qif_dse.py now
+#: refuses that axis by name, so it can never be regenerated. It is kept
+#: because it is the measurement ADJ-9 was adjudicated on.
+QIF_DSE_DEMO_RETIRED = os.path.join(
+    REPO_ROOT, "docs", "qif", "dse", "granite_lanes_banks_retired", "dse_report.json"
 )
 #: QIF P7.4/P7.5 — the regime-v2 FRONTIER curves (D29-D32). Read, not rerun:
 #: `tests/test_qif_frontier.py` re-walks each ladder and compares it, so the
@@ -1351,12 +1358,19 @@ def _run_qif_dse_tool(hw_yaml_path, model_yaml_name, out_dir, extra_args=()):
 
 def check_qif_dse_selection(table):
     """(P3.7 a) The CHECKED-IN demo sweep: Granite-4.0-H-Tiny over
-    vector_lanes {512,1024,2048,4096} x bank_depth {1,2}.
+    arrays_per_chip {604,640,965,1207} x bank_depth {1,2}.
 
     Read, not rerun: `tests/test_qif_dse_allocation.py` regenerates this
-    artifact and compares it, so the rows here are about WHAT THE SWEEP
-    FOUND — the headline scaling with the declared design point, the pick,
-    and the front.
+    artifact and compares it, so the rows here are about WHAT THE SWEEP FOUND.
+
+    ADJ-9 REWRITE. OLD AXES: `vector_lanes x bank_depth`, and the finding was
+    that the headline rises with the DECLARED lane count. D31-v2 derives the
+    engine to the analog floor and the tool now refuses the lane axis by name,
+    so the sweep's first axis is CHIP CAPACITY and the finding inverts: at a
+    fixed bank depth capacity moves no throughput at all, only silicon, which
+    is Invariant W (D27) on a cross product. The old artifact is frozen at
+    docs/qif/dse/granite_lanes_banks_retired and checked below under its own
+    rows.
     """
     name = "P3.7 demo sweep"
     if not table.boolean(
@@ -1370,8 +1384,15 @@ def check_qif_dse_selection(table):
 
     table.exact(
         "%s: axes swept" % name,
-        {"vector_lanes": [512, 1024, 2048, 4096], "bank_depth": [1, 2]},
+        {"arrays_per_chip": [604, 640, 965, 1207], "bank_depth": [1, 2]},
         payload["sweep"]["axes"],
+    )
+    table.boolean(
+        "%s: the engine width is REFUSED as an axis (D31/ADJ-9)" % name,
+        "vector_lanes is in sweep.refused_axes and in no axes[] anywhere",
+        "vector_lanes" in payload["sweep"].get("refused_axes", {})
+        and "vector_lanes" not in payload["sweep"]["axes"],
+        "refused: %s" % sorted(payload["sweep"].get("refused_axes", {})),
     )
     table.exact("%s: candidates" % name, 8, payload["num_candidates"])
     table.exact("%s: valid candidates" % name, 8, payload["num_valid"])
@@ -1382,33 +1403,52 @@ def check_qif_dse_selection(table):
         payload["evaluation_path"][:60],
     )
 
-    # THE FINDING: at a fixed bank depth the headline rises with every
-    # doubling of the declared vector-lane count.
+    # THE FINDING (ADJ-9): at a fixed bank depth, CHIP CAPACITY moves the
+    # silicon and NOT the headline. Every candidate derives its own engine and
+    # the derived width does not depend on how many empty slots a chip has.
     for bank in (1, 2):
-        series = [
-            c["metrics"]["tokens_per_s"]
-            for c in payload["candidates"]
-            if c["knobs"]["bank_depth"] == bank
-        ]
+        rows = sorted(
+            (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == bank),
+            key=lambda c: c["knobs"]["arrays_per_chip"],
+        )
+        rates = {round(c["metrics"]["tokens_per_s"], 9) for c in rows}
+        silicon = [c["silicon"]["total_silicon_mm2"] for c in rows]
         table.boolean(
-            "%s: headline rises with vector_lanes (bank_depth %d)" % (name, bank),
-            "strictly increasing over 512/1024/2048/4096",
-            len(series) == 4 and all(b > a for a, b in zip(series, series[1:])),
-            ", ".join("%.1f" % value for value in series),
+            "%s: capacity buys silicon and NOT throughput (bank_depth %d)" % (name, bank),
+            "one tokens/s over the four capacities; total silicon strictly rising",
+            len(rows) == 4
+            and len(rates) == 1
+            and all(b > a for a, b in zip(silicon, silicon[1:])),
+            "%.1f tokens/s over %s mm2"
+            % (list(rates)[0], ", ".join("%.0f" % value for value in silicon)),
         )
     fastest = max(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
     slowest = min(c["metrics"]["tokens_per_s"] for c in payload["candidates"])
+    biggest = max(c["silicon"]["total_silicon_mm2"] for c in payload["candidates"])
+    smallest = min(c["silicon"]["total_silicon_mm2"] for c in payload["candidates"])
     table.boolean(
-        "%s: 8x the lanes is SUB-linear in the headline" % name,
-        "1 < fastest/slowest < 8 (the analog GEMMs do not move)",
-        1.0 < fastest / slowest < 8.0,
-        "%.3f" % (fastest / slowest),
+        "%s: 2x the capacity is FLAT in the headline (D27)" % name,
+        "silicon spans ~2x while tokens/s spans under 2% (Invariant W)",
+        biggest / smallest > 1.9 and 1.0 < fastest / slowest < 1.02,
+        "silicon x%.3f, headline x%.4f" % (biggest / smallest, fastest / slowest),
+    )
+    table.boolean(
+        "%s: every candidate derives an ANALOG-BOUND engine (ADJ-9)" % name,
+        "derived_digital.sizing_target == analog_stage_time and every stage is bound",
+        all(
+            c["derived_digital"]["sizing_target"] == "analog_stage_time"
+            and c["derived_digital"]["analog_bound_stages"]
+            == c["derived_digital"]["stages_sized"]
+            for c in payload["candidates"]
+        ),
+        "%s stage(s) analog-bound on every point"
+        % sorted({c["derived_digital"]["stages_sized"] for c in payload["candidates"]}),
     )
 
     selected = payload["selected"]
     table.exact(
         "%s: selected knobs" % name,
-        {"vector_lanes": 4096, "bank_depth": 1},
+        {"arrays_per_chip": 604, "bank_depth": 1},
         selected["knobs"],
     )
     table.boolean(
@@ -1432,16 +1472,34 @@ def check_qif_dse_selection(table):
         or (payload["front_shape"] == "flat_area" and len(areas) == 1),
         "%s over %d distinct silicon values" % (payload["front_shape"], len(areas)),
     )
+    # ADJ-9 REWRITE. OLD CLAIM: the silicon axis moves with the DIGITAL term
+    # only, because the analog inventory was constant across a lane sweep. NEW
+    # CLAIM: the sweep's own area axis is CHIP CAPACITY, so the ANALOG term is
+    # exactly what moves along it — enumerated-but-unowned slots, which is what
+    # Invariant W says capacity buys. The digital term is what moves along the
+    # BANK-DEPTH axis, because the derived width follows the analog m-pass.
+    at_capacity = [
+        c for c in payload["candidates"] if c["knobs"]["arrays_per_chip"] == 604
+    ]
     table.boolean(
-        "%s: the silicon axis moves with the DIGITAL term only" % name,
-        "Invariant W pins the analog floor, so every mm2 of the spread is digital",
-        len({round(c["silicon"]["analog_macro_silicon_mm2"], 9) for c in payload["candidates"]})
-        == 1
+        "%s: capacity moves the ANALOG term, banking moves the DIGITAL one" % name,
+        "analog mm2 constant within a capacity and rising across them; the "
+        "digital mm2 is what the two bank depths differ by",
+        len({round(c["silicon"]["analog_macro_silicon_mm2"], 9) for c in at_capacity}) == 1
+        and len(
+            {
+                round(c["silicon"]["analog_macro_silicon_mm2"], 9)
+                for c in payload["candidates"]
+            }
+        )
+        == 4
+        and len({round(c["silicon"]["shared_digital_silicon_mm2"], 9) for c in at_capacity})
+        == 2
         and all(
             c["silicon"]["shared_digital_area_provenance"] == "composed-measured"
             for c in payload["candidates"]
         ),
-        "analog fixed, digital composed from measured synthesis (D32)",
+        "4 analog terms over 4 capacities; 2 digital terms over 2 bank depths",
     )
     table.boolean(
         "%s: infeasible candidates recorded, not dropped" % name,
@@ -1523,16 +1581,22 @@ def check_qif_dse_selection(table):
     # is the one kept here: the stranded columns and the enumerated SLOT count
     # — the silicon a point buys — do not move, so the ENERGY win belongs to
     # the active-column-set law and not to recovered waste.
+    # ADJ-9 REWRITE. OLD SCOPE: "across the sweep", which held while the sweep's
+    # other axis was the lane width. The other axis is now chip capacity, and
+    # enumerating slots is exactly what it does — so the claim is scoped to one
+    # capacity, where it says the same thing about BANKING that it always did.
+    at_one_capacity = [c for c in valid_rows if c["knobs"]["arrays_per_chip"] == 604]
     table.boolean(
-        "%s: unowned columns and enumerated slots are IDENTICAL across the sweep" % name,
+        "%s: unowned columns and enumerated slots are IDENTICAL across the bank depths" % name,
         "banking changes active column sets, not stranded ones (ADJ-4); the "
         "macro count DOES move, because D27's dense law is in force",
-        len({c["placement"]["unowned_columns"] for c in valid_rows}) == 1
-        and len({c["placement"]["analog_macro_slots"] for c in valid_rows}) == 1,
+        len({c["placement"]["unowned_columns"] for c in at_one_capacity}) == 1
+        and len({c["placement"]["analog_macro_slots"] for c in at_one_capacity}) == 1
+        and len({c["placement"]["analog_macro_slots"] for c in valid_rows}) == 4,
         "unowned=%s slots=%s macros=%s"
         % (
-            sorted({c["placement"]["unowned_columns"] for c in valid_rows}),
-            sorted({c["placement"]["analog_macro_slots"] for c in valid_rows}),
+            sorted({c["placement"]["unowned_columns"] for c in at_one_capacity}),
+            sorted({c["placement"]["analog_macro_slots"] for c in at_one_capacity}),
             sorted({c["placement"]["macros_holding_tiles"] for c in valid_rows}),
         ),
     )
@@ -1543,17 +1607,35 @@ def check_qif_dse_selection(table):
                 return entry["energy_pj"]
         return None
 
-    bank1 = [c for c in valid_rows if c["knobs"]["bank_depth"] == 1]
-    bank2 = [c for c in valid_rows if c["knobs"]["bank_depth"] == 2]
+    bank1 = [c for c in at_one_capacity if c["knobs"]["bank_depth"] == 1]
+    bank2 = [c for c in at_one_capacity if c["knobs"]["bank_depth"] == 2]
     if bank1 and bank2:
         total_delta = bank2[0]["metrics"]["total_energy_pj"] - bank1[0]["metrics"]["total_energy_pj"]
         array_delta = _component(bank2[0], "analog_arrays") - _component(bank1[0], "analog_arrays")
+        engine_delta = _component(bank2[0], "shared_digital_chiplet") - _component(
+            bank1[0], "shared_digital_chiplet"
+        )
+        # ADJ-9 REWRITE. OLD CLAIM: the WHOLE banking energy delta is the
+        # analog arrays. NEW CLAIM: it is two terms of opposite sign. A finer
+        # bank shortens the analog m-pass, and under D31-v2 that m-pass IS the
+        # engine's sizing target, so bank_depth 1 derives a WIDER engine whose
+        # composed power is higher. The analog term is still the dominant half
+        # and the links still do not move.
         table.boolean(
-            "%s: the whole banking energy delta is analog_arrays" % name,
-            "total delta == analog_arrays delta; link_traffic unmoved",
-            abs(total_delta - array_delta) < 1e-3
-            and _component(bank1[0], "link_traffic") == _component(bank2[0], "link_traffic"),
-            "total %.6g pJ vs arrays %.6g pJ" % (total_delta, array_delta),
+            "%s: the banking energy delta is analog_arrays PLUS the derived engine" % name,
+            "total delta == analog_arrays delta + shared_digital delta; "
+            "link_traffic unmoved; the analog half dominates",
+            abs(total_delta - (array_delta + engine_delta)) < 1e-3
+            and _component(bank1[0], "link_traffic") == _component(bank2[0], "link_traffic")
+            and abs(engine_delta) < 0.1 * abs(array_delta),
+            "total %.6g pJ = arrays %.6g pJ + engine %.6g pJ (lanes %d vs %d)"
+            % (
+                total_delta,
+                array_delta,
+                engine_delta,
+                bank1[0]["derived_digital"]["vector_lanes"],
+                bank2[0]["derived_digital"]["vector_lanes"],
+            ),
         )
 
     # WAVE D AUDIT: D21 wants the relaxation disclosed in the ARTIFACT, and
@@ -1640,10 +1722,20 @@ def check_qif_dse_selection(table):
         os.path.exists(QIF_DSE_DEMO_SELECTED),
     ):
         emitted = load_yaml(QIF_DSE_DEMO_SELECTED)
+        # ADJ-9 REWRITE. OLD ROW: the emitted card declares vector_lanes = 4096.
+        # NEW ROW: it declares NO lane count at all — the winning point has no
+        # width to write down, because D31-v2 derives it from the machine's own
+        # analog m-pass every time it runs.
+        table.boolean(
+            "%s: emitted config declares NO vector_lanes (D31/ADJ-9)" % name,
+            "the winner carries no engine width; the width is derived at run time",
+            "vector_lanes" not in emitted["cim"]["cards"]["sa"],
+            "card keys: %s" % sorted(emitted["cim"]["cards"]["sa"]),
+        )
         table.exact(
-            "%s: emitted vector_lanes" % name,
-            4096,
-            emitted["cim"]["cards"]["sa"]["vector_lanes"],
+            "%s: emitted arrays_per_chip" % name,
+            604,
+            emitted["cim"]["chip"]["arrays_per_chip"],
         )
         table.exact(
             "%s: emitted bank_depth" % name, 1, emitted["cim"]["cards"]["ctt"]["bank_depth"]
@@ -1658,6 +1750,92 @@ def check_qif_dse_selection(table):
             "mapping: block present (ADJ-6 DAG report, not the closed form)",
             "mapping" in emitted,
         )
+
+
+def check_qif_dse_retired(table):
+    """(P3.7 c, ADJ-9) The FROZEN Wave-D sweep, kept because it is evidence.
+
+    ADJ-9 was adjudicated on this artifact: declaring 512 -> 4096 scan lanes on
+    the shipped Granite machine bought +27% tokens/s for +0.78% silicon, which
+    is the measurement that says digital lanes are nearly free against the
+    Invariant-W analog floor. Its config declared `vector_lanes` as a sweep
+    axis and tools/fws_qif_dse.py now REFUSES that axis by name, so it can
+    never be regenerated. A frozen artifact with no label rots silently; these
+    rows are the label, checked.
+    """
+    name = "P3.7 retired sweep"
+    if not table.boolean(
+        "%s: the frozen artifact exists" % name,
+        "docs/qif/dse/granite_lanes_banks_retired/dse_report.json",
+        os.path.exists(QIF_DSE_DEMO_RETIRED),
+    ):
+        return
+    with open(QIF_DSE_DEMO_RETIRED) as handle:
+        payload = json.load(handle)
+    retired = payload.get("retired") or {}
+    table.boolean(
+        "%s: it declares itself FROZEN and names the decision" % name,
+        "retired.decision names ADJ-9; retired.status says why it cannot regenerate",
+        str(retired.get("decision", "")).startswith("ADJ-9")
+        and "FROZEN" in str(retired.get("status", ""))
+        and "REFUSES that axis by name" in str(retired.get("status", "")),
+        str(retired.get("decision", "MISSING")),
+    )
+    table.boolean(
+        "%s: it names its successor and how to read it" % name,
+        "retired.successor points at the D31-legal sweep; retired.read_it_as "
+        "says the digital side was chosen, not derived",
+        "granite_capacity_banks" in str(retired.get("successor", ""))
+        and "DERIVED" in str(retired.get("read_it_as", "")),
+        str(retired.get("successor", "MISSING")),
+    )
+    table.boolean(
+        "%s: the axis it swept is one the tool now refuses" % name,
+        "SweepSpec.from_raw raises on this sweep block",
+        _refuses_retired_axes(payload["sweep"]),
+        "axes: %s" % ", ".join(sorted(payload["sweep"]["axes"])),
+    )
+    at_depth_one = sorted(
+        (c for c in payload["candidates"] if c["knobs"]["bank_depth"] == 1),
+        key=lambda c: c["knobs"]["vector_lanes"],
+    )
+    rates = [c["metrics"]["tokens_per_s"] for c in at_depth_one]
+    silicon = [c["silicon"]["total_silicon_mm2"] for c in at_depth_one]
+    table.boolean(
+        "%s: the comparison ADJ-9 quotes is still readable off it" % name,
+        "8x the declared lanes: ~+27% tokens/s for ~+0.8% silicon",
+        len(rates) == 4
+        and 1.25 < rates[-1] / rates[0] < 1.30
+        and 1.005 < silicon[-1] / silicon[0] < 1.010,
+        "%.0f -> %.0f tokens/s (x%.3f) for %.1f -> %.1f mm2 (x%.4f)"
+        % (
+            rates[0],
+            rates[-1],
+            rates[-1] / rates[0],
+            silicon[0],
+            silicon[-1],
+            silicon[-1] / silicon[0],
+        ),
+    )
+
+
+def _refuses_retired_axes(sweep_block):
+    """True when tools/fws_qif_dse.py refuses this sweep block by name."""
+    module = _load_qif_dse_module()
+    try:
+        module.SweepSpec.from_raw({module.DSE_BLOCK: sweep_block}, "retired")
+    except module.QifDseUsageError:
+        return True
+    return False
+
+
+def _load_qif_dse_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("fws_qif_dse_validator", QIF_DSE_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def check_qif_dse_verify(table):
@@ -1824,9 +2002,9 @@ def check_qif_synthesis_library(table):
         + lib.block("M_REG").area_um2
     )
     table.close(
-        "%s: 220 scan lanes == 220 x (FP_MULT + FP_ADD + M_REG)" % name,
-        220 * lane_um2 / 1e6,
-        _cim_timing.compose_vector_engine(lib, 220).area_mm2,
+        "%s: 5479 scan lanes == 5479 x (FP_MULT + FP_ADD + M_REG)" % name,
+        5479 * lane_um2 / 1e6,
+        _cim_timing.compose_vector_engine(lib, 5479).area_mm2,
     )
     fabric = _cim_timing.compose_sa_fabric(lib, 32, 64, 2, 1)
     table.exact(
@@ -1866,7 +2044,7 @@ def check_qif_synthesis_library(table):
 
     table.boolean(
         "%s: the headline card DECLARES no engine, and one is DERIVED (D31)" % name,
-        "cim.cards.sa carries no vector_lanes; the width comes from the beat",
+        "cim.cards.sa carries no vector_lanes; the width comes from the analog floor",
         device.digital_card.has_vector_engine is False
         and sizing is not None
         and device.vector_lanes_provenance == _cim_timing.PROVENANCE_DERIVED_COUNT,
@@ -1874,21 +2052,66 @@ def check_qif_synthesis_library(table):
         % (device.vector_lanes, device.vector_lanes_provenance),
     )
     binding = [row for row in sizing.per_stage if row.stage == sizing.binding_stage][0]
+    # ADJ-9 REWRITE. OLD ROW: "the derived width HOLDS the analog BEAT" — the
+    # binding stage's vector time fits inside the beat the slowest stage sets.
+    # NEW ROW: it holds that stage's OWN ANALOG M-PASS, which is 24x tighter on
+    # this machine, and EVERY stage does. That is the fixed point D31-v2 asks
+    # for, asserted rather than described.
     table.boolean(
-        "%s: the derived width HOLDS the analog beat" % name,
-        "the binding stage's own priced vector time fits inside the analog beat",
-        binding.time_s <= sizing.analog_beat_s
-        and binding.used_cycles <= binding.budget_cycles,
-        "%.6g s of digital in a %.6g s analog beat" % (binding.time_s, sizing.analog_beat_s),
+        "%s: EVERY stage is ANALOG-BOUND by construction (ADJ-9)" % name,
+        "digital per-stage time <= that stage's own analog m-pass, on every stage",
+        len(sizing.analog_bound_stages) == len(sizing.per_stage)
+        and not sizing.unreachable_stages
+        and all(row.time_s <= row.analog_time_s for row in sizing.per_stage),
+        "%d of %d stage(s); binding stage %.6g s of digital in a %.6g s analog m-pass"
+        % (
+            len(sizing.analog_bound_stages),
+            len(sizing.per_stage),
+            binding.time_s,
+            binding.analog_time_s,
+        ),
     )
     table.boolean(
         "%s: and it is the SMALLEST width that does (no margin, D28)" % name,
-        "one lane fewer overruns the beat on the binding stage",
+        "one lane fewer overruns the analog m-pass on the binding stage",
         _cim_timing.vector_cycles_at(
             binding.ops, sizing.vector_lanes - 1, sizing.pipeline_depth
         )
         > binding.budget_cycles,
         "%d lanes; %d would not fit" % (sizing.vector_lanes, sizing.vector_lanes - 1),
+    )
+    # THE OTHER HALF OF ADJ-9, AND IT IS A FINDING: the criterion binds every
+    # STAGE and cannot bind the MACHINE. The beat-setting stage's largest term
+    # is the attention systolic fabric, whose geometry is DECLARED card
+    # geometry that D31 derives no width for, so scan lanes past the point
+    # where the scan fits under it buy area and no throughput. Measured here,
+    # not argued.
+    setter = sizing.beat_setting_stage or {}
+    largest = (setter.get("terms") or [{}])[0]
+    table.boolean(
+        "%s: the beat-setter is NAMED, and on this machine it is not analog" % name,
+        "derived_engine_sizing.beat_setting_stage itemizes the longest stage's terms",
+        bool(setter)
+        and setter.get("analog_is_largest_term") is False
+        and largest.get("device_class") == "shared_digital"
+        and float(largest.get("busy_s", 0.0)) > 10 * float(setter.get("analog_time_s", 1.0)),
+        "stage %s spends %.6g s on %s/%s against %.6g s of analog m-pass"
+        % (
+            setter.get("stage"),
+            float(largest.get("busy_s", 0.0)),
+            largest.get("device_class"),
+            largest.get("block"),
+            float(setter.get("analog_time_s", 0.0)),
+        ),
+    )
+    table.boolean(
+        "%s: the reachability finding rides the ARTIFACT, not only stdout" % name,
+        "an analog_floor_reachability disclosure names the stage and the term",
+        any(
+            item.constraint == "analog_floor_reachability"
+            for item in evaluation.disclosures
+        ),
+        "disclosed",
     )
     table.exact(
         "%s: the derivation is the pricing law inverted" % name,
@@ -2145,6 +2368,84 @@ def check_qif_filled_pipeline(table):
     )
 
 
+def check_qif_service_links(table):
+    """(P5/P7) The atlas `svc` wires: one per serviced analog chip, MEASURED.
+
+    The atlas drew the `act` chip boundary and nothing at all for the
+    relationship between an analog chip and the shared digital chiplet that
+    runs its attention and its scan (D13). The results.html pipeline map needs
+    that wire tree, and a wire whose bytes are invented is a picture, not a
+    result — so these rows check the byte accounting rather than the drawing.
+    """
+    name = "P5 svc links"
+    for model, filename in (
+        ("Granite-4.0-H-Tiny", "granite_4_0_h_tiny.json"),
+        ("Qwen3.5-4B", "qwen3_5_4b.json"),
+    ):
+        path = os.path.join(REPO_ROOT, "docs", "qif", "atlas", filename)
+        if not table.boolean(
+            "%s %s: the priced atlas exists" % (name, model),
+            "docs/qif/atlas/%s" % filename,
+            os.path.exists(path),
+        ):
+            continue
+        with open(path) as handle:
+            document = json.load(handle)
+        links = [row for row in document["links"] if row["role"] == "svc"]
+        analog = [c for c in document["chips"] if c["pool"] == "analog"]
+        digital = {c["id"] for c in document["chips"] if c["pool"] == "digital"}
+        table.exact(
+            "%s %s: one svc wire per analog chip" % (name, model),
+            len(analog),
+            len(links),
+        )
+        table.boolean(
+            "%s %s: every wire runs chiplet -> analog chip" % (name, model),
+            "from is a digital chip id, to is an analog chip id, and every "
+            "analog chip is reached exactly once",
+            bool(links)
+            and {row["from"] for row in links} <= digital
+            and sorted(row["to"] for row in links)
+            == sorted(c["id"] for c in analog),
+            "%d wire(s) from %d chiplet(s)"
+            % (len(links), len({row["from"] for row in links})),
+        )
+        table.boolean(
+            "%s %s: the bytes are MEASURED per beat and name both directions"
+            % (name, model),
+            "basis prints the measurement slice, operands out + results back, "
+            "and the per-block itemization",
+            bool(links)
+            and all(
+                row["per"] == "beat"
+                and row["bytes"] >= 0.0
+                and "MEASURED on beat" in row["basis"]
+                and "operands out" in row["basis"]
+                and "results back" in row["basis"]
+                for row in links
+            ),
+            "bytes/beat: %s"
+            % sorted({row["bytes"] for row in links}),
+        )
+        table.boolean(
+            "%s %s: an unpriced component is NAMED, never absorbed" % (name, model),
+            "a wire carrying only scan work measures 0 B and its basis says "
+            "which block lowers no transfer (D21, D28)",
+            bool(links)
+            and all(
+                "UNPRICED COMPONENT" not in row["basis"]
+                or "absent op, not a measured zero" in row["basis"]
+                for row in links
+            )
+            and any("UNPRICED COMPONENT" in row["basis"] for row in links),
+            "%d of %d wire(s) name an unpriced component"
+            % (
+                sum(1 for row in links if "UNPRICED COMPONENT" in row["basis"]),
+                len(links),
+            ),
+        )
+
+
 def check_qif_frontier(table):
     """QIF P7.4/P7.5 rows: the (area, tokens/s) FRONTIER under regime v2.
 
@@ -2197,10 +2498,29 @@ def check_qif_frontier(table):
         # (2) D31: digital provisioning is NOT an axis, and the engine is
         # derived at every point.
         table.boolean(
-            "%s: no retired axis is swept (D31)" % name,
+            "%s: no refused axis is swept (D31/ADJ-9)" % name,
             "the scan/vector engine is derived per point, never declared",
-            not set(sweep["axes"]) & {"vector_lanes"},
-            "axes: %s" % ", ".join(sorted(sweep["axes"])),
+            not set(sweep["axes"]) & set(sweep.get("refused_axes", {})),
+            "axes: %s (refused: %s)"
+            % (
+                ", ".join(sorted(sweep["axes"])),
+                ", ".join(sorted(sweep.get("refused_axes", {}))),
+            ),
+        )
+        table.boolean(
+            "%s: every point's engine is sized to the ANALOG FLOOR (ADJ-9)" % name,
+            "derived_digital.sizing_target == analog_stage_time and every stage "
+            "of every valid point is analog-bound",
+            bool(valid)
+            and all(
+                c["derived_digital"]["sizing_target"] == "analog_stage_time"
+                and c["derived_digital"]["analog_bound_stages"]
+                == c["derived_digital"]["stages_sized"]
+                and c["derived_digital"]["stages_sized"] > 0
+                for c in valid
+            ),
+            "stage counts: %s, all analog-bound"
+            % sorted({c["derived_digital"]["stages_sized"] for c in valid}),
         )
         table.boolean(
             "%s: the engine width is DERIVED at every point (D31)" % name,
@@ -2547,6 +2867,7 @@ def main():
     print()
     print("Running the QIF P3.7 mapped-DSE rows (one live sweep + one --verify run_perf)...")
     check_qif_dse_selection(table)
+    check_qif_dse_retired(table)
     check_qif_dse_verify(table)
 
     # QIF P7.7 rows: the filled-pipeline regime (D29/D30). In-process and last,
@@ -2566,6 +2887,7 @@ def main():
     # nothing here touches an artifact an earlier row read.
     print()
     print("Running the QIF P7.4/P7.5 frontier rows (two checked-in curves, read)...")
+    check_qif_service_links(table)
     check_qif_frontier(table)
 
     print()
