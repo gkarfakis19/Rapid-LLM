@@ -1,4 +1,11 @@
 {
+  "retired": {
+    "decision": "ADJ-9 (D31-v2, 2026-08-25)",
+    "status": "FROZEN. This artifact is not regenerated and cannot be: the config that produced it declared vector_lanes as a sweep axis, and tools/fws_qif_dse.py now REFUSES that axis by name (REFUSED_AXES).",
+    "why_kept": "It is the historical comparison ADJ-9 itself quotes: declaring 512 -> 4096 scan lanes on the shipped Granite machine bought +27% tokens/s (20164 -> 25674) for +0.78% silicon (12991.5 -> 13092.9 mm2), which is the measurement that says digital lanes are nearly free against the Invariant-W analog floor. docs/qif/atlas/fixture_frontier_granite.json is grounded on these eight rows and a test pins it.",
+    "read_it_as": "a machine whose digital side was CHOSEN. Every number here prices a DECLARED vector_lanes width. Under D31-v2 that width is DERIVED (sized up until every stage's digital per-stage time fits that stage's own analog m-pass time), so no number in this file describes a machine this repo would build today.",
+    "successor": "docs/qif/dse/granite_capacity_banks/ - the same config on D31-legal axes (chip capacity x analog banking)."
+  },
   "tool": "fws_qif_dse",
   "schema": "fws_qif_dse/1",
   "hardware_config": "configs/hardware-config/fws_cim_granite_tiny_dse.yaml",

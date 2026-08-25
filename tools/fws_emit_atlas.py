@@ -111,7 +111,7 @@ def _override_spec(spec, *, shared_chiplets=None, macros_per_chip=None, layers_p
 
 
 def _price(mapping):
-    """P4 over one placed DAG: (duty cycles, metrics, pool sizing, disclosures).
+    """P4 over one placed DAG: duty, metrics, pool sizing, disclosures, svc links.
 
     One call per INVENTORY. A PD pair is two inventories (D16) and each half is
     priced on its own timeline; sharing one evaluation between them would print
@@ -126,6 +126,7 @@ def _price(mapping):
         evaluation.atlas_metrics(),
         evaluation.atlas_pool_sizing(),
         evaluation.atlas_relaxations(),
+        evaluation.atlas_service_links(),
     )
 
 
@@ -180,16 +181,18 @@ def build(
     extra_metrics = None
     pool_sizing = None
     extra_relaxations = None
+    service_links = None
     if priced:
         # P4 measured the pool concurrency and the decode-window truncation on
         # the SAME timeline these metrics come from. Carrying both keeps the
         # atlas and the report ONE accounting (D21) instead of two documents
         # printing different numbers under the same field name.
-        duty, metrics, pools, disclosures = _price(mapping)
+        duty, metrics, pools, disclosures, services = _price(mapping)
         duty_cycles = [duty]
         extra_metrics = [metrics]
         pool_sizing = [pools]
         extra_relaxations = [disclosures]
+        service_links = [services]
     document = fws_atlas_export.export_atlas(
         [mapping],
         boundary_rows=[rows],
@@ -206,6 +209,7 @@ def build(
         extra_metrics=extra_metrics,
         pool_sizing=pool_sizing,
         extra_relaxations=extra_relaxations,
+        service_links=service_links,
     )
     return mapping, rows, document
 
@@ -322,6 +326,7 @@ def build_pd(
     # document lowers no request, so there is no request-shaped claim to make
     # and disclosing one would be a relaxation of a constraint nothing imposed.
     extra_relaxations = [[PD_WHOLE_MODEL_DISCLOSURE], [PD_WHOLE_MODEL_DISCLOSURE]]
+    service_links = None
     if priced:
         halves = [_price(pair.prefill), _price(pair.decode)]
         duty_cycles = [half[0] for half in halves]
@@ -329,6 +334,7 @@ def build_pd(
         pool_sizing = [half[2] for half in halves]
         shared = [PD_WHOLE_MODEL_DISCLOSURE, PD_WHOLE_REQUEST_DISCLOSURE]
         extra_relaxations = [shared + list(halves[0][3]), shared + list(halves[1][3])]
+        service_links = [half[4] for half in halves]
     document = fws_atlas_export.export_pd_atlas(
         pair,
         title=title or f"{label} — prefill and decode systems (D16)",
@@ -344,6 +350,7 @@ def build_pd(
         extra_metrics=extra_metrics,
         pool_sizing=pool_sizing,
         extra_relaxations=extra_relaxations,
+        service_links=service_links,
     )
     return pair, rows, document
 

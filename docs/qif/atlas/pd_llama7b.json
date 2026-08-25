@@ -14,7 +14,7 @@
    "chips[], macros[] and tiles[] are the enumerated placement fws_mapping.build_mapping produced",
    "cards[] are the P2 device cards of the hardware config",
    "macros[].digital_pool is P4.5's TIMELINE-MEASURED per-macro pool sizing (D12) — the same number the run's pool table prints, not a second derivation",
-   "links[] are the P3.5 boundary table's link-crossing rows",
+   "links[] are the P3.5 boundary table's link-crossing rows, plus one MEASURED svc row per (shared digital chiplet -> analog chip) service relationship whose bytes are read off P4's timeline",
    "metrics[] are placement counts plus P4's timing metrics, every one read off ONE timeline and every one naming its basis"
   ],
   "invented_fields": [],
@@ -46450,6 +46450,46 @@
    "basis": "cim_timing.boundary_bytes(tokens = 7168, act_bytes = 2.0) = tokens x hidden 4096 x act"
   },
   {
+   "id": "sys.prefill.link.svc.d4->c0",
+   "from": "sys.prefill.chip.004",
+   "to": "sys.prefill.chip.000",
+   "role": "svc",
+   "bytes": 1048576.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 2 (the retired lockstep regime): chiplet 4 runs attention_qk x 8, attention_softmax x 8, attention_pv x 8 for chip 0's layers. Bytes = operands out 786432 B + results back 262144 B = 1.04858e+06 B per decode_step, over 32 lowered link op(s); itemized: qkv 786432 B, o_proj 262144 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.prefill.link.svc.d4->c2",
+   "from": "sys.prefill.chip.004",
+   "to": "sys.prefill.chip.002",
+   "role": "svc",
+   "bytes": 1048576.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 2 (the retired lockstep regime): chiplet 4 runs attention_qk x 8, attention_softmax x 8, attention_pv x 8 for chip 2's layers. Bytes = operands out 786432 B + results back 262144 B = 1.04858e+06 B per decode_step, over 32 lowered link op(s); itemized: qkv 786432 B, o_proj 262144 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.prefill.link.svc.d5->c1",
+   "from": "sys.prefill.chip.005",
+   "to": "sys.prefill.chip.001",
+   "role": "svc",
+   "bytes": 1048576.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 2 (the retired lockstep regime): chiplet 5 runs attention_qk x 8, attention_softmax x 8, attention_pv x 8 for chip 1's layers. Bytes = operands out 786432 B + results back 262144 B = 1.04858e+06 B per decode_step, over 32 lowered link op(s); itemized: qkv 786432 B, o_proj 262144 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.prefill.link.svc.d5->c3",
+   "from": "sys.prefill.chip.005",
+   "to": "sys.prefill.chip.003",
+   "role": "svc",
+   "bytes": 1048576.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 2 (the retired lockstep regime): chiplet 5 runs attention_qk x 8, attention_softmax x 8, attention_pv x 8 for chip 3's layers. Bytes = operands out 786432 B + results back 262144 B = 1.04858e+06 B per decode_step, over 32 lowered link op(s); itemized: qkv 786432 B, o_proj 262144 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
    "id": "sys.decode.link.act.c0->c1",
    "from": "sys.decode.chip.000",
    "to": "sys.decode.chip.001",
@@ -46518,6 +46558,86 @@
    "per": "decode_step",
    "label": "activation handoff across the chip boundary",
    "basis": "cim_timing.boundary_bytes(tokens = 4, act_bytes = 2.0) = tokens x hidden 4096 x act"
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c0",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.000",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 0's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c1",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.001",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 1's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c2",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.002",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 2's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c3",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.003",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 3's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c4",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.004",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 4's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c5",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.005",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 5's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c6",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.006",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 6's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
+  },
+  {
+   "id": "sys.decode.link.svc.d8->c7",
+   "from": "sys.decode.chip.008",
+   "to": "sys.decode.chip.007",
+   "role": "svc",
+   "bytes": 524288.0,
+   "per": "decode_step",
+   "label": "shared-digital service traffic (act x act operands out, results back)",
+   "basis": "MEASURED on lowered decode step 3 (the retired lockstep regime): chiplet 8 runs attention_qk x 4, attention_softmax x 4, attention_pv x 4 for chip 7's layers. Bytes = operands out 393216 B + results back 131072 B = 524288 B per decode_step, over 16 lowered link op(s); itemized: qkv 393216 B, o_proj 131072 B. Every term is the lowering's own FwsOpAnnotation.bytes_moved, so this link and the P3.5 boundary table are one accounting (D21)."
   },
   {
    "id": "link.pd_handoff",

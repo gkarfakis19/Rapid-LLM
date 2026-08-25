@@ -1222,6 +1222,159 @@ class FwsEvaluation:
         """The packing law and, under dense packing, its waste accounting."""
         return _packing_block(self.mapping)
 
+    def atlas_service_links(self) -> List["OrderedDict[str, object]"]:
+        """One ``svc`` link per (digital chiplet -> analog chip) it services.
+
+        WHAT A SERVICE LINK IS. A shared digital chiplet does the act x act
+        work — attention and the scan/state update (D13) — for the layers of
+        the analog chips assigned to it, and that work costs REAL traffic in
+        both directions: operands leave the analog chip (Q/K/V for attention,
+        the projected inputs for a scan) and the result comes back to a macro
+        or its pool. The atlas already drew the ``act`` boundary between
+        consecutive analog chips; it drew nothing at all for this
+        relationship, so the picture showed a pipeline with no wires to the
+        silicon that does half its work.
+
+        WHERE THE RELATIONSHIP COMES FROM. It is read off the LOWERED DAG, not
+        recomputed: every shared-digital compute op names the chiplet it runs
+        on and the LAYER it serves, and the placement names the analog chip
+        that holds that layer. Nothing here re-implements the builder's
+        chiplet-assignment rule, so the two cannot drift.
+
+        WHERE THE BYTES COME FROM. They are MEASURED: every priced ``link`` op
+        in the beat :func:`_measurement_slice` selects whose two endpoints are
+        an analog chip and a shared digital chiplet is summed onto that pair,
+        the two directions kept apart so the basis can print them. Each term is
+        the lowering's own ``FwsOpAnnotation.bytes_moved`` — the number the
+        P3.5 boundary table and the energy accounting also read (D21).
+
+        WHAT IS UNPRICED, BY NAME. Only traffic this repo LOWERS as a link op
+        can be counted. The attention hops are lowered (qkv out, the attention
+        output back); the RECURRENT hops are not — ``_recurrent_block`` places
+        the scan on the chiplet with no transfer op on either side — so a
+        relationship that carries only scan work measures 0 B and the basis
+        says which block that is. It is an absent op, not a measured zero, and
+        it is named here rather than filled with an estimate (D21, D28).
+        """
+        select, scope = _measurement_slice(self.serving)
+        mapping = self.mapping
+        unit = str(scope.get("unit", "beat"))
+        analog_chips = [chip for chip in mapping.chips if chip.pool == "analog"]
+        rows: "OrderedDict[Tuple[int, int], Dict[str, object]]" = OrderedDict()
+
+        def _row(chiplet_chip: int, analog_chip: int) -> Dict[str, object]:
+            return rows.setdefault(
+                (int(chiplet_chip), int(analog_chip)),
+                {
+                    "operands_out": 0.0,
+                    "results_back": 0.0,
+                    "link_blocks": OrderedDict(),
+                    "fabric_blocks": OrderedDict(),
+                    "ops": 0,
+                },
+            )
+
+        for annotation, cost in zip(annotations_of(self.program), self.pricing.costs):
+            if not select(annotation):
+                continue
+            if cost.device_class == "shared_digital":
+                layer = annotation.layer
+                if layer is None:
+                    continue
+                shard = mapping.device_record(int(annotation.device_id)).shard
+                for chip in analog_chips:
+                    if int(layer) not in tuple(chip.layers):
+                        continue
+                    if chip.shard.tp != shard.tp:
+                        continue
+                    row = _row(int(annotation.chip_id), int(chip.chip_id))
+                    blocks = row["fabric_blocks"]
+                    blocks[cost.block] = int(blocks.get(cost.block, 0)) + 1
+                continue
+            if cost.device_class != "link":
+                continue
+            src, dst = int(annotation.src_device), int(annotation.dst_device)
+            if src < 0 or dst < 0:
+                continue
+            src_record = mapping.device_record(src)
+            dst_record = mapping.device_record(dst)
+            classes = (src_record.device_class, dst_record.device_class)
+            if "shared_digital" not in classes or classes[0] == classes[1]:
+                continue
+            if src_record.device_class == "shared_digital":
+                chiplet, analog, direction = src_record, dst_record, "results_back"
+            else:
+                chiplet, analog, direction = dst_record, src_record, "operands_out"
+            row = _row(int(chiplet.chip_id), int(analog.chip_id))
+            row[direction] = float(row[direction]) + float(annotation.bytes_moved)
+            row["ops"] = int(row["ops"]) + 1
+            link_blocks = row["link_blocks"]
+            link_blocks[cost.block] = float(link_blocks.get(cost.block, 0.0)) + float(
+                annotation.bytes_moved
+            )
+
+        system = mapping.system_id
+        out: List["OrderedDict[str, object]"] = []
+        for (chiplet_chip, analog_chip) in sorted(rows):
+            row = rows[(chiplet_chip, analog_chip)]
+            out_bytes = float(row["operands_out"])
+            back_bytes = float(row["results_back"])
+            itemized = (
+                ", ".join(
+                    f"{block} {value:.6g} B" for block, value in row["link_blocks"].items()
+                )
+                or "no lowered link op on this relationship"
+            )
+            fabric = ", ".join(
+                f"{block} x {count}" for block, count in row["fabric_blocks"].items()
+            ) or "none in this slice"
+            unpriced = [
+                block
+                for block in row["fabric_blocks"]
+                if block in _UNPRICED_SERVICE_BLOCKS
+            ]
+            out.append(
+                OrderedDict(
+                    (
+                        ("id", f"{system}.link.svc.d{chiplet_chip}->c{analog_chip}"),
+                        ("from", f"{system}.chip.{chiplet_chip:03d}"),
+                        ("to", f"{system}.chip.{analog_chip:03d}"),
+                        ("role", "svc"),
+                        ("bytes", out_bytes + back_bytes),
+                        ("per", unit),
+                        (
+                            "label",
+                            "shared-digital service traffic (act x act operands out, "
+                            "results back)",
+                        ),
+                        (
+                            "basis",
+                            f"MEASURED on {scope.get('scope', unit)}: chiplet "
+                            f"{chiplet_chip} runs {fabric} for chip {analog_chip}'s "
+                            f"layers. Bytes = operands out {out_bytes:.6g} B + results "
+                            f"back {back_bytes:.6g} B = {out_bytes + back_bytes:.6g} B "
+                            f"per {unit}, over {int(row['ops'])} lowered link op(s); "
+                            f"itemized: {itemized}. Every term is the lowering's own "
+                            "FwsOpAnnotation.bytes_moved, so this link and the P3.5 "
+                            "boundary table are one accounting (D21)."
+                            + (
+                                " UNPRICED COMPONENT: "
+                                + ", ".join(unpriced)
+                                + " lowers no transfer op on either side (the "
+                                "projection writes and the scan reads without a "
+                                "lowered hop), so its operand and result traffic is NOT "
+                                "in the number above. That is an absent op, not a "
+                                "measured zero, and it is named rather than estimated "
+                                "(D21, D28)."
+                                if unpriced
+                                else ""
+                            ),
+                        ),
+                    )
+                )
+            )
+        return out
+
     def utilization_of(self, device_class: str) -> ClassUtilization:
         for row in self.utilization:
             if row.device_class == device_class:
@@ -3286,12 +3439,45 @@ def _analog_beat_of(
     )
 
 
+#: Shared-digital blocks whose analog<->chiplet traffic this repo LOWERS NO
+#: transfer op for, so a ``svc`` link cannot count their bytes (D21). The
+#: recurrent path places its scan on the chiplet directly: the projections
+#: write their result and the scan reads it with no hop in between. Named here
+#: once, so the disclosure and the byte total cannot disagree about which
+#: component is missing.
+_UNPRICED_SERVICE_BLOCKS = ("ssm_scan", "delta_rule", "rg_lru")
+
+
+def _union_busy_s(intervals: Sequence[Tuple[float, float]]) -> float:
+    """Wall time covered by at least one of ``intervals`` — measured, not summed.
+
+    Analog macros within one stage fire in PARALLEL, so a sum over their ops
+    would report a stage's analog time as hundreds of microseconds when the
+    stage really spends a few. The union is the wall-clock time the stage's
+    analog side is occupied, which is the quantity ADJ-9 compares the digital
+    engine against.
+    """
+    ordered = sorted(intervals)
+    if not ordered:
+        return 0.0
+    total = 0.0
+    start, end = ordered[0]
+    for begin, finish in ordered[1:]:
+        if begin > end:
+            total += end - start
+            start, end = begin, finish
+        else:
+            end = max(end, finish)
+    return total + (end - start)
+
+
 def _engine_demand(
     serving: ServingPoint,
     annotations: Sequence[FwsOpAnnotation],
     costs: Sequence[OpCost],
+    timeline: CoarseEvalResult,
 ) -> Tuple[EngineDemand, ...]:
-    """Per-stage vector-engine demand in ONE beat, from the probe's own costs.
+    """Per-stage vector demand AND analog m-pass time in ONE beat (ADJ-9).
 
     The scope is :func:`_measurement_slice`'s — the last lowered beat under the
     filled pipeline, the last lowered decode step under lockstep — because that
@@ -3302,16 +3488,45 @@ def _engine_demand(
     exactly the set :meth:`CimDeviceModel.price_vector_work` produces; the
     attention ops on the same chiplet run on the systolic array and the softmax
     lanes, which are different silicon with their own laws.
+
+    THE ANALOG TARGET (D31-v2). ``analog_time_s`` is the UNION of the busy
+    intervals of the stage's ``analog_macro`` ops in that slice, read off the
+    probe timeline: the wall time during which at least one of the stage's
+    macros is running an m-pass. Three properties make it the right target:
+
+    * it is a MEASUREMENT off the same timeline the beat comes from, not a
+      formula (A1, P4 §3);
+    * it is INVARIANT to the width being derived — every analog duration is,
+      and the union ignores the gaps the engine's own time would open between
+      them — so ADJ-9 keeps D31's two-pass argument intact and needs no
+      iteration;
+    * it EXCLUDES the gaps, so it is the strictly smaller of the two candidate
+      readings (union vs. first-issue-to-last-finish span) and therefore the
+      tighter target. Sizing against the span would let the digital engine hide
+      inside time the analog side is not actually working, which is the margin
+      D28 forbids.
     """
     select, _ = _measurement_slice(serving)
     per_stage: "OrderedDict[int, List[float]]" = OrderedDict()
+    analog: "OrderedDict[int, List[Tuple[float, float]]]" = OrderedDict()
     for annotation, cost in zip(annotations, costs):
-        if "ops" not in cost.detail or not select(annotation):
+        if not select(annotation):
             continue
         stage = int(annotation.stage)
-        per_stage.setdefault(stage, []).append(float(cost.detail["ops"]))
+        if "ops" in cost.detail:
+            per_stage.setdefault(stage, []).append(float(cost.detail["ops"]))
+        if cost.device_class == "analog_macro":
+            start = float(timeline.start_times[cost.uid])
+            finish = float(timeline.finish_times[cost.uid])
+            if start >= 0 and finish >= start:
+                analog.setdefault(stage, []).append((start, finish))
     return tuple(
-        EngineDemand(stage=stage, ops=tuple(ops)) for stage, ops in per_stage.items()
+        EngineDemand(
+            stage=stage,
+            ops=tuple(ops),
+            analog_time_s=_union_busy_s(analog.get(stage, ())),
+        )
+        for stage, ops in per_stage.items()
     )
 
 
@@ -3319,6 +3534,96 @@ def _engine_demand(
 #: (D31). Written by :func:`_derive_engine` and read by
 #: :func:`engine_sizing_disclosures` in the same call chain.
 _PROBE_BEAT_CONVERGENCE: "OrderedDict[str, object]" = OrderedDict()
+
+
+def _beat_setting_stage_terms(
+    serving: ServingPoint,
+    annotations: Sequence[FwsOpAnnotation],
+    costs: Sequence[OpCost],
+    timeline: CoarseEvalResult,
+) -> "OrderedDict[str, object]":
+    """WHICH stage sets the probe beat, and WHAT it spends the beat on (ADJ-9).
+
+    ADJ-9 asks for the analog side to be the binding term "wherever physically
+    reachable". Reachability has two halves and this block measures the second
+    one. The derivation can guarantee that the DERIVED engine fits inside a
+    stage's analog m-pass time; it cannot guarantee that the analog m-pass is
+    then the stage's longest term, because a stage also runs silicon D31 does
+    not size — the attention systolic fabric and the softmax pipeline, whose
+    geometry is DECLARED on the card. This function names the stage that takes
+    longest in the probe and itemizes its terms by op block, so a machine that
+    is still bound by a declared digital unit says which one and by how much,
+    instead of leaving the reader to infer it from a throughput number.
+
+    Every term is a UNION of busy intervals, the same reading
+    :func:`_engine_demand` takes for the analog target, so the numbers on this
+    row and the numbers the engine was sized against are one accounting (D21).
+    """
+    select, _ = _measurement_slice(serving)
+    spans: Dict[int, List[Tuple[float, float]]] = {}
+    terms: Dict[int, Dict[Tuple[str, str], List[Tuple[float, float]]]] = {}
+    for annotation, cost in zip(annotations, costs):
+        if not select(annotation):
+            continue
+        start = float(timeline.start_times[cost.uid])
+        finish = float(timeline.finish_times[cost.uid])
+        if start < 0 or finish < start:
+            continue
+        stage = int(annotation.stage)
+        spans.setdefault(stage, []).append((start, finish))
+        terms.setdefault(stage, {}).setdefault(
+            (cost.device_class, cost.block), []
+        ).append((start, finish))
+    if not spans:
+        return OrderedDict()
+    stage = max(
+        spans, key=lambda key: max(f for _, f in spans[key]) - min(s for s, _ in spans[key])
+    )
+    span_s = max(f for _, f in spans[stage]) - min(s for s, _ in spans[stage])
+    rows = sorted(
+        (
+            (device_class, block, _union_busy_s(intervals))
+            for (device_class, block), intervals in terms[stage].items()
+        ),
+        key=lambda row: -row[2],
+    )
+    analog_s = _union_busy_s(
+        [
+            interval
+            for (device_class, _), intervals in terms[stage].items()
+            if device_class == "analog_macro"
+            for interval in intervals
+        ]
+    )
+    return OrderedDict(
+        (
+            ("stage", stage),
+            ("span_s", span_s),
+            ("analog_time_s", analog_s),
+            ("analog_is_largest_term", bool(rows and rows[0][0] == "analog_macro")),
+            (
+                "terms",
+                [
+                    OrderedDict(
+                        (
+                            ("device_class", device_class),
+                            ("block", block),
+                            ("busy_s", busy),
+                        )
+                    )
+                    for device_class, block, busy in rows[:5]
+                ],
+            ),
+            (
+                "basis",
+                "the stage with the longest first-issue-to-last-finish span in the "
+                "PROBE slice (every vector op counted and untimed), with each term the "
+                "UNION of the busy intervals of its op block on that stage. A union, "
+                "not a sum: devices of one class fire in parallel and a sum would "
+                "report a stage's analog time as the total of hundreds of macros.",
+            ),
+        )
+    )
 
 
 def _derive_engine(
@@ -3330,23 +3635,25 @@ def _derive_engine(
     """Size the scan/vector engine from this run's own beat (D31), or do nothing.
 
     THE CIRCULARITY AND HOW IT IS BROKEN. The engine's width sets the time its
-    ops take, which contributes to the beat, which is what the width is derived
-    from. Pass A prices the run with every vector op COUNTED AND UNTIMED
-    (:meth:`CimDeviceModel.begin_engine_probe`), so the beat it measures is the
-    one the ANALOG stages set — a quantity no digital width can move. The width
-    that holds THAT beat is then derived, installed, and the caller prices the
-    run again for real. TWO PASSES ARE ENOUGH because the sizing budget does not
-    depend on the sizing: pass A's beat is a property of the analog side alone,
-    so pass B cannot change the number pass A derived from, and no iteration is
+    ops take, which contributes to the beat. Pass A prices the run with every
+    vector op COUNTED AND UNTIMED
+    (:meth:`CimDeviceModel.begin_engine_probe`), so everything it measures is a
+    property of the non-vector silicon — the per-stage ANALOG m-pass time that
+    ADJ-9 sizes against, and the beat that serves as the fallback budget. The
+    width is then derived, installed, and the caller prices the run again for
+    real. TWO PASSES ARE ENOUGH because neither target depends on the sizing:
+    an analog op's duration does not move with a lane count, and the union that
+    measures the stage's analog time ignores the gaps between those ops, so
+    pass B cannot change the numbers pass A derived from. No iteration is
     needed or attempted.
 
     WHAT PASS B THEN MEASURES IS LARGER, and that is the machine, not an error.
-    The criterion is *digital-per-beat <= the ANALOG beat* (see
-    :meth:`CimDeviceModel.derive_engine_sizing`): the engine is sized to be at
-    most CO-BOUND, never binding. Under D29 a stage holds ONE stream at a time,
-    so its analog passes and its scan run in SERIES and the beat pass B reports
-    is their sum. No width makes the two equal; a wider one would shorten the
-    sum, and D31 does not buy it, because the engine is not a free knob.
+    The criterion is *digital per-stage time <= that stage's own ANALOG m-pass
+    time* (ADJ-9; see :meth:`CimDeviceModel.derive_engine_sizing`), so the
+    analog side is the binding term of every stage that has analog work. Under
+    D29 a stage holds ONE stream at a time, so its analog passes and its scan
+    run in SERIES and the beat pass B reports is their sum. What ADJ-9 buys is
+    that the analog half dominates the sum — not that the sum equals it.
 
     Returns None when there is nothing to derive — a card that declares an
     explicit ``vector_lanes`` override (D31 honours it, with a disclosure), or a
@@ -3383,10 +3690,19 @@ def _derive_engine(
         require_pipeline=False,
     )
     beat, convergence = _analog_beat_of(mapping, serving, probe, timeline)
-    demand = _engine_demand(serving, annotations, probe.costs)
+    demand = _engine_demand(serving, annotations, probe.costs, timeline)
     if beat <= 0 or not demand:
         return None
     sizing = device.derive_engine_sizing(beat, demand)
+    # ADJ-9's reachability evidence rides the SIZING, not a module global: a
+    # report is written long after the derivation ran, and a global would hand
+    # one run's evidence to another run's report (D21).
+    sizing = replace(
+        sizing,
+        beat_setting_stage=_beat_setting_stage_terms(
+            serving, annotations, probe.costs, timeline
+        ),
+    )
     device.install_derived_engine(sizing)
     # The PROBE's own convergence, carried out so the disclosure can say
     # whether the width was derived from a settled number. A shorter probe beat
@@ -3405,42 +3721,55 @@ def engine_sizing_disclosures(
     if sizing is None:
         return []
     rows = ", ".join(
-        f"stage {row.stage}: {row.used_cycles}/{row.budget_cycles} cycles"
+        f"stage {row.stage}: {row.used_cycles}/{row.budget_cycles} cycles, digital "
+        f"{row.time_s:.4g} s vs analog {row.analog_time_s:.4g} s"
         for row in sizing.per_stage[:6]
     )
-    binding = next(
-        (row for row in sizing.per_stage if row.stage == sizing.binding_stage), None
-    )
+    binding = sizing.binding_row
+    unreachable = sizing.unreachable_stages
     out = [
         Relaxation(
             constraint="derived_engine_sizing",
             value=(
                 f"vector_lanes = {int(sizing.vector_lanes)} ({PROVENANCE_DERIVED_COUNT}), "
                 f"binding stage {int(sizing.binding_stage)}, engine duty "
-                f"{sizing.utilization * 100:.3f}% of the {sizing.analog_beat_s:.6g} s "
-                "ANALOG beat"
+                f"{sizing.utilization * 100:.3f}% of that stage's own "
+                f"{(binding.target_s if binding is not None else 0.0):.6g} s ANALOG "
+                f"m-pass; {len(sizing.analog_bound_stages)} of {len(sizing.per_stage)} "
+                "stage(s) analog-bound"
             ),
             reason=(
-                "D31: the scan/vector engine is never a swept or declared free knob. Its "
-                "width is DERIVED here as the smallest integer lane count whose own "
-                "priced time fits the beat the ANALOG stages set, with no margin (D28). "
-                "The beat comes from a PROBE pass in which every vector op is counted "
-                "and costs nothing, so the number the engine is sized against does not "
-                "depend on the engine. The derivation inverts "
-                "CimDeviceModel.price_vector_work exactly, so the engine sized here is "
-                "the engine the run is then priced on. THE CRITERION IS "
-                "digital-per-beat <= the ANALOG beat: the engine is at most CO-BOUND "
-                "with the analog stages and never the binding term. It does not make "
-                "the MEASURED beat equal the analog beat and cannot — a D29 stage holds "
-                "one stream at a time, so its analog passes and its scan run in series "
-                "and the measured beat is their sum at any width"
+                "D31-v2 (ADJ-9): the scan/vector engine is never a swept or declared "
+                "free knob, and it is sized to the ANALOG FLOOR rather than to the "
+                "beat. Its width is DERIVED here as the smallest integer lane count for "
+                "which EVERY stage's digital per-stage time fits that stage's OWN "
+                "measured analog m-pass time, with no margin (D28). Both targets come "
+                "from a PROBE pass in which every vector op is counted and costs "
+                "nothing, so nothing the engine is sized against depends on the engine. "
+                "The derivation inverts CimDeviceModel.price_vector_work exactly, so "
+                "the engine sized here is the engine the run is then priced on. THE "
+                "CRITERION IS digital-per-stage <= the stage's ANALOG m-pass time: the "
+                "analog side is the binding term by construction wherever it can be. It "
+                "does not make the MEASURED beat equal the analog time and cannot — a "
+                "D29 stage holds one stream at a time, so its analog passes and its "
+                "scan run in series and the measured beat is their sum at any width"
                 + (
                     f" (here {binding.time_s:.6g} s of digital against a "
-                    f"{sizing.analog_beat_s:.6g} s analog beat on the binding stage)"
+                    f"{binding.analog_time_s:.6g} s analog m-pass on the binding stage)"
                     if binding is not None
                     else ""
                 )
                 + f". Per stage: {rows}."
+                + (
+                    " UNREACHABLE on stage(s) "
+                    + ", ".join(str(int(stage)) for stage in unreachable)
+                    + f", which fall back to the {sizing.analog_beat_s:.6g} s analog "
+                    "beat: a stage with no analog work has no analog time to be bound "
+                    "by, and a stage whose analog time is below the engine's own "
+                    "pipeline fill cannot be held at any width."
+                    if unreachable
+                    else " Every stage's criterion was reachable."
+                )
                 + (
                     " Stage -1 is the RETIRED lockstep regime's spelling for 'no pipeline "
                     "stage': that regime has one decode STEP rather than D staggered "
@@ -3451,6 +3780,51 @@ def engine_sizing_disclosures(
             ),
         )
     ]
+    setter = dict(sizing.beat_setting_stage or {})
+    if setter:
+        largest = (setter.get("terms") or [{}])[0]
+        out.append(
+            Relaxation(
+                constraint="analog_floor_reachability",
+                value=(
+                    f"{len(sizing.analog_bound_stages)} of {len(sizing.per_stage)} "
+                    "stage(s) analog-bound after the derivation; the beat-setting stage "
+                    f"{int(setter.get('stage', -1))} spends "
+                    f"{float(largest.get('busy_s', 0.0)):.6g} s on "
+                    f"{largest.get('device_class', '?')}/{largest.get('block', '?')} "
+                    f"against {float(setter.get('analog_time_s', 0.0)):.6g} s of analog "
+                    "m-pass"
+                ),
+                reason=(
+                    "ADJ-9 asks the ANALOG side to be the binding term wherever that is "
+                    "physically reachable. The derivation guarantees the half it can: "
+                    "the DERIVED scan/vector engine is sized so its per-stage time fits "
+                    "inside that stage's own analog m-pass time. It cannot guarantee "
+                    "the other half, because a stage also runs silicon D31 does not "
+                    "derive — the attention systolic fabric and the softmax pipeline "
+                    "are DECLARED card geometry (cim.fabric rows x cols x num_arrays, "
+                    "softmax_lanes, D13) and a sweep axis under D28, not a derived "
+                    "engine. This row is the measurement that says which it is on THIS "
+                    "machine: "
+                    + (
+                        "the analog m-pass IS the largest term of the beat-setting "
+                        "stage, so the machine runs at the analog floor."
+                        if setter.get("analog_is_largest_term")
+                        else "the largest term is NOT analog, so the beat is set by "
+                        "declared digital silicon and buying more scan lanes cannot "
+                        "move it. The terms are itemized in "
+                        "evaluation.digital_silicon.derived_engine_sizing."
+                        "beat_setting_stage."
+                    )
+                    + " Terms (union of busy intervals, probe slice): "
+                    + "; ".join(
+                        f"{row['device_class']}/{row['block']} {row['busy_s']:.4g} s"
+                        for row in setter.get("terms", ())
+                    )
+                    + f". Stage span {float(setter.get('span_s', 0.0)):.6g} s."
+                ),
+            )
+        )
     probe = dict(_PROBE_BEAT_CONVERGENCE)
     if probe.get("regime") == REGIME_FILLED:
         out.append(
@@ -3465,14 +3839,16 @@ def engine_sizing_disclosures(
                     f"{float(probe.get('steady_beat_spread', 0.0)) * 100:.4f}%)"
                 ),
                 reason=(
-                    "The width above is derived from the PROBE pass's beat, and that "
-                    "beat is a measurement like any other. A SHORTER probe beat is a "
-                    "tighter cycle budget and therefore MORE lanes, so a derivation "
-                    "taken from a still-ramping probe systematically over-sizes the "
-                    "engine. The probe beat is read off the same settled tail the "
-                    "priced pass uses (P7.9), so it does not move with the window, and "
-                    "this line is where a reader sees whether it settled at all rather "
-                    "than having to trust that it did."
+                    "The probe pass is where BOTH of ADJ-9's inputs are measured: each "
+                    "stage's analog m-pass time (the sizing target) and this beat (the "
+                    "fallback budget for a stage the criterion cannot reach). The beat "
+                    "is a measurement like any other, so this line is where a reader "
+                    "sees whether it settled. Under D31-v2 the beat no longer sizes any "
+                    "stage that has analog work, so a still-ramping beat can only move "
+                    "a FALLBACK row; the analog stage times themselves are sums of "
+                    "op durations and do not ramp. The beat is read off the same "
+                    "settled tail the priced pass uses (P7.9), so it does not move with "
+                    "the window."
                 ),
             )
         )
@@ -3863,6 +4239,8 @@ def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, objec
     out["digital_area_mm2_total"] = chiplet_area * chiplets + pool.area_mm2 * slots
     out["digital_power_W_total"] = chiplet_power * chiplets + pool.power_w * slots
     sizing = device.derived_engine
+    # ADJ-9's beat-setting evidence rides derived_engine_sizing itself, so the
+    # block carries no second copy of it (D21).
     out["derived_engine_sizing"] = sizing.summary() if sizing is not None else None
     # None = no vector op ran, so no engine was derived and none is invented (D31).
     out["vector_lanes"] = device.resolved_vector_lanes()

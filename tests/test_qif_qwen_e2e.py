@@ -398,22 +398,25 @@ def test_a_delta_rule_op_matches_its_law_computed_by_hand(qwen_lockstep):
 
         cycles = ceil(ops / lanes) + (pipeline_depth - 1)
 
-    WAVE F REWRITE (D31, P7.8). OLD: `lanes = 1024`, DECLARED on the card, for
-    25,776,147 cycles and 27.1328 ms. NEW: the card declares no engine, so the
-    width is DERIVED — 178 lanes, the smallest integer that holds this run's
-    step — and the same hand arithmetic gives
+    ADJ-9 REWRITE (D31-v2). The width moved twice and the LAW never did.
+    OLD-OLD: `lanes = 1024`, DECLARED on the card, 25,776,147 cycles, 27.1328
+    ms. OLD (D31-v1): 178 lanes, the smallest that held the analog BEAT,
+    148,285,160 cycles, 156.0896 ms. NEW (D31-v2, ADJ-9): the width is derived
+    to the ANALOG FLOOR — the smallest integer whose priced time fits the
+    ANALOG M-PASS of the stage itself — which on this fixture's decode step is
+    48.96 us of analog against 0.95 GHz, and the answer is 7676 lanes:
 
-        cycles = ceil(26,394,755,072 / 178) + 19 = 148,285,141 + 19
-               = 148,285,160
-        t      = cycles / 0.95e9 = 156.0896 ms
+        cycles = ceil(26,394,755,072 / 7676) + 19 = 3,438,609 + 19
+               = 3,438,628
+        t      = cycles / 0.95e9 = 3.6196 ms
 
-    The LAW is untouched and the hand check is the same check; only the width
-    it is evaluated at moved, from a number somebody declared to a number the
-    beat derived. Note also WHICH beat: this run is the retired lockstep
-    fixture, so the engine is sized against its DECODE STEP and the PREFILL op
-    below is then priced on decode-sized silicon — which is what the machine
-    physically has, and which is why P7 is decode-only (D25) and these prefill
-    rows are law checks rather than claims about prefill performance.
+    The hand check is the same check; only the width it is evaluated at moved,
+    and it moved because the TARGET moved from the slowest stage's time to this
+    stage's own analog time. Note also WHICH time: this run is the retired
+    lockstep fixture, so the engine is sized against its DECODE STEP and the
+    PREFILL op below is then priced on decode-sized silicon — which is what the
+    machine physically has, and which is why P7 is decode-only (D25) and these
+    prefill rows are law checks rather than claims about prefill performance.
     """
     cost = next(
         c for c in qwen_lockstep.pricing.costs
@@ -424,27 +427,30 @@ def test_a_delta_rule_op_matches_its_law_computed_by_hand(qwen_lockstep):
     assert expected_ops == 26_394_755_072
     assert float(cost.detail["ops"]) == float(expected_ops)
     device = qwen_lockstep.mapping.device
-    assert device.vector_lanes == 178
+    assert device.vector_lanes == 7676
     assert device.vector_lanes_provenance == "derived-count"
     assert device.vector_clock_hz == 0.95e9
-    cycles = math.ceil(expected_ops / 178) + (device.vector_pipeline_depth - 1)
-    assert cycles == 148_285_160
+    cycles = math.ceil(expected_ops / 7676) + (device.vector_pipeline_depth - 1)
+    assert cycles == 3_438_628
     assert float(cost.detail["arith_cycles"]) == float(cycles)
     assert cost.duration_s == pytest.approx(cycles / 0.95e9, rel=1e-12)
-    # The pipeline drain is 19 cycles on 148 million: the op is lane-bound,
-    # so it also sits within 1e-6 of the pure ops / (lanes * clock) bound.
+    # The pipeline drain is 19 cycles on 3.4 million: the op is lane-bound,
+    # so it also sits within 1e-5 of the pure ops / (lanes * clock) bound.
     assert cost.duration_s == pytest.approx(
-        expected_ops / (178 * 0.95e9), rel=1e-6
+        expected_ops / (7676 * 0.95e9), rel=1e-5
     )
-    # And 178 is the SMALLEST width that holds the step: one lane fewer does not
-    # fit, which is what "no margins" (D28) means as an assertion.
+    # And 7676 is the SMALLEST width that holds the stage's own ANALOG m-pass:
+    # one lane fewer does not fit, which is what "no margins" (D28) means as an
+    # assertion, and the row is ANALOG-BOUND, which is what ADJ-9 means as one.
     sizing = device.derived_engine
-    assert sizing.vector_lanes == 178
+    assert sizing.vector_lanes == 7676
     row = sizing.per_stage[0]
+    assert row.target_kind == cim_timing.TARGET_ANALOG_STAGE
     assert row.used_cycles <= row.budget_cycles
-    assert row.time_s <= sizing.analog_beat_s
+    assert row.time_s <= row.analog_time_s
+    assert row.analog_bound
     assert cim_timing.vector_cycles_at(
-        [expected_ops], 178, device.vector_pipeline_depth
+        [expected_ops], 7676, device.vector_pipeline_depth
     ) == cycles
 
 
@@ -603,10 +609,9 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
     """P1's finding #1 (D5), restated for a 3:1 linear:full stack.
 
     Qwen3.5-4B's prefill is owned by the shared digital chiplet twice over: the
-    24 delta-rule ops and the 8 layers of full attention together are ~89% of
-    the prefill critical path, and ONE gated-attention layer costs about twice
-    what ONE delta-rule layer costs at this context. The analog macros hold
-    every weight matrix in the model and account for well under half of it.
+    24 delta-rule ops and the 8 layers of full attention together are ~80% of
+    the prefill critical path, and ONE gated-attention layer costs many times
+    what ONE delta-rule layer costs at this context.
     """
     prefill = [cost for cost in qwen_lockstep.pricing.costs if cost.phase == "prefill"]
     latency = qwen_lockstep.metric("sys.fws.prefill_latency").value
@@ -617,23 +622,32 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
     )
     analog = sum(c.duration_s for c in prefill if c.device_class == "analog_macro")
 
-    # WAVE F REWRITE (D31, P7.8). OLD CLAIM: delta 50-60% of the critical path,
-    # attention 30-40%, together 85-95%, and ONE attention layer costing >1.5x
-    # ONE delta-rule layer. Those splits were read on a card that DECLARED 1024
-    # vector lanes. NEW CLAIM: the engine is DERIVED from this run's own decode
-    # step (178 lanes), so the delta rule — which is the only block that runs on
-    # it — dominates far harder, and the per-layer comparison REVERSES. The
-    # finding P1 wanted is unchanged and stronger: this stack is shared-digital
-    # bound, and the analog macros that hold every weight in the model are under
-    # a tenth of the path. What changed is which digital unit owns it, and that
-    # is a consequence of D31 (a decode-sized engine priced on a prefill), not a
-    # new law.
-    assert 0.8 < delta / latency < 0.95
-    assert 0.05 < attention / latency < 0.2
-    assert 0.9 < (delta + attention) / latency < 1.0
-    assert analog / latency < 0.2
-    # per-layer: 24 linear layers vs 8 attention layers — now the OTHER way.
-    assert (attention / 8) / (delta / 24) < 1.0
+    # ADJ-9 REWRITE (D31-v2). This split has now been read at three engine
+    # widths and it says something different at each, which is the point of
+    # writing the width down.
+    #   1024 DECLARED lanes: delta 50-60%, attention 30-40%.
+    #   178 lanes (D31-v1, sized to the analog BEAT): delta 80-95%, attention
+    #     5-20%, and one attention layer CHEAPER than one delta layer.
+    #   5479-class widths (D31-v2, sized to the ANALOG FLOOR): 7676 lanes here,
+    #     delta falls to ~13%, ATTENTION owns ~67%, and the per-layer ratio
+    #     reverses back and then some — one attention layer costs ~15x one
+    #     delta-rule layer.
+    # NEW CLAIM, and it is the honest one: with the scan engine no longer
+    # under-provisioned, this stack is bound by the ATTENTION SYSTOLIC FABRIC,
+    # whose geometry is DECLARED on the card and which D31 does not derive. The
+    # analog macros are no longer a minor term either: at ~63% of the summed
+    # prefill work they are now comparable to the digital side, which is what
+    # deriving the engine to the analog floor was supposed to expose.
+    #
+    # The shares are sums of OP DURATIONS over parallel device classes, so they
+    # are shares of WORK and not of one serial path; they do not sum to 1 and
+    # are not claimed to.
+    assert 0.10 < delta / latency < 0.18
+    assert 0.60 < attention / latency < 0.75
+    assert 0.70 < (delta + attention) / latency < 0.90
+    assert 0.55 < analog / latency < 0.70
+    # per-layer: 24 linear layers vs 8 attention layers — attention wins hard.
+    assert (attention / 8) / (delta / 24) > 10.0
 
 
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):

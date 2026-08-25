@@ -353,28 +353,47 @@ def test_a_run_with_no_scan_op_composes_no_scan_engine():
 
 
 def test_derive_vector_lanes_is_the_exact_inverse_of_the_pricing_law():
-    """HAND CHECK — one call of 1 000 000 ops, a 43.98 us beat, 0.95 GHz, depth 20.
+    """HAND CHECK — one call of 1 000 000 ops against the ANALOG FLOOR (ADJ-9).
 
-        budget = floor(43.98e-6 * 0.95e9) = floor(41781.0) = 41781 cycles
+    The budget handed in is the stage's own ANALOG m-pass time, 1.6 us — the
+    number Granite's stages actually measure — at 0.95 GHz, depth 20:
+
+        budget = floor(1.6e-6 * 0.95e9) = floor(1520.0) = 1520 cycles
         cost(lanes) = 20 + ceil(1e6 / lanes) - 1 = 19 + ceil(1e6 / lanes)
 
-        at 24 lanes: ceil(1e6/24) = 41667 -> 41686 cycles  <= 41781  OK
-        at 23 lanes: ceil(1e6/23) = 43479 -> 43498 cycles  >  41781  NO
+        at 667 lanes: ceil(1e6/667) = 1500 -> 1519 cycles  <= 1520  OK
+        at 666 lanes: ceil(1e6/666) = 1502 -> 1521 cycles  >  1520  NO
 
-    So 24 is the answer, and 24 is the SMALLEST answer, which is what "no
-    margins" (D28) means when it is written as an assertion.
+    So 667 is the answer, and 667 is the SMALLEST answer for THAT budget, which
+    is what "no margins" (D28) means written as an assertion.
+
+    REWRITTEN BY ADJ-9. OLD CLAIM: the budget is the 43.98 us analog BEAT and
+    the answer is 24 lanes. NEW CLAIM: the budget is the 1.6 us analog M-PASS
+    of the stage itself and the answer is 667. Same law, same arithmetic, a
+    28x tighter budget — which is the whole content of derive-to-the-floor: a
+    smaller budget buys more lanes, and the analog floor is the smallest budget
+    the machine can physically justify. The old number is kept below as the
+    thing the new criterion replaced, so the two are comparable on one page.
     """
     ops = [1_000_000.0]
-    beat, clock, depth = 43.98e-6, 0.95e9, 20
-    assert math.floor(beat * clock) == 41781
-    assert cim_timing.vector_cycles_at(ops, 24, depth) == 19 + math.ceil(1e6 / 24)
-    assert cim_timing.vector_cycles_at(ops, 24, depth) == 41686
-    assert cim_timing.vector_cycles_at(ops, 23, depth) == 43498
+    analog_s, clock, depth = 1.6e-6, 0.95e9, 20
+    assert math.floor(analog_s * clock) == 1520
+    assert cim_timing.vector_cycles_at(ops, 667, depth) == 19 + math.ceil(1e6 / 667)
+    assert cim_timing.vector_cycles_at(ops, 667, depth) == 1519
+    assert cim_timing.vector_cycles_at(ops, 666, depth) == 1521
 
-    lanes = cim_timing.derive_vector_lanes(ops, beat, clock, depth)
-    assert lanes == 24
-    assert cim_timing.vector_cycles_at(ops, lanes, depth) <= 41781
-    assert cim_timing.vector_cycles_at(ops, lanes - 1, depth) > 41781
+    lanes = cim_timing.derive_vector_lanes(ops, analog_s, clock, depth)
+    assert lanes == 667
+    assert cim_timing.vector_cycles_at(ops, lanes, depth) <= 1520
+    assert cim_timing.vector_cycles_at(ops, lanes - 1, depth) > 1520
+
+    # What the RETIRED criterion bought on the same call: the beat is the
+    # slowest stage's time, so sizing against it leaves this stage's engine
+    # 28x narrower than its own analog m-pass — and therefore its own binding
+    # term. That is the machine ADJ-9 refuses.
+    assert math.floor(43.98e-6 * clock) == 41781
+    assert cim_timing.derive_vector_lanes(ops, 43.98e-6, clock, depth) == 24
+    assert cim_timing.vector_cycles_at(ops, 24, depth) / clock > analog_s
 
 
 def test_the_per_call_pipeline_fill_is_charged_and_not_amortized():
@@ -397,43 +416,130 @@ def test_a_beat_shorter_than_the_engines_own_fill_is_refused_by_name():
     assert "no vector-engine width holds" in message
     assert "never the FILL" in message
     assert "refuses to clamp" in message
-    # A missing beat is refused too: D31 has nothing to derive from without one.
+    # A missing budget is refused too: D31 has nothing to derive from.
     with pytest.raises(cim_timing.EngineSizingError):
         cim_timing.derive_vector_lanes([1000.0], 0.0, 0.95e9, 20)
 
 
-def test_one_card_carries_one_width_and_the_slack_stays_visible():
-    """D28: idle silicon is a finding the report shows, not a number it smooths."""
+def test_every_stage_is_sized_to_its_own_analog_m_pass(): 
+    """ADJ-9's FIXED POINT: digital per-stage time <= that stage's analog time.
+
+    REWRITTEN BY ADJ-9. OLD CLAIM (test_one_card_carries_one_width...): the
+    width is the smallest that holds the analog BEAT, and the binding stage is
+    the one with the most work. NEW CLAIM: the width is the smallest for which
+    EVERY stage fits its OWN analog m-pass, and the binding stage is the one
+    whose (work / analog time) ratio is worst — which is not the same stage.
+
+    HAND CHECK on stage 1 below: 1 000 000 ops in one call against a 1.6 us
+    analog m-pass at 0.95 GHz, depth 20, is 667 lanes (see
+    test_derive_vector_lanes_is_the_exact_inverse_of_the_pricing_law). Stage 0
+    carries 8x the work but 16x the analog time, so it asks for fewer.
+    """
     device = _device(synthesis_library="22nm")
     demand = [
-        cim_timing.EngineDemand(stage=0, ops=(8_000_000.0,)),   # the binding stage
-        cim_timing.EngineDemand(stage=1, ops=(2_000_000.0,)),
+        cim_timing.EngineDemand(stage=0, ops=(8_000_000.0,), analog_time_s=25.6e-6),
+        cim_timing.EngineDemand(stage=1, ops=(1_000_000.0,), analog_time_s=1.6e-6),
     ]
     sizing = device.derive_engine_sizing(43.98e-6, demand)
-    assert sizing.binding_stage == 0
+    # The stage with the MOST work is not the binding one; the tightest ratio is.
+    assert sizing.binding_stage == 1
+    assert sizing.vector_lanes == 667
     # Both rows are priced at the PROVISIONED width, not at the width each
     # stage asked for, because the machine that gets built has one engine.
     assert {row.lanes for row in sizing.per_stage} == {sizing.vector_lanes}
-    binding, light = sizing.per_stage
-    assert binding.used_cycles <= binding.budget_cycles
-    assert light.used_cycles < binding.used_cycles
-    assert light.slack_s > binding.slack_s > 0
-    # The width is the smallest that holds the beat, hand-checkable both ways.
+    heavy, tight = sizing.per_stage
+    # THE FIXED POINT: every stage is ANALOG-BOUND, by construction.
+    assert sizing.analog_bound_stages == (0, 1)
+    assert sizing.unreachable_stages == ()
+    for row in sizing.per_stage:
+        assert row.target_kind == cim_timing.TARGET_ANALOG_STAGE
+        assert row.target_s == row.analog_time_s
+        assert row.time_s <= row.analog_time_s
+        assert row.analog_bound
+    # D28: idle silicon stays visible. The heavy stage runs with far more
+    # slack than the stage that paid for the width.
+    assert heavy.slack_s > tight.slack_s >= 0
+    # The width is the smallest that holds the BINDING stage's analog time,
+    # hand-checkable both ways.
     assert cim_timing.vector_cycles_at(
-        [8_000_000.0], sizing.vector_lanes, sizing.pipeline_depth
-    ) <= binding.budget_cycles
+        [1_000_000.0], sizing.vector_lanes, sizing.pipeline_depth
+    ) <= tight.budget_cycles
     assert cim_timing.vector_cycles_at(
-        [8_000_000.0], sizing.vector_lanes - 1, sizing.pipeline_depth
-    ) > binding.budget_cycles
+        [1_000_000.0], sizing.vector_lanes - 1, sizing.pipeline_depth
+    ) > tight.budget_cycles
     # And it is COMPOSED, because this card names a library.
     assert sizing.composition is not None
     assert sizing.composition.blocks["FP_MULT"] == sizing.vector_lanes
 
 
+def test_the_analog_floor_beats_the_retired_beat_criterion_on_the_same_demand():
+    """Derive-UP, stated as a comparison rather than as a claim.
+
+    The same stages sized against the analog BEAT (what D31-v1 did: pass no
+    analog time and every stage falls back) buy a NARROWER engine whose own
+    per-stage time then EXCEEDS the analog m-pass — the digital-bound machine
+    ADJ-9 refuses.
+    """
+    device = _device(synthesis_library="22nm")
+    ops = (1_000_000.0,)
+    floor = device.derive_engine_sizing(
+        43.98e-6, [cim_timing.EngineDemand(stage=0, ops=ops, analog_time_s=1.6e-6)]
+    )
+    beat = device.derive_engine_sizing(
+        43.98e-6, [cim_timing.EngineDemand(stage=0, ops=ops)]
+    )
+    assert floor.vector_lanes > beat.vector_lanes
+    assert floor.vector_lanes == 667 and beat.vector_lanes == 24
+    assert floor.per_stage[0].analog_bound
+    # The retired criterion's engine is 28x slower than the analog m-pass it
+    # shares its stage with, which is exactly how a stage ends up digital-bound.
+    assert beat.per_stage[0].time_s > 1.6e-6
+    assert beat.per_stage[0].analog_bound is False
+
+
+@pytest.mark.parametrize(
+    "analog_time_s, kind",
+    [
+        (0.0, cim_timing.TARGET_NO_ANALOG_WORK),
+        # 10 ns at 0.95 GHz is 9 cycles; one call needs at least depth = 20,
+        # and no lane count shortens a fill.
+        (10e-9, cim_timing.TARGET_ANALOG_BELOW_FILL),
+    ],
+)
+def test_an_unreachable_analog_target_falls_back_and_is_named(analog_time_s, kind):
+    """ADJ-9: where the analog side cannot bind, the row says WHY (D21, D28).
+
+    Two stages cannot be analog-bound at any width: one with no analog work at
+    all, and one whose analog m-pass is shorter than the engine's own pipeline
+    fill. Neither is clamped and neither is padded — both fall back to the
+    analog BEAT, which is the widest budget this derivation ever uses, and both
+    are counted in unreachable_stages and named in the disclosures.
+    """
+    device = _device(synthesis_library="22nm")
+    sizing = device.derive_engine_sizing(
+        43.98e-6,
+        [
+            cim_timing.EngineDemand(
+                stage=0, ops=(1_000_000.0,), analog_time_s=analog_time_s
+            )
+        ],
+    )
+    row = sizing.per_stage[0]
+    assert row.target_kind == kind
+    assert row.target_s == 43.98e-6
+    assert sizing.unreachable_stages == (0,)
+    assert sizing.analog_bound_stages == ()
+    assert sizing.vector_lanes == 24          # the beat's answer, not the floor's
+    assert any("UNREACHABLE" in note for note in sizing.disclosures)
+    assert any(kind in note for note in sizing.disclosures)
+
+
 def test_the_derived_width_installs_and_prices_the_ops_it_was_sized_for():
     """The derivation and the pricing are the same law, so they cannot drift."""
     device = _device(synthesis_library="22nm")
-    demand = [cim_timing.EngineDemand(stage=0, ops=(5_000_000.0,))]
+    demand = [
+        cim_timing.EngineDemand(stage=0, ops=(5_000_000.0,), analog_time_s=8e-6)
+    ]
     sizing = device.derive_engine_sizing(43.98e-6, demand)
     device.install_derived_engine(sizing)
     assert device.vector_lanes == sizing.vector_lanes
@@ -443,7 +549,7 @@ def test_the_derived_width_installs_and_prices_the_ops_it_was_sized_for():
     )
     cost = device.price_vector_work(work)
     assert cost.lanes == sizing.vector_lanes
-    assert any("is DERIVED (D31)" in note for note in cost.disclosures)
+    assert any("is DERIVED (D31-v2, ADJ-9)" in note for note in cost.disclosures)
     # Clearing it restores the refusal: a device never silently keeps a width.
     device.install_derived_engine(None)
     with pytest.raises(cim_timing.EngineCapabilityError):
@@ -460,10 +566,12 @@ def test_an_explicit_vector_lanes_is_an_override_that_rides_a_disclosure():
     # With a derivation in hand the disclosure also prints what the beat WOULD
     # have bought, which is the number a reader of an override wants.
     sizing = device.derive_engine_sizing(
-        43.98e-6, [cim_timing.EngineDemand(stage=0, ops=(1_000_000.0,))]
+        43.98e-6,
+        [cim_timing.EngineDemand(stage=0, ops=(1_000_000.0,), analog_time_s=1.6e-6)],
     )
     device.install_derived_engine(sizing)
     assert device.vector_lanes == 4096          # the override still wins
+    assert sizing.vector_lanes == 667
     assert any(
         f"would have derived {sizing.vector_lanes} lane" in note
         for note in device.vector_engine_disclosures()
@@ -482,8 +590,12 @@ def test_the_sizing_summary_carries_everything_it_was_derived_from():
     sizing = device.derive_engine_sizing(
         43.98e-6,
         [
-            cim_timing.EngineDemand(stage=0, ops=(3_000_000.0, 1_000_000.0)),
-            cim_timing.EngineDemand(stage=1, ops=(1_000_000.0,)),
+            cim_timing.EngineDemand(
+                stage=0, ops=(3_000_000.0, 1_000_000.0), analog_time_s=1.6e-6
+            ),
+            cim_timing.EngineDemand(
+                stage=1, ops=(1_000_000.0,), analog_time_s=1.6e-6
+            ),
         ],
     )
     summary = sizing.summary()
@@ -496,6 +608,21 @@ def test_the_sizing_summary_carries_everything_it_was_derived_from():
     assert summary["per_stage"][0]["scalar_ops"] == 4_000_000.0
     assert summary["per_stage"][0]["scalar_ops_per_call"] == [3_000_000.0, 1_000_000.0]
     assert summary["composition"]["technology"] == "22nm"
+    # ADJ-9's own fields: the target, what kind of target it is, and whether the
+    # analog side ended up binding. A width with no target beside it is not a
+    # derivation to the floor, it is just a width.
+    assert summary["sizing_target"] == "analog_stage_time"
+    assert summary["analog_bound_stages"] == [0, 1]
+    assert summary["unreachable_stages"] == []
+    assert summary["stages_sized"] == 2
+    assert 0.0 < summary["engine_duty_at_target"] <= 1.0
+    for row in summary["per_stage"]:
+        assert row["analog_time_s"] == 1.6e-6
+        assert row["target_s"] == 1.6e-6
+        assert row["target_kind"] == cim_timing.TARGET_ANALOG_STAGE
+        assert row["analog_bound"] is True
     # The criterion is stated where the number is, not only in a docstring.
-    assert any("CO-BOUND" in note for note in sizing.disclosures)
-    assert "the beat sets the width" in sizing.report()
+    assert any("ANALOG-BOUND BY CONSTRUCTION" in note for note in sizing.disclosures)
+    report = sizing.report()
+    assert "sized to the ANALOG FLOOR" in report
+    assert "analog-bound stages     2 of 2" in report

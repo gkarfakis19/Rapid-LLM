@@ -179,7 +179,7 @@ traffic. There is no topology here and no time.
 |---|---|---|
 | `id` | string | Unique. |
 | `from`, `to` | string | Chip ids. |
-| `role` | string | `tp` \| `ep` \| `pp` \| `pd` \| `act`. |
+| `role` | string | `tp` \| `ep` \| `pp` \| `pd` \| `act` \| `svc`. |
 | `bytes` | number | Bytes per `per`. |
 | `per` | string | The unit `bytes` is counted over, e.g. `decode_step`, `inference`. |
 | `label` | string | What the traffic is. |
@@ -189,6 +189,21 @@ traffic. There is no topology here and no time.
 is not a parallelism collective: the chip-boundary handoff, and the analog →
 shared-digital hop that attention needs (D13). The alternative was to call a
 chip boundary `pp`, which ADJ-5 forbids — chip index is not implicitly pp.
+
+`svc` is the SERVICE relationship between a shared digital chiplet and each
+analog chip whose act × act work it runs (D13): `from` is the chiplet's chip
+id, `to` is the analog chip. Its `bytes` are the traffic that relationship
+moves in ONE beat, both directions summed — operands out (Q/K/V, the projected
+scan inputs) plus results back — and they are MEASURED off P4's timeline, never
+a formula: `basis` prints the two directions, the op count and the per-block
+itemization. A direction with 0 B has no lowered transfer in it and `basis`
+says which, rather than the total absorbing an estimate.
+
+`svc` rows are PRICED rows. A placement-only export carries none, because P3
+has no timeline to measure them on (A1). One `act` link is a chip boundary and
+one `svc` link is a wire to the chiplet: a reader who wants the pipeline map's
+wire trees reads `svc`, and a reader who wants the pipeline's own handoffs
+reads `act`. They are different traffic and are never summed into one row.
 
 Roles are drawn as line dash patterns, never as hue. Hue is the parallelism
 group and nothing else (D20).

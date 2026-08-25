@@ -713,7 +713,7 @@ def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
 ):
     # The BEAT is NOT assignment-invariant to the last digit and P7 says why:
     # stacking K blocks in one macro buys an in-macro accumulator and sells a
-    # partial-sum transport. Dense is 684 accumulator ops richer and 0.103%
+    # partial-sum transport. Dense is 684 accumulator ops richer and 0.104%
     # faster per beat; both numbers are on the artifact.
     #
     # WAVE F: the op count rose from 288 with the WINDOW, not with the packing —
@@ -723,13 +723,21 @@ def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
     # per-beat trade is what moved: the accumulator saving is now measured
     # against a beat 17x shorter than the retired regime's step, so the same
     # trade is a smaller PERCENTAGE of it.
+    #
+    # ADJ-9: -0.10260107% -> -0.10411058%. The trade in SECONDS is unchanged —
+    # it is analog and pool work either way — but D31-v2 derives a wider engine,
+    # the beat it is measured against is shorter, and the same saving is
+    # therefore a slightly larger percentage of it. The machine under this
+    # comparison also changed with the demo sweep's axes (arrays_per_chip 604
+    # instead of the shipped 640, and no declared vector_lanes), which is what
+    # the emitted config now carries.
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["accumulator_ops"] == 0
     assert dense["accumulator_ops"] == 684
     assert document["delta"]["median_decode_step_delta_s"] < 0
     assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(
-        -0.10260106919069317
+        -0.1041105842826095
     )
     assert dense["tokens_per_s"] > dedicated["tokens_per_s"]
 

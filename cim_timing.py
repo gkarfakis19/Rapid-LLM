@@ -264,7 +264,7 @@ import math
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
@@ -1657,7 +1657,8 @@ def short_conv_ops_per_result(kernel_size: int) -> int:
 # borrow is how OPTIMA gets the counts: `create_s3_scan_collection` SIZES the
 # engine to a microcycle budget and `get_execution_cycles` then returns that
 # budget while ignoring its own arguments, so digital load can only cost area
-# there, never time (AUDIT finding 6). Here the counts are DERIVED FROM A BEAT
+# there, never time (AUDIT finding 6). Here the counts are DERIVED FROM THE
+# MEASURED ANALOG M-PASS TIME (ADJ-9)
 # by :meth:`CimDeviceModel.derive_engine_sizing` and the resulting engine is
 # then TIMED by :meth:`CimDeviceModel.price_vector_work` like any other — the
 # derivation is the exact inverse of the pricing law, so a run cannot buy an
@@ -2267,10 +2268,19 @@ class EngineDemand:
     pipeline fill: ``depth + ceil(ops/lanes) - 1`` cycles each. Summing the ops
     into one number and sizing on that would under-count the fill by
     ``(calls - 1) * (depth - 1)`` cycles, which is a real cost of the machine.
+
+    ``analog_time_s`` is D31-v2's SIZING TARGET (ADJ-9): the wall time this
+    stage's own analog macros spend passing weights in one beat, measured off
+    the probe timeline. The engine is derived UP until it fits inside that
+    number, so the ANALOG m-pass is the term that sets the stage's time and the
+    digital side never is. A stage with no analog work leaves it at 0.0, which
+    is the one case the criterion cannot reach and which the derivation then
+    names rather than smooths.
     """
 
     stage: int
     ops: Tuple[float, ...]
+    analog_time_s: float = 0.0
 
     @property
     def calls(self) -> int:
@@ -2281,9 +2291,15 @@ class EngineDemand:
         return math.fsum(self.ops)
 
 
+#: Why one stage's sizing target is what it is (D31-v2 / ADJ-9).
+TARGET_ANALOG_STAGE = "analog_stage_time"
+TARGET_NO_ANALOG_WORK = "no_analog_work_in_stage"
+TARGET_ANALOG_BELOW_FILL = "analog_stage_time_below_engine_fill"
+
+
 @dataclass(frozen=True)
 class StageEngineSizing:
-    """One stage's derived width and the cycles it actually spends."""
+    """One stage's derived width, its sizing TARGET, and the cycles it spends."""
 
     stage: int
     calls: int
@@ -2300,17 +2316,42 @@ class StageEngineSizing:
     used_cycles: int
     time_s: float
     slack_s: float
+    #: The stage's own measured ANALOG m-pass time in one beat (0.0 = none).
+    analog_time_s: float = 0.0
+    #: The seconds the width was actually derived against — the analog stage
+    #: time where ADJ-9's criterion is reachable, the analog BEAT where it is
+    #: not. Never both: one accounting per metric (D21).
+    target_s: float = 0.0
+    #: Which of the two it is, by name (``TARGET_*`` above).
+    target_kind: str = TARGET_ANALOG_STAGE
+
+    @property
+    def analog_bound(self) -> bool:
+        """Does the ANALOG m-pass set this stage's time rather than the engine?"""
+        return self.analog_time_s > 0.0 and self.time_s <= self.analog_time_s
+
+    @property
+    def duty_at_target(self) -> float:
+        """Engine time as a share of the target it was sized against."""
+        return (self.time_s / self.target_s) if self.target_s > 0 else 0.0
 
 
 @dataclass(frozen=True)
 class DerivedEngineSizing:
-    """The engine D31 derives from the beat, with everything it was derived from.
+    """The engine D31-v2 derives to the ANALOG FLOOR, with its whole basis.
 
     ``vector_lanes`` is the width the WORST stage needs; the chiplet card is one
     card, so one width is provisioned and the per-stage rows show which stage
     set it and how much slack the others run with. ``binding_stage`` is that
     worst stage — reporting it is the point of the exercise (D28: idle silicon
     must be visible, and so must the stage that paid for it).
+
+    ADJ-9 (D31-v2) moved the SIZING TARGET. It used to be the analog BEAT (the
+    slowest stage's time), which left every faster stage's engine free to be
+    that stage's own binding term. It is now each stage's OWN analog m-pass
+    time, so the analog side binds every stage it can bind — and the stages
+    where it cannot are counted in :attr:`unreachable_stages` and named in the
+    disclosures rather than quietly folded into the answer.
     """
 
     analog_beat_s: float
@@ -2322,16 +2363,44 @@ class DerivedEngineSizing:
     composition: Optional[EngineComposition] = None
     basis: str = ""
     disclosures: Tuple[str, ...] = ()
+    #: ADJ-9's reachability evidence, attached by the evaluator that measured
+    #: it: which stage takes longest in the probe and what it spends the time
+    #: on, itemized by op block. It rides the SIZING rather than a module
+    #: global because a report is written long after the derivation ran, and a
+    #: global would hand one run's evidence to another run's report (D21).
+    beat_setting_stage: Optional[Mapping[str, object]] = None
+
+    @property
+    def binding_row(self) -> Optional[StageEngineSizing]:
+        for row in self.per_stage:
+            if row.stage == self.binding_stage:
+                return row
+        return None
 
     @property
     def utilization(self) -> float:
-        """Binding stage's engine duty inside the beat (1.0 = perfectly held)."""
-        for row in self.per_stage:
-            if row.stage == self.binding_stage:
-                return (
-                    (row.time_s / self.analog_beat_s) if self.analog_beat_s > 0 else 0.0
-                )
-        return 0.0
+        """Binding stage's engine duty inside its OWN sizing target (ADJ-9).
+
+        1.0 means the engine exactly fills the analog m-pass time it was sized
+        against; anything below is the integer-lane remainder, never a margin
+        (D28 forbids one).
+        """
+        row = self.binding_row
+        return row.duty_at_target if row is not None else 0.0
+
+    @property
+    def analog_bound_stages(self) -> Tuple[int, ...]:
+        """Stages where the ANALOG m-pass really is the longer term."""
+        return tuple(int(row.stage) for row in self.per_stage if row.analog_bound)
+
+    @property
+    def unreachable_stages(self) -> Tuple[int, ...]:
+        """Stages ADJ-9's criterion cannot reach, whatever the width."""
+        return tuple(
+            int(row.stage)
+            for row in self.per_stage
+            if row.target_kind != TARGET_ANALOG_STAGE
+        )
 
     def summary(self) -> "OrderedDict[str, object]":
         return OrderedDict(
@@ -2342,7 +2411,12 @@ class DerivedEngineSizing:
                 ("binding_stage", int(self.binding_stage)),
                 ("vector_clock_hz", self.clock_hz),
                 ("vector_pipeline_depth", int(self.pipeline_depth)),
-                ("engine_utilization_at_beat", self.utilization),
+                ("sizing_target", "analog_stage_time"),
+                ("engine_duty_at_target", self.utilization),
+                ("analog_bound_stages", list(self.analog_bound_stages)),
+                ("stages_sized", len(self.per_stage)),
+                ("unreachable_stages", list(self.unreachable_stages)),
+                ("beat_setting_stage", dict(self.beat_setting_stage or {}) or None),
                 ("basis", self.basis),
                 (
                     "per_stage",
@@ -2354,6 +2428,10 @@ class DerivedEngineSizing:
                                 ("scalar_ops", row.total_ops),
                                 ("scalar_ops_per_call", list(row.ops)),
                                 ("lanes", int(row.lanes)),
+                                ("analog_time_s", row.analog_time_s),
+                                ("target_s", row.target_s),
+                                ("target_kind", row.target_kind),
+                                ("analog_bound", bool(row.analog_bound)),
                                 ("budget_cycles", int(row.budget_cycles)),
                                 ("fill_cycles", int(row.fill_cycles)),
                                 ("stream_cycles", int(row.stream_cycles)),
@@ -2375,12 +2453,19 @@ class DerivedEngineSizing:
 
     def report(self) -> str:
         lines = [
-            "[FWS-CIM] derived engine sizing (D31 — the beat sets the width, never a sweep)",
-            f"  analog beat             {self.analog_beat_s:.6g} s (what the analog "
-            "stages set; the sizing budget)",
+            "[FWS-CIM] derived engine sizing (D31-v2/ADJ-9 — sized to the ANALOG FLOOR, never a sweep)",
+            f"  analog beat             {self.analog_beat_s:.6g} s (the slowest stage's "
+            "probe time; the fallback budget only)",
             f"  vector lanes            {self.vector_lanes} (DERIVED; stage "
             f"{self.binding_stage} is binding, engine duty "
-            f"{self.utilization * 100:.3f}% of the analog beat)",
+            f"{self.utilization * 100:.3f}% of ITS OWN analog m-pass time)",
+            f"  analog-bound stages     {len(self.analog_bound_stages)} of "
+            f"{len(self.per_stage)}"
+            + (
+                f" (unreachable: {list(self.unreachable_stages)})"
+                if self.unreachable_stages
+                else ""
+            ),
             f"  vector engine           {self.clock_hz / 1e9:.4g} GHz, pipeline depth "
             f"{self.pipeline_depth}",
         ]
@@ -2388,7 +2473,8 @@ class DerivedEngineSizing:
             lines.append(
                 f"  stage {row.stage:<3d} {row.calls:>4d} call(s) {row.total_ops:>14.6g} ops"
                 f"  {row.used_cycles:>10d}/{row.budget_cycles:<10d} cycles"
-                f"  slack {row.slack_s:.6g} s"
+                f"  digital {row.time_s:.6g} s vs analog {row.analog_time_s:.6g} s"
+                f"  ({'ANALOG-BOUND' if row.analog_bound else row.target_kind})"
             )
         if self.composition is not None:
             lines.append(self.composition.report())
@@ -2414,42 +2500,49 @@ def vector_cycles_at(ops: Sequence[float], lanes: int, depth: int) -> int:
 
 
 def derive_vector_lanes(
-    ops: Sequence[float], beat_s: float, clock_hz: float, depth: int
+    ops: Sequence[float], budget_s: float, clock_hz: float, depth: int
 ) -> int:
-    """The SMALLEST lane count whose priced time fits the beat (D31, D28).
+    """The SMALLEST lane count whose priced time fits ``budget_s`` (D31, D28).
 
-    ``budget_cycles = floor(beat * clock)`` — floor, because a cycle the beat
-    does not contain cannot be spent — and the answer is the smallest integer
-    ``lanes`` with ``vector_cycles_at(ops, lanes, depth) <= budget_cycles``.
-    Smallest, so there is no margin (D28); integer, because a lane is silicon.
+    ``budget_cycles = floor(budget_s * clock)`` — floor, because a cycle the
+    budget does not contain cannot be spent — and the answer is the smallest
+    integer ``lanes`` with ``vector_cycles_at(ops, lanes, depth) <=
+    budget_cycles``. Smallest for a GIVEN budget, so there is no margin (D28);
+    integer, because a lane is silicon. Under ADJ-9 the budget handed in is the
+    stage's own ANALOG m-pass time, which is what makes the answer a
+    derive-UP: a smaller budget buys more lanes, and the analog floor is the
+    smallest budget the machine can physically justify.
 
     The predicate is monotone in ``lanes`` (``ceil(x/lanes)`` never rises as
     lanes rise), so a binary search returns the exact minimum rather than a
     conservative one. Above ``lanes = max(ops)`` every call already costs its
     fill plus one streaming cycle, so that is the upper bound of the search and
-    a beat that does not fit there does not fit anywhere — :class:`EngineSizingError`.
+    a budget that does not fit there does not fit anywhere —
+    :class:`EngineSizingError`.
     """
     calls = [float(call) for call in ops if float(call) > 0]
     depth = max(1, int(depth))
-    if beat_s <= 0 or clock_hz <= 0:
+    if budget_s <= 0 or clock_hz <= 0:
         raise EngineSizingError(
-            f"derive_vector_lanes needs a positive beat and clock (got beat={beat_s!r}, "
-            f"clock={clock_hz!r}). D31 derives the engine FROM the beat; with no beat "
-            "there is nothing to derive from and no default width to fall back on."
+            f"derive_vector_lanes needs a positive time budget and clock (got "
+            f"budget={budget_s!r}, clock={clock_hz!r}). D31 derives the engine FROM a "
+            "measured time — under ADJ-9 the stage's own analog m-pass time — and with "
+            "no such time there is nothing to derive from and no default width to fall "
+            "back on."
         )
     if not calls:
         return 1
-    budget = int(math.floor(float(beat_s) * float(clock_hz)))
+    budget = int(math.floor(float(budget_s) * float(clock_hz)))
     ceiling = max(1, int(math.ceil(max(calls))))
     if vector_cycles_at(calls, ceiling, depth) > budget:
         floor_cycles = len(calls) * depth
         raise EngineSizingError(
-            f"no vector-engine width holds a {beat_s:.6g} s beat: {len(calls)} call(s) "
-            f"cost at least {floor_cycles} cycles (pipeline depth {depth} each, one "
-            f"streaming cycle each) and the beat contains only {budget} cycles at "
+            f"no vector-engine width holds a {budget_s:.6g} s budget: {len(calls)} "
+            f"call(s) cost at least {floor_cycles} cycles (pipeline depth {depth} each, "
+            f"one streaming cycle each) and the budget contains only {budget} cycles at "
             f"{clock_hz / 1e9:.4g} GHz. Lanes shorten the STREAMING term and never the "
-            "FILL, so this is not fixable by provisioning: the beat is shorter than the "
-            "engine's own latency. Widen the beat, raise the clock, or declare a "
+            "FILL, so this is not fixable by provisioning: the budget is shorter than "
+            "the engine's own latency. Widen it, raise the clock, or declare a "
             "shallower pipeline (D31 refuses to clamp, and D28 forbids padding it)."
         )
     low, high = 1, ceiling
@@ -3733,7 +3826,7 @@ class CimDeviceModel:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # D31: derive the engine width from the beat
+    # D31-v2 (ADJ-9): derive the engine width to the ANALOG FLOOR
     # ------------------------------------------------------------------
 
     def derive_engine_sizing(
@@ -3743,34 +3836,55 @@ class CimDeviceModel:
         *,
         compose: Optional[bool] = None,
     ) -> DerivedEngineSizing:
-        """Size the scan/vector engine so it HOLDS the beat, and report it (D31).
+        """Size the engine UP until the ANALOG m-pass binds, and report it (ADJ-9).
 
-        ``analog_beat_s`` is the beat the ANALOG stages set — the probe pass
-        measures it with every vector op counted and untimed, so it does not
-        depend on the width being derived. ``demand`` is one
-        :class:`EngineDemand` per pipeline stage: the scalar-op count of each
-        vector call that stage runs in ONE beat.
+        ``analog_beat_s`` is the beat the probe pass measured with every vector
+        op counted and untimed. Under D31-v2 it is no longer the sizing target:
+        it is the FALLBACK budget for a stage whose own analog time cannot
+        serve as one, and the number the report prints beside the derivation so
+        a reader can see both.
 
-        WHAT "HOLDS THE BEAT" MEANS, EXACTLY. The criterion is *digital
-        per-beat time <= the analog beat*: the engine is sized so it is at most
-        CO-BOUND with the analog stages and never the binding term. It is NOT
-        sized so the finished machine's beat equals the analog beat, and it
-        cannot be: under D29 a stage holds ONE stream at a time, so a stage's
-        analog passes and its scan run in SERIES and the measured beat is their
-        sum whatever the width. Lanes shorten the digital half and nothing
-        shortens the sum below the analog half. The consequence is stated in
-        the disclosures and in the report rather than smoothed away: at the
-        derived width the two halves are comparable, which is precisely P7's
-        "the knee is where the analog m-pass time becomes co-bound with the
-        digital side".
+        ``demand`` is one :class:`EngineDemand` per pipeline stage: the
+        scalar-op count of each vector call the stage runs in ONE beat, plus
+        ``analog_time_s`` — the wall time that stage's own analog macros spend
+        passing weights in that beat.
+
+        WHAT THE CRITERION IS, EXACTLY (ADJ-9, D31-v2). For every stage:
+        *digital per-stage time <= that stage's ANALOG m-pass time*. The width
+        is the smallest integer lane count that satisfies it — smallest for
+        that target, so there is no margin (D28), and integer because a lane is
+        silicon. Because the target is the analog time rather than the beat,
+        the answer is a DERIVE-UP: the engine grows until the analog side is
+        the longer of the two terms in every stage it can be, which is what
+        makes the analog floor the thing that sets the machine's pace.
+
+        WHAT IT REPLACED, AND WHY. The old criterion was *digital per-beat <=
+        the analog BEAT*. The beat is the SLOWEST stage's time, so a stage that
+        was faster than the beat got an engine sized against somebody else's
+        stage and became its own binding term — the machine was left
+        digital-bound by a minimal derivation. ADJ-9's rationale: against the
+        Invariant-W analog floor, digital lanes are nearly free (the audit
+        measured +27% tokens/s for +0.78% silicon on Granite), so a derivation
+        that leaves throughput on the table to save lanes is the wrong trade.
+
+        WHERE THE CRITERION IS NOT REACHABLE, IT SAYS SO. Two cases, both named
+        in the per-stage rows (``target_kind``) and in the disclosures:
+
+        * a stage with NO analog work in the beat has no analog time to be
+          bound by, at any width;
+        * a stage whose analog time is shorter than the engine's own pipeline
+          FILL (``calls * depth`` cycles) cannot be held by any width either,
+          because lanes shorten the streaming term and never the fill.
+
+        Both fall back to the analog BEAT, which is the widest budget this
+        derivation ever uses, and both are counted in
+        :attr:`DerivedEngineSizing.unreachable_stages`. Nothing is clamped and
+        nothing is padded.
 
         THE DERIVATION IS THE PRICING LAW, INVERTED. For a candidate width the
         cost of a stage's beat is exactly what :meth:`price_vector_work` would
-        charge — ``sum over calls of (depth + ceil(ops/lanes) - 1)`` — and the
-        answer is the SMALLEST integer width for which that sum fits
-        ``floor(beat * clock)`` cycles. Smallest, so there is no margin (D28);
-        integer, because a lane is silicon; the pricing law itself, so an engine
-        this method sizes is one the run's own laws will actually use.
+        charge — ``sum over calls of (depth + ceil(ops/lanes) - 1)`` — so an
+        engine this method sizes is one the run's own laws will actually use.
 
         ONE CARD, ONE WIDTH. The chiplet is a single card, so the provisioned
         width is the maximum over the stages and the per-stage rows report the
@@ -3780,11 +3894,27 @@ class CimDeviceModel:
         clock = self.vector_clock_hz
         depth = self.vector_pipeline_depth
         beat_s = float(analog_beat_s)
+        ordered = sorted(demand, key=lambda item: int(item.stage))
         rows: List[StageEngineSizing] = []
-        for entry in sorted(demand, key=lambda item: int(item.stage)):
+        for entry in ordered:
             calls = [float(call) for call in entry.ops if float(call) > 0]
-            lanes = derive_vector_lanes(calls, beat_s, clock, depth)
-            budget = int(math.floor(beat_s * clock))
+            analog_s = max(0.0, float(getattr(entry, "analog_time_s", 0.0) or 0.0))
+            # ADJ-9: the stage's OWN analog m-pass time is the target. Where it
+            # cannot be one, the analog beat is, and the row says which.
+            lanes = None
+            target_s, target_kind = analog_s, TARGET_ANALOG_STAGE
+            if analog_s <= 0:
+                target_s, target_kind = beat_s, TARGET_NO_ANALOG_WORK
+            else:
+                try:
+                    lanes = derive_vector_lanes(calls, analog_s, clock, depth)
+                except EngineSizingError:
+                    # No width holds this stage's analog m-pass, at any lane
+                    # count: the beat is the fallback and the row says which.
+                    target_s, target_kind = beat_s, TARGET_ANALOG_BELOW_FILL
+            if lanes is None:
+                lanes = derive_vector_lanes(calls, target_s, clock, depth)
+            budget = int(math.floor(target_s * clock))
             used = vector_cycles_at(calls, lanes, depth)
             rows.append(
                 StageEngineSizing(
@@ -3798,7 +3928,10 @@ class CimDeviceModel:
                     stream_cycles=used - len(calls) * (depth - 1),
                     used_cycles=used,
                     time_s=used / clock,
-                    slack_s=beat_s - used / clock,
+                    slack_s=target_s - used / clock,
+                    analog_time_s=analog_s,
+                    target_s=target_s,
+                    target_kind=target_kind,
                 )
             )
         if not rows:
@@ -3813,9 +3946,8 @@ class CimDeviceModel:
         # width, so a stage whose own derivation asked for fewer lanes actually
         # runs on the wider engine and finishes early: its reported slack is the
         # slack of the machine that gets built, not of the one it asked for.
-        budget = int(math.floor(beat_s * clock))
         repriced: List[StageEngineSizing] = []
-        for row, entry in zip(rows, sorted(demand, key=lambda item: int(item.stage))):
+        for row, entry in zip(rows, ordered):
             calls = [float(call) for call in entry.ops if float(call) > 0]
             used = vector_cycles_at(calls, provisioned, depth)
             fill = len(calls) * (depth - 1)
@@ -3826,12 +3958,15 @@ class CimDeviceModel:
                     ops=tuple(calls),
                     total_ops=row.total_ops,
                     lanes=provisioned,
-                    budget_cycles=budget,
+                    budget_cycles=row.budget_cycles,
                     fill_cycles=fill,
                     stream_cycles=used - fill,
                     used_cycles=used,
                     time_s=used / clock,
-                    slack_s=beat_s - used / clock,
+                    slack_s=row.target_s - used / clock,
+                    analog_time_s=row.analog_time_s,
+                    target_s=row.target_s,
+                    target_kind=row.target_kind,
                 )
             )
         rows = repriced
@@ -3845,9 +3980,30 @@ class CimDeviceModel:
                 provisioned,
                 count_provenance=PROVENANCE_DERIVED_COUNT,
             )
+        analog_bound = [row for row in rows if row.analog_bound]
+        unreachable = [row for row in rows if row.target_kind != TARGET_ANALOG_STAGE]
         disclosures = [
-            "D31: the scan/vector engine is not a swept axis and not a declared knob. "
-            "Its width is the smallest integer that holds the beat, and it is reported.",
+            "D31-v2 (ADJ-9): the scan/vector engine is not a swept axis and not a "
+            "declared knob, and it is no longer sized to the analog BEAT. Its width is "
+            "the smallest integer for which EVERY stage's digital per-stage time fits "
+            "that stage's OWN analog m-pass time, so the analog side is the binding "
+            "term by construction wherever it can be. The width is reported.",
+            f"ANALOG-BOUND BY CONSTRUCTION: {len(analog_bound)} of {len(rows)} stage(s) "
+            "run with the analog m-pass longer than the derived engine's own per-stage "
+            "time"
+            + (
+                ". The criterion is UNREACHABLE on stage(s) "
+                + ", ".join(
+                    f"{int(row.stage)} ({row.target_kind})" for row in unreachable
+                )
+                + ", which fall back to the analog beat "
+                f"({beat_s:.6g} s) — a stage with no analog work has no analog time to "
+                "be bound by, and a stage whose analog time is shorter than the "
+                "engine's own pipeline fill cannot be held at any width because lanes "
+                "shorten the streaming term and never the fill. Neither is clamped."
+                if unreachable
+                else ", and there is no stage the criterion could not reach."
+            ),
             "one card, one width: the provisioned width is the maximum over the stages, "
             "so every non-binding stage runs with the slack printed beside it. That "
             "slack is idle silicon and D28 requires it to be visible, not smoothed.",
@@ -3872,14 +4028,19 @@ class CimDeviceModel:
                     "is 0 and the inversion is exact."
                 )
             ),
-            "the criterion is digital-per-beat <= the ANALOG beat, so the engine is at "
-            "most CO-BOUND with the analog stages and never the binding term. The "
-            "MEASURED beat of the priced run is larger than the analog beat, because a "
-            "D29 stage holds one stream at a time and its analog passes and its scan "
-            "therefore run in series. A wider engine would still shorten the measured "
-            "beat; D31 does not buy that width, because the engine is not a free knob "
-            "and the point derived here is the smallest one at which the digital side "
-            "stops dominating.",
+            "the criterion is digital-per-stage <= that stage's own ANALOG m-pass time, "
+            "so the analog side sets each stage's pace and the engine never does. It "
+            "does NOT make the MEASURED beat equal the analog time and cannot: a D29 "
+            "stage holds one stream at a time, so its analog passes and its scan run in "
+            "SERIES and the beat is their sum at any width. What ADJ-9 buys is that the "
+            "sum is dominated by the analog half. A stage's measured time can still be "
+            "set by a term this derivation does not size — the attention systolic "
+            "fabric and the softmax pipeline are DECLARED card geometry (rows x cols x "
+            "num_arrays, softmax_lanes), not derived engines — and when that term is "
+            "the larger one the machine is bound by declared digital silicon rather "
+            "than by the analog floor. That is a property of the CARD, reported here "
+            "and in the per-device-class utilization, not something a lane count can "
+            "fix.",
         ]
         return DerivedEngineSizing(
             analog_beat_s=beat_s,
@@ -3890,9 +4051,17 @@ class CimDeviceModel:
             per_stage=tuple(rows),
             composition=composition,
             basis=(
-                f"smallest integer lanes with sum(depth + ceil(ops/lanes) - 1) <= "
-                f"floor(beat x clock) = {int(math.floor(beat_s * clock))} cycles at "
-                f"{clock / 1e9:.4g} GHz, depth {depth}, over {len(rows)} stage(s)"
+                "smallest integer lanes with sum(depth + ceil(ops/lanes) - 1) <= "
+                "floor(target x clock) for EVERY stage, where the target is the "
+                "stage's own measured ANALOG m-pass time (ADJ-9/D31-v2); binding stage "
+                f"{int(binding)} at {int(next(int(r.budget_cycles) for r in rows if r.stage == binding))} "
+                f"cycles of budget, {clock / 1e9:.4g} GHz, depth {depth}, over "
+                f"{len(rows)} stage(s), {len(analog_bound)} of them analog-bound"
+                + (
+                    f"; {len(unreachable)} fell back to the {beat_s:.6g} s analog beat"
+                    if unreachable
+                    else ""
+                )
             ),
             disclosures=tuple(disclosures),
         )
@@ -5241,18 +5410,23 @@ class CimDeviceModel:
                 # this sentence always rides an override. It does not, and they
                 # no longer say so.
                 line += (
-                    f" The analog beat of {derived.analog_beat_s:.6g} s would have derived "
-                    f"{int(derived.vector_lanes)} lane(s)."
+                    f" The measured analog stage times would have derived "
+                    f"{int(derived.vector_lanes)} lane(s) (ADJ-9)."
                 )
             notes.append(line)
         elif self._derived_engine is not None:
             sizing = self._derived_engine
+            row = sizing.binding_row
+            target = row.target_s if row is not None else 0.0
             notes.append(
-                f"vector_lanes = {int(sizing.vector_lanes)} is DERIVED (D31) from the "
-                f"measured ANALOG beat {sizing.analog_beat_s:.6g} s: the smallest width whose "
-                "own priced time fits the beat, with no margin (D28). Stage "
-                f"{int(sizing.binding_stage)} is binding and the engine runs at "
-                f"{sizing.utilization * 100:.3f}% duty inside the beat."
+                f"vector_lanes = {int(sizing.vector_lanes)} is DERIVED (D31-v2, ADJ-9) "
+                "to the ANALOG FLOOR: the smallest width for which every stage's "
+                "digital per-stage time fits that stage's own measured ANALOG m-pass "
+                f"time, with no margin (D28). Stage {int(sizing.binding_stage)} is "
+                f"binding at a {target:.6g} s analog m-pass and the engine runs at "
+                f"{sizing.utilization * 100:.3f}% duty inside it; "
+                f"{len(sizing.analog_bound_stages)} of {len(sizing.per_stage)} stage(s) "
+                "are analog-bound by construction."
             )
         if card.vector_clock_ghz <= 0:
             notes.append(

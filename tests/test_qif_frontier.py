@@ -292,23 +292,34 @@ def test_a_front_with_no_interior_has_no_knee():
 
 
 def test_stage_granularity_and_chip_capacity_are_axes_and_the_engine_is_not():
-    """D31: the scan/vector engine is not a design point any more.
+    """D31/ADJ-9: the scan/vector engine is not a design point any more.
 
-    ``vector_lanes`` stays SPELLABLE — the frozen Wave-D demo sweep is built on
-    it and the validator reruns that artifact — but it is named in the retired
-    register, its retirement cites the decision, and a candidate that sets it
-    carries the retirement in its own notes.
+    ADJ-9 REWRITE. OLD CLAIM: ``vector_lanes`` stays SPELLABLE and is named in
+    a RETIRED register, and a candidate that sets it carries the retirement in
+    its own notes. That is what Wave F built, and the labelled axis went on
+    producing a checked-in artifact whose whole spread came from overriding the
+    derivation. NEW CLAIM: it is REFUSED BY NAME at parse and it has no field
+    to write, so no sweep can carry it at all — the frozen Wave-D artifact is
+    frozen precisely because it can never be re-walked.
     """
     assert "layers_per_chip" in DSE.AXIS_TARGETS
     assert "layers_per_stage" in DSE.AXIS_TARGETS
     assert "arrays_per_chip" in DSE.AXIS_TARGETS
     assert "bank_depth" in DSE.AXIS_TARGETS
-    assert set(DSE.RETIRED_AXES) == {"vector_lanes"}
-    assert "D31" in DSE.RETIRED_AXES["vector_lanes"]
-    # The frontier sweeps declare no retired axis.
+    assert set(DSE.REFUSED_AXES) == {"vector_lanes"}
+    assert "vector_lanes" not in DSE.AXIS_TARGETS
+    assert not hasattr(DSE, "RETIRED_AXES")
+    reason = DSE.REFUSED_AXES["vector_lanes"]
+    assert "D31/ADJ-9" in reason and "ANALOG m-pass" in reason
+    with pytest.raises(DSE.QifDseUsageError, match="REFUSED"):
+        DSE.SweepSpec.from_raw(
+            {DSE.DSE_BLOCK: {"axes": {"vector_lanes": [512]}}}, "test"
+        )
+    # The frontier sweeps declare no refused axis, and every sweep's payload
+    # carries the refusal register so a reader of the artifact sees it too.
     for path in (GRANITE_FRONTIER_HW, QWEN_FRONTIER_HW):
         axes = yaml.safe_load(path.read_text())[DSE.DSE_BLOCK]["axes"]
-        assert not set(axes) & set(DSE.RETIRED_AXES), path.name
+        assert not set(axes) & set(DSE.REFUSED_AXES), path.name
 
 
 def test_the_ladder_refuses_a_missing_or_off_ladder_initializer():
@@ -655,6 +666,16 @@ def test_the_checked_in_curve_is_a_real_frontier_with_its_state_bill(
         assert bill["max_stage_state_bytes"] > 0
         assert candidate["utilization"]
         assert candidate["derived_digital"]["vector_lanes_provenance"]
+        # ADJ-9 (D31-v2): the engine is derived to the ANALOG FLOOR at every
+        # point of the curve, not only on the shipped machine. A point whose
+        # engine was sized against the beat would be a machine left
+        # digital-bound by a minimal derivation, and the curve would be a
+        # picture of that instead of of the frontier.
+        derived = candidate["derived_digital"]
+        assert derived["sizing_target"] == "analog_stage_time"
+        assert derived["stages_sized"] >= 1
+        assert derived["analog_bound_stages"] == derived["stages_sized"]
+        assert 0.0 < derived["engine_duty"] <= 1.0
     # Invariant W (D27): the analog term is the cell floor, so every mm2 the
     # front spends over its cheapest point is DIGITAL or enumerated-but-unowned
     # analog slots — never a bigger model footprint.
