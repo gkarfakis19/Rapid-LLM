@@ -94,7 +94,7 @@ class FakeSpace:
         self.calls = []
 
     def __call__(self, point):
-        a, b = int(point["layers_per_chip"]), int(point["arrays_per_chip"])
+        a, b = int(point["layers_per_chip"]), int(point["column_sets_per_tile"])
         self.calls.append((a, b))
         candidate = {
             "id": f"c{len(self.calls) - 1:03d}",
@@ -122,10 +122,10 @@ def _fake_spec(**overrides):
     block = {
         "label": "synthetic",
         "search": "ladder",
-        "initializer": {"layers_per_chip": 2, "arrays_per_chip": 3},
+        "initializer": {"layers_per_chip": 2, "column_sets_per_tile": 3},
         "axes": {
             "layers_per_chip": [1, 2, 3, 4],
-            "arrays_per_chip": [1, 2, 3],
+            "column_sets_per_tile": [1, 2, 3],
         },
     }
     block.update(overrides)
@@ -144,8 +144,8 @@ def test_the_ladder_trims_the_initializer_before_it_walks_anywhere():
     space = FakeSpace()
     candidates, trail = DSE.ladder_candidates(_fake_spec(), space)
     trims = [row for row in trail if row["phase"] == "trim" and row.get("accepted")]
-    assert [row["knobs"]["arrays_per_chip"] for row in trims[:2]] == [2, 1]
-    by_knobs = {(c["knobs"]["layers_per_chip"], c["knobs"]["arrays_per_chip"]): c
+    assert [row["knobs"]["column_sets_per_tile"] for row in trims[:2]] == [2, 1]
+    by_knobs = {(c["knobs"]["layers_per_chip"], c["knobs"]["column_sets_per_tile"]): c
                 for c in candidates}
     assert by_knobs[(2, 1)]["silicon"]["total_silicon_mm2"] == 20.0
     assert by_knobs[(2, 1)]["metrics"]["tokens_per_s"] == 300.0
@@ -196,7 +196,7 @@ def test_every_point_the_walk_declined_is_still_in_the_report():
     """
     space = FakeSpace()
     candidates, trail = DSE.ladder_candidates(_fake_spec(), space)
-    knobs = {(c["knobs"]["layers_per_chip"], c["knobs"]["arrays_per_chip"])
+    knobs = {(c["knobs"]["layers_per_chip"], c["knobs"]["column_sets_per_tile"])
              for c in candidates}
     assert (1, 3) in knobs
     accepted = {row["accepted"] for row in trail if row.get("accepted")}
@@ -215,13 +215,13 @@ def test_a_refused_step_is_repaired_on_the_declared_repair_axis():
     """
     space = FakeSpace(needs={4: 3})
     candidates, trail = DSE.ladder_candidates(
-        _fake_spec(repair_axis="arrays_per_chip"), space
+        _fake_spec(repair_axis="column_sets_per_tile"), space
     )
     refused = [c for c in candidates
-               if c["knobs"] == {"layers_per_chip": 4, "arrays_per_chip": 1}]
+               if c["knobs"] == {"layers_per_chip": 4, "column_sets_per_tile": 1}]
     assert refused and refused[0]["fail_stage"] == "mapping"
     repaired = [c for c in candidates
-                if c["knobs"] == {"layers_per_chip": 4, "arrays_per_chip": 3}]
+                if c["knobs"] == {"layers_per_chip": 4, "column_sets_per_tile": 3}]
     assert repaired and repaired[0]["ok"]
     assert repaired[0]["ladder"]["repaired_from"] == refused[0]["id"]
     assert "REPAIRED STEP" in "\n".join(repaired[0]["notes"])
@@ -310,9 +310,17 @@ def test_stage_granularity_and_chip_capacity_are_axes_and_the_engine_is_not():
     """
     assert "layers_per_chip" in DSE.AXIS_TARGETS
     assert "layers_per_stage" in DSE.AXIS_TARGETS
-    assert "arrays_per_chip" in DSE.AXIS_TARGETS
+    assert "column_sets_per_tile" in DSE.AXIS_TARGETS
     assert "bank_depth" in DSE.AXIS_TARGETS
-    assert set(DSE.REFUSED_AXES) == {"vector_lanes", "num_arrays", "softmax_lanes"}
+    # ADJ-13 adds the two SIZING knobs to the refused set: a chip is built to
+    # its placement and the chiplets are packed to the beat, so neither is a
+    # design point a sweep may carry.
+    # ADJ-14 returns shared_chiplets to the swept axes: what stays refused is
+    # the sizing that has no design choice behind it.
+    assert set(DSE.REFUSED_AXES) == {
+        "vector_lanes", "num_arrays", "softmax_lanes", "arrays_per_chip",
+    }
+    assert "shared_chiplets" in DSE.AXIS_TARGETS
     assert not set(DSE.REFUSED_AXES) & set(DSE.AXIS_TARGETS)
     assert not hasattr(DSE, "RETIRED_AXES")
     reason = DSE.REFUSED_AXES["vector_lanes"]
@@ -345,9 +353,9 @@ def test_the_ladder_refuses_a_missing_or_off_ladder_initializer():
     assert "initializer" in str(missing.value)
     with pytest.raises(DSE.QifDseUsageError) as partial:
         _fake_spec(initializer={"layers_per_chip": 2})
-    assert "arrays_per_chip" in str(partial.value)
+    assert "column_sets_per_tile" in str(partial.value)
     with pytest.raises(DSE.QifDseUsageError) as off:
-        _fake_spec(initializer={"layers_per_chip": 9, "arrays_per_chip": 1})
+        _fake_spec(initializer={"layers_per_chip": 9, "column_sets_per_tile": 1})
     assert "declared rungs" in str(off.value)
     with pytest.raises(DSE.QifDseUsageError) as pointless:
         _fake_spec(search="cross_product")
@@ -522,7 +530,11 @@ def test_every_point_reports_D_the_beat_and_the_state_bill(tmp_path):
             assert row["state_bytes"] == pytest.approx(
                 row["recurrent_state_bytes"] + row["kv_bytes"]
             )
-        assert bill["budget_verdict"] == "undeclared"
+        # The store is SIZED to the bill, never checked against a cap.
+        assert bill["budget_verdict"] == "sized"
+        assert bill["budget_bytes"] is None
+        assert bill["store_macros"] > 0
+        assert bill["store_area_mm2"] > 0
         # D28: every device class the mapping instantiated has a row.
         assert candidate["utilization"]
         assert candidate["binding_device_class"] in {
@@ -530,81 +542,105 @@ def test_every_point_reports_D_the_beat_and_the_state_bill(tmp_path):
         }
 
 
-def test_a_stage_plan_over_the_declared_budget_is_refused_with_its_bytes(tmp_path):
-    """INFEASIBLE BY MEMORY, named (D29).
+def test_more_state_buys_more_sram_instead_of_refusing_the_plan(tmp_path):
+    """A MACHINE IS NEVER REFUSED FOR NEEDING MEMORY.
 
-    The budget is set to one byte under the finer plan's own measured
-    worst-stage bill, so the refusal is a statement about THAT plan and not
-    about a number pulled out of the air: the coarse plan still fits.
+    The finer stage plan holds more resident state (every stage holds all D
+    streams, and a finer plan raises D). That used to refuse it. Now it SIZES
+    the on-chip store to what it holds, out of integer copies of the measured
+    SRAM macro, and charges the area — so the finer plan costs more silicon and
+    stays buildable.
     """
     _code, measured = _moe_sweep(
         tmp_path / "measure",
         {"label": "measure", "axes": {"layers_per_chip": [6, 3]}},
     )
-    bills = {
-        candidate["knobs"]["layers_per_chip"]:
-            candidate["state_bill"]["max_stage_state_bytes"]
-        for candidate in measured["candidates"]
-    }
+    by_knob = {c["knobs"]["layers_per_chip"]: c for c in measured["candidates"]}
+    coarse, fine = by_knob[6], by_knob[3]
+    bills = {k: c["state_bill"]["max_stage_state_bytes"] for k, c in by_knob.items()}
     assert bills[3] > bills[6], "the finer stage plan must hold MORE state (D29)"
-    budget = bills[3] - 1.0
 
+    # Both are feasible, and neither carries a residency budget at all.
+    assert coarse["ok"] and fine["ok"]
+    for candidate in (coarse, fine):
+        assert candidate["state_bill"]["budget_verdict"] == "sized"
+        assert candidate["state_bill"]["budget_bytes"] is None
+
+    # The store is sized from the bill, and the bigger bill buys more macros.
+    assert fine["state_bill"]["store_macros"] > coarse["state_bill"]["store_macros"]
+    for candidate in (coarse, fine):
+        silicon = candidate["silicon"]
+        store = candidate["state_bill"]
+        assert silicon["state_sram_macros"] == store["store_macros"]
+        assert silicon["state_sram_silicon_mm2"] == pytest.approx(store["store_area_mm2"])
+        assert silicon["state_sram_silicon_mm2"] > 0
+        # One accounting (D21): the total is its four named terms.
+        assert silicon["total_silicon_mm2"] == pytest.approx(
+            silicon["analog_macro_silicon_mm2"]
+            + silicon["shared_digital_silicon_mm2"]
+            + silicon["macro_pool_silicon_mm2"]
+            + silicon["state_sram_silicon_mm2"]
+        )
+        # The store holds at least what the mapping needs, and the rounding is
+        # whole macros rather than a margin (D28).
+        assert store["store_macros"] * 33280 >= sum(
+            row["state_bytes"] for row in store["per_stage"]
+        )
+    summary = measured["state_bill_summary"]
+    assert summary["budget_bytes"] is None
+    assert not summary["infeasible_by_state"]
+    assert summary["store_area_mm2_max"] >= summary["store_area_mm2_min"] > 0
+
+
+def test_a_residency_budget_is_refused_by_name(tmp_path):
+    """The old per-stage residency cap is gone, and says so.
+
+    Leaving it parseable would let a config quietly reintroduce a memory
+    refusal; the area budget is the one feasibility statement now.
+    """
+    raw = _moe_raw()
+    raw[DSE.DSE_BLOCK] = {
+        "label": "capped",
+        "max_stage_state_bytes": 1.0,
+        "axes": {"layers_per_chip": [6]},
+    }
+    path = tmp_path / "capped.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        DSE.run_sweep(
+            str(path),
+            str(MOE_MODEL),
+            model_id="MoE-small",
+            output_dir=str(tmp_path / "out"),
+            quiet=True,
+        )
+    message = str(excinfo.value)
+    assert "max_stage_state_bytes is REFUSED BY NAME" in message
+    assert "max_silicon_mm2" in message
+
+
+def test_the_area_budget_is_what_refuses_a_machine(tmp_path):
+    """AREA is the feasibility statement, and it names the term that broke it."""
+    _code, measured = _moe_sweep(
+        tmp_path / "measure", {"label": "measure", "axes": {"layers_per_chip": [6]}}
+    )
+    total = measured["candidates"][0]["silicon"]["total_silicon_mm2"]
     exit_code, payload = _moe_sweep(
         tmp_path / "budget",
         {
             "label": "budget",
-            "max_stage_state_bytes": budget,
-            "axes": {"layers_per_chip": [6, 3]},
+            "max_silicon_mm2": total * 0.5,
+            "axes": {"layers_per_chip": [6]},
         },
     )
-    assert exit_code == 0
-    by_knob = {c["knobs"]["layers_per_chip"]: c for c in payload["candidates"]}
-    assert by_knob[6]["ok"] and by_knob[6]["state_bill"]["budget_verdict"] == "fits"
-    refused = by_knob[3]
-    assert not refused["ok"] and refused["fail_stage"] == "state"
-    assert "INFEASIBLE BY MEMORY (D29)" in refused["fail_message"]
-    assert refused["state_bill"]["budget_verdict"] == "VIOLATED"
-    violating = refused["state_bill"]["budget_violating_stages"]
-    assert violating and all(
-        row["state_bytes"] > budget for row in violating
-    )
-    # The point was PRICED before it was refused, so its throughput is real.
-    assert refused["metrics"]["tokens_per_s"] > by_knob[6]["metrics"]["tokens_per_s"]
-    summary = payload["state_bill_summary"]
-    assert [row["id"] for row in summary["infeasible_by_state"]] == [refused["id"]]
-    assert summary["budget_bytes"] == budget
-    report = (tmp_path / "budget" / "out" / "dse_report.md").read_text()
-    assert "Infeasible by RESIDENCY" in report
-    assert "The state bill (D29)" in report
-
-
-def test_a_declared_budget_on_a_lockstep_run_refuses_rather_than_passes(tmp_path):
-    """A check that COULD NOT BE MADE is not a pass (D21).
-
-    The retired lockstep regime has no resident streams, so it measures no
-    per-stage residency; a declared budget there is refused by name instead of
-    being silently satisfied.
-    """
-    raw = _moe_raw()
-    raw["mapping"]["regime"] = "lockstep"
-    raw[DSE.DSE_BLOCK] = {
-        "label": "lockstep",
-        "max_stage_state_bytes": 1.0,
-        "axes": {"layers_per_chip": [6]},
-    }
-    path = tmp_path / "lockstep.yaml"
-    path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    exit_code, payload = DSE.run_sweep(
-        str(path),
-        str(MOE_MODEL),
-        model_id="MoE-small",
-        output_dir=str(tmp_path / "out"),
-        quiet=True,
-    )
-    assert exit_code == 3, payload["candidates"][0].get("fail_message")
-    candidate = payload["candidates"][0]
-    assert candidate["fail_stage"] == "state"
-    assert "measures NO per-stage residency" in candidate["fail_message"]
+    refused = payload["candidates"][0]
+    assert not refused["ok"]
+    assert refused["fail_stage"] == "budget"
+    assert "max_silicon_mm2" in refused["fail_message"]
+    # It was PRICED before it was refused, so a reader can see what the design
+    # that did not fit would have delivered, and the plot can still draw it.
+    assert refused["metrics"]["tokens_per_s"] > 0
+    assert refused["silicon"]["state_sram_silicon_mm2"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -633,21 +669,27 @@ def test_the_frontier_config_is_the_shipped_machine_plus_the_sweep_block(
     )
     block = swept[DSE.DSE_BLOCK]
     assert block["search"] == "ladder"
-    assert block["repair_axis"] == "arrays_per_chip"
-    assert set(block["axes"]) == {"layers_per_chip", "arrays_per_chip", "bank_depth"}
-    # A declared residency budget is the config's OWN L2 tier and never a
-    # number invented for the sweep. Qwen declares none, because its per-stage
-    # bill is above that tier at every stage plan and a budget there would
-    # refuse the whole sweep; the config says so in its own comment.
+    # ADJ-13: the capacity axis is retired, and with it the repair that raised
+    # it. A chip is built to its placement, so a placement can no longer be
+    # refused for a capacity that was declared too small.
+    assert "repair_axis" not in block
+    assert "arrays_per_chip" not in block["axes"]
+    # ADJ-14: the CHIPLET COUNT is an axis, because an engine is sized for the
+    # stages its chiplet serves and the trade is real.
+    assert set(block["axes"]) == {"layers_per_chip", "bank_depth", "shared_chiplets"}
+    assert block["initializer"]["shared_chiplets"] > 0
+    # The one feasibility budget is an AREA budget, and it is the same
+    # appliance-level number for every model because it describes the box the
+    # system ships in rather than the workload.
     raw = copy.deepcopy(swept)
     raw.pop(DSE.DSE_BLOCK)
     import config as config_module
 
     config_module.convert(raw)
-    if "max_stage_state_bytes" in block:
-        assert block["max_stage_state_bytes"] == raw["tech_param"]["SRAM-L2"]["size"]
-    else:
-        assert "DELIBERATELY NOT DECLARED" in frontier.read_text()
+    assert "max_stage_state_bytes" not in block, (
+        "the per-stage residency cap is retired: state is sized and charged as area"
+    )
+    assert block["max_silicon_mm2"] > 0, "every sweep declares its area budget"
 
 
 def _payload(art):
@@ -752,32 +794,33 @@ def test_the_checked_in_curve_names_its_knee(
 def test_the_checked_in_curve_reports_its_infeasible_points_by_name(
     name, frontier, shipped, model, art, model_id
 ):
-    """Infeasible is a verdict with bytes and a stage behind it, or it is a word."""
+    """A machine is never refused for needing memory, and the curve says so.
+
+    ADJ-11 REWRITE. This used to check that a refusal carried its bytes and its
+    stage. There are no residency refusals any more: the store is SIZED to each
+    point's own bill and charged as silicon, so what the checked-in curve has to
+    show is that nothing was refused for memory and that every point PAID for
+    the store it needs.
+    """
     payload = _payload(art)
     summary = payload["state_bill_summary"]
-    assert summary["budget_bytes"] == (payload["sweep"]["max_stage_state_bytes"] or None)
-    if summary["budget_bytes"] is None:
-        assert not summary["infeasible_by_state"]
-        assert "not declared" in summary["budget_basis"]
-    for row in summary["infeasible_by_state"]:
-        assert "INFEASIBLE BY MEMORY (D29)" in row["verdict"]
-        assert row["violating_stages"]
-        assert all(
-            stage["state_bytes"] > summary["budget_bytes"]
-            for stage in row["violating_stages"]
-        )
+    assert summary["budget_bytes"] is None
+    assert not summary["infeasible_by_state"]
+    assert "SIZED" in summary["budget_basis"]
+    assert "max_silicon_mm2" in summary["budget_basis"]
     for row in summary["infeasible_by_memory"]:
         assert row["verdicts"]
-        for verdict in row["verdicts"]:
-            assert verdict["scope"] and verdict["tier"] and verdict["owner"]
-    # Rendered from the CHECKED-IN payload rather than read off disk: the .md
-    # is gitignored repo-wide (`*.md`), so the JSON is the artifact and the
-    # renderer is what this asserts.
-    text = DSE.render_markdown(payload)
-    assert "## The knee" in text
-    assert "## The state bill (D29)" in text
-    assert "## The ladder (how the space was walked)" in text
-    assert "## Per-device-class utilization (D28)" in text
+    sized = [
+        c for c in payload["candidates"]
+        if (c.get("state_bill") or {}).get("measured")
+    ]
+    assert sized
+    for candidate in sized:
+        store = candidate["state_bill"]
+        silicon = candidate["silicon"]
+        assert store["budget_verdict"] == "sized"
+        assert silicon["state_sram_macros"] == store["store_macros"]
+        assert silicon["state_sram_silicon_mm2"] > 0
 
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)
@@ -796,8 +839,13 @@ def test_the_checked_in_curve_verifies_its_own_emitted_config(
     assert DSE.DSE_BLOCK not in emitted
     selected = payload["selected"]
     assert emitted["mapping"]["layers_per_chip"] == selected["knobs"]["layers_per_chip"]
-    assert emitted["cim"]["chip"]["arrays_per_chip"] == selected["knobs"]["arrays_per_chip"]
     assert emitted["cim"]["cards"]["ctt"]["bank_depth"] == selected["knobs"]["bank_depth"]
+    assert emitted["mapping"]["shared_chiplets"] == selected["knobs"]["shared_chiplets"]
+    # ADJ-13: the emitted machine also carries the capacity the sweep DERIVED
+    # for it. run_perf does not derive - deriving is what the sweep is for - so
+    # without this the emitted config would describe a different machine and
+    # the round trip above would not reproduce the selection.
+    assert emitted["cim"]["chip"]["arrays_per_chip"] == selected["knobs_derived"]["arrays_per_chip"]
 
 
 def _normalized(payload):

@@ -124,13 +124,23 @@ def test_fixture_declares_no_accuracy_field_anywhere():
         assert word not in blob, word
 
 
-def test_embedded_blob_is_the_fixture_verbatim():
-    # SCHEMA.md's own instruction is "when the fixture changes, re-embed it".
-    # A stale embed is a document that draws the wrong mapping under the
-    # right title, which is exactly the silent divergence the note warns of.
-    match = EMBED_RE.search(_html())
-    assert match is not None, "atlas.html carries no atlas-embedded blob"
-    assert json.loads(match.group(1)) == _fixture()
+def test_the_page_embeds_no_fixture_and_fetches_the_real_artifacts():
+    # THE PAGE IS THE RESULTS PAGE NOW, and it draws the checked-in artifacts of
+    # its own directory. It used to open on an EMBEDDED hand-authored fixture,
+    # which meant the first thing a reader saw was a different machine, under a
+    # confusingly similar title, from the numbers every other page reported.
+    # An embedded document is a stale document the moment the artifacts move,
+    # so there is none: both blobs are null and the page fetches.
+    html = _html()
+    for name, pattern in (("atlas", EMBED_RE), ("frontier", FRONT_EMBED_RE)):
+        match = pattern.search(html)
+        assert match is not None, f"atlas.html carries no {name}-embedded slot"
+        assert json.loads(match.group(1)) is None, (
+            f"the {name} slot embeds a document again; the page must fetch the "
+            "artifacts so it can never show a stale machine"
+        )
+    for artifact in ("_report.json", "../dse/", ".json"):
+        assert artifact in html, artifact
 
 
 # --- P5.3 the loader --------------------------------------------------------
@@ -309,7 +319,7 @@ def test_the_svc_role_is_accepted_by_the_loader_and_documented(tmp_path):
     # Its own dash pattern, so it is distinguishable from `act` on the picture.
     assert 'svc: "4 2 1 2"' in html
     # ... and it is in the legend's role list, so a reader is told it exists.
-    assert '["tp", "ep", "pp", "pd", "act", "svc"].forEach' in html
+    assert '["tp", "ep", "pp", "pd", "act", "svc"].filter' in html
     schema = SCHEMA_MD.read_text(encoding="utf-8")
     assert "`svc`" in schema
     assert "shared digital chiplet and each" in schema
@@ -705,26 +715,25 @@ def test_schema_md_documents_the_contract_the_renderer_now_reads():
         assert token in schema, token
 
 
-def test_the_sibling_fetch_never_silently_replaces_an_embedded_document():
+def test_the_page_fetches_its_artifacts_and_a_deep_link_still_opens_one_document():
     """The boot block is the one part of the page no headless run reaches.
 
     It touches location, document, fetch and the live state object, so this is
-    a SOURCE-level assertion and says so: the fetch must be conditional on
-    ?data= or on there being no embedded blob. It used to fire unconditionally
-    and race the page — whoever embedded a document in this file meant it to be
-    the one on screen, and the late fetch would swap it for whatever else
-    happens to sit in the directory.
+    a SOURCE-level assertion. The page is the results page: it fetches the
+    model's own three artifacts, and ?data=<file> still opens a single document
+    on its own (the drilldown alone) rather than being ignored.
     """
     html = _html()
-    assert 'var target = wanted || (embedded ? null : "fixture_llama7b_tp2.json");' in html
-    assert 'if (target && typeof fetch === "function") {' in html
-    # The unconditional form is gone, not merely guarded downstream.
-    assert 'fetch(wanted || "fixture_llama7b_tp2.json"' not in html
-    # And a dropped or picked document still outranks an in-flight fetch.
-    assert 'S.source === "embedded blob" || S.source === "none"' in html
+    assert 'rsFetch(id + "_report.json")' in html
+    assert 'rsFetch("../dse/" + id + "_frontier/dse_report.json")' in html
+    assert 'rsFetch(id + ".json")' in html
+    # ?data= keeps the one-document deep link, and it turns the results layer off.
+    assert 'var wanted = param("data");' in html
+    assert "RS.solo = true;" in html
+    # No hardcoded fixture is opened by default any more.
+    assert 'fixture_llama7b_tp2.json' not in html
     schema = SCHEMA_MD.read_text(encoding="utf-8")
     assert "the sibling fetch runs only when this parameter asks for one" in schema
-
 
 def test_the_quotient_scan_covers_every_placement_table():
     """R9 reads the placement tables too, not just the document root.
@@ -1416,11 +1425,13 @@ def test_the_frontier_marks_the_field_no_producer_emits():
         assert point["area"]["uncovered"] == []
 
 
-def test_the_embedded_frontier_blob_is_the_frontier_fixture_verbatim():
-    match = FRONT_EMBED_RE.search(_html())
-    assert match is not None, "atlas.html carries no frontier-embedded blob"
-    assert json.loads(match.group(1)) == _frontier()
-
+def test_the_frontier_fixture_still_parses_even_though_the_page_no_longer_embeds_it():
+    # The fixture is frozen data with its own provenance, and the loader still
+    # opens it on request (?data=). What changed is that the page does not
+    # OPEN on it any more.
+    front = _frontier()
+    assert front["schema"] == "fws_frontier/1"
+    assert front["points"]
 
 def test_the_extension_view_rules_hold_and_are_emitted_only_where_they_apply(tmp_path):
     out = _run_core_pair(
@@ -1496,23 +1507,16 @@ def test_schema_md_states_the_extension_self_tests_real_case_counts(tmp_path):
     assert stated_skip and int(stated_skip.group(1)) == ext_cases
 
 
-def test_the_frontier_document_never_displaces_the_atlas():
-    """A SOURCE-level assertion, like the sibling-fetch one above.
+def test_a_dropped_frontier_document_still_never_displaces_the_atlas():
+    """Two documents of two kinds can be on screen at once.
 
-    The boot block is the one part of the page no headless run reaches. Two
-    documents of two kinds are on screen at once, and a dropped frontier must
-    add a view rather than replace the mapping the reader is looking at.
+    A dropped fws_frontier/1 file adds a view; it never replaces the mapping
+    the reader is looking at. (The page embeds neither kind now — it fetches —
+    so what is pinned here is the drop path.)
     """
     html = _html()
     assert 'if (parsed && parsed.schema === A.FRONTIER_SCHEMA) { adoptFrontier(parsed, file.name); return; }' in html
     assert 'S.front = doc; S.frontSource = source; S.selftest = null; S.view = "frontier";' in html
-    # The frontier blob is parsed BEFORE the atlas adopts, so ?view=frontier is
-    # honoured on the first paint instead of being reset to the package view.
-    assert html.index('$("frontier-embedded")') < html.index('if (embedded) adopt(embedded, "embedded blob");')
-    # And the toolbar refuses to offer a view the loaded document cannot draw.
-    assert 'this document carries no folding block' in html
-    assert 'no fws_frontier/1 document loaded' in html
-
 
 def test_no_frontier_document_smuggles_an_accuracy_field():
     """D23 applies to every artifact, and the frontier is not an atlas document,

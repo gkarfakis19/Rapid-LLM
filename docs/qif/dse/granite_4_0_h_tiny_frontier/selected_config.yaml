@@ -6,7 +6,7 @@
 #
 # sweep base:  configs/hardware-config/fws_cim_granite_tiny_frontier.yaml
 # model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
-# candidate:   c003 (layers_per_chip = 4, arrays_per_chip = 604, bank_depth = 1)
+# candidate:   c000 (layers_per_chip = 4, bank_depth = 1, shared_chiplets = 10, arrays_per_chip = 484 (DERIVED))
 # headline:    65325.1 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
@@ -30,7 +30,7 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 604
+    arrays_per_chip: 484
     layers_per_chip: 4
     moe_expert_parallel: 1
   cards:
@@ -160,3 +160,4 @@ mapping:
   packing: dense
   decode_window: 3
   layers_per_chip: 4
+  shared_chiplets: 10

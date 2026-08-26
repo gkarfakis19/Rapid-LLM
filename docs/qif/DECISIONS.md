@@ -244,3 +244,168 @@ Process and scope:
   Whatever binds after that must be a REAL limit (unscalable declared
   geometry or a bandwidth term) and is named in the artifact. The frontier
   sweeps only knobs with genuine physical trades left.
+
+---
+
+## ADJ-11 — A machine is never refused for needing memory. The state store is SIZED, and AREA is the one budget.
+
+**What changed.** The per-stage residency cap (`mapping_dse.max_stage_state_bytes`)
+is REFUSED BY NAME. It used to refuse a stage plan whose resident state exceeded
+a declared on-chip tier, which is the wrong question: a decode pipeline's state
+is not a constraint to check, it is a store to BUILD.
+
+**The law.** `compose_state_sram` (cim_timing) sizes the store to the state a
+mapping actually holds, in integer copies of the measured 22nm SRAM macro
+(`SRAM_MACRO_256x1040`: 256 b x 1040 words = 33 280 B, 53 006.39 um2, copied
+from OPTIMA's `sram_config.yaml` with its provenance, same convention as D32).
+The rounding up to whole macros is physical block granularity, not a margin
+(D28). Only the macro's LEAKAGE power is carried: the source measures read and
+write energy per word, and this repo has no access law to apply them with, so
+the store's dynamic energy is a NAMED GAP rather than an estimate.
+
+**Where it lands.** `silicon.state_sram_silicon_mm2` is a fourth named term in
+the machine's silicon, inside `digital_silicon_mm2` and inside
+`total_silicon_mm2`. `state_residency.verdict` is now `sized` — never
+`VIOLATED` — and each stage row carries `store_macros`, `store_area_mm2` and a
+`capacity_bytes` that IS the store built for it. The declared tier
+(`tech_param.SRAM-L2.size`) is still reported as `declared_onchip_tier_bytes`,
+but it gates nothing.
+
+**What refuses a machine now.** `mapping_dse.max_silicon_mm2`, declared at
+20 000 mm2 on every sweep. It is an appliance-level statement about the box the
+system ships in, deliberately the SAME number for every model, and it is
+checked ONCE — after pricing, because both the derived digital engine and the
+sized store exist only then. A point refused by area is still fully priced, so
+it still reports the throughput it would have delivered and still draws on the
+design-space plot; the refusal names all four silicon terms.
+
+**Measured consequence.** Granite-4.0-H-Tiny: 12 940 SRAM macros = 686 mm2
+(+5.5% silicon). Falcon-Mamba-7B: the finer stage plan holds 4x the state
+(427.5 mm2 vs 106.9 mm2 of store) and delivers 4x the throughput
+(241 362 vs 60 340 tokens/s) — a trade that was previously REFUSED and is now
+priced. Falcon-Mamba at `arrays_per_chip` 880 or above exceeds the area budget
+outright, refused with its terms named.
+
+## ADJ-12 — The two simplest workloads run: a ViT encoder and a pure-SSM stack.
+
+A suspicious mapping number on a hybrid could come from either mixer, so the
+debugging shapes come first.
+
+**ViT** (`configs/hardware-config/fws_cim_vit.yaml`, the OPTIMA T1 machine plus a
+`mapping:` block): an encoder, uniform layers, NO KV and no decode step. It runs
+under `regime: lockstep` because the filled pipeline is a decode regime with
+nothing to stagger, and it refuses `packing: dense`, which is decode-only.
+ViT-Huge-story at seq 64: 1 chip, 400 slots, 386 tiles, 779 requests/s.
+
+**Pure SSM** (`configs/hardware-config/fws_cim_mamba.yaml` + the new
+`falcon_mamba_7b_decode_inf.yaml` D29 twin): 64 Mamba-1 layers, no attention
+block at all. It used to CRASH rather than refuse — three sites read attention
+attributes unguarded (`CimModelParams.from_model`, and two in
+`base_timing.TimeCalculation.__init__`). A model with no attention has no heads:
+the count is 0 and every attention law is already gated on a layer declaring an
+attention block. 241 362 tokens/s at 14 788 mm2 on the selected point.
+
+## ADJ-13 — The machine sizes itself. Chip capacity and chip counts DERIVE; the sweep keeps only the free choices.
+
+**The error this fixes.** The sweep declared `arrays_per_chip` (a chip's macro
+slot count) and `shared_chiplets` (how many digital chiplets exist) as AXES, so
+a human had to guess them and the frontier filled up with points that were not
+designs at all. Under the requirement, the assembly check refuses the point and
+it teaches nothing. Over the requirement, the machine enumerates empty slots and
+is CHARGED SILICON for them, so the curve bought area with no throughput and
+called it a design point. Granite's shipped config declared 640 slots per chip
+and needed 556: 84 empty slots on each of 10 chips, 1697 mm2 of silicon — 13%
+of the machine — bought for nothing and drawn on the frontier as if it were a
+choice.
+
+**Chip capacity is arithmetic, not a choice.** A chip offers exactly the macro
+slots the layers it holds need. The sweep places the layers once against a
+capacity that cannot bind (`_CAPACITY_PROBE`), reads what the busiest chip
+needed, and builds the chip to it. What stays free is the PARTITION —
+`layers_per_chip` / `layers_per_stage` — which is a real design choice with a
+real trade: a finer partition raises the resident stream count D and the
+throughput with it, and makes every stage hold more state.
+
+**The digital chiplet count is what makes the pipeline balanced, and it
+derives from the stage plan.** One chiplet per pipeline stage, each with its
+engines sized up to that stage's own analog pass (D31/ADJ-9/ADJ-10). That is
+the balance condition, and it is not a knob: the PARTITION decides it, so
+declaring it separately could only starve the pipeline or buy idle chiplets.
+
+**The packing question is REPORTED, not applied — and the reason is a caught
+mistake.** How few chiplets could carry this work if the stages time-shared
+them inside one beat? First-fit over the stages sorted heaviest-first says
+FOUR for Granite (three chiplets at 95.7% of the beat, one at 75.6%) where the
+machine builds ten. The first implementation APPLIED that number and charged
+area for four chiplets. It was wrong: the engine widths are derived per STAGE,
+so a chiplet serving three stages would have been sized for one of them and
+silently under-provisioned. `--verify` caught it — it re-ran the emitted config
+and measured a machine 3.5x slower than the sweep claimed (Qwen: 47148 vs
+13314 tokens/s). Sharing a chiplet across stages needs an engine sizing that
+knows it is shared; until that law exists, the row says what the headroom is
+and the machine does not take it.
+
+**Measured consequence.** Granite-4.0-H-Tiny declared 640 macro slots per chip
+and needs 556, so 84 slots on each of 10 chips were being enumerated and
+charged for nothing. The
+clearest case is the ViT machine, whose swept capacities put its frontier at
+8980 mm2; built to its placement the same machine is 542 mm2, which means 94%
+of that curve was empty silicon that a human had picked.
+
+**What the sweep is left with:** `layers_per_chip` (the partition) and
+`bank_depth` (the fold). Everything else on this machine now derives: the
+engine widths to each stage's analog pass (D31/ADJ-9/ADJ-10), the state store to
+the state held (ADJ-11), the chip capacity to the weights and the chiplet count
+to the beat (here). `arrays_per_chip` and `shared_chiplets` join REFUSED_AXES
+and are refused BY NAME, with the reason quoted.
+
+## ADJ-14 — An engine is sized for the stages its chiplet serves, so the CHIPLET COUNT is a frontier axis.
+
+**What was missing.** ADJ-13 left the shared digital chiplet count derived at
+one per pipeline stage, and refused it as an axis, because the engine widths
+were derived PER STAGE: a chiplet asked to serve three stages would have been
+sized for one of them. That is not a modelling nicety — `--verify` measured it,
+re-running an emitted config with a shared count and finding a machine 3.5x
+slower than the sweep claimed (Qwen: 47148 vs 13314 tokens/s).
+
+**The law.** A shared chiplet runs the digital work of every stage it serves,
+one after another, inside one beat. So both derivations (the scan/vector engine
+of D31/ADJ-9 and the attention fabric of ADJ-10) now take a STAGE GROUPING and
+widen until the busiest chiplet's SUMMED per-stage time fits the ANALOG PACE of
+the stages it serves — the same target ADJ-9 uses for one stage, read over the
+set. With one stage per chiplet the loop exits immediately and every previous
+number is unchanged. The grouping is CONTIGUOUS, so a chiplet serves neighbours
+in the pipeline and reads its operands locally.
+
+**Where widening stops.** It stops where it stops HELPING. If doubling the
+width no longer lowers the busiest chiplet's time, more silicon is not buying
+speed: the search halts at that saturation width and the disclosure says the
+chiplet is the binding term. This is the same saturation ADJ-10 already names
+for a single stage — the attention fabric runs out of folds to run in parallel
+— read over a shared chiplet. Without this guard the search bought 8192 arrays
+and 63000 mm2 of silicon that changed nothing.
+
+**What it buys.** The count is a real design choice with a real trade, so it is
+an AXIS (`mapping.shared_chiplets`) and the frontier explores it. Granite at
+one chiplet per stage: 62661 tokens/s, 294.2 mm2 of digital. At 5 chiplets:
+40761 tokens/s, 241.5 mm2. At 2: 40702 tokens/s, 211.9 mm2 — 28% less digital
+silicon for 35% less throughput, with the scan engine widening 5479 -> 30342
+lanes and the attention fabric refusing to widen at all because it is
+saturated.
+
+**On Granite the near-tie is the finding.** Its 23-point sweep puts
+`5 layers/chip x 5 chiplets` at 65253 tokens/s and 10575 mm2 against the
+selected `4 x 10` at 65325 and 10784 — 0.1% of the throughput for 209 mm2 and
+half the digital chiplets. Both are on the front, and the lexicographic rule
+takes throughput first, so the sweep ships the faster one and the cheaper one
+is one row below it rather than invisible. The same table shows 20 chiplets
+costing 615.7 mm2 of digital silicon against 10 chiplets' 307.8 for IDENTICAL
+throughput, which is what over-provisioning a count looks like once the count
+is swept instead of assumed.
+
+**And it finds designs a human would not have picked.** On Qwen3.5-4B the sweep
+selects FOUR chiplets over eight (one per stage) — 43434 tokens/s at 4456 mm2
+against 42214 at 4495. Sharing is both faster and smaller there, because one
+card carries one engine width: sizing it for a shared chiplet widens the engine
+for every stage on the machine. That is the kind of point the frontier exists
+to find, and it is exactly the point a hand-declared count would have missed.

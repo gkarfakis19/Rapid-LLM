@@ -1,0 +1,216 @@
+# THE PURE-RECURRENCE MACHINE (Falcon-Mamba-7B, 64 Mamba-1 layers, no attention).
+#
+# It is the Granite machine's card set - the same measured analog macro and the
+# same measured 22nm digital library - pointed at the simplest decode workload
+# there is: one mixer kind, no KV, no MLP. A suspicious occupancy or stage plan
+# here cannot be blamed on a hybrid's second mixer, so this is the shape to
+# debug the mapping against.
+device_class: fws_cim
+
+# All values inside cim must be plain numbers: unit strings like "100 MB"
+# would be rewritten into byte counts by the YAML preprocessor.
+cim:
+  analog:
+    rows: 1536               # array rows (K per array tile) = hidden_dim
+    cols_adc: 384            # ADC columns per array
+    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    slice_cycles: 2          # analog cycles per ADC evaluation
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 13730.312016  # T1 point scaled by cell count (x1.44)
+    shots_per_output: 2      # energy only, never time
+    area_mm2_per_array: 2.0204136    # T1 point scaled by cell count (x1.44)
+  fabric:
+    model: sa                # sa | gpu_native
+    rows: 32
+    cols: 64
+    num_arrays: 2            # QK and PV run concurrently on these
+    replicas: 1              # attention array replicas
+    clock_ghz: 0.95
+    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    arrays_per_chip: 112     # worst chip: 4 layers * 139 = 556 under D30
+                             # (which DROPS the lm_head; the +66 that used to
+                             # sit here is gone). 640 is deliberately held at
+                             # the pre-D30 value so the 84 unowned slots are
+                             # the frontier's own area axis - read the D32
+                             # pool total as the machine's SLOTS, never as
+                             # demand.
+    layers_per_chip: 4  # 64 layers -> 16 chips       # 40 layers -> 10 chips; endpoints on first/last chips
+    moe_expert_parallel: 1   # routed experts of a layer stay on that layer's chip
+
+  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
+  # The shared digital chiplet card is what makes the SSD scan TIMEABLE, and
+  # under D31 it no longer DECLARES the engine: it names the measured synthesis
+  # library its silicon is composed from, and the width is derived from the
+  # beat (ADJ-4 still forbids deriving scan lanes from the systolic array or
+  # the softmax pipeline, which is why the beat is the only honest source).
+  cards:
+    ctt:
+      bank_depth: 1
+      kind: analog_macro
+      device: ctt
+    sa:
+      kind: digital_chiplet
+      # D32: this chiplet's AREA and POWER are COMPOSED from the measured
+      # synthesis library checked in beside this file — the SA fabric from
+      # GEMMINI_SYS_ARRAY blocks, the softmax pipeline from
+      # FP_COMP/FP_ADD/FP_MULT/BF16_EXP/BF16_RECIP, the scan engine from
+      # FP_MULT/FP_ADD/M_REG. Nothing is declared and nothing is estimated;
+      # digital_components_22nm.yaml names the synthesis run every number
+      # came from.
+      synthesis_library: 22nm
+      # D31: vector_lanes is GONE as an input. The engine's width is DERIVED
+      # from the beat this run's ANALOG stages set — the smallest integer lane
+      # count whose own priced time fits that beat, with no margin (D28) — and
+      # it is REPORTED (evaluation.digital_silicon.derived_engine_sizing, plus
+      # a derived_engine_sizing disclosure). The 1024-lane "declared design
+      # point" this card used to carry was a number nobody measured; declaring
+      # one again is still possible and rides a disclosure naming it an
+      # OVERRIDE of a retired input. (P7.9 correction: that disclosure does not
+      # print what the beat would have derived. A declared width skips the
+      # probe pass entirely, so no derivation exists to compare it with, and
+      # claiming otherwise described a sentence no run can emit.)
+      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
+      # undeclared on purpose: the first two inherit the chiplet's own clock
+      # and softmax depth (disclosed per priced op), and an undeclared state
+      # bandwidth REPORTS recurrent-state traffic without bounding it.
+
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  const_mem_offset: 0 GB
+
+# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
+tech_param:
+  core:
+    operating_frequency: 0.95e9     # (Hz) fabric clock
+    num_bundles: 2                  # = cim.fabric.num_arrays
+    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
+    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+    size: 8 GB
+    bandwidth: 4 TB        # (/s)
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0             # (s) on-chip SRAM
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
+    dynamic_energy_per_bit: 1e-13   # (J)
+    latency: 0
+    util: 1
+
+memory_hierarchy:
+  l0:   # Register memory
+    type: SRAM-R
+    scope: mcu
+  l1:   # Shared memory
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:   # L2
+    type: SRAM-L2
+    scope: global
+  l3:   # Activation buffer (DRAM stub)
+    type: DRAM
+    scope: global
+
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+    - id: dim0
+      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
+      size: auto
+      topology:
+        type: Ring       # analytical mode requires ring topologies
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [tp, cp, ep]
+    - id: dim1
+      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB
+        latency: 1e-6
+        energy_per_bit: 1e-12 # (J/bit)
+        util: 1.0
+      collective_override: {}
+      parallelisms: [pp, dp]
+
+execution_backend:
+  model: analytical   # fws_cim supports only the analytical backend
+
+inference:
+  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
+
+# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
+# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+mapping:
+  # SELECTED BY THE SWEEP (ADJ-13/ADJ-14): this machine is the point
+  # tools/fws_qif_dse.py chose on its own frontier, not a hand-declared one.
+  shared_chiplets: 4
+  layers_per_chip: 2
+  parallelism:
+    tp: 1
+  # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer
+  # is the law this machine is placed under. On this card dense and dedicated
+  # coincide tile for tile (the degenerate identity of P7.2), so declaring it
+  # moves no number here — what it adds is the CENSUS: every report now carries
+  # the committed cells, the remainder waste and the global cell floor, which
+  # is the quantity D27 is written about. At a finer allocation granularity
+  # (bank_depth 1) the two laws separate and dense saves 716 macros.
+  packing: dense
+  # ADJ-6: the decode series is a bounded window plus a disclosed
+  # extrapolation. Three steps give a first / median / last that are three
+  # different readings rather than one repeated.
+  decode_window: 3

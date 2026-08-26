@@ -47,12 +47,25 @@ GRANITE_HW = os.path.join(HW_DIR, "fws_cim_granite_tiny.yaml")
 # a card that already ships rather than on a second invented design point
 # (ADJ-4). WAVE C AUDIT: two knobs in that file ARE derived from Qwen, and the
 # file's own comments say so: `layers_per_chip: 4` is Qwen's layer_plan period
-# and `arrays_per_chip: 180` is Qwen's worst-chip arithmetic. Gemma fits both,
-# but by arithmetic of its own, so
-# test_the_shared_2560_card_still_fits_gemma_by_gemmas_own_arithmetic pins it:
-# a later edit to Qwen's sizing that breaks this row FAILS instead of quietly
-# changing it.
+# and `arrays_per_chip` is Qwen's own worst-chip arithmetic.
+#
+# ADJ-13 SHARPENED THAT. A chip is now BUILT to the placement it holds, so
+# Qwen's file carries the slot count Qwen needs (73) and nothing else fits on
+# it. That is the decision working, not a breakage: a machine sized to one
+# model is not a machine another model can borrow. What Gemma borrows here is
+# the CARD -- the 2560-row analog point, which is not Qwen-specific -- and it
+# brings its OWN chip capacity, pinned below by its own arithmetic. The gate
+# that used to catch an edit to Qwen's sizing now catches an edit to GEMMA's.
 CARD_2560_HW = os.path.join(HW_DIR, "fws_cim_qwen3_5_4b.yaml")
+
+#: Gemma's worst chip holds 132 macros (the last one carries the 262208-wide
+#: lm_head), so a machine built for Gemma offers exactly that.
+GEMMA_SLOTS = 132
+
+
+def _gemmas_own_capacity(raw):
+    """Borrow the card, bring your own chip (ADJ-13)."""
+    raw["cim"]["chip"]["arrays_per_chip"] = GEMMA_SLOTS
 
 FALCON_H1_3B = os.path.join(MODEL_DIR, "falcon_h1_3b_inf.yaml")
 HUNYUAN_4B = os.path.join(MODEL_DIR, "hunyuan_4b_inf.yaml")
@@ -191,7 +204,7 @@ def gemma():
     and says so. The window law itself is untouched by the pivot.
     """
     mapping = fws_mapping.build_mapping(
-        _hw(CARD_2560_HW),
+        _hw(CARD_2560_HW, _gemmas_own_capacity),
         config.parse_config(GEMMA_3_4B, "LLM"),
         regime=fws_mapping.REGIME_LOCKSTEP,
     )
@@ -276,13 +289,13 @@ def test_gemma_3_4b_places_no_gate_and_no_recurrence(gemma):
 def test_the_shared_2560_card_still_fits_gemma_by_gemmas_own_arithmetic(gemma):
     """WAVE C AUDIT: the Gemma row rides a card sized for Qwen. Pin the fit.
 
-    ``configs/hardware-config/fws_cim_qwen3_5_4b.yaml`` justifies
-    ``layers_per_chip: 4`` by Qwen's layer_plan period and ``arrays_per_chip:
-    180`` by Qwen's worst-chip arithmetic. Gemma has no layer plan and a
-    different endpoint, so it fits by arithmetic of its own: 34 layers at 4 per
-    chip is 9 analog chips, and the busiest of them (the last, which carries the
-    262208-wide lm_head) holds 133 macros against the card's 180. Without this
-    gate, an edit to Qwen's sizing could break or silently move the Gemma row.
+    ADJ-13 REWRITE. Gemma borrows the 2560-row CARD, which is an analog design
+    point and not Qwen-specific, and brings its own chip: a chip is built to
+    the placement it holds, and Gemma's placement is not Qwen's. Gemma has no
+    layer plan and a different endpoint, so its arithmetic is its own: 34
+    layers at 4 per chip is 9 analog chips, and the busiest of them (the last,
+    which carries the 262208-wide lm_head) holds 132 macros -- exactly the
+    capacity the machine offers, with nothing enumerated that no tile uses.
     """
     counts = collections.Counter(
         slot.chip_id for slot in gemma.mapping.macros
@@ -291,4 +304,5 @@ def test_the_shared_2560_card_still_fits_gemma_by_gemmas_own_arithmetic(gemma):
     card = gemma.mapping.hw.cim_config.chip
     assert card.layers_per_chip == 4
     assert len(counts) == math.ceil(34 / card.layers_per_chip) == 9
-    assert max(counts.values()) == 133 <= card.arrays_per_chip
+    # Built to the placement: the busiest chip fills the capacity exactly.
+    assert max(counts.values()) == GEMMA_SLOTS == card.arrays_per_chip

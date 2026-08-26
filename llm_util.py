@@ -102,6 +102,13 @@ def vit_head_param_count(
 
 
 def resolve_head_dim(hidden_dim, num_heads, head_dim=None) -> int:
+    # A model whose layers are all recurrent mixers declares no attention block,
+    # so it has no heads and no head dimension. Zero is the honest answer for
+    # it; every attention term computed from this is then zero-sized, which is
+    # what a stack with no attention should contribute. A model that DOES have
+    # heads still gets the strict checks below.
+    if not num_heads and not head_dim:
+        return 0
     if head_dim is None:
         if hidden_dim % num_heads != 0:
             raise ValueError("hidden_dim must be divisible by num_heads when head_dim is not provided")
@@ -115,6 +122,11 @@ def resolve_head_dim(hidden_dim, num_heads, head_dim=None) -> int:
 def attention_dim_sizes(hidden_dim, num_heads, kv_heads, head_dim=None):
     if kv_heads is None:
         kv_heads = num_heads
+    # No attention block, no attention dimensions. A model whose layers are all
+    # recurrent mixers has zero heads, and every size below is then zero rather
+    # than an error about a division that has no meaning for it.
+    if not num_heads:
+        return 0, 0, 0
     head_dim = resolve_head_dim(hidden_dim, num_heads, head_dim=head_dim)
     q_size = num_heads * head_dim
     kv_size = kv_heads * head_dim
@@ -719,6 +731,15 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
 
 
     """
+    # A pure-recurrence stack declares no attention block at all, so it has no
+    # heads to share and no kv_heads to divide by. Fall the KV grouping back to
+    # one group per head; every attention GEMM below is then shaped from a head
+    # count of 0 and contributes nothing, which is the honest census for a model
+    # whose layers are all mixers.
+    if not num_heads:
+        kv_heads = kv_heads or 1
+    elif kv_heads is None:
+        kv_heads = num_heads
     assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim, q_size, kv_size = attention_dim_sizes(
         d_model,
@@ -1194,7 +1215,14 @@ def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
 # ====================================================================
 
 def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
-    """Return total bytes to store K+V for a single new token."""
+    """Return total bytes to store K+V for a single new token.
+
+    A model with no attention block caches nothing: there is no K and no V to
+    hold, so the answer is 0 bytes rather than an error about a head count that
+    does not exist for it.
+    """
+    if not kv_heads or not head_dim:
+        return 0
     return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
@@ -1219,6 +1247,11 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     Returns:
         OrderedDict: GEMM shapes [M, K, N] for decode step operations
     """
+    # No attention block means no heads to group; see multihead_decoder_gemm.
+    if not num_heads:
+        kv_heads = kv_heads or 1
+    elif kv_heads is None:
+        kv_heads = num_heads
     assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim, q_size, kv_size = attention_dim_sizes(
         d_model,

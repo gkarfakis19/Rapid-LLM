@@ -50,7 +50,7 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 640     # worst chip: 4 layers * 139 = 556 under D30
+    arrays_per_chip: 484     # worst chip: 4 layers * 139 = 556 under D30
                              # (which DROPS the lm_head; the +66 that used to
                              # sit here is gone). 640 is deliberately held at
                              # the pre-D30 value so the 84 unowned slots are
@@ -68,6 +68,7 @@ cim:
   # the softmax pipeline, which is why the beat is the only honest source).
   cards:
     ctt:
+      bank_depth: 1
       kind: analog_macro
       device: ctt
     sa:
@@ -215,6 +216,10 @@ inference:
 # --- the mapping block (P3, ADJ-5). Its presence is what makes this a
 # --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
 mapping:
+  # SELECTED BY THE SWEEP (ADJ-13/ADJ-14): this machine is the point
+  # tools/fws_qif_dse.py chose on its own frontier, not a hand-declared one.
+  shared_chiplets: 10
+  layers_per_chip: 4
   parallelism:
     tp: 1
   # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer
