@@ -744,16 +744,14 @@ def test_state_scales_with_d_because_every_stage_holds_every_stream():
     ]
 
 
-def test_the_stage_residency_gets_a_named_verdict_and_a_tight_tier_violates_it():
-    """P7.9 REWRITE: the verdict belongs to the ON-CHIP tier, not the DRAM stub.
+def test_the_state_store_is_sized_to_the_stage_and_a_tight_declared_tier_cannot_violate_it():
+    """A MACHINE IS NEVER REFUSED FOR NEEDING MEMORY.
 
-    D29's per-stage state is RESIDENT and read every beat, so the tier that
-    decides feasibility is the declared on-chip SRAM-L2 size. It used to be
-    taken against tech_param.DRAM.size (an 8 GiB activation stub), which made
-    the check near-vacuous — a 68 MiB Qwen stage read "fits" while the same
-    machine's frontier config called not fitting its own 64 MiB L2 "the
-    finding". Both readings still ship; only the unqualified name moved to the
-    check that can fail.
+    The per-stage state is RESIDENT and read every beat, so it needs a store —
+    and a store is something you BUILD, not a constant to fail against. It is
+    sized here out of integer copies of the measured SRAM macro and its area is
+    charged as silicon, so a tight number in tech_param cannot make a mapping
+    infeasible. What can refuse a machine is its AREA budget.
     """
 
     def tight(raw):
@@ -762,27 +760,50 @@ def test_the_stage_residency_gets_a_named_verdict_and_a_tight_tier_violates_it()
 
     run = _moe_run(mutate=tight)
     residency = run.state_residency
-    assert residency["verdict"] == "VIOLATED"
-    assert residency["stages_violating"] == [0, 1]
+    assert residency["verdict"] == "sized"
+    assert residency["stages_violating"] == []
+    assert residency["store_bytes"] >= residency["total_state_bytes"]
+    # The declared tier is still reported — it is just not a gate.
+    assert residency["declared_onchip_tier_bytes"] == 1048576.0
+    for row in residency["per_stage"]:
+        assert row["verdict"] == "sized"
+        assert row["capacity_bytes"] >= row["state_bytes"]
+    # This machine's card names NO synthesis library, so there is no measured
+    # SRAM macro to build a store out of. That is an absent law, not a zero:
+    # the store reports the requirement and counts no macros, and it still
+    # never turns into a refusal.
+    assert residency["store_macros"] == 0
+    assert residency["store_area_mm2"] == 0.0
+
+    # On a machine whose card DOES name the measured library, the store is
+    # composed: whole macros, and real silicon.
+    granite = _run(FWS_GRANITE, GRANITE)
+    gres = granite.state_residency
+    assert gres["verdict"] == "sized"
+    assert gres["store_macros"] > 0
+    assert gres["store_area_mm2"] > 0
+    assert gres["store_bytes"] >= gres["total_state_bytes"]
+    for row in gres["per_stage"]:
+        # whole macros of the measured 33280 B block, rounded UP to hold the
+        # stage: the granularity is physical, not a margin (D28)
+        assert row["store_macros"] * 33280 == row["capacity_bytes"]
+        assert row["capacity_bytes"] >= row["state_bytes"]
     # The DRAM activation stub is the OTHER reading and keeps its own name.
     assert residency["activation_tier_verdict"] == "fits"
     assert residency["activation_tier_capacity_bytes"] == float(
         run.mapping.hw.tech_config.DRAM.size
     )
-    assert residency["capacity_bytes"] == 1048576.0
-    assert "SRAM-L2" in residency["tier"]
-    # The MemoryVerdict rows are P4's DECLARED-capacity machinery (and what the
-    # DSE's `memory` stage gates on), so they stay on the declared activation
-    # tier — untouched by the tightened SRAM-L2 above — and each one NAMES the
-    # on-chip reading in its basis so the two can never drift apart.
+    # The MemoryVerdict rows are P4's DECLARED-capacity machinery and stay on
+    # the declared activation tier, untouched by the tightened SRAM-L2 above.
     verdicts = [v for v in run.memory if v.tier == "stage_state_kv"]
     assert len(verdicts) == len(run.mapping.stages)
     for verdict in verdicts:
         assert verdict.status == "fits"
         assert verdict.capacity_bytes == float(run.mapping.hw.tech_config.DRAM.size)
         assert verdict.owner.startswith("stage ")
-        assert "SRAM-L2" in verdict.basis and "VIOLATED" in verdict.basis
-    # And the same machine with a tight DECLARED tier still violates these rows.
+
+    # And the same machine with a tight DECLARED activation tier still says so
+    # on those rows: that tier is a different question with a different name.
     def tight_dram(raw):
         _d29(raw)
         raw["tech_param"]["DRAM"]["size"] = 1048576
@@ -792,11 +813,8 @@ def test_the_stage_residency_gets_a_named_verdict_and_a_tight_tier_violates_it()
     assert dram_rows and all(v.status == "VIOLATED" for v in dram_rows)
     assert all("resident streams" in v.disclosure for v in dram_rows)
     assert dram_run.state_residency["activation_tier_verdict"] == "VIOLATED"
-    disclosure = [
-        d for d in run.disclosures if d.constraint == "stage_state_tier_is_one_declared_size"
-    ]
-    assert len(disclosure) == 1 and "PESSIMISTIC" in disclosure[0].reason
-
+    # ... while its state store is still simply sized.
+    assert dram_run.state_residency["verdict"] == "sized"
 
 def test_the_state_number_rides_the_report_headline(moe):
     document = fws_eval.report_document(moe)
@@ -808,7 +826,7 @@ def test_the_state_number_rides_the_report_headline(moe):
     assert pipeline["beat_s"] == moe.pipeline["beat_s"]
     residency = document["evaluation"]["state_residency"]
     assert residency["max_stage_state_bytes"] == moe.state_residency["max_stage_state_bytes"]
-    assert residency["verdict"] in ("fits", "VIOLATED", "undeclared")
+    assert residency["verdict"] == "sized"
 
 
 # ---------------------------------------------------------------------------

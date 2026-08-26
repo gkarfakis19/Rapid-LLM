@@ -1380,10 +1380,21 @@ def _shard_shapes(device: CimDeviceModel, model, layer_idx: int, tp: int) -> Tup
             pass  # handled by the FFN half below
         else:
             stages.extend(_hybrid_stages(model, kind))
-    if device.layer_class_mask()[layer_idx]:
-        stages.extend(_moe_stages(device))
-    else:
-        stages.extend(_ffn_stages(device))
+    # THE FFN HALF IS NOT UNCONDITIONAL. `layer_plan.ffn_per_layer: false` says
+    # this stack's mixer layers carry no MLP at all — a pure Mamba-1 stack is
+    # the case it exists for — and a standalone "ffn"/"moe" layer in the pattern
+    # asks for one by name instead. Adding it to every layer regardless placed a
+    # phantom FFN on each of Falcon-Mamba's 64 layers, which roughly DOUBLED
+    # that model's weight footprint and priced GEMMs the pricing side (which
+    # does honour the flag) never counts.
+    wants_ffn = bool(getattr(model, "ffn_per_layer", True)) or any(
+        kind in ("ffn", "moe") for kind in kinds
+    )
+    if wants_ffn:
+        if device.layer_class_mask()[layer_idx]:
+            stages.extend(_moe_stages(device))
+        else:
+            stages.extend(_ffn_stages(device))
     return tuple(stage.sharded(tp) for stage in stages)
 
 

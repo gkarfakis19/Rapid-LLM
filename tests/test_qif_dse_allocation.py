@@ -41,9 +41,11 @@ GRANITE_DSE = HW_DIR / "fws_cim_granite_tiny_dse.yaml"
 GRANITE_MODEL = MODEL_DIR / "granite_4_0_h_tiny_inf.yaml"
 GRANITE_SELECTED = HW_DIR / "fws_cim_granite_tiny_dse_selected.yaml"
 
-#: The checked-in demo sweep (the one George asked for).
-DEMO_DIR = DSE_DIR / "granite_capacity_banks"
-#: The Wave-D sweep this one replaced (ADJ-9): FROZEN, and pinned as frozen.
+#: The capacity x bank-depth demo sweep. FROZEN by ADJ-13: `arrays_per_chip`
+#: is refused by name now (a chip is BUILT to its placement), so this sweep can
+#: never be re-walked and its rows are read as history, not regenerated.
+DEMO_DIR = DSE_DIR / "granite_capacity_banks_retired"
+#: The Wave-D sweep it replaced (ADJ-9): frozen on the same grounds.
 RETIRED_DEMO_DIR = DSE_DIR / "granite_lanes_banks_retired"
 DEMO_JSON = DEMO_DIR / "dse_report.json"
 DEMO_MD = DEMO_DIR / "dse_report.md"
@@ -142,7 +144,7 @@ def test_missing_sweep_block_is_refused_by_name(tmp_path):
     message = str(excinfo.value)
     assert DSE.DSE_BLOCK in message
     # The message must name the axes, or the reader has to read the source.
-    assert "arrays_per_chip" in message and "bank_depth" in message
+    assert "layers_per_chip" in message and "bank_depth" in message
     # ADJ-9: and it must NOT offer the axis it refuses.
     assert "vector_lanes" not in message
 
@@ -198,18 +200,18 @@ def test_cross_product_is_complete_and_declaration_ordered():
     spec = DSE.SweepSpec.from_raw(
         {
             DSE.DSE_BLOCK: {
-                "axes": {"arrays_per_chip": [604, 640, 965, 1207], "bank_depth": [1, 2]}
+                "axes": {"column_sets_per_tile": [604, 640, 965, 1207], "bank_depth": [1, 2]}
             }
         },
         "test",
     )
     points = list(spec.points)
     assert spec.size == 8 == len(points)
-    assert points[0] == {"arrays_per_chip": 604, "bank_depth": 1}
-    assert points[1] == {"arrays_per_chip": 604, "bank_depth": 2}
-    assert points[-1] == {"arrays_per_chip": 1207, "bank_depth": 2}
+    assert points[0] == {"column_sets_per_tile": 604, "bank_depth": 1}
+    assert points[1] == {"column_sets_per_tile": 604, "bank_depth": 2}
+    assert points[-1] == {"column_sets_per_tile": 1207, "bank_depth": 2}
     # The LAST axis varies fastest, so a reader can find a point by counting.
-    assert [p["arrays_per_chip"] for p in points] == [
+    assert [p["column_sets_per_tile"] for p in points] == [
         604, 604, 640, 640, 965, 965, 1207, 1207
     ]
 
@@ -251,22 +253,18 @@ def test_every_axis_writes_exactly_one_documented_field():
         # refused by name and no longer has a field to write.
         "bank_depth": lambda raw: raw["cim"]["cards"]["ctt"]["bank_depth"],
         "column_sets_per_tile": lambda raw: raw["cim"]["allocation"]["column_sets_per_tile"],
-        "arrays_per_chip": lambda raw: raw["cim"]["chip"]["arrays_per_chip"],
         "layers_per_chip": lambda raw: raw["mapping"]["layers_per_chip"],
         # WAVE F (P7.4, D29): the stage plan is its own axis, because a stage
         # count IS the resident-stream count D and a sweep has to be able to
         # move it without moving the chip split.
         "layers_per_stage": lambda raw: raw["mapping"]["layers_per_stage"],
-        "shared_chiplets": lambda raw: raw["mapping"]["shared_chiplets"],
     }
     assert set(fields) == set(DSE.AXIS_TARGETS)
     values = {
         "bank_depth": 2,
         "column_sets_per_tile": 2,
-        "arrays_per_chip": 200,
         "layers_per_chip": 4,
         "layers_per_stage": 2,
-        "shared_chiplets": 3,
     }
     for axis, reader in fields.items():
         moved = DSE.apply_point(base, {axis: values[axis]}, "ctt", "sa", "test")
@@ -278,8 +276,6 @@ def test_every_axis_writes_exactly_one_documented_field():
             restored["cim"].pop("allocation")
         elif axis == "bank_depth":
             restored["cim"]["cards"]["ctt"].pop("bank_depth")
-        elif axis == "arrays_per_chip":
-            restored["cim"]["chip"]["arrays_per_chip"] = base["cim"]["chip"]["arrays_per_chip"]
         else:
             restored["mapping"].pop(axis)
         assert restored == base, axis
@@ -385,19 +381,28 @@ def test_allocation_block_wins_over_the_card_bank_and_says_so(tmp_path):
 
 
 def test_infeasible_candidate_carries_its_stage_and_the_refusal_message(tmp_path):
-    """A chip too small to hold its layers dies in the MAPPER, and the
-    mapper's own named message is what the report prints."""
-    exit_code, payload = _run(tmp_path, {"axes": {"arrays_per_chip": [120, 8]}})
+    """A refused candidate carries the stage that refused it and that stage's
+    own message, and the stages it PASSED are recorded as passed.
+
+    ADJ-13 REWRITE. This used to declare a chip too small to hold its layers
+    and check the mapper's refusal. That failure mode no longer exists — the
+    chip is BUILT to its placement, so a placement can never outgrow it — which
+    is the whole point of the decision. A stage plan whose per-chip activation
+    demand outgrows the DECLARED activation tier still refuses, further down
+    the pipeline, and the tagging is what is under test here.
+    """
+    exit_code, payload = _run(tmp_path, {"axes": {"layers_per_chip": [4, 99]}})
     assert exit_code == 0  # one candidate is still feasible
     assert payload["num_candidates"] == 2 and payload["num_valid"] == 1
-    failed = payload["candidates"][1]
-    assert failed["ok"] is False
-    assert failed["fail_stage"] == "mapping"
-    assert "macro slots" in failed["fail_message"]
-    assert failed["stages"]["config"] == {"ok": True}
+    failed = [c for c in payload["candidates"] if not c["ok"]][0]
+    assert failed["fail_stage"] == "memory"
+    assert "VIOLATED" in failed["fail_message"]
+    # Every stage it got THROUGH is recorded as passed, so the row says how far
+    # the candidate went and not merely that it died.
+    for stage in ("config", "mapping", "budget", "lowering", "pricing"):
+        assert failed["stages"][stage] == {"ok": True}, stage
     assert payload["best_violation"]["id"] == failed["id"]
-    assert payload["best_violation"]["knobs"] == {"arrays_per_chip": 8}
-
+    assert payload["best_violation"]["knobs"] == {"layers_per_chip": 99}
 
 def test_card_refusal_is_a_config_stage_candidate(tmp_path):
     """`bank_depth: 3` does not divide the card's mux. The CARD refuses it
@@ -455,7 +460,7 @@ def test_budget_caps_are_a_stage_of_their_own(tmp_path):
 
 
 def test_all_infeasible_sweep_exits_three_and_still_writes_its_artifacts(tmp_path):
-    exit_code, payload = _run(tmp_path, {"axes": {"arrays_per_chip": [8, 9]}})
+    exit_code, payload = _run(tmp_path, {"axes": {"column_sets_per_tile": [998, 999]}})
     assert exit_code == 3
     assert payload["selected"] is None and payload["front_ids"] == []
     assert payload["front_shape"] == "empty"
@@ -507,13 +512,13 @@ def test_pareto_front_is_two_axis_dominance_and_the_shape_is_read_off_the_data()
     flat = [_fake("a", 100.0, 10.0, tiles=7), _fake("b", 200.0, 10.0, tiles=99)]
     front = DSE.pareto_front_ids(flat)
     assert front == ["b"]
-    shape, note = DSE.front_shape(flat, front, axes=("arrays_per_chip", "bank_depth"))
+    shape, note = DSE.front_shape(flat, front, axes=("column_sets_per_tile", "bank_depth"))
     assert shape == "flat_area" and "SAME total silicon" in note
     # The note DERIVES the flatness from the two counts the accounting
     # multiplies, and it names the axes it read them over.
     assert "ENUMERATED analog macro slot count is 64" in note
     assert "shared digital chiplet count is 2" in note
-    assert "arrays_per_chip, bank_depth" in note
+    assert "column_sets_per_tile, bank_depth" in note
     # ... and it never claims a mechanism the payload contradicts. These two
     # candidates place 7 and 99 tiles; a note asserting the same tiles are
     # placed either way, or that the analog term is the model's weights,
@@ -539,37 +544,41 @@ def test_pareto_front_is_two_axis_dominance_and_the_shape_is_read_off_the_data()
     assert shape == "dominated_chain"
 
 
-def test_chip_split_and_shared_chiplet_axes_sweep_the_mapping_itself(tmp_path):
-    """The two axes that move `mapping:` rather than a card.
+def test_the_chip_split_is_the_axis_that_moves_the_machine(tmp_path):
+    """`layers_per_chip` moves `mapping:` rather than a card, and it is the
+    axis with a real trade behind it.
 
-    `layers_per_chip` is the chip split, and it is the only axis in this
-    sweep that moves silicon. `shared_chiplets` is ADJ-5's declared count,
-    and on a dense Llama decode it moves NEITHER number: the layers of a
-    step run in sequence, so extra chiplets stand idle and the card
-    declares no area. A sweep that reported that as a trade-off would be
-    selling a tie as a design choice, so the front's shape says `tied`.
+    ADJ-13 REWRITE. This used to sweep the declared chiplet count beside the
+    chip split and check that the count reached the mapping. That count is
+    DERIVED now — the stages are packed onto as few chiplets as the beat
+    admits — so what is left to test is the split itself: half the layers per
+    chip is twice the chips, and the chip that results is built to what its
+    layers need rather than to a number somebody declared.
     """
     exit_code, payload = _run(
-        tmp_path, {"axes": {"layers_per_chip": [8, 4], "shared_chiplets": [1, 4]}}
+        tmp_path, {"axes": {"layers_per_chip": [8, 4], "bank_depth": [1, 2]}}
     )
     assert exit_code == 0 and payload["num_valid"] == 4
     by_knobs = {
-        (c["knobs"]["layers_per_chip"], c["knobs"]["shared_chiplets"]): c
+        (c["knobs"]["layers_per_chip"], c["knobs"]["bank_depth"]): c
         for c in payload["candidates"]
     }
-    # The chip split is the axis that moves silicon: half the layers per
-    # chip is twice the chips and twice the enumerated slots.
-    assert by_knobs[(4, 1)]["placement"]["analog_chips"] == 2 * by_knobs[(8, 1)]["placement"]["analog_chips"]
-    assert by_knobs[(4, 1)]["silicon"]["total_silicon_mm2"] > by_knobs[(8, 1)]["silicon"]["total_silicon_mm2"]
-    # The declared chiplet count reaches the mapping ...
-    assert by_knobs[(8, 4)]["placement"]["shared_digital_chiplets"] == 4
-    assert by_knobs[(8, 1)]["placement"]["shared_digital_chiplets"] == 1
-    # ... and moves neither axis of the front on this model.
-    assert by_knobs[(8, 4)]["metrics"]["tokens_per_s"] == by_knobs[(8, 1)]["metrics"]["tokens_per_s"]
-    assert by_knobs[(8, 4)]["silicon"]["total_silicon_mm2"] == by_knobs[(8, 1)]["silicon"]["total_silicon_mm2"]
-    assert payload["front_shape"] == "tied"
-    assert payload["selected"]["knobs"]["layers_per_chip"] == 8
-
+    coarse, fine = by_knobs[(8, 1)], by_knobs[(4, 1)]
+    # The chip split is the axis that moves silicon: half the layers per chip
+    # is twice the chips.
+    assert fine["placement"]["analog_chips"] == 2 * coarse["placement"]["analog_chips"]
+    # ADJ-13: each chip offers what ITS layers need, so halving the layers per
+    # chip roughly halves the slots per chip instead of leaving the declared
+    # capacity standing and enumerating empty ones.
+    coarse_slots = coarse["knobs_derived"]["arrays_per_chip"]
+    fine_slots = fine["knobs_derived"]["arrays_per_chip"]
+    assert fine_slots < coarse_slots
+    assert fine_slots >= coarse_slots // 2
+    # And the total analog silicon barely moves, because the WEIGHTS did not:
+    # the same tiles are spread over more chips (D27, Invariant W).
+    assert fine["silicon"]["analog_macro_silicon_mm2"] == pytest.approx(
+        coarse["silicon"]["analog_macro_silicon_mm2"], rel=0.25
+    )
 
 def test_the_headline_key_is_one_per_sweep_and_is_named():
     """ADJ-6's headline is tokens/s at the decode terminal. A prefill-only
@@ -594,23 +603,30 @@ def test_selection_is_lexicographic_and_the_rule_is_printed(tmp_path):
     FIRST in declaration order: a selection that returned the first feasible
     candidate would pass a weaker test than this one."""
     exit_code, payload = _run(
-        tmp_path, {"axes": {"arrays_per_chip": [240, 120], "bank_depth": [4, 1]}}
+        tmp_path, {"axes": {"column_sets_per_tile": [2, 1], "bank_depth": [4, 1]}}
     )
     assert exit_code == 0 and payload["num_valid"] == 4
     selected = payload["selected"]
-    # bank_depth 1 is faster (finer allocation), arrays_per_chip 120 is smaller.
-    assert selected["knobs"] == {"arrays_per_chip": 120, "bank_depth": 1}
+    # The finer column-set allocation is the faster one, and it is the axis the
+    # selection has to pick on. ADJ-13 note: bank_depth TIES on both axes here
+    # now — with the chip built to its placement it moves neither throughput
+    # nor silicon on this model — so the pin is on the axis that actually
+    # separates the points, not on a tie broken by declaration order.
+    assert selected["knobs"]["column_sets_per_tile"] == 1
+    assert selected["metrics"]["tokens_per_s"] == max(
+        c["metrics"]["tokens_per_s"] for c in payload["candidates"] if c["ok"]
+    )
     assert payload["selection_rule"].startswith("lexicographic: max headline tokens/s")
     assert selected["id"] in payload["front_ids"]
 
     exit_code, payload = _run(
         tmp_path,
-        {"axes": {"arrays_per_chip": [240, 120], "bank_depth": [4, 1]},
+        {"axes": {"column_sets_per_tile": [2, 1], "bank_depth": [4, 1]},
          "objective": "min_silicon"},
     )
     assert exit_code == 0
     assert payload["objective"] == "min_silicon"
-    assert payload["selected"]["knobs"]["arrays_per_chip"] == 120
+    assert payload["selected"]["knobs"]["column_sets_per_tile"] == 1
     assert payload["selection_rule"].startswith("lexicographic: min total silicon")
 
 
@@ -630,13 +646,13 @@ def test_silicon_names_its_terms_and_labels_the_uncovered_ones(tmp_path):
 
 
 def test_report_markdown_names_the_selection_the_front_and_the_failures(tmp_path):
-    _run(tmp_path, {"axes": {"bank_depth": [1, 4], "arrays_per_chip": [120, 8]}})
+    _run(tmp_path, {"axes": {"bank_depth": [1, 4], "column_sets_per_tile": [1, 999]}})
     report = (tmp_path / "out" / "dse_report.md").read_text()
     assert "## Selected design point" in report
     assert "## Pareto front (headline tokens/s vs total silicon)" in report
     assert "Front shape" in report
     assert "## Infeasible candidates" in report
-    assert "[mapping]" in report  # the stage tag of the arrays_per_chip: 8 rows
+    assert "[config]" in report  # the stage tag of the refused allocation rows
     assert "## Disclosures" in report
     assert "nothing sampled" in report
     # Every candidate is a row, feasible or not.
@@ -711,8 +727,14 @@ def _normalized(payload):
 
 
 def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
-    """Content gate on the checked-in artifact (cheap): the axes, the
-    scaling, the pick and the round trip.
+    """Content gate on the FROZEN artifact (cheap): the axes, the scaling and
+    the pick, read as history.
+
+    ADJ-13 FROZE THIS SWEEP. `arrays_per_chip` is refused by name now — a chip
+    is BUILT to the placement it holds — so this cross product can never be
+    re-walked, and what it measured is preserved rather than regenerated. What
+    it measured is worth preserving: it is the clearest statement in the repo
+    of why the axis had to go.
 
     ADJ-9 REWRITE, AXES AND FINDING BOTH.
     OLD AXES: `vector_lanes {512,1024,2048,4096} x bank_depth {1,2}`.
@@ -884,37 +906,32 @@ def test_the_retired_wave_d_sweep_is_frozen_and_says_so():
     assert silicon[-1] / silicon[0] == pytest.approx(1.0078, rel=1e-3)
 
 
-def test_checked_in_demo_sweep_regenerates_identically(tmp_path):
-    """Regenerate-and-compare. THIS IS THE SLOW ONE (about two minutes): the
-    eight Granite candidates are re-placed and re-priced through the real
-    mapped path, and the verify round trip reruns run_perf. Nothing here is
-    sampled to make it faster — a gate that checks one candidate out of eight
-    is a gate that lets seven rot."""
-    exit_code, payload = DSE.run_sweep(
-        str(GRANITE_DSE),
-        str(GRANITE_MODEL),
-        model_id="Granite-4.0-H-Tiny",
-        output_dir=str(tmp_path / "out"),
-        emit_config=str(tmp_path / "selected.yaml"),
-        verify=True,
-        quiet=True,
+def test_the_frozen_demo_sweep_can_never_be_re_walked(tmp_path):
+    """ADJ-13 REPLACES THE REGENERATE GATE.
+
+    This used to re-run the eight Granite candidates and compare them to the
+    checked-in artifact. That gate cannot exist any more, and its absence is
+    the point: the sweep's own axis is refused by name, so re-walking it is
+    refused too. What is pinned instead is that the refusal happens, that it
+    NAMES the axis and the reason, and that the frozen artifact is still on
+    disk to be read.
+    """
+    assert DEMO_JSON.exists(), "the frozen artifact is history and stays checked in"
+    raw = yaml.safe_load(GRANITE_DSE.read_text())
+    assert "arrays_per_chip" in raw[DSE.DSE_BLOCK]["axes"], (
+        "the frozen sweep config is preserved verbatim, refused axis and all"
     )
-    assert exit_code == 0
-    fresh = json.loads((tmp_path / "out" / "dse_report.json").read_text())
-    checked_in = json.loads(DEMO_JSON.read_text())
-    assert _normalized(fresh) == _normalized(checked_in)
-
-    # The emitted config is byte-identical to the checked-in machine except
-    # for the provenance line naming where it was written from.
-    emitted = yaml.safe_load((tmp_path / "selected.yaml").read_text())
-    assert emitted == yaml.safe_load(GRANITE_SELECTED.read_text())
-
-
-# ---------------------------------------------------------------------------
-# Wave D audit fixes: prose that must stay derived, and the guarantees the
-# docstrings make
-# ---------------------------------------------------------------------------
-
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        DSE.run_sweep(
+            str(GRANITE_DSE),
+            str(GRANITE_MODEL),
+            model_id="Granite-4.0-H-Tiny",
+            output_dir=str(tmp_path / "out"),
+            quiet=True,
+        )
+    message = str(excinfo.value)
+    assert "arrays_per_chip" in message
+    assert "ADJ-13" in message and "built to" in message.lower() or "derived" in message.lower()
 
 def test_demo_config_is_the_shipped_granite_point_plus_the_sweep_block():
     """The sweep config is the SHIPPED machine plus `mapping_dse`, and nothing
@@ -955,13 +972,12 @@ def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
     chiplets = {
         c["placement"]["shared_digital_chiplets"] for c in payload["candidates"] if c["ok"]
     }
-    # ADJ-9 REWRITE. OLD CLAIM: the slot count is constant across the sweep,
-    # because the old axes (lane width, bank depth) moved neither the chip
-    # capacity nor the chip count. NEW CLAIM: the CHIPLET count is constant and
-    # the SLOT count is not, because arrays_per_chip is now an axis and
-    # enumerating slots is exactly what it does. The flat_area branch below is
-    # therefore unreachable on this sweep and the assertion says so instead of
-    # pretending both branches are live.
+    # On this FROZEN sweep the chiplet count is constant and the slot count is
+    # not, because the sweep declared chip capacity directly and enumerating
+    # slots is exactly what that did. ADJ-13 is the answer to what this shows:
+    # the four capacities measure the identical throughput and differ only in
+    # enumerated-but-unowned slots, so capacity was never a design choice — it
+    # is arithmetic, and it derives.
     assert len(chiplets) == 1
     assert len(slots) == 4
     uncovered = payload["silicon_coverage"]["uncovered_terms"]
@@ -1098,7 +1114,7 @@ def test_an_unrankable_sweep_still_writes_both_artifacts(tmp_path, monkeypatch):
         return real(candidate) if calls["n"] % 2 else "requests_per_s"
 
     monkeypatch.setattr(DSE, "headline_key_of", alternating)
-    exit_code, payload = _run(tmp_path, {"axes": {"shared_chiplets": [1, 2]}})
+    exit_code, payload = _run(tmp_path, {"axes": {"column_sets_per_tile": [1, 2]}})
     assert exit_code == 2
     assert payload["selected"] is None and payload["front_ids"] == []
     assert payload["front_shape"] == "unrankable"

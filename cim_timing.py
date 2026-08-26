@@ -380,10 +380,22 @@ class CimModelParams:
     def from_model(cls, model) -> "CimModelParams":
         """Adapt any object carrying the model dims (LLMConfig or tc)."""
         hidden_dim = int(getattr(model, "hidden_dim"))
-        num_heads = int(getattr(model, "num_heads"))
-        head_dim = getattr(model, "head_dim", None)
+        # A PURE-RECURRENCE stack (Falcon-Mamba, or any layer plan whose block
+        # kinds exclude "attention") legally carries attention = None, and
+        # LLMConfig.num_heads then refuses by name. That is not an error here:
+        # a model with no attention has no heads, and every attention law is
+        # gated on a layer declaring an attention block, so zero is the honest
+        # count rather than a crash on the way in.
+        try:
+            num_heads = int(getattr(model, "num_heads"))
+        except (AttributeError, ValueError, TypeError):
+            num_heads = 0
+        try:
+            head_dim = getattr(model, "head_dim", None)
+        except (AttributeError, ValueError, TypeError):
+            head_dim = None
         if head_dim is None:
-            head_dim = hidden_dim // num_heads
+            head_dim = hidden_dim // num_heads if num_heads > 0 else 0
         kv_heads = getattr(model, "kv_heads", None)
         if kv_heads is None:
             kv_heads = getattr(getattr(model, "attention", None), "kv_heads", None)
@@ -2287,6 +2299,69 @@ def compose_macro_pool(
     )
 
 
+#: The measured on-chip SRAM macro (D32). One instance holds
+#: ``rows * cols / 8`` bytes; a store is an INTEGER number of them, because a
+#: macro is a physical block and half of one cannot be taped out.
+STATE_SRAM_BLOCK = "SRAM_MACRO_256x1040"
+
+
+def sram_macro_bytes(library: SynthesisLibrary) -> int:
+    """Capacity of one measured SRAM macro, in bytes."""
+    block = library.block(STATE_SRAM_BLOCK)
+    if block.rows <= 0 or block.cols <= 0:
+        raise SynthesisLibraryError(
+            f"the {library.technology} library's {STATE_SRAM_BLOCK} declares no "
+            "rows/cols, so its capacity is unknown. A store cannot be sized from an "
+            "area alone."
+        )
+    return int(block.rows) * int(block.cols) // 8
+
+
+def compose_state_sram(
+    library: SynthesisLibrary,
+    required_bytes: float,
+    *,
+    role: str = "decode state store (recurrent + KV)",
+    count_provenance: str = PROVENANCE_DERIVED_COUNT,
+) -> EngineComposition:
+    """The on-chip state store, SIZED TO THE STATE THE MAPPING ACTUALLY HOLDS.
+
+    The pipeline's resident state is not a constraint to fail against: it is a
+    store to BUILD. This composes that store out of integer copies of the
+    measured SRAM macro, so holding more state costs silicon instead of
+    refusing the design. What can still fail is the AREA BUDGET, which is a
+    statement about the package and not about the memory.
+
+    No margin is added (D28): the store is ceil(required / macro capacity)
+    macros, and the rounding up is the physical block granularity, not a pad.
+    """
+    per_macro = sram_macro_bytes(library)
+    need = max(0.0, float(required_bytes))
+    macros = int(math.ceil(need / per_macro)) if need > 0 else 0
+    rows = [(STATE_SRAM_BLOCK, macros, role)]
+    held = macros * per_macro
+    return EngineComposition(
+        name="on-chip state store",
+        technology=library.technology,
+        units=_units(library, rows, count_provenance=count_provenance),
+        basis=(
+            f"ceil({need:.6g} B of resident state / {per_macro} B per measured "
+            f"{STATE_SRAM_BLOCK}) = {macros} macro(s), holding {held} B"
+        ),
+        disclosures=(
+            "the state store is SIZED, never assumed: the mapping's own measured "
+            "per-stage state bill sets the macro count, so a plan that holds more "
+            "state buys more SRAM and pays for it in area (it is not refused).",
+            f"the store rounds up to whole macros ({per_macro} B each), which is the "
+            "physical granularity of the measured block and not a safety margin (D28).",
+            "only the macro's LEAKAGE power is carried here. The library measures read "
+            "and write energy per word, which this repo has no access law to apply "
+            "them with, so the store's dynamic energy is NOT priced and is named as a "
+            "gap rather than estimated.",
+        ),
+    )
+
+
 # --- Derived engine sizing (D31): the beat sets the width -------------------
 
 
@@ -3334,7 +3409,7 @@ class CimDeviceModel:
                 "device_class: fws_cim does not support context parallelism "
                 f"(got parallelism.cp = {cp}); set cp: 1."
             )
-        n_mult = float(int(tc.batch_size) * int(tc.kv_heads))
+        n_mult = float(int(tc.batch_size) * int(getattr(tc, "kv_heads", None) or 1))
         if tp >= 2:
             n_mult /= tp
         return n_mult
@@ -3367,7 +3442,11 @@ class CimDeviceModel:
                 m=int(dim1),
                 k=int(dim2),
                 n=int(dim3),
-                kv_heads=int(tc.kv_heads),
+                # A model with no attention block declares no kv_heads; an
+                # attention op cannot be reached from one, and one group is the
+                # inert reading if this is somehow called for a shape that is
+                # zero-sized anyway.
+                kv_heads=int(getattr(tc, "kv_heads", None) or 1),
                 tp=max(1, int(getattr(tc, "tp", 1) or 1)),
                 streams=max(1, int(getattr(tc, "batch_size", 1) or 1)),
             )
@@ -4243,6 +4322,14 @@ class CimDeviceModel:
         sizing = self.digital_pool_sizing() if sizing is None else sizing
         return compose_macro_pool(self.synthesis_library(), sizing)
 
+    def state_sram_composition(self, required_bytes: float) -> EngineComposition:
+        """The on-chip state store this machine needs, in measured SRAM macros.
+
+        ``required_bytes`` is the state ONE stage holds for every stream in
+        flight; the caller sums the stages. See :func:`compose_state_sram`.
+        """
+        return compose_state_sram(self.synthesis_library(), required_bytes)
+
     def shared_digital_compositions(self) -> Tuple[EngineComposition, ...]:
         """Every engine ONE shared digital chiplet is made of (D32).
 
@@ -4440,6 +4527,7 @@ class CimDeviceModel:
         demand: Sequence["FabricDemand"],
         *,
         compose: Optional[bool] = None,
+        stage_groups: Optional[Sequence[Sequence[int]]] = None,
     ) -> "DerivedFabricSizing":
         """Size the ATTENTION FABRIC up until the ANALOG m-pass binds (ADJ-10).
 
@@ -4554,6 +4642,85 @@ class CimDeviceModel:
         provisioned = max(int(row.num_arrays) for row in rows)
         width = max(int(row.softmax_width) for row in rows)
         lanes = _ceil_div(width, replicas)
+        # ADJ-14: a chiplet shared across stages runs their attention one after
+        # another inside one beat, so the fabric is sized for the SUM. With one
+        # stage per chiplet this leaves ADJ-10's answer untouched.
+        fabric_shared_widened = None
+        groups = [
+            [int(stage) for stage in group]
+            for group in (stage_groups or [])
+            if len(group) > 1
+        ]
+        if groups:
+            by_stage = {int(entry.stage): entry for entry in ordered}
+
+            def _group_target(group):
+                return max(
+                    (float(getattr(by_stage[st], "analog_time_s", 0.0) or 0.0)
+                     for st in group if st in by_stage),
+                    default=0.0,
+                )
+
+            def _group_attention_time(arrays, group):
+                total = 0.0
+                for stage in group:
+                    entry = by_stage.get(stage)
+                    if entry is None:
+                        continue
+                    total += self._stage_attention_cycles(
+                        entry.calls, arrays, lanes * replicas
+                    )[0] / clock
+                return total
+
+            def _worst_over(arrays):
+                return max(
+                    (_group_attention_time(arrays, g) - _group_target(g)) for g in groups
+                )
+
+            def _grow(worst_over, measure, start, cap):
+                """Smallest width that meets the target, or the SATURATION width.
+
+                Widening buys less and less: once doubling the width stops
+                lowering the busiest chiplet's time, more silicon is not buying
+                speed and the derivation stops there rather than charging for
+                width that does nothing. That is the same saturation ADJ-10
+                already names for a single stage, read over a shared chiplet.
+                """
+                lo = hi = int(start)
+                best = measure(hi)
+                while worst_over(hi) > 0 and hi < cap:
+                    nxt = hi * 2
+                    gain = best - measure(nxt)
+                    if gain <= best * 1e-9:
+                        return int(hi), False, True    # saturated: widening is inert
+                    lo, hi, best = hi, nxt, measure(nxt)
+                if worst_over(hi) > 0:
+                    return int(hi), False, False       # hit the cap, still short
+                while lo + 1 < hi:
+                    mid = (lo + hi) // 2
+                    if worst_over(mid) > 0:
+                        lo = mid
+                    else:
+                        hi = mid
+                return int(hi), True, False
+
+            live = [g for g in groups if _group_target(g) > 0]
+            if live and _worst_over(provisioned) > 0:
+                width, reached, saturated = _grow(
+                    _worst_over,
+                    lambda a: max(_group_attention_time(a, g) for g in groups),
+                    provisioned,
+                    provisioned * (1 << 10),
+                )
+                hi = width
+                fabric_shared_widened = {
+                    "saturated": bool(saturated),
+                    "from_arrays": int(provisioned),
+                    "to_arrays": int(hi),
+                    "stages_per_chiplet_max": max(len(g) for g in groups),
+                    "target_reached": bool(reached),
+                }
+                provisioned = int(hi)
         binding = max(
             rows, key=lambda row: (int(row.num_arrays), int(row.used_cycles))
         ).stage
@@ -4709,6 +4876,7 @@ class CimDeviceModel:
         demand: Sequence[EngineDemand],
         *,
         compose: Optional[bool] = None,
+        stage_groups: Optional[Sequence[Sequence[int]]] = None,
     ) -> DerivedEngineSizing:
         """Size the engine UP until the ANALOG m-pass binds, and report it (ADJ-9).
 
@@ -4815,6 +4983,94 @@ class CimDeviceModel:
                 "nothing to size and a width would be an invention, not a derivation."
             )
         provisioned = max(int(row.lanes) for row in rows)
+        # ADJ-14: A CHIPLET IS SIZED FOR THE STAGES IT SERVES. When several
+        # stages share one chiplet, that chiplet runs their work one after
+        # another inside a single beat, so the width that holds ONE stage's
+        # analog m-pass is not the width the machine needs — the SUM has to fit
+        # the beat. Widen until it does. With one stage per chiplet the loop
+        # exits immediately and ADJ-9's answer is unchanged.
+        shared_widened = None
+        groups = [
+            [int(stage) for stage in group]
+            for group in (stage_groups or [])
+            if len(group) > 1
+        ]
+        if groups:
+            by_stage = {int(entry.stage): entry for entry in ordered}
+
+            def _group_target(group):
+                # The pace the chiplet has to keep is the ANALOG pace of the
+                # stages it serves — the same target ADJ-9 uses for one stage,
+                # read over the set. A chiplet that finishes its whole group
+                # inside that leaves the analog side binding, which is the
+                # condition this derivation exists to preserve.
+                return max(
+                    (float(getattr(by_stage[st], "analog_time_s", 0.0) or 0.0)
+                     for st in group if st in by_stage),
+                    default=0.0,
+                )
+
+            def _group_time(width, group):
+                total = 0.0
+                for stage in group:
+                    entry = by_stage.get(stage)
+                    if entry is None:
+                        continue
+                    calls = [float(c) for c in entry.ops if float(c) > 0]
+                    total += vector_cycles_at(calls, width, depth) / clock
+                return total
+
+            def _worst_over(width):
+                return max(
+                    (_group_time(width, g) - _group_target(g)) for g in groups
+                )
+
+            def _grow(worst_over, measure, start, cap):
+                """Smallest width that meets the target, or the SATURATION width.
+
+                Widening buys less and less: once doubling the width stops
+                lowering the busiest chiplet's time, more silicon is not buying
+                speed and the derivation stops there rather than charging for
+                width that does nothing. That is the same saturation ADJ-10
+                already names for a single stage, read over a shared chiplet.
+                """
+                lo = hi = int(start)
+                best = measure(hi)
+                while worst_over(hi) > 0 and hi < cap:
+                    nxt = hi * 2
+                    gain = best - measure(nxt)
+                    if gain <= best * 1e-9:
+                        return int(hi), False, True    # saturated: widening is inert
+                    lo, hi, best = hi, nxt, measure(nxt)
+                if worst_over(hi) > 0:
+                    return int(hi), False, False       # hit the cap, still short
+                while lo + 1 < hi:
+                    mid = (lo + hi) // 2
+                    if worst_over(mid) > 0:
+                        lo = mid
+                    else:
+                        hi = mid
+                return int(hi), True, False
+
+            live = [g for g in groups if _group_target(g) > 0]
+            if live and _worst_over(provisioned) > 0:
+                width, reached, saturated = _grow(
+                    _worst_over,
+                    lambda w: max(_group_time(w, g) for g in groups),
+                    provisioned,
+                    provisioned * (1 << 12),
+                )
+                hi = width
+                shared_widened = {
+                    "saturated": bool(saturated),
+                    "from_lanes": int(provisioned),
+                    "to_lanes": int(hi),
+                    "stages_per_chiplet_max": max(len(g) for g in groups),
+                    "target_reached": bool(reached),
+                    "worst_group_time_s": max(_group_time(hi, g) for g in groups),
+                    "worst_group_target_s": max(_group_target(g) for g in groups),
+                }
+                provisioned = int(hi)
         binding = max(rows, key=lambda row: (int(row.lanes), row.total_ops)).stage
         # Re-price every stage at the PROVISIONED width. One card carries one
         # width, so a stage whose own derivation asked for fewer lanes actually
@@ -4856,7 +5112,28 @@ class CimDeviceModel:
             )
         analog_bound = [row for row in rows if row.analog_bound]
         unreachable = [row for row in rows if row.target_kind != TARGET_ANALOG_STAGE]
-        disclosures = [
+        disclosures = []
+        if shared_widened is not None:
+            disclosures.append(
+                "ADJ-14: this machine SHARES a digital chiplet across up to "
+                f"{shared_widened['stages_per_chiplet_max']} pipeline stages, so the "
+                "engine is sized for the work of every stage its chiplet carries, not "
+                f"for one. The width went from {shared_widened['from_lanes']} lanes "
+                f"(ADJ-9's per-stage answer) to {shared_widened['to_lanes']}. The "
+                "target is the ANALOG pace of the stages a chiplet serves, and the "
+                "busiest chiplet's SUMMED time is "
+                f"{shared_widened['worst_group_time_s']:.6g} s against "
+                f"{shared_widened['worst_group_target_s']:.6g} s"
+                + (
+                    ", which it meets."
+                    if shared_widened["target_reached"]
+                    else " — UNREACHABLE at any width, so the chiplet is the binding "
+                    "term and this machine is digital-bound by its own sharing. "
+                    "Fewer chiplets do not make the digital work smaller; they "
+                    "concentrate it."
+                )
+            )
+        disclosures += [
             "D31-v2 (ADJ-9): the scan/vector engine is not a swept axis and not a "
             "declared knob, and it is no longer sized to the analog BEAT. Its width is "
             "the smallest integer for which EVERY stage's digital per-stage time fits "

@@ -4,22 +4,22 @@
 # `mapping_dse` sweep block removed (a runnable config declares a machine, not a
 # candidate space).
 #
-# sweep base:  configs/hardware-config/fws_cim_granite_tiny_frontier.yaml
-# model:       configs/model-config/granite_4_0_h_tiny_inf.yaml
-# candidate:   c000 (layers_per_chip = 4, bank_depth = 1, shared_chiplets = 10, arrays_per_chip = 484 (DERIVED))
-# headline:    65325.1 tokens/s, measured on this point's own timeline by fws_eval
+# sweep base:  configs/hardware-config/fws_cim_vit_frontier.yaml
+# model:       configs/model-config/vit_huge_story_64_inf.yaml
+# candidate:   c000 (layers_per_chip = 32, arrays_per_chip = 386 (DERIVED))
+# headline:    789.844 requests/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
   analog:
-    rows: 1536
-    cols_adc: 384
+    rows: 1280
+    cols_adc: 320
     adc_mux: 4
     slice_cycles: 2
     analog_clock_mhz: 100
-    energy_per_vec_pj: 13730.312016
+    energy_per_vec_pj: 9534.9389
     shots_per_output: 2
-    area_mm2_per_array: 2.0204136
+    area_mm2_per_array: 1.403065
   fabric:
     model: sa
     rows: 32
@@ -30,17 +30,8 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 484
-    layers_per_chip: 4
-    moe_expert_parallel: 1
-  cards:
-    ctt:
-      kind: analog_macro
-      device: ctt
-      bank_depth: 1
-    sa:
-      kind: digital_chiplet
-      synthesis_library: 22nm
+    arrays_per_chip: 386
+    layers_per_chip: 32
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 0
@@ -68,7 +59,7 @@ tech_param:
     dataflow: best
     util: 1
   DRAM:
-    size: 8 GB
+    size: 256 MB
     bandwidth: 4 TB
     dynamic_energy_per_bit: 1e-13
     latency: 0
@@ -124,7 +115,7 @@ network:
     cp_overlap: 0.0
   dimensions:
   - id: dim0
-    label: chip_ring_ep_tp
+    label: chip_ring_tp
     size: auto
     topology:
       type: Ring
@@ -150,14 +141,12 @@ network:
     parallelisms:
     - pp
     - dp
+mapping:
+  parallelism:
+    tp: 1
+  regime: lockstep
+  layers_per_chip: 32
 execution_backend:
   model: analytical
 inference:
   kvcache_type: cim_sram
-mapping:
-  parallelism:
-    tp: 1
-  packing: dense
-  decode_window: 3
-  layers_per_chip: 4
-  shared_chiplets: 10

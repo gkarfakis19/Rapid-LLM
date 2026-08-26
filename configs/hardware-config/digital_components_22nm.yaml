@@ -127,6 +127,24 @@ blocks:
     pipeline_depth: 1
     provenance: "measured via synthesis, 22nm"
     description: "Register for MAMBA BF16. TODO!!!!!"
+  SRAM_MACRO_256x1040:
+    area_um2: 53006.39
+    power_W: 0.00003241
+    frequency_GHz: 1.1377
+    pipeline_depth: 1
+    rows: 1040
+    cols: 256
+    provenance: "measured via synthesis, 22nm"
+    description: >-
+      One SRAM macro: 256-bit IO x 1040 words = 33280 B. area_um2 and the
+      leakage power are copied from OPTIMA's sram_config.yaml
+      (/app/nanocad/projects/cim_ctt_big_optima/perf_model/configs/sram_config.yaml),
+      the same measured source family as the blocks above. frequency_GHz is
+      1 / clock_cycle_time_ps = 1 / 879 ps. power_W is the macro's LEAKAGE only
+      (leakage_power_mW 0.03241): the file also measures read and write energy
+      per word (10736 fJ and 15091 fJ), which is an energy law and not a
+      standing power, so it is not folded in here. This block is the on-chip
+      STATE store the decode pipeline holds its recurrent state and KV in.
   ELASTIC_BUFFER_256_MXFP4_ELEMS:
     area_um2: 8125.064
     power_W: 0.00713462

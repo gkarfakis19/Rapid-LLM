@@ -72,6 +72,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from cim_timing import (
+    sram_macro_bytes,
     LAW_UNVALIDATED,
     PROVENANCE_DERIVED_COUNT,
     AttentionCallDemand,
@@ -3207,6 +3208,58 @@ _RESIDENCY_BASIS = (
 )
 
 
+def _sized_store(mapping: FwsMapping, required_bytes: float) -> Dict[str, float]:
+    """The on-chip store built to hold ``required_bytes``, in measured macros.
+
+    A stage's resident state is not checked against a declared tier size: the
+    store is BUILT to it. When the card names a synthesis library the store is
+    integer copies of the measured SRAM macro and its area is real silicon;
+    when it names none there is no measured macro to build from, so the store
+    reports the requirement and no area, and says so by carrying 0 macros.
+    """
+    try:
+        device = mapping.device
+        if not device.has_synthesis_library():
+            return {"bytes": float(required_bytes), "macros": 0, "area_mm2": 0.0}
+        composition = device.state_sram_composition(float(required_bytes))
+        macros = int(sum(composition.blocks.values()))
+        per_macro = sram_macro_bytes(device.synthesis_library())
+        return {
+            "bytes": float(macros * per_macro),
+            "macros": macros,
+            "area_mm2": float(composition.area_mm2),
+        }
+    except Exception:
+        # A library that cannot compose is an absent law, not a zero: report
+        # the requirement and no store rather than inventing one.
+        return {"bytes": float(required_bytes), "macros": 0, "area_mm2": 0.0}
+
+
+def _stage_chiplet_groups(mapping: FwsMapping) -> Tuple[Tuple[int, ...], ...]:
+    """Which pipeline stages share each shared digital chiplet.
+
+    One chiplet per stage is the balanced default and returns singletons, which
+    changes no derivation. When a machine declares FEWER chiplets than stages,
+    the stages are dealt out in CONTIGUOUS blocks — a chiplet serves neighbours
+    in the pipeline, so the activations it reads come from the analog chips
+    beside it rather than from across the package.
+    """
+    stages = list(getattr(mapping, "stages", ()) or ())
+    if not stages:
+        return ()
+    chiplets = 0
+    for chip in getattr(mapping, "chips", ()) or ():
+        if getattr(chip, "pool", None) != "analog":
+            chiplets += 1
+    if chiplets <= 0 or chiplets >= len(stages):
+        return tuple((int(stage.index),) for stage in stages)
+    groups: List[List[int]] = [[] for _ in range(chiplets)]
+    per = math.ceil(len(stages) / chiplets)
+    for position, stage in enumerate(stages):
+        groups[min(chiplets - 1, position // per)].append(int(stage.index))
+    return tuple(tuple(group) for group in groups if group)
+
+
 def _build_state_residency(
     mapping: FwsMapping,
     serving: ServingPoint,
@@ -3255,11 +3308,13 @@ def _build_state_residency(
             if capacity_bytes <= 0
             else ("fits" if total <= capacity_bytes else "VIOLATED")
         )
-        status = (
-            "undeclared"
-            if onchip_capacity_bytes <= 0
-            else ("fits" if total <= onchip_capacity_bytes else "VIOLATED")
-        )
+        # THE ON-CHIP STORE IS SIZED, NOT CHECKED. A stage holds what it
+        # holds; the SRAM that holds it is built to that size out of integer
+        # measured macros and charged as silicon. So this row reports the
+        # store the stage needs, and its verdict is "sized" — never a
+        # violation. What can refuse a machine is its AREA budget.
+        store = _sized_store(mapping, total)
+        status = "sized"
         rows.append(
             OrderedDict(
                 (
@@ -3271,7 +3326,10 @@ def _build_state_residency(
                     ("kv_bytes", float(kv)),
                     ("state_bytes", float(total)),
                     ("per_stream_state_bytes", float(total) / max(1, int(residents))),
-                    ("capacity_bytes", float(onchip_capacity_bytes)),
+                    ("capacity_bytes", float(store["bytes"])),
+                    ("store_macros", int(store["macros"])),
+                    ("store_area_mm2", float(store["area_mm2"])),
+                    ("declared_onchip_tier_bytes", float(onchip_capacity_bytes)),
                     ("verdict", status),
                     ("activation_tier_capacity_bytes", float(capacity_bytes)),
                     ("activation_tier_verdict", activation_status),
@@ -3283,6 +3341,9 @@ def _build_state_residency(
     representative = (
         float(_median([float(value) for value in ordered])) if ordered else 0.0
     )
+    store_macros = int(sum(int(row["store_macros"]) for row in rows))
+    store_bytes = float(sum(float(row["capacity_bytes"]) for row in rows))
+    store_area = float(math.fsum(float(row["store_area_mm2"]) for row in rows))
     violated = [row for row in rows if row["verdict"] == "VIOLATED"]
     activation_violated = [
         row for row in rows if row["activation_tier_verdict"] == "VIOLATED"
@@ -3296,15 +3357,18 @@ def _build_state_residency(
             ("total_state_bytes", float(total_bytes)),
             ("per_stream_model_state_bytes", float(total_bytes) / max(1, int(residents))),
             ("max_stage_state_bytes", max((row["state_bytes"] for row in rows), default=0.0)),
-            ("capacity_bytes", float(onchip_capacity_bytes)),
-            ("tier", "tech_param.SRAM-L2.size (the on-chip tier the state lives in)"),
-            ("stages_violating", [int(row["stage"]) for row in violated]),
+            ("capacity_bytes", float(store_bytes)),
+            ("store_macros", store_macros),
+            ("store_bytes", float(store_bytes)),
+            ("store_area_mm2", store_area),
+            ("declared_onchip_tier_bytes", float(onchip_capacity_bytes)),
             (
-                "verdict",
-                "undeclared"
-                if onchip_capacity_bytes <= 0
-                else ("VIOLATED" if violated else "fits"),
+                "tier",
+                "an on-chip store SIZED to this mapping, in integer copies of the "
+                "measured SRAM macro; its area is charged as silicon",
             ),
+            ("stages_violating", [int(row["stage"]) for row in violated]),
+            ("verdict", "sized"),
             ("activation_tier_capacity_bytes", float(capacity_bytes)),
             (
                 "activation_tier",
@@ -3810,16 +3874,26 @@ def _derive_engine(
     # m-pass times, which are properties of the analog side and invariant to
     # either width — and it is fixed here only so the derivation is
     # deterministic and re-runnable.
+    # ADJ-14: which stages share a chiplet. A machine with fewer shared digital
+    # chiplets than pipeline stages runs several stages' digital work on one
+    # chiplet, one after another inside a beat, and both derivations below have
+    # to size for that. The grouping is CONTIGUOUS so a chiplet serves stages
+    # that are neighbours in the pipeline, which keeps its operands local.
+    stage_groups = _stage_chiplet_groups(mapping)
     fabric_sizing = None
     if not pins_fabric and beat > 0:
         fabric_demand = _fabric_demand(serving, annotations, probe.costs, timeline)
         if fabric_demand:
-            fabric_sizing = device.derive_fabric_sizing(beat, fabric_demand)
+            fabric_sizing = device.derive_fabric_sizing(
+                beat, fabric_demand, stage_groups=stage_groups
+            )
             device.install_derived_fabric(fabric_sizing)
     engine_sizing = None
     demand = _engine_demand(serving, annotations, probe.costs, timeline)
     if saw_vector_op and not pins_engine and beat > 0 and demand:
-        engine_sizing = device.derive_engine_sizing(beat, demand)
+        engine_sizing = device.derive_engine_sizing(
+            beat, demand, stage_groups=stage_groups
+        )
         # ADJ-9's reachability evidence rides the SIZING, not a module global: a
         # report is written long after the derivation ran, and a global would hand
         # one run's evidence to another run's report (D21).

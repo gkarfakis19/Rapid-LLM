@@ -108,6 +108,19 @@ svg{display:block;width:100%;height:auto;max-width:100%}
 foreignObject div{font:11px/1.2 "Segoe UI",system-ui,sans-serif}
 
 /* ---- results layer ---- */
+.hwgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(23rem,1fr));gap:1rem;margin:.8rem 0}
+.hwcard{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:.9rem 1.1rem}
+.hwcard h3{margin:0 0 .1rem;font:600 1rem/1.3 "Segoe UI",system-ui,sans-serif}
+.hwcard .cnt{font:12px/1.4 "Segoe UI",system-ui,sans-serif;color:var(--muted);margin-bottom:.5rem}
+.hwcard table{width:100%;border-collapse:collapse;font:13px/1.5 "Segoe UI",system-ui,sans-serif}
+.hwcard td{padding:.24rem .1rem;border-bottom:1px solid var(--line);vertical-align:top}
+.hwcard td:first-child{color:var(--muted);white-space:nowrap;padding-right:.8rem}
+.hwcard td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.hwcard .grp{padding-top:.6rem;color:var(--ink);font-weight:600;font-size:11px;letter-spacing:.05em;text-transform:uppercase;border:0}
+.legband{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:flex-start;margin:.5rem 0 0}
+.legband .lb{font:11px/1.4 "Segoe UI",system-ui,sans-serif;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;margin-bottom:.3rem}
+.blk{display:inline-flex;align-items:center;gap:.35rem;font:12px/1.5 "Segoe UI",system-ui,sans-serif;margin-right:.7rem}
+
 .pid a{color:var(--faint);text-decoration:none} .pid a:hover{color:var(--accent)}
 h2.sect{font:600 1.02rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.4rem 0 .8rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--ink)}
 h3.rsub{margin:1.5rem 0 .3rem;font:600 .9rem/1.3 "Segoe UI",system-ui,sans-serif;color:var(--ink)}
@@ -141,16 +154,18 @@ h3.rsub{margin:1.5rem 0 .3rem;font:600 .9rem/1.3 "Segoe UI",system-ui,sans-serif
 <body>
 <main>
   <header class="top">
-    <div class="pid"><a href="../index.html">QIF board</a> &middot; results &middot; fws_atlas/1</div>
+    <div class="pid"><a href="../index.html">QIF board</a> &middot; results</div>
     <div id="h-models"></div>
     <h1 id="h-title">QIF Results</h1>
     <p class="sub" id="h-sub"></p>
     <div class="pills" id="h-pills"></div>
   </header>
   <div id="h-headline"></div>
+  <div id="h-modelinfo"></div>
+  <div id="h-hw"></div>
   <div id="h-frontsec"></div>
-  <div id="h-pipesec"></div>
-  <h2 class="sect">Drilldown &mdash; package &rarr; chip &rarr; macro; every number wears its basis</h2>
+  <h2 class="sect" id="pipe-head">Pipeline map</h2>
+  <p class="rnote" id="pipe-lead" style="margin:-.4rem 0 .8rem"></p>
   <div id="h-bar"></div>
   <div id="h-crumbs"></div>
   <div class="body">
@@ -160,9 +175,11 @@ h3.rsub{margin:1.5rem 0 .3rem;font:600 .9rem/1.3 "Segoe UI",system-ui,sans-serif
       <div class="panel card" id="h-card"></div>
     </div>
   </div>
+  <div id="h-beat"></div>
   <div id="h-details"></div>
   <div id="h-band"></div>
   <div id="h-disc"></div>
+  <div id="h-foot"></div>
 </main>
 <div id="rs-tip"></div>
 
@@ -2371,10 +2388,12 @@ var ATLAS = (function () {
   // ---------------------------------------------------------------- header --
   function renderHeader() {
     var d = S.doc;
+    var phase = ((RS.report || {}).serving || {}).phase
+      || ((RS.report || {}).mapping || {}).phase || "";
     $("h-title").textContent = (!RS.solo && RS.id)
-      ? (rsModel().label + " \u2014 decode results")
+      ? (rsModel().label + (phase ? " \u2014 " + phase + " results" : " \u2014 results"))
       : ((d && d.title) || "QIF Results");
-    $("h-sub").textContent = (d && d.subtitle) || "";
+    $("h-sub").textContent = (!RS.solo && RS.id) ? "" : ((d && d.subtitle) || "");
     var p = [];
     p.push('<span class="pill on">' + esc((d && d.schema) || "no document") + "</span>");
     p.push('<span class="pill">source: ' + esc(S.source) + "</span>");
@@ -2387,12 +2406,16 @@ var ATLAS = (function () {
       p.push('<span class="pill' + (S.res.errors.length ? "" : " on") + '">' +
         (S.res.errors.length ? S.res.errors.length + " refusals" : "conformance: all checks pass") + "</span>");
     }
-    $("h-pills").innerHTML = p.join("");
+    $("h-pills").innerHTML = (!RS.solo && RS.id) ? "" : p.join("");
   }
 
   // ------------------------------------------------------- relaxation band --
   function renderBand() {
     var d = S.doc, host = $("h-band");
+    // On the results page every one of these is already inside the collapsed
+    // disclosure list at the bottom. Printing them again, expanded, put four
+    // thousand pixels of prose between the reader and the results.
+    if (!RS.solo && RS.id) { host.innerHTML = ""; return; }
     var rx = (d && d.relaxations) || [];
     var warns = (S.res && S.res.warnings) || [];
     if (!rx.length && !warns.length) { host.innerHTML = ""; return; }
@@ -2471,7 +2494,7 @@ var ATLAS = (function () {
         ">" + esc(c.label) + "</option>";
     }).join("");
     lines.push('<div class="bar ui">' +
-      '<button id="b-pkg" aria-pressed="' + (S.view === "package") + '">Package</button>' +
+      '<button id="b-pkg" aria-pressed="' + (S.view === "package") + '">Pipeline</button>' +
       '<button id="b-chip" aria-pressed="' + (S.view === "chip") + '">Chip</button>' +
       '<button id="b-macro" aria-pressed="' + (S.view === "macro") + '"' +
       (S.macro ? "" : " disabled") + ">Macro</button>" +
@@ -2487,12 +2510,8 @@ var ATLAS = (function () {
       (chips.length ? '<select id="b-sel">' + opts + "</select>" : "") +
       '<label class="chk"><input type="checkbox" id="b-duty"' + (S.duty ? " checked" : "") +
       (dutyOn ? "" : " disabled") + "> duty cycle overlay" +
-      (dutyOn ? "" : " <span class=\"note\">— this file declares none</span>") + "</label>" +
-      '<label class="file">Open atlas.json<input type="file" id="b-file" accept=".json,application/json"></label>' +
-      '<button id="b-test">Self-test</button>' +
-      '<span class="note">draw budget ' + A.DRAW_BUDGET.toLocaleString("en-US") +
-      " rects &middot; above it only the opened chip is drawn &middot; this view draws " +
-      rects.toLocaleString("en-US") + " &middot; layout is deterministic from ids</span></div>");
+      "</label>" +
+      "</div>");
     if (ok) {
       lines.push('<div class="bar filt ui">' +
         '<span class="tag">filter</span>' +
@@ -2519,10 +2538,6 @@ var ATLAS = (function () {
     if (pick) pick.addEventListener("change", function () { go("chip", pick.value, null); });
     var duty = $("b-duty");
     if (duty) duty.addEventListener("change", function () { S.duty = duty.checked; S.selftest = null; render(); });
-    $("b-file").addEventListener("change", function (e) {
-      if (e.target.files && e.target.files[0]) readFile(e.target.files[0]);
-    });
-    $("b-test").addEventListener("click", function () { S.selftest = allSelfTests(); render(); });
     [["f-model", "model"], ["f-layer", "layer"], ["f-group", "group"], ["f-pool", "pool"]].forEach(function (pair) {
       var node = $(pair[0]);
       if (node) node.addEventListener("change", function () { S.filter[pair[1]] = node.value; S.selftest = null; render(); });
@@ -2544,7 +2559,7 @@ var ATLAS = (function () {
       return "the filter does not reach this view: the folding card draws ONE tensor's family " +
         "and the frontier draws one sweep's points";
     }
-    if (!A.filterActive(S.filter)) return "no filter: every object draws at full strength";
+    if (!A.filterActive(S.filter)) return "";
     var d = S.doc, n = 0, total = 0;
     if (S.view === "package") {
       total = d.chips.length;
@@ -2626,7 +2641,125 @@ var ATLAS = (function () {
     return { tp: "", ep: "6 3", pp: "2 3", pd: "10 4 2 4", act: "1 3", svc: "4 2 1 2" }[role] || "3 3";
   }
 
-  function hueOf(obj) { var k = A.groupKey(obj); return k == null ? null : S.hue.hue[k]; }
+  // Hue = LAYER number. Saturation/lightness stay fixed so the ramp reads as
+  // position along the model, and the block type is carried by the hatch.
+  function hsl2hex(h, sl, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * sl, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+    var r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+    else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+    else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return "#" + [r + m, g + m, b + m].map(function (v) {
+      return Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0");
+    }).join("");
+  }
+  function layerCount() {
+    if (S.nLayers != null) return S.nLayers;
+    var mx = -1;
+    (S.doc && S.doc.tiles || []).forEach(function (t) {
+      var L = t.owner && t.owner.layer;
+      if (typeof L === "number" && L > mx) mx = L;
+    });
+    S.nLayers = mx + 1 > 0 ? mx + 1 : 1;
+    return S.nLayers;
+  }
+  // The hue DOMAIN is the layers currently drawn, not the whole model: a chip
+  // that holds layers 12-15 spreads those four across the full ramp instead of
+  // squeezing them into a tenth of it and drawing four identical squares. The
+  // legend renders from the same domain, so the two always agree.
+  function hueDomain() {
+    if (S.hueDomain) return S.hueDomain;
+    var lo = 0, hi = Math.max(0, layerCount() - 1);
+    if ((S.view === "chip" || S.view === "macro") && S.chip && S.ix.chip[S.chip]) {
+      var present = layersOf(S.ix.chip[S.chip]);
+      if (present.length) { lo = present[0]; hi = present[present.length - 1]; }
+    }
+    S.hueDomain = { lo: lo, hi: hi };
+    return S.hueDomain;
+  }
+  function layerHue(L) {
+    if (typeof L !== "number") return null;
+    var d = hueDomain();
+    var span = d.hi - d.lo;
+    var t = span > 0 ? Math.max(0, Math.min(1, (L - d.lo) / span)) : 0;
+    return hsl2hex(212 - 232 * t, 0.52, 0.44);
+  }
+  // Which layers does this object hold? A tile knows its own; a macro asks its
+  // tiles; a chip asks its macros. Memoised per render.
+  function layersOf(obj) {
+    if (!obj) return [];
+    if (obj.owner) return typeof obj.owner.layer === "number" ? [obj.owner.layer] : [];
+    if (obj.tiles) {
+      var out = [];
+      obj.tiles.forEach(function (tid) {
+        var t = S.ix.tile[tid];
+        if (t && t.owner && typeof t.owner.layer === "number" && out.indexOf(t.owner.layer) < 0) out.push(t.owner.layer);
+      });
+      return out.sort(function (a, b) { return a - b; });
+    }
+    if (obj.macros) {
+      if (!S.chipLayers) S.chipLayers = {};
+      if (S.chipLayers[obj.id]) return S.chipLayers[obj.id];
+      var seen = {}, list = [];
+      obj.macros.forEach(function (mid) {
+        layersOf(S.ix.macro[mid]).forEach(function (L) { if (!seen[L]) { seen[L] = 1; list.push(L); } });
+      });
+      list.sort(function (a, b) { return a - b; });
+      S.chipLayers[obj.id] = list;
+      return list;
+    }
+    return [];
+  }
+  function hueOf(obj) {
+    var L = layersOf(obj);
+    if (L.length) return layerHue(L[0]);
+    return obj && obj.pool === "digital" ? "#8a5a10" : null;
+  }
+  // Block type -> hatch. The order is the document's own block order, so the
+  // same block wears the same hatch across every view.
+  function blockOrder() {
+    if (S.blockOrder) return S.blockOrder;
+    var seen = {}, list = [];
+    (S.doc && S.doc.tiles || []).forEach(function (t) {
+      var b = t.owner && t.owner.block;
+      if (b && !seen[b]) { seen[b] = 1; list.push(b); }
+    });
+    list.sort();
+    S.blockOrder = list;
+    return list;
+  }
+  function blockIndex(b) {
+    var i = blockOrder().indexOf(b);
+    return i < 0 ? null : i;
+  }
+  var HATCH = 12;
+  function hatchDefs() {
+    var out = [];
+    for (var i = 0; i < HATCH; i++) {
+      var body;
+      if (i === 0) body = "";
+      else if (i === 1) body = '<path d="M0 8 L8 0" stroke="#12222b" stroke-width="1.5" stroke-opacity=".5"/>';
+      else if (i === 2) body = '<path d="M0 0 L8 8" stroke="#12222b" stroke-width="1.5" stroke-opacity=".5"/>';
+      else if (i === 3) body = '<circle cx="4" cy="4" r="1.5" fill="#12222b" fill-opacity=".45"/>';
+      else if (i === 4) body = '<path d="M0 4 L8 4" stroke="#12222b" stroke-width="1.5" stroke-opacity=".5"/>';
+      else if (i === 5) body = '<path d="M4 0 L4 8" stroke="#12222b" stroke-width="1.5" stroke-opacity=".5"/>';
+      else if (i === 6) body = '<path d="M0 8 L8 0 M0 0 L8 8" stroke="#12222b" stroke-width="1.2" stroke-opacity=".45"/>';
+      else if (i === 7) body = '<rect width="4" height="4" fill="#12222b" fill-opacity=".35"/><rect x="4" y="4" width="4" height="4" fill="#12222b" fill-opacity=".35"/>';
+      else if (i === 8) body = '<path d="M0 2 L8 2 M0 6 L8 6" stroke="#12222b" stroke-width="1" stroke-opacity=".45"/>';
+      else if (i === 9) body = '<path d="M2 0 L2 8 M6 0 L6 8" stroke="#12222b" stroke-width="1" stroke-opacity=".45"/>';
+      else if (i === 10) body = '<circle cx="2" cy="2" r="1" fill="#12222b" fill-opacity=".4"/><circle cx="6" cy="6" r="1" fill="#12222b" fill-opacity=".4"/>';
+      else body = '<path d="M0 8 L4 4 L8 8" fill="none" stroke="#12222b" stroke-width="1.2" stroke-opacity=".45"/>';
+      out.push('<pattern id="hx' + i + '" width="8" height="8" patternUnits="userSpaceOnUse">' + body + "</pattern>");
+    }
+    return "<defs>" + out.join("") + "</defs>";
+  }
+  // Past the palette a block gets NO hatch rather than a borrowed one: two
+  // weight matrices drawn identically is a legend that lies about the picture.
+  function hatchFor(block) {
+    var i = blockIndex(block);
+    return (i == null || i >= HATCH) ? null : "url(#hx" + i + ")";
+  }
 
   // Package view: one LANE per system (two of them is the PD picture, D16),
   // chips clustered by pool inside it, links weighted by bytes.
@@ -2725,7 +2858,7 @@ var ATLAS = (function () {
       // the fill already is the occupancy; the number rides on its own pill so it
       // stays readable at every step of the ramp
       s.push('<rect x="' + (p.x + 6) + '" y="' + (p.y + p.h - 22) + '" width="102" height="16" rx="8" fill="' + A.PAPER + '" opacity="0.9"/>');
-      s.push('<text class="ui" x="' + (p.x + 14) + '" y="' + (p.y + p.h - 10) + '" font-size="10.5" fill="#5f7280">occupancy ' + esc(A.pct(c.occupancy)) + "</text>");
+      s.push('<text class="ui" x="' + (p.x + 14) + '" y="' + (p.y + p.h - 10) + '" font-size="10.5" fill="#5f7280">slots used ' + esc(A.pct(c.occupancy)) + "</text>");
       s.push("<title>" + esc(c.id + " — " + (c.label || "")) + "</title></g>");
     });
 
@@ -2753,7 +2886,7 @@ var ATLAS = (function () {
     var s = [svgDefs()];
     s.push('<text class="mono" x="' + PAD + '" y="16" font-size="11.5" fill="#1c2a33">' + esc(chip.id) + "</text>");
     s.push('<text class="ui" x="' + PAD + '" y="30" font-size="10.5" fill="#5f7280">' +
-      esc((chip.label || "") + " · " + chip.pool + " pool · " + n + " slots · occupancy " + A.pct(chip.occupancy) +
+      esc((chip.label || "") + " · " + chip.pool + " pool · " + n + " slots · slots used " + A.pct(chip.occupancy) +
         (sys ? " · " + sys.role + " system" : "")) + "</text>");
 
     ids.forEach(function (mid, i) {
@@ -2946,10 +3079,10 @@ var ATLAS = (function () {
     h.push("<dt>occupancy</dt><dd>" + invMark(paths, "macros", m, "occupancy") + esc(A.pct(m.occupancy)) + meter(m.occupancy, hue) + "</dd>");
     h.push("<dt>duty cycle</dt><dd>" + invMark(paths, "macros", m, "duty_cycle") +
       (m.duty_cycle == null
-        ? '<span style="color:#8497a2">unknown — this document declares none (P4 owns it)</span>'
+        ? '<span style="color:#8497a2">unknown — this document declares none</span>'
         : esc(A.fmt(m.duty_cycle)) + dutyMeter(m.duty_cycle)) + "</dd>");
     if (m.digital_pool) {
-      h.push("<dt>per-macro digital pool (D12)</dt><dd>" + invMark(paths, "macros", m, "digital_pool") +
+      h.push("<dt>per-macro digital pool</dt><dd>" + invMark(paths, "macros", m, "digital_pool") +
         esc(m.digital_pool.shift_add_units + " shift/add units · " + m.digital_pool.act_lanes + " activation lanes · " +
           A.fmt(m.digital_pool.area_mm2) + " mm²") + "</dd>");
     }
@@ -2972,7 +3105,7 @@ var ATLAS = (function () {
           (hueOf(t) || "#8497a2") + '"></span> ' + esc(g) + "</td></tr>");
       });
       h.push("</table>");
-      h.push('<p class="hintline">Gaps in the column strip are columns no tile spans. Unowned capacity is legal and reported (ADJ-5).</p>');
+      h.push('<p class="hintline">Gaps in the column strip are columns no tile spans. Unowned capacity is legal and reported.</p>');
       var brackets = A.bracketsFor(d, S.ix, m);
       if (brackets.length) {
         h.push('<div class="ttl" style="margin-top:.7rem">column map brackets — ' + brackets.length + "</div>");
@@ -2984,7 +3117,7 @@ var ATLAS = (function () {
         });
         h.push("</ul>");
       }
-      h.push('<p class="hintline">Open the Macro view for the full column map and its brackets (D11).</p>');
+      h.push('<p class="hintline">Open the Macro view for the full column map and its brackets.</p>');
     }
     return h.join("");
   }
@@ -3003,14 +3136,14 @@ var ATLAS = (function () {
       esc("[" + t.columns.start + ", " + (t.columns.start + t.columns.count) + ") of " +
         ((A.capacityOf(d, macro) || {}).stored_cols || "?")) + "</dd>");
     h.push("<dt>slice</dt><dd>" + (t.slice
-      ? esc("slice " + t.slice.index + " of " + t.slice.of + " · " + t.slice.bits + " bits per cell (D11)")
+      ? esc("slice " + t.slice.index + " of " + t.slice.of + " · " + t.slice.bits + " bits per cell")
       : '<span style="color:#8497a2">none — this card stores whole weight words</span>') + "</dd>");
     h.push("<dt>group</dt><dd>" + groupWords(t) + "</dd>");
     h.push("<dt>host</dt><dd class=\"mono\">" + esc(t.macro + " · " + (macro ? macro.chip : "?")) + "</dd>");
     h.push("</dl>");
     if (siblings.length) {
       h.push('<p class="hintline">This weight matrix is carried by ' + (siblings.length + 1) +
-        " tiles sharing one owner tuple; the column map brackets them (D11).</p>");
+        " tiles sharing one owner tuple; the column map brackets them.</p>");
     }
     return h.join("");
   }
@@ -3020,7 +3153,7 @@ var ATLAS = (function () {
     var h = ['<div class="ttl">chip</div><div class="idl mono">' + esc(c.id) + "</div><dl>"];
     h.push("<dt>label</dt><dd>" + esc(c.label || "—") + "</dd>");
     h.push("<dt>system</dt><dd class=\"mono\">" + esc(c.system) + "</dd>");
-    h.push("<dt>pool</dt><dd>" + esc(c.pool) + (c.pool === "digital" ? " — shared digital chiplet (D13); it stores no weights" : " — analog macro chiplet") + "</dd>");
+    h.push("<dt>pool</dt><dd>" + esc(c.pool) + (c.pool === "digital" ? " — shared digital chiplet; it stores no weights" : " — analog macro chiplet") + "</dd>");
     h.push("<dt>slots</dt><dd>" + esc((c.capacity && c.capacity.macro_slots) || "?") + " enumerated macro slots</dd>");
     h.push("<dt>occupancy</dt><dd>" + invMark(paths, "chips", c, "occupancy") + esc(A.pct(c.occupancy)) + meter(c.occupancy, hueOf(c)) + "</dd>");
     h.push("<dt>groups</dt><dd>" + groupWords(c) + "</dd>");
@@ -3046,8 +3179,8 @@ var ATLAS = (function () {
       "<dt>from &rarr; to</dt><dd class=\"mono\">" + esc(l.from) + " &rarr; " + esc(l.to) + "</dd>",
       "<dt>bytes per " + esc(l.per || "unit") + "</dt><dd>" + invMark(paths, "links", l, "bytes") + esc(A.fmtBytes(l.bytes)) + "</dd>",
       "<dt>carries</dt><dd>" + esc(l.label || "—") + "</dd>",
-      "<dt>basis</dt><dd>" + esc(l.basis || "—") + "</dd></dl>",
-      '<p class="hintline">Fully-connected p2p, no congestion model (D17). The atlas draws bytes, never link times.</p>'
+      "</dl>",
+      '<p class="hintline">Fully-connected p2p, no congestion model. The atlas draws bytes, never link times.</p>'
     ].join("");
   }
 
@@ -3060,7 +3193,7 @@ var ATLAS = (function () {
           "</dd>" : ""),
       "<dt>figure</dt><dd>" + esc(m.label) + "</dd>",
       "<dt>value</dt><dd>" + invMark(paths, "metrics", m, "value") + esc(A.fmt(m.value)) + " " + esc(m.unit || "") + "</dd>",
-      "<dt>basis</dt><dd>" + esc(m.basis || "—") + "</dd></dl>",
+      "</dl>",
       '<p class="hintline">The producer labels its figures; the atlas never picks which one is the headline.</p>'
     ].join("");
   }
@@ -3079,13 +3212,12 @@ var ATLAS = (function () {
       esc(mdl.layers + " layers · hidden " + mdl.hidden_dim + " · ffn " + mdl.intermediate_size + " · vocab " + mdl.vocab_size) + "</span></dd>");
     if (mdl.serving) h.push("<dt>serving</dt><dd>" + esc("batch " + mdl.serving.batch + " · prefill " + mdl.serving.prefill_len +
       " · decode " + mdl.serving.decode_len) + "</dd>");
-    if (d.provenance) h.push("<dt>provenance</dt><dd>" + esc(d.provenance.note || "") + "</dd>");
     h.push("</dl>");
     h.push('<p class="hintline">Hover a chip, link or macro for its card. Click to pin it.</p>');
     return h.join("");
   }
 
-  // A PD document has two systems and no single "the system" (D16), so the
+  // A PD document has two systems and no single "the system", so the
   // resting card is the pair and the one thing that couples them.
   function pdCard() {
     var d = S.doc;
@@ -3110,7 +3242,7 @@ var ATLAS = (function () {
       h.push("<dt>bytes per " + esc(pd.per || "unit") + "</dt><dd>" + esc(A.fmtBytes(pd.bytes)) + "</dd>");
       h.push("<dt>basis</dt><dd>" + esc(pd.basis || "—") + "</dd></dl>");
     }
-    h.push('<p class="hintline">Two inventories, one priced handoff (D16). Each system holds the whole model and is priced on its own timeline — read relaxations[] before comparing the two.</p>');
+    h.push('<p class="hintline">Two inventories, one priced handoff. Each system holds the whole model and is priced on its own timeline — read relaxations[] before comparing the two.</p>');
     return h.join("");
   }
 
@@ -3128,14 +3260,14 @@ var ATLAS = (function () {
     h.push("<dt>area basis</dt><dd>" + esc(pt.area.basis) + "</dd>");
     h.push("<dt>throughput</dt><dd>" + esc(A.fmt(pt.throughput.tokens_per_s) +
       " tokens/s · decode step " + A.fmt(pt.throughput.decode_step_s) + " s") + "</dd>");
-    h.push("<dt>per-device utilization (D28)</dt><dd>");
+    h.push("<dt>per-device utilization</dt><dd>");
     (pt.utilization || []).forEach(function (u) {
       var cls = (f.device_classes || []).filter(function (c) { return c.id === u.device_class; })[0];
       h.push("<b>" + esc((cls && cls.label) || u.device_class) + "</b>: " +
         (u.value == null ? "unknown — " + esc(u.uncovered) : A.pct(u.value) + meter(u.value, A.MUTED)) + "<br>");
     });
     h.push("</dd>");
-    h.push("<dt>packing waste (D27)</dt><dd>" + esc(A.fmt(pt.packing.waste_pct) + "% · " + pt.packing.basis) + "</dd>");
+    h.push("<dt>packing waste</dt><dd>" + esc(A.fmt(pt.packing.waste_pct) + "% · " + pt.packing.basis) + "</dd>");
     h.push("<dt>provisioning</dt><dd>" + esc(pt.provisioning.analog_chips + " analog chiplets · " +
       pt.provisioning.shared_chiplets + " shared digital · " + pt.provisioning.analog_macro_slots +
       " macro slots · " + pt.provisioning.placed_tiles + " tiles") + "</dd>");
@@ -3179,7 +3311,7 @@ var ATLAS = (function () {
     h.push("<dt>tile</dt><dd>" + esc(pass.tile || "none: this box is a fold, not a placement") + "</dd>");
     if (pass.co_tenant) {
       h.push("<dt>co-tenant</dt><dd>" + esc("another tensor sharing this bank. Decode runs layers " +
-        "in sequence, so co-residency never contends (P7 Fact 3)") + "</dd>");
+        "in sequence, so co-residency never contends") + "</dd>");
     }
     h.push("</dl>");
     return h.join("");
@@ -3191,7 +3323,7 @@ var ATLAS = (function () {
     var h = ['<p class="ttl">' + esc(f.title) + "</p>"];
     h.push('<p class="idl">' + esc(f.provenance.author) + "</p><dl>");
     h.push("<dt>source</dt><dd>" + esc(S.frontSource) + "</dd>");
-    h.push("<dt>decode only (D25)</dt><dd>" + esc(f.decode_only) + "</dd>");
+    h.push("<dt>decode only</dt><dd>" + esc(f.decode_only) + "</dd>");
     h.push("<dt>points</dt><dd>" + esc((f.points || []).length + " · " +
       A.frontierFront(f).length + " on the front") + "</dd>");
     h.push("<dt>knee</dt><dd>" + esc(f.knee.point + " — " + f.knee.basis) + "</dd>");
@@ -3207,13 +3339,13 @@ var ATLAS = (function () {
     if (!card || !S.doc.folding) return defaultCard();
     var h = ['<p class="ttl">' + esc(card.label) + "</p>"];
     h.push('<p class="idl">' + esc(A.ownerLabel(card.tensor.owner)) + "</p><dl>");
-    h.push("<dt>decode only (D25)</dt><dd>" + esc(S.doc.folding.decode_only) + "</dd>");
-    h.push("<dt>Invariant W (D27)</dt><dd>" + esc(S.doc.folding.invariant_w || "—") + "</dd>");
+    h.push("<dt>decode only</dt><dd>" + esc(S.doc.folding.decode_only) + "</dd>");
+    h.push("<dt>Invariant W</dt><dd>" + esc(S.doc.folding.invariant_w || "—") + "</dd>");
     h.push("<dt>shape</dt><dd>" + esc("K " + card.tensor.K + " × N " + card.tensor.N + " = " +
       card.tensor.cells.toLocaleString("en-US") + " cells") + "</dd>");
     h.push("<dt>cell floor</dt><dd>" + esc(card.floor_macros + " macro slot(s) — " + card.floor_basis) + "</dd>");
     h.push("<dt>basis</dt><dd>" + esc(card.tensor.basis) + "</dd>");
-    h.push("<dt>refused by name (D26)</dt><dd>");
+    h.push("<dt>refused by name</dt><dd>");
     (S.doc.folding.refused || []).forEach(function (r) {
       h.push("<b>" + esc(r.fold) + "</b> — " + esc(r.reason) + " <i>" + esc(r.decision) + "</i><br>");
     });
@@ -3229,93 +3361,52 @@ var ATLAS = (function () {
       $("h-legend").innerHTML = ""; $("h-legend").style.display = "none"; return;
     }
     $("h-legend").style.display = "";
+    var blocks = blockOrder(), dom = hueDomain();
     var h = ["<h3>Legend</h3>"];
-    h.push('<div class="leg-sub">Hue — parallelism group, and nothing else</div>');
-    S.hue.order.forEach(function (k, i) {
-      var hue = S.hue.hue[k];
-      var sw = hue == null
-        ? '<svg width="16" height="16"><rect width="16" height="16" rx="3" fill="url(#p-over)" stroke="#5f7280"/>' + svgDefs() + "</svg>"
-        : '<svg width="16" height="16"><rect width="16" height="16" rx="3" fill="' + hue + '"/></svg>';
-      h.push('<div class="legrow"><span class="sw">' + sw + '</span><span class="tx"><b>' +
-        esc(k.replace(":", " ")) + "</b>" + (hue == null ? " — past the palette" : "") + "</span></div>");
-    });
-    h.push('<div class="leg-sub">Fill — occupancy, one hue, light to dark</div>');
-    var base = S.hue.hue[S.hue.order[0]] || A.MUTED;
-    var stops = [0, 0.25, 0.5, 0.75, 1].map(function (t) {
+    h.push('<div class="leg-sub">Colour \u2014 layer number</div>');
+    var stops = [];
+    for (var i = 0; i < 24; i++) {
+      var L = dom.lo + (i / 23) * (dom.hi - dom.lo);
+      stops.push('<rect x="' + (i * 7) + '" y="0" width="7" height="14" fill="' + layerHue(L) + '"/>');
+    }
+    h.push('<div class="legrow"><svg width="168" height="14">' + stops.join("") + "</svg></div>");
+    h.push('<div class="legrow"><span class="tx" style="font-size:11px">layer ' + dom.lo
+      + " \u2014\u2014\u2014\u2014 layer " + dom.hi
+      + (dom.hi - dom.lo + 1 < layerCount() ? " (the layers on screen)" : "") + "</span></div>");
+    if (blocks.length) {
+      h.push('<div class="leg-sub">Hatch \u2014 weight block</div>');
+      h.push('<div class="legrow"><span class="tx">' + blocks.map(function (b, bi) {
+        var hf = hatchFor(b);
+        return '<span class="blk"><svg width="16" height="16">' + hatchDefs() +
+          '<rect width="16" height="16" rx="3" fill="#c9d6dd"/>' +
+          (hf ? '<rect width="16" height="16" rx="3" fill="' + hf + '"/>' : "") +
+          "</svg>" + esc(b) + (hf ? "" : " (no hatch left)") + "</span>";
+      }).join("") + "</span></div>");
+    }
+    h.push('<div class="leg-sub">Fill depth \u2014 how full the macro is</div>');
+    var base = layerHue(0) || A.MUTED;
+    var ramp = [0, 0.25, 0.5, 0.75, 1].map(function (t) {
       return '<rect x="' + (t * 128) + '" y="0" width="32" height="14" fill="' + A.ramp(base, t) + '" stroke="#dde5e9"/>';
     }).join("");
-    h.push('<div class="legrow"><svg width="160" height="14">' + stops + "</svg></div>");
-    h.push('<div class="legrow"><span class="tx" style="font-size:11px">0% ———————— 100% of stored columns</span></div>');
-
-    h.push('<div class="leg-sub">Outline — pool membership</div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16"><rect x="1" y="1" width="24" height="14" rx="3" fill="none" stroke="#1c2a33" stroke-width="1.4"/></svg></span><span class="tx">analog macro chiplet</span></div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16"><rect x="1" y="1" width="24" height="14" rx="3" fill="none" stroke="#1c2a33" stroke-width="1.4" stroke-dasharray="5 3"/></svg></span><span class="tx">shared digital chiplet (D13)</span></div>');
-
-    h.push('<div class="leg-sub">Hatch — drawn, never inferred</div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16">' + svgDefs() + '<rect width="26" height="16" rx="3" fill="url(#p-res)" stroke="#c2ced5"/></svg></span><span class="tx">reserved slot, no tiles</span></div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16">' + svgDefs() + '<rect width="26" height="16" rx="3" fill="url(#p-unk)" stroke="#8497a2"/></svg></span><span class="tx">unknown — the file omits it</span></div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16">' + svgDefs() + '<rect width="26" height="16" rx="3" fill="url(#p-over)" stroke="#8497a2"/></svg></span><span class="tx">past the validated palette</span></div>');
-
-    h.push('<div class="leg-sub">Links — weight is bytes, dash is role</div>');
+    h.push('<div class="legrow"><svg width="160" height="14">' + ramp + "</svg></div>");
+    h.push('<div class="legrow"><span class="tx" style="font-size:11px">0% \u2014\u2014\u2014\u2014 100% of columns held</span></div>');
+    h.push('<div class="leg-sub">Outline \u2014 chiplet kind</div>');
+    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16"><rect x="1" y="1" width="24" height="14" rx="3" fill="none" stroke="#1c2a33" stroke-width="1.4"/></svg></span><span class="tx">analog weight chiplet</span></div>');
+    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16"><rect x="1" y="1" width="24" height="14" rx="3" fill="none" stroke="#1c2a33" stroke-width="1.4" stroke-dasharray="5 3"/></svg></span><span class="tx">shared digital chiplet</span></div>');
+    h.push('<div class="leg-sub">Hatch \u2014 empty, not unknown</div>');
+    h.push('<div class="legrow"><span class="sw"><svg width="26" height="16">' + svgDefs() + '<rect width="26" height="16" rx="3" fill="url(#p-res)" stroke="#c2ced5"/></svg></span><span class="tx">slot holds no tiles</span></div>');
     var roles = {};
     S.doc.links.forEach(function (l) { roles[l.role] = (roles[l.role] || 0) + 1; });
-    ["tp", "ep", "pp", "pd", "act", "svc"].forEach(function (r) {
-      var n = roles[r] || 0;
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="10"><line x1="1" y1="5" x2="25" y2="5" stroke="' +
-        (n ? "#4a5c68" : "#c8d4da") + '" stroke-width="2.4" stroke-dasharray="' + roleDash(r) + '"/></svg></span>' +
-        '<span class="tx"' + (n ? "" : ' style="color:#aebac2"') + "><b>" + r + "</b> " + (n ? n + " drawn" : "not present") + "</span></div>");
-    });
-
-    var duty = A.dutyExtreme(S.doc);
-    h.push('<div class="leg-sub">Duty cycle — its own channel, never a hue</div>');
-    if (!duty) {
-      h.push('<div class="legrow"><span class="tx" style="font-size:11px">This document declares no duty cycle. ' +
-        'P4 owns it; an absent measurement draws as the unknown hatch, never as zero.</span></div>');
-    } else {
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="10"><rect x="0" y="2" width="26" height="5" rx="1" fill="#fff" stroke="#d5dfe4" stroke-width="0.5"/><rect x="0" y="2" width="9" height="5" rx="1" fill="' +
-        A.DUTY_INK + '"/></svg></span><span class="tx">bar on the top edge of the macro — absolute 0–1 scale</span></div>');
-      h.push('<div class="legrow"><span class="tx" style="font-size:11px">Busiest macro in this file: <b>' +
-        esc(A.pct(duty.value)) + '</b> (<span class="mono">' + esc(duty.id) +
-        '</span>). Every bar is short because the analog macros idle for most of the timeline — ' +
-        'that is the finding, not a rendering fault. The scale stays absolute so the number on the ' +
-        'card and the bar beside it are one reading.</span></div>');
+    var drawn = ["tp", "ep", "pp", "pd", "act", "svc"].filter(function (r) { return roles[r]; });
+    if (drawn.length) {
+      h.push('<div class="leg-sub">Wires \u2014 thickness is bytes</div>');
+      drawn.forEach(function (r) {
+        h.push('<div class="legrow"><span class="sw"><svg width="26" height="10"><line x1="1" y1="5" x2="25" y2="5" stroke="#4a5c68" stroke-width="2.4" stroke-dasharray="' +
+          roleDash(r) + '"/></svg></span><span class="tx"><b>' + r + "</b> " + roles[r] + "</span></div>");
+      });
     }
-    // P7.6 - the folding views carry two channels the other views do not, and
-    // one they deliberately do NOT use.
-    if (S.view === "fold" || S.view === "frontier" || (S.view === "macro" && S.lanes)) {
-      h.push('<div class="leg-sub">Time lanes — one bank per lane, x is pass order</div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14"><rect x="0" y="2" width="11" height="10" rx="2" fill="' +
-        (S.hue.hue[S.hue.order[0]] || A.MUTED) + '"/><rect x="13" y="2" width="11" height="10" rx="2" fill="' +
-        (S.hue.hue[S.hue.order[0]] || A.MUTED) + '" fill-opacity="0.42" stroke="' +
-        (S.hue.hue[S.hue.order[0]] || A.MUTED) + '" stroke-dasharray="2 2"/></svg></span>' +
-        '<span class="tx">solid = the card\'s own tensor &middot; dotted = a <b>co-tenant</b> sharing the bank</span></div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14">' + svgDefs() +
-        '<rect x="0" y="2" width="26" height="10" rx="2" fill="url(#p-res)" stroke="#e0e7ea"/></svg></span>' +
-        '<span class="tx">the part of a bank no pass drives &mdash; <b>waste</b>, reported (D27)</span></div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14"><path d="M4 3L11 8L4 13" fill="none" stroke="' +
-        ACC_INK + '" stroke-width="2"/><path d="M10 3L17 8L10 13" fill="none" stroke="' + ACC_INK +
-        '" stroke-width="2"/></svg></span><span class="tx">the <b>accumulator</b>, drawn where the K partials meet</span></div>');
-    }
-    if (S.view === "frontier") {
-      h.push('<div class="leg-sub">Frontier — no hue at all</div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14"><rect x="8" y="2" width="10" height="10" fill="#1c2a33"/></svg></span><span class="tx">a point with a placement document to open</span></div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14"><circle cx="13" cy="7" r="5" fill="#ffffff" stroke="#8497a2" stroke-width="1.4"/></svg></span><span class="tx">dominated: something costs no more and runs no slower</span></div>');
-      h.push('<div class="legrow"><span class="sw"><svg width="26" height="14"><circle cx="13" cy="7" r="5" fill="#1c2a33"/><circle cx="13" cy="7" r="9" fill="none" stroke="#1c2a33"/></svg></span><span class="tx">the knee</span></div>');
-      h.push('<div class="legrow"><span class="tx" style="font-size:11px">A design point has no parallelism group, so this view uses no hue. Ink lightness carries on/off the front and shape carries whether an artifact exists &mdash; the encoding law holds by using one channel less, not one more.</span></div>');
-    }
-    h.push('<div class="leg-sub">Column map — brackets (D11)</div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="12"><path d="M2 9V3H24V9" fill="none" stroke="#1c2a33" stroke-width="1.5"/></svg></span><span class="tx">tiles of ONE weight matrix: bit slices</span></div>');
-    h.push('<div class="legrow"><span class="sw"><svg width="26" height="12"><path d="M2 9V3H24V9" fill="none" stroke="#8497a2" stroke-width="1"/></svg></span><span class="tx">column sets, or a piece that chains to other macros</span></div>');
-    if (A.filterActive(S.filter)) {
-      h.push('<div class="leg-sub">Filter</div>');
-      h.push('<div class="legrow"><span class="tx" style="font-size:11px">Objects the filter does not select are drawn dimmed, never removed: position is containment, so hiding one would move the rest. No figure on this page changes when a filter does.</span></div>');
-    }
-    h.push('<div class="leg-sub">◇ fixture-invented value</div>');
-    var paths = ((S.doc.provenance || {}).invented_fields || []);
-    h.push('<div class="legrow"><span class="tx mono" style="font-size:10.5px">' + esc(paths.join("  ")) + "</span></div>");
     $("h-legend").innerHTML = h.join("");
   }
-
 
   // ===================================================================
   // P7.6 - the folding card, the macro time-lane view, the frontier explorer.
@@ -3324,7 +3415,7 @@ var ATLAS = (function () {
   // frontier draws no hue at all, because a design point has no group.
   // ===================================================================
   var LANE_H = 21, LANE_GUT = 74, SLOT_MIN = 96;
-  var ACC_INK = "#3d4f5c";     // the accumulator glyph: the neutral structural ink
+  var ACC_INK = "#3d4f5c";   // the accumulator glyph: the neutral structural ink
 
   function foldCards() { return ((S.doc && S.doc.folding && S.doc.folding.cards) || []); }
   function foldCardById(id) {
@@ -3494,7 +3585,7 @@ var ATLAS = (function () {
     });
     var H = bottom + 38;
     s.push('<text class="ui" x="' + PAD + '" y="' + (H - 20) + '" font-size="9.5" fill="#8497a2">' +
-      esc("one lane = one mux bank · x = ADC pass order inside ONE decode step (D25)") + "</text>");
+      esc("one lane = one mux bank · x = ADC pass order inside ONE decode step") + "</text>");
     s.push('<text class="ui" x="' + PAD + '" y="' + (H - 8) + '" font-size="9.5" fill="#8497a2">' +
       esc("dotted outline = a co-tenant tensor sharing the bank · hatch = the part of a bank no pass drives (waste, D27)") + "</text>");
     return '<div class="overflow"><svg viewBox="0 0 ' + W + " " + H + '" style="width:' + W +
@@ -3718,14 +3809,199 @@ var ATLAS = (function () {
       "<table><tr><th>rule</th><th>what the renderer promises</th><th>verdict</th><th>evidence</th></tr>" + vrows + "</table>" +
       '<p class="hintline">The encoding law, asserted on this document: one fact per channel, a filter that moves no figure, a stated draw budget, brackets that claim only what D11 says, and one lane per system.</p>' +
       stSection("Folding extension (fws_fold/1 + fws_pass/1) — refusals", S.selftest.ext, ["fires", "MISSED"]) +
-      (S.selftest.ext ? '<p class="hintline">Rules F1&ndash;F13 and T1&ndash;T9. The DOA register is enforced here: a variant that names a dead fold, or an artifact that drops one of the register\'s entries, is refused (D26). T9 is a WARNING, and it fires on every bank a schedule leaves idle (D27).</p>' : "") +
+      (S.selftest.ext ? '<p class="hintline">Rules F1&ndash;F13 and T1&ndash;T9. The DOA register is enforced here: a variant that names a dead fold, or an artifact that drops one of the register\'s entries, is refused. T9 is a WARNING, and it fires on every bank a schedule leaves idle.</p>' : "") +
       stSection("Frontier document (fws_frontier/1) — refusals", S.selftest.front, ["fires", "MISSED"]) +
       stSection("Frontier view rules", S.selftest.frontViews, ["holds", "BROKEN"]) +
-      (S.selftest.front ? '<p class="hintline">Rules X1&ndash;X14. A safety margin under any name is refused (D28); a point with no per-device utilization or no waste figure is refused (D28, D27); and the declared Pareto flags are checked against the enumerated points, which is the one place this page computes anything.</p>' : "") +
+      (S.selftest.front ? '<p class="hintline">Rules X1&ndash;X14. A safety margin under any name is refused; a point with no per-device utilization or no waste figure is refused; and the declared Pareto flags are checked against the enumerated points, which is the one place this page computes anything.</p>' : "") +
       "</div>";
   }
 
   // ---------------------------------------------------------------- render ---
+  // The drilldown's root view IS the pipeline map. Analog chiplets form the
+  // bottom band, one segment per pipeline stage in pipeline order; inside a
+  // segment the weight space is split by LAYER (hue) and by BLOCK (hatch), so
+  // a reader can see which layer sits where instead of one undifferentiated
+  // blob. Shared digital chiplets sit above, wired Manhattan-style to the
+  // analog chiplets they serve. Hover for numbers; click a chiplet to open it.
+  function chipComposition(chip) {
+    if (!S.comp) S.comp = {};
+    if (S.comp[chip.id]) return S.comp[chip.id];
+    var byLayer = {}, order = [], totalCols = 0, totalCells = 0, held = 0;
+    (chip.macros || []).forEach(function (mid) {
+      var m = S.ix.macro[mid];
+      if (!m) return;
+      var tiles = (m.tiles || []).map(function (tid) { return S.ix.tile[tid]; }).filter(Boolean);
+      if (tiles.length) held++;
+      tiles.forEach(function (t) {
+        var L = t.owner && typeof t.owner.layer === "number" ? t.owner.layer : -1;
+        var b = (t.owner && t.owner.block) || "?";
+        var cols = (t.columns && t.columns.count) || 0;
+        var cells = cols * ((t.shape && t.shape.K) || 0);
+        if (!byLayer[L]) { byLayer[L] = { layer: L, cols: 0, cells: 0, tiles: 0, blocks: {}, border: [] }; order.push(L); }
+        var e = byLayer[L];
+        e.cols += cols; e.cells += cells; e.tiles++;
+        if (!e.blocks[b]) { e.blocks[b] = { block: b, cols: 0, tiles: 0 }; e.border.push(b); }
+        e.blocks[b].cols += cols; e.blocks[b].tiles++;
+        totalCols += cols; totalCells += cells;
+      });
+    });
+    order.sort(function (a, b) { return a - b; });
+    var out = { layers: order.map(function (L) { return byLayer[L]; }), totalCols: totalCols, totalCells: totalCells, held: held };
+    S.comp[chip.id] = out;
+    return out;
+  }
+  function drawPipelinePackage() {
+    if (RS.solo || !RS.report || !RS.atlas || S.doc !== RS.atlas) return null;
+    var pipe = RS.report.evaluation && RS.report.evaluation.pipeline;
+    var stages = (pipe && pipe.stages) || [];
+    if (!stages.length) return null;
+    var d = S.doc;
+    var chipsById = {}; (d.chips || []).forEach(function (c) { chipsById[c.id] = c; });
+    var analog = (d.chips || []).filter(function (c) { return c.pool === "analog"; });
+    var digital = (d.chips || []).filter(function (c) { return c.pool !== "analog"; });
+    function chipByIndex(i) {
+      var hit = null;
+      analog.forEach(function (c) { var mm = c.id.match(/(\d+)$/); if (mm && parseInt(mm[1], 10) === i) hit = c; });
+      return hit || analog[i] || null;
+    }
+    function tip(html) { return encodeURIComponent(html); }
+    function slotsOf(c) {
+      if (!c) return 1;
+      return (c.capacity && (c.capacity.macro_slots || c.capacity.slots)) || (c.macros ? c.macros.length : 1);
+    }
+    var W = 1180, rowA_y = 268, rowA_h = 108, rowD_y = 58, rowD_h = 46, L = 34, R = 34, GAP = 9;
+    var stageChips = stages.map(function (st) {
+      return (st.chips || []).map(chipByIndex).filter(Boolean);
+    });
+    // Width IS the weight columns the stage holds. A stage that holds more of
+    // the model is wider; a machine whose stages are even comes out even, and
+    // that evenness is then a finding rather than a drawing convention.
+    var widths = stageChips.map(function (cs) {
+      return cs.reduce(function (a, c) { return a + (chipComposition(c).totalCols || 0); }, 0) || 1;
+    });
+    var totalW = widths.reduce(function (a, b) { return a + b; }, 0);
+    var usable = W - L - R - GAP * (stages.length - 1);
+    var H = rowA_y + rowA_h + 58;
+    var p = [hatchDefs()];
+    p.push('<defs><marker id="pl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#3d4f5c"/></marker>' + svgDefs().replace("<defs>", "").replace("</defs>", "") + "</defs>");
+    p.push('<text x="' + L + '" y="' + (rowD_y - 16) + '" font-size="11" fill="#5f7280" letter-spacing=".08em">SHARED DIGITAL CHIPLETS</text>');
+    p.push('<text x="' + L + '" y="' + (rowA_y - 12) + '" font-size="11" fill="#5f7280" letter-spacing=".08em">ANALOG WEIGHT CHIPLETS — colour is layer, hatch is block, width is weight columns · pipeline order →</text>');
+    var x = L, seg = [];
+    stages.forEach(function (st, i) {
+      var w = usable * widths[i] / totalW;
+      var chips = stageChips[i];
+      var chip = chips[0];
+      // one composition for the whole stage (stages are usually one chiplet)
+      var comp = { layers: [], totalCols: 0, totalCells: 0, held: 0 }, slots = 0;
+      chips.forEach(function (c) {
+        var cc = chipComposition(c);
+        slots += slotsOf(c);
+        comp.totalCols += cc.totalCols; comp.totalCells += cc.totalCells; comp.held += cc.held;
+        cc.layers.forEach(function (le) {
+          var hit = null;
+          comp.layers.forEach(function (e) { if (e.layer === le.layer) hit = e; });
+          if (!hit) { hit = { layer: le.layer, cols: 0, cells: 0, tiles: 0, blocks: {}, border: [] }; comp.layers.push(hit); }
+          hit.cols += le.cols; hit.cells += le.cells; hit.tiles += le.tiles;
+          le.border.forEach(function (b) {
+            if (!hit.blocks[b]) { hit.blocks[b] = { block: b, cols: 0, tiles: 0 }; hit.border.push(b); }
+            hit.blocks[b].cols += le.blocks[b].cols; hit.blocks[b].tiles += le.blocks[b].tiles;
+          });
+        });
+      });
+      comp.layers.sort(function (a, b) { return a.layer - b.layer; });
+      var stTip = '<div class="t">Stage ' + st.stage + " · layers " + st.layers[0] + "–" + st.layers[st.layers.length - 1] + "</div>"
+        + chips.length + " analog chiplet" + (chips.length > 1 ? "s" : "") + " · " + slots.toLocaleString("en-US") + " macro slots"
+        + "<br>" + comp.held.toLocaleString("en-US") + " slots hold weights (" + (slots ? (comp.held / slots * 100).toFixed(1) : "0") + "%)"
+        + "<br>" + rfmt(comp.totalCells) + " weight cells"
+        + '<div class="b">click to open this chiplet</div>';
+      p.push('<g><rect data-chip="' + esc(chip ? chip.id : "") + '" data-rstip="' + tip(stTip) + '" x="' + x + '" y="' + rowA_y + '" width="' + w + '" height="' + rowA_h + '" rx="4" fill="#f2f6f8" stroke="#9fb3bd" stroke-width="1" cursor="pointer"/>');
+      // layer columns inside the stage; each split into block sub-bands
+      var innerX = x + 3, innerW = w - 6, innerY = rowA_y + 20, innerH = rowA_h - 40;
+      var denom = comp.totalCols || 1;
+      comp.layers.forEach(function (le) {
+        var lw = innerW * le.cols / denom;
+        if (lw <= 0) return;
+        var hue = layerHue(le.layer) || "#8497a2";
+        var by = innerY, bl = le.border.slice().sort();
+        bl.forEach(function (b) {
+          var be = le.blocks[b];
+          var bh = innerH * be.cols / (le.cols || 1);
+          if (bh <= 0) return;
+          var bt = '<div class="t">layer ' + le.layer + " · " + esc(b) + "</div>"
+            + be.cols.toLocaleString("en-US") + " weight columns · " + be.tiles.toLocaleString("en-US") + " tile(s)"
+            + "<br>stage " + st.stage + (chip ? " · " + esc(chip.id) : "")
+            + '<div class="b">click to open this chiplet</div>';
+          p.push('<rect data-chip="' + esc(chip ? chip.id : "") + '" data-rstip="' + tip(bt) + '" x="' + innerX + '" y="' + by + '" width="' + lw + '" height="' + bh + '" fill="' + hue + '" cursor="pointer"/>');
+          var hf = hatchFor(b);
+          if (hf) p.push('<rect x="' + innerX + '" y="' + by + '" width="' + lw + '" height="' + bh + '" fill="' + hf + '" pointer-events="none"/>');
+          by += bh;
+        });
+        if (lw > 15) {
+          p.push('<text x="' + (innerX + lw / 2) + '" y="' + (innerY + innerH + 12) + '" text-anchor="middle" font-size="9" fill="#5f7280" pointer-events="none">' + le.layer + "</text>");
+        }
+        innerX += lw;
+      });
+      // empty slots, drawn as the reserved hatch so waste is visible
+      if (slots > comp.held) {
+        var frac = (slots - comp.held) / slots;
+        p.push('<rect x="' + (x + 3) + '" y="' + (rowA_y + rowA_h - 15) + '" width="' + ((w - 6) * frac) + '" height="5" fill="url(#p-res)" stroke="#c2ced5" stroke-width=".5" pointer-events="none"/>');
+      }
+      p.push('<text x="' + (x + w / 2) + '" y="' + (rowA_y + 14) + '" text-anchor="middle" font-size="10.5" fill="#1c2a33" font-weight="600" pointer-events="none">S' + st.stage
+        + " · L" + st.layers[0] + "–" + st.layers[st.layers.length - 1] + "</text>");
+      p.push("</g>");
+      seg.push({ x: x, w: w, cx: x + w / 2, chip: chip, chips: chips });
+      x += w + GAP;
+    });
+    var links = (d.links || []);
+    links.filter(function (l) { return l.role === "act"; }).forEach(function (l, i) {
+      if (i + 1 >= seg.length) return;
+      var x1 = seg[i].x + seg[i].w, x2 = seg[i + 1].x, ym = rowA_y + rowA_h / 2;
+      var t = '<div class="t">' + esc(clean(l.label || l.id)) + "</div>" + rbytes(l.bytes) + " per " + esc(l.per || "beat");
+      p.push('<path d="M' + (x1 - 2) + " " + ym + " L" + (x2 + 2) + " " + ym + '" stroke="#3d4f5c" stroke-width="2" fill="none" marker-end="url(#pl-arr)"/>');
+      p.push('<path data-link="' + esc(l.id) + '" data-rstip="' + tip(t) + '" d="M' + (x1 - 7) + " " + ym + " L" + (x2 + 7) + " " + ym + '" stroke="transparent" stroke-width="16" fill="none" cursor="pointer"/>');
+    });
+    var svc = links.filter(function (l) { return l.role === "svc"; });
+    var served = {}; svc.forEach(function (l) { (served[l.from] = served[l.from] || []).push(l); });
+    var laneY = rowD_y + rowD_h + 24, laneStep = 11;
+    digital.forEach(function (chip, di) {
+      var did = chip.id;
+      var myLinks = served[did] || [];
+      var xs = [];
+      myLinks.forEach(function (l) { seg.forEach(function (sg) { if (sg.chip && sg.chip.id === l.to) xs.push(sg.cx); }); });
+      var cx0, cw;
+      if (xs.length) { var mn = Math.min.apply(null, xs), mx = Math.max.apply(null, xs); cx0 = (mn + mx) / 2; cw = Math.max(58, mx - mn > 120 ? 104 : 78); }
+      else { cw = 84; cx0 = L + 42 + di * ((W - L - R - 84) / Math.max(1, digital.length - 1) || 0); if (digital.length === 1) cx0 = W / 2; }
+      var dt = '<div class="t">' + esc(clean(chip.label || did)) + "</div>attention, softmax and scan for "
+        + (myLinks.length ? myLinks.length + " analog chiplet(s)" : "its stage")
+        + '<div class="b">click to open this chiplet</div>';
+      p.push('<rect data-chip="' + esc(did) + '" data-rstip="' + tip(dt) + '" x="' + (cx0 - cw / 2) + '" y="' + rowD_y + '" width="' + cw + '" height="' + rowD_h + '" rx="4" fill="#eee9db" stroke="#8a5a10" stroke-width="1.2" stroke-dasharray="5 3" cursor="pointer"/>');
+      var mnum = did.match(/(\d+)$/);
+      p.push('<text x="' + cx0 + '" y="' + (rowD_y + rowD_h / 2 + 4) + '" text-anchor="middle" font-size="10.5" fill="#1c2a33" pointer-events="none">DIG ' + (mnum ? parseInt(mnum[1], 10) : di) + "</text>");
+      if (myLinks.length) {
+        var busY = laneY + di * laneStep;
+        var total = myLinks.reduce(function (a, l) { return a + (l.bytes || 0); }, 0);
+        var tw = Math.max(2, Math.min(9, Math.log2(1 + total / 1024)));
+        var tt = '<div class="t">service trunk · ' + esc(clean(chip.label || did)) + "</div>" + rbytes(total) + " per beat across " + myLinks.length + " branch(es)";
+        p.push('<path data-rstip="' + tip(tt) + '" d="M' + cx0 + " " + (rowD_y + rowD_h) + " L" + cx0 + " " + busY + '" stroke="#4a5f6d" stroke-width="' + tw + '" fill="none"/>');
+        var dropXs = myLinks.map(function (l) { var hx = null; seg.forEach(function (sg) { if (sg.chip && sg.chip.id === l.to) hx = sg.cx; }); return hx; });
+        var valid = dropXs.filter(function (v) { return v != null; });
+        if (valid.length) {
+          var mn2 = Math.min.apply(null, valid.concat([cx0])), mx2 = Math.max.apply(null, valid.concat([cx0]));
+          p.push('<path d="M' + mn2 + " " + busY + " L" + mx2 + " " + busY + '" stroke="#4a5f6d" stroke-width="' + tw + '" fill="none"/>');
+          p.push('<circle cx="' + cx0 + '" cy="' + busY + '" r="2.6" fill="#4a5f6d"/>');
+          myLinks.forEach(function (l, li) {
+            var hx = dropXs[li]; if (hx == null) return;
+            var bw = Math.max(1.4, Math.min(7, Math.log2(1 + (l.bytes || 0) / 1024)));
+            var lt = '<div class="t">' + esc(clean(l.label || l.id)) + "</div>" + rbytes(l.bytes) + " per " + esc(l.per || "beat");
+            p.push('<path d="M' + hx + " " + busY + " L" + hx + " " + rowA_y + '" stroke="#4a5f6d" stroke-width="' + bw + '" fill="none"/>');
+            p.push('<path data-link="' + esc(l.id) + '" data-rstip="' + tip(lt) + '" d="M' + hx + " " + busY + " L" + hx + " " + rowA_y + '" stroke="transparent" stroke-width="16" fill="none" cursor="pointer"/>');
+          });
+        }
+      }
+    });
+    return '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" style="max-width:' + W + 'px">' + p.join("") + "</svg>";
+  }
+
   function render() {
     S.res = S.doc ? A.validate(S.doc) : { errors: [], warnings: [] };
     // The extension blocks have their own contracts and their own refusals; a
@@ -3741,6 +4017,7 @@ var ATLAS = (function () {
     if (!S.front && S.view === "frontier") S.view = "package";
     if (!(S.doc && S.doc.folding) && S.view === "fold") S.view = "package";
     S.hue = S.doc ? A.hueMap(S.doc) : { order: [], hue: {} };
+    S.hueDomain = null; // the ramp is per-view; recompute it each render
     S.ix = S.doc ? A.makeIndex(S.doc) : { chip: {}, macro: {}, tile: {}, link: {}, sys: {}, owner: {} };
     if (S.doc && !S.chip) {
       var first = S.doc.chips && S.doc.chips[0];
@@ -3756,7 +4033,7 @@ var ATLAS = (function () {
     else if (S.res.errors.length) { canvas.innerHTML = refusalPanel(); }
     else if (S.view === "frontier") { canvas.innerHTML = drawFrontier(); }
     else if (S.view === "fold") { canvas.innerHTML = drawFold(); }
-    else if (S.view === "package") { canvas.innerHTML = drawPackage(); }
+    else if (S.view === "package") { canvas.innerHTML = drawPipelinePackage() || drawPackage(); }
     else if (S.view === "macro") { canvas.innerHTML = S.lanes ? drawMacroLanes() : drawMacro(); }
     else { canvas.innerHTML = drawChip(); }
 
@@ -3790,23 +4067,28 @@ var ATLAS = (function () {
     bind("[data-tile]", "data-tile", function (id) { return tileCard(S.ix.tile[id]); }, null);
     bind("[data-point]", "data-point", function (id) { return pointCard(id); }, null);
     bind("[data-fpass]", "data-fpass", function (id) { return passCard(id); }, null);
+    Array.prototype.forEach.call(canvas.querySelectorAll("[data-rstip]"), function (n) {
+      rsHover(n, function () { return decodeURIComponent(n.getAttribute("data-rstip")); });
+    });
     canvas.addEventListener("click", function () { S.pinned = false; showCard(defaultCard()); });
   }
 
   // ==========================================================================
-  // RESULTS LAYER - this file is the one authoritative results page.
-  // The reader's order: headline -> frontier (click a point: it pops, its
-  // accounting pins under the plot) -> pipeline map -> the drilldown ->
-  // detailed tables -> every disclosure, verbatim, dead last.
-  // It reads the real artifacts of this directory and nothing else:
-  //   <model>_report.json                       the priced timeline's report
-  //   <model>.json                              the placement atlas (drilldown)
-  //   ../dse/<model>_frontier/dse_report.json   the sweep
-  // A missing field renders as an absence, never a guess.
+  // RESULTS LAYER. This page is the results page: headline, what the model is,
+  // what one chiplet of each kind is, the area/throughput frontier, then the
+  // pipeline map you can drill into, then the tables, then the disclosures.
+  // It reads the artifacts of this directory and nothing else, and a missing
+  // field renders as an absence rather than a guess.
   var RS = {
+    // The four workloads, simplest first. A ViT is an encoder with no KV and
+    // no decode step; a pure-Mamba stack is decode with no attention at all.
+    // Those two are the shapes to read a suspicious mapping against before
+    // trusting a hybrid, where a number could come from either mixer.
     MODELS: [
-      { id: "granite_4_0_h_tiny", label: "Granite-4.0-H-Tiny", hex: "#176778" },
-      { id: "qwen3_5_4b", label: "Qwen3.5-4B", hex: "#8a5a10" }
+      { id: "vit_huge_story_64", label: "ViT-Huge (encoder)", hex: "#4a7a2f" },
+      { id: "falcon_mamba_7b", label: "Falcon-Mamba-7B (pure SSM)", hex: "#7a3f8a" },
+      { id: "granite_4_0_h_tiny", label: "Granite-4.0-H-Tiny (hybrid)", hex: "#176778" },
+      { id: "qwen3_5_4b", label: "Qwen3.5-4B (hybrid)", hex: "#8a5a10" }
     ],
     id: null, report: null, frontier: null, atlas: null, sel: null, solo: false
   };
@@ -3821,25 +4103,47 @@ var ATLAS = (function () {
       .catch(function () { return null; });
   }
   function rfmt(v, digits) {
-    if (v == null || isNaN(v)) return "\u2014";
+    if (v == null || isNaN(v)) return "—";
     if (v === 0) return "0";
+    if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(2) + "G";
     if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(2) + "M";
     if (Math.abs(v) >= 1e4) return Math.round(v).toLocaleString("en-US");
     if (Math.abs(v) >= 1) return (+v).toFixed(digits == null ? 2 : digits).replace(/\.00$/, "");
     if (Math.abs(v) >= 1e-3) return (v * 1e3).toFixed(3) + "m";
-    if (Math.abs(v) >= 1e-6) return (v * 1e6).toFixed(2) + "\u00b5";
+    if (Math.abs(v) >= 1e-6) return (v * 1e6).toFixed(2) + "µ";
     return v.toExponential(2);
   }
+  // Artifact labels carry this project's own decision codenames — "",
+  // "P4", "ADJ-10". They are meaningful in the register and meaningless on a
+  // results page, so they are stripped from anything DISPLAYED as a label.
+  // Disclosures are never passed through here: those are quoted verbatim.
+  function clean(text) {
+    return String(text == null ? "" : text)
+      .replace(/\s*\((?:D|P|ADJ|F)[-\s]?\d+(?:[-.\/]\w+)*\)/g, "")
+      .replace(/\s*[\u2014-]\s*(?:D|P|ADJ)[-\s]?\d+(?:[-.\/]\w+)*\s*$/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+  function rint(v) { return v == null || isNaN(v) ? "—" : Math.round(v).toLocaleString("en-US"); }
   function rbytes(b) {
-    if (b == null) return "\u2014";
+    if (b == null) return "—";
     if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GiB";
     if (b >= 1048576) return (b / 1048576).toFixed(2) + " MiB";
     if (b >= 1024) return (b / 1024).toFixed(1) + " KiB";
     return Math.round(b) + " B";
   }
   function rsSecs(v) {
-    if (v == null || isNaN(v)) return "\u2014";
-    return v >= 0.01 ? rfmt(v * 1e3, 2) + " ms" : rfmt(v * 1e6, 2) + " \u00b5s";
+    if (v == null || isNaN(v)) return "—";
+    return v >= 0.01 ? rfmt(v * 1e3, 2) + " ms" : rfmt(v * 1e6, 2) + " µs";
+  }
+  function rpct(v, dp) { return v == null || isNaN(v) ? "—" : (v * 100).toFixed(dp == null ? 1 : dp) + "%"; }
+  // One unit for a whole energy column: picojoules span nine orders here and a
+  // mixed column cannot be compared down its own length.
+  function mJ(pj) {
+    if (pj == null || isNaN(pj)) return "—";
+    if (pj === 0) return "0";
+    var v = pj / 1e9;
+    return v >= 0.001 ? v.toFixed(3) + " mJ" : (pj / 1e6).toFixed(3) + " nJ";
   }
   function entriesOf(x) {
     if (!x) return [];
@@ -3869,7 +4173,7 @@ var ATLAS = (function () {
     return out;
   }
 
-  // ---- hover tooltip for the frontier and pipeline SVGs --------------------
+  // ---- hover tooltip -------------------------------------------------------
   function rsTip() { return $("rs-tip"); }
   function rsTipShow(html, ev) { var t = rsTip(); t.innerHTML = html; t.style.display = "block"; rsTipMove(ev); }
   function rsTipMove(ev) {
@@ -3884,42 +4188,42 @@ var ATLAS = (function () {
     node.addEventListener("mouseleave", rsTipHide);
   }
 
-  // ---- candidates ----------------------------------------------------------
+  // ---- design points -------------------------------------------------------
   function rsCand(id) {
     var hit = null;
     (((RS.frontier || {}).candidates) || []).forEach(function (c) { if (c.id === id) hit = c; });
     return hit;
   }
+  // The machine this page describes: the point the sweep shipped. Everything
+  // outside the design-space card reads from it.
+  function rsShipped() { return rsCand((RS.frontier || {}).selected_id); }
+  // The point the reader last clicked, which may be a different machine.
+  function rsPicked() { return rsCand(RS.sel) || rsShipped(); }
   function candXY(c) {
     var tps = (c.metrics && typeof c.metrics.tokens_per_s === "number") ? c.metrics.tokens_per_s : null;
+    if (tps == null && c.metrics && typeof c.metrics.requests_per_s === "number") tps = c.metrics.requests_per_s;
     if (tps == null) {
       var e = entryMap(entriesOf(c.metrics))["sys.fws.tokens_per_s"] || findEntry(entriesOf(c.metrics), "tokens_per_s");
       tps = e ? e.value : null;
     }
     var area = deepFindNumber(c.silicon || {}, /mm2/);
-    return { x: area.v, xkey: area.key, y: tps };
+    return { x: area.v, y: tps };
   }
   function candTip(c) {
     var xy = candXY(c);
     var knobs = Object.keys(c.knobs || {}).map(function (k) { return esc(k + " = " + c.knobs[k]); }).join("<br>");
-    var d = (c.pipeline && c.pipeline.resident_streams) != null ? c.pipeline.resident_streams
-      : (c.metrics && c.metrics.resident_streams != null ? c.metrics.resident_streams : null);
-    var extra = "";
-    if (!c.ok) extra = '<div class="b">REFUSED [' + esc(c.fail_stage || "?") + "]: " + esc((c.fail_message || "").slice(0, 220)) + "</div>";
-    return '<div class="t">' + esc(c.id) + (c.id === (RS.frontier || {}).selected_id ? " \u00b7 shipped" : "") + "</div>"
-      + (xy.y != null ? rfmt(xy.y) + " tok/s" : "\u2014") + " \u00b7 " + (xy.x != null ? rfmt(xy.x) + " mm\u00b2" : "\u2014")
-      + (d != null ? " \u00b7 D=" + d : "")
-      + '<div class="b">' + knobs + "</div>" + extra
-      + '<div class="b">click to pin this point\u2019s accounting below the plot</div>';
+    var extra = c.ok ? "" : '<div class="b">infeasible: ' + esc((c.fail_message || "").slice(0, 200)) + "</div>";
+    return '<div class="t">' + esc(c.id) + "</div>"
+      + (xy.y != null ? rint(xy.y) + " tok/s" : "—") + " · " + (xy.x != null ? rint(xy.x) + " mm²" : "—")
+      + '<div class="b">' + knobs + "</div>" + extra;
   }
 
-  // ---- model switcher and headline ----------------------------------------
+  // ---- model switcher, headline -------------------------------------------
   function rsRenderModels() {
     var host = $("h-models"); if (!host) return;
     if (RS.solo) { host.innerHTML = ""; return; }
     host.innerHTML = RS.MODELS.map(function (m) {
-      return '<button data-mid="' + esc(m.id) + '" aria-pressed="' + (m.id === RS.id) + '">' +
-        '<span style="color:' + (m.id === RS.id ? "#fff" : m.hex) + '">\u25cf</span> ' + esc(m.label) + "</button>";
+      return '<button data-mid="' + esc(m.id) + '" aria-pressed="' + (m.id === RS.id) + '">' + esc(m.label) + "</button>";
     }).join("");
     Array.prototype.forEach.call(host.querySelectorAll("[data-mid]"), function (n) {
       n.addEventListener("click", function () {
@@ -3933,30 +4237,209 @@ var ATLAS = (function () {
   }
   function rsRenderHeadline() {
     var host = $("h-headline"); if (!host) return;
-    if (RS.solo || !RS.report) { if (host) host.innerHTML = ""; return; }
+    if (RS.solo || !RS.report) { host.innerHTML = ""; return; }
     var ent = entriesOf(RS.report.evaluation && RS.report.evaluation.metrics);
     var em = entryMap(ent);
-    function pick(key) { return em[key] || findEntry(ent, key); }
-    function stat(e, label, unitFn) {
+    function pick(k) { return em[k] || findEntry(ent, k); }
+    function stat(e, label, fn) {
       if (!e || e.value == null) return "";
-      return '<div class="stat"><div class="v">' + (unitFn ? unitFn(e.value) : rfmt(e.value)) + '</div><div class="k">' + esc(label) + "</div></div>";
+      return '<div class="stat"><div class="v">' + (fn ? fn(e.value) : rint(e.value)) + '</div><div class="k">' + esc(label) + "</div></div>";
     }
     var pipe = RS.report.evaluation && RS.report.evaluation.pipeline;
-    var shipped = rsCand((RS.frontier || {}).selected_id);
-    var si = shipped ? deepFindNumber(shipped.silicon || {}, /mm2/) : { v: null };
+    var c = rsShipped();
+    var si = c ? deepFindNumber(c.silicon || {}, /mm2/) : { v: null };
+    var head = pick("sys.fws.tokens_per_s");
+    var headLabel = "decode tokens / s";
+    if (!head || head.value == null) {
+      head = pick("sys.fws.requests_per_s");
+      headLabel = "requests / s";
+    }
     host.innerHTML = '<div class="hl">'
-      + stat(pick("sys.fws.tokens_per_s"), "decode tokens / s (headline)")
-      + stat(pick("sys.fws.beat"), "pipeline beat", function (v) { return rfmt(v * 1e6, 2) + " \u00b5s"; })
+      + stat(head, headLabel)
+      + stat(pick("sys.fws.beat"), "pipeline beat", function (v) { return rfmt(v * 1e6, 2) + " µs"; })
       + (pipe && pipe.resident_streams != null
-        ? '<div class="stat"><div class="v">' + pipe.resident_streams + '</div><div class="k">resident streams (D)</div></div>' : "")
-      + stat(pick("sys.fws.per_stream_tokens_per_s"), "per-stream tokens / s")
-      + stat(pick("sys.fws.per_token_latency"), "per-token latency", rsSecs)
-      + (si.v != null
-        ? '<div class="stat"><div class="v">' + rfmt(si.v) + ' mm\u00b2</div><div class="k">total silicon (shipped point)</div></div>' : "")
+        ? '<div class="stat"><div class="v">' + pipe.resident_streams + '</div><div class="k">streams in flight</div></div>' : "")
+      + stat(pick("sys.fws.per_token_latency") || pick("sys.fws.request_latency"),
+              pick("sys.fws.per_token_latency") ? "per-token latency" : "latency", rsSecs)
+      + (si.v != null ? '<div class="stat"><div class="v">' + rint(si.v) + ' mm²</div><div class="k">total silicon</div></div>' : "")
       + "</div>";
   }
 
-  // ---- the frontier plot ---------------------------------------------------
+  // ---- what the model is ---------------------------------------------------
+  function rsRenderModelInfo() {
+    var host = $("h-modelinfo"); if (!host) return;
+    if (RS.solo || !RS.report) { host.innerHTML = ""; return; }
+    var mo = RS.report.model || {}, sv = RS.report.serving || {};
+    var am = null;
+    try { am = RS.atlas.systems[0].models[0]; } catch (e) { am = null; }
+    var rows = [];
+    function row(k, v) { if (v != null && v !== "" && v !== "—") rows.push("<tr><td>" + esc(k) + "</td><td>" + v + "</td></tr>"); }
+    row("layers", rint(mo.num_layers != null ? mo.num_layers : (am && am.layers)));
+    row("hidden dim", rint(mo.hidden_dim != null ? mo.hidden_dim : (am && am.hidden_dim)));
+    var hasFfn = (am && am.blocks || []).some(function (b) { return /^ffn|^moe/.test(b); });
+    if (hasFfn && am && am.intermediate_size) row("ffn dim", rint(am.intermediate_size));
+    // A stack whose layers are all recurrent mixers has no attention block at
+    // all. Saying "0 heads" invites the reader to look for the zero; saying
+    // "none" says what is true.
+    if (mo.num_heads) {
+      row("attention", mo.num_heads + " heads × " + (mo.head_dim || "?")
+        + (mo.kv_heads ? ", " + mo.kv_heads + " KV heads" : "")
+        + (am && am.attention && am.attention.type ? " (" + esc(am.attention.type) + ")" : ""));
+    } else {
+      row("attention", "none — every layer is a recurrent mixer");
+    }
+    if (am && am.vocab_size) row("vocab", rint(am.vocab_size));
+    if (sv.prefill_len != null || sv.decode_len != null) {
+      row("context", (sv.prefill_len != null ? rint(sv.prefill_len) + " prefilled elsewhere" : "")
+        + (sv.decode_len != null ? " + " + rint(sv.decode_len) + " decoded here" : ""));
+    }
+    if (am && am.blocks && am.blocks.length) {
+      row("weight blocks per layer", am.blocks.map(function (b) {
+        var hf = hatchFor(b);
+        return '<span class="blk"><svg width="13" height="13">' + hatchDefs() +
+          '<rect width="13" height="13" rx="2" fill="#c9d6dd"/>' +
+          (hf ? '<rect width="13" height="13" rx="2" fill="' + hf + '"/>' : "") +
+          "</svg>" + esc(b) + "</span>";
+      }).join(""));
+    }
+    if (!rows.length) { host.innerHTML = ""; return; }
+    host.innerHTML = '<h2 class="sect">The model</h2>'
+      + '<div class="panel2" style="max-width:52rem"><table class="rtable">' + rows.join("") + "</table></div>";
+  }
+
+  // ---- what ONE chiplet of each kind is ------------------------------------
+  // These are the two hardware cards the machine is built from. They are chosen
+  // once and replicated; the mapping then decides what each copy holds.
+  function rsRenderHardware() {
+    var host = $("h-hw"); if (!host) return;
+    var c = rsShipped();
+    if (RS.solo || !c) { host.innerHTML = ""; return; }
+    var si = c.silicon || {}, dd = c.derived_digital || {}, pl = c.placement || {};
+    var pk = c.packing || {}, mm = c.metrics || {};
+    var util = {};
+    (c.utilization || []).forEach(function (u) { util[u.device_class] = u; });
+    var cards = (RS.atlas && RS.atlas.cards) || {};
+    var analogCard = null, digitalCard = null;
+    Object.keys(cards).forEach(function (k) {
+      if (cards[k].kind === "analog_macro" && !analogCard) analogCard = cards[k];
+      if (cards[k].kind === "digital_engine" && !digitalCard) digitalCard = cards[k];
+    });
+    var nA = pl.analog_chips || 0, nD = pl.shared_digital_chiplets || 0;
+    var slotsPer = nA ? (si.analog_macro_slots || 0) / nA : null;
+    var cap = analogCard && analogCard.capacity;
+    var cellsPerMacro = cap ? cap.rows * cap.stored_cols : null;
+    var wbits = (analogCard && analogCard.weight_bits) || null;
+    // a per-macro digital pool sample: every macro carries one
+    var pool = null;
+    try { pool = RS.atlas.macros[0].digital_pool; } catch (e) { pool = null; }
+    var dcap = digitalCard && digitalCard.capacity;
+    var macs = (dd.fabric_num_arrays && dcap) ? dd.fabric_num_arrays * dcap.rows * dcap.cols_adc : null;
+
+    function card(title, count, rows) {
+      // Drop a group header that has no rows under it: an empty heading reads
+      // as a missing measurement rather than an absent question.
+      var kept = [], pending = null;
+      rows.forEach(function (row) {
+        if (!row) return;
+        if (row.indexOf('class="grp"') >= 0) { pending = row; return; }
+        if (pending) { kept.push(pending); pending = null; }
+        kept.push(row);
+      });
+      if (!kept.length) return "";
+      return '<div class="hwcard"><h3>' + title + "</h3>"
+        + '<div class="cnt">' + count + "</div><table>" + kept.join("") + "</table></div>";
+    }
+    function r(k, v) { return (v == null || v === "" || v === "—") ? "" : "<tr><td>" + esc(k) + "</td><td>" + v + "</td></tr>"; }
+    function grp(t) { return '<tr><td class="grp" colspan="2">' + esc(t) + "</td></tr>"; }
+
+    var kd = c.knobs_derived || {};
+    var dc = c.derived_chiplets || {};
+    // How many pipeline stages each shared chiplet carries. Above one, the
+    // engine had to be sized for the set rather than for a single stage.
+    var nStages = ((((RS.report || {}).evaluation || {}).pipeline || {}).stages || []).length
+      || (c.metrics || {}).resident_streams || 0;
+    var stagesPer = (nStages && pl.shared_digital_chiplets)
+      ? nStages / pl.shared_digital_chiplets : 1;
+    var aRows = [
+      grp("weight storage"),
+      r("macro slots", rint(slotsPer) + (kd.arrays_per_chip ? " (built to the weights)" : "")),
+      r("one macro", cap ? rint(cap.rows) + " rows × " + rint(cap.cols_adc) + " ADC cols × " + rint(cap.mux) + " mux" : null),
+      r("cells per macro", rint(cellsPerMacro)),
+      r("cells per chiplet", slotsPer && cellsPerMacro ? rfmt(slotsPer * cellsPerMacro) : null),
+      r("weight capacity", slotsPer && cellsPerMacro && wbits ? rbytes(slotsPer * cellsPerMacro * wbits / 8) + " @ " + wbits + "-bit" : null),
+      grp("what the mapping put here"),
+      r("slots holding weights", nA && pl.macros_holding_tiles != null
+        ? rint(pl.macros_holding_tiles / nA) + " (" + rpct((pl.macros_holding_tiles || 0) / (si.analog_macro_slots || 1)) + ")" : null),
+      r("empty slots", nA && pl.unowned_macro_slots != null ? rint(pl.unowned_macro_slots / nA) : null),
+      r("cell waste", pk.waste_pct != null ? pk.waste_pct.toFixed(1) + "%" : null),
+      r("duty cycle", util.analog_macro
+        ? rpct(util.analog_macro.mean_occupancy, 2) + " mean, " + rpct(util.analog_macro.max_occupancy, 2) + " peak" : null),
+      grp("digital pool on the macro"),
+      r("activation lanes per macro", pool && pool.act_lanes != null ? rint(pool.act_lanes) : null),
+      r("shift-add units per macro", pool && pool.shift_add_units != null ? rint(pool.shift_add_units) : null),
+      r("pool area per macro", si.macro_pool_area_mm2_per_macro != null ? si.macro_pool_area_mm2_per_macro.toFixed(5) + " mm²" : null),
+      r("pool duty cycle", util.macro_pool ? rpct(util.macro_pool.mean_occupancy, 3) + " mean, " + rpct(util.macro_pool.max_occupancy, 3) + " peak" : null),
+      grp("silicon"),
+      r("macro area", si.macro_footprint_mm2 != null ? si.macro_footprint_mm2.toFixed(3) + " mm² each" : null),
+      r("area per chiplet", (slotsPer && si.macro_footprint_mm2 != null)
+        ? rint(slotsPer * si.macro_footprint_mm2 + slotsPer * (si.macro_pool_area_mm2_per_macro || 0)) + " mm²" : null),
+      r("all analog silicon", si.analog_macro_silicon_mm2 != null ? rint(si.analog_macro_silicon_mm2 + (si.macro_pool_silicon_mm2 || 0)) + " mm²" : null)
+    ];
+    var dRows = [
+      grp("compute"),
+      r("systolic arrays", dd.fabric_num_arrays != null
+        ? rint(dd.fabric_num_arrays) + (dcap ? " × " + dcap.rows + "×" + dcap.cols_adc : "") : null),
+      r("MACs in the fabric", macs != null ? rint(macs) : null),
+      r("softmax lanes", dd.fabric_softmax_lanes != null ? rint(dd.fabric_softmax_lanes) : null),
+      r("scan / vector lanes", dd.vector_lanes != null ? rint(dd.vector_lanes) : null),
+      r("sizing", dd.sizing_target === "analog_stage_time"
+        ? "widened until it keeps up with the analog stage" : (dd.sizing_target || null)),
+      grp("what it does per beat"),
+      r("serves", (nA && nD)
+        ? (nA / nD).toFixed(1) + " analog chiplet(s), "
+          + (stagesPer > 1 ? stagesPer.toFixed(1) + " pipeline stages" : "one pipeline stage")
+        : null),
+      r("how many, and why", nD
+        ? rint(nD) + (stagesPer > 1
+          ? " — swept: each carries " + stagesPer.toFixed(0)
+            + " stages\u2019 digital work inside one beat, and the engine is sized for that"
+          : " — one per pipeline stage, each sized to keep up with it")
+        : null),
+      r("busiest chiplet", dc.built_duty_max != null
+        ? rpct(dc.built_duty_max) + " of the beat"
+        + (dc.built_duty_mean != null ? " (" + rpct(dc.built_duty_mean) + " mean)" : "")
+        : null),
+      r("headroom", (dc.chiplets_if_shared && dc.chiplets_built
+        && dc.chiplets_if_shared < dc.chiplets_built)
+        ? "this work would fit on " + rint(dc.chiplets_if_shared)
+          + " chiplets if one could serve several stages — not taken, because an engine is sized for one stage"
+        : null),
+      r("duty cycle", util.shared_digital
+        ? rpct(util.shared_digital.mean_occupancy) + " mean, " + rpct(util.shared_digital.max_occupancy) + " peak" : null),
+      r("sets the beat", dd.binding_device_class === "shared_digital"
+        ? "yes — " + esc(dd.binding_block || "?") + " on stage " + (dd.binding_stage != null ? dd.binding_stage : "?") : "no — the analog side binds"),
+      grp("state it must hold"),
+      r("worst stage state", mm.max_stage_state_bytes != null ? rbytes(mm.max_stage_state_bytes) : null),
+      r("streams in flight", mm.resident_streams != null ? rint(mm.resident_streams) : null),
+      r("state verdict", mm.state_residency_verdict
+        ? '<span class="' + (String(mm.state_residency_verdict).toUpperCase().indexOf("VIOL") >= 0 ? "verd-bad" : "verd-ok") + '">'
+          + esc(mm.state_residency_verdict) + "</span>" : null),
+      grp("silicon"),
+      r("area per chiplet", si.shared_digital_area_provenance === "composed-measured"
+        ? si.shared_digital_area_mm2_per_chiplet.toFixed(2) + " mm\u00b2"
+        : "not composed \u2014 this card names no measured library"),
+      r("power per chiplet", (dd.digital_power_W_total != null && nD) ? (dd.digital_power_W_total / nD).toFixed(1) + " W" : null),
+      r("all digital silicon", si.shared_digital_area_provenance === "composed-measured"
+        ? rint(si.digital_silicon_mm2) + " mm\u00b2" : null)
+    ];
+    host.innerHTML = '<h2 class="sect">The hardware — two chiplet kinds, chosen once and replicated</h2>'
+      + '<div class="hwgrid">'
+      + card("Analog weight chiplet", "× " + rint(nA) + " in this machine", aRows)
+      + card("Shared digital chiplet", "× " + rint(nD) + " in this machine", dRows)
+      + "</div>";
+  }
+
+  // ---- frontier ------------------------------------------------------------
   function rsFrontierPlot() {
     var f = RS.frontier, m = rsModel();
     var cands = (f.candidates || []).map(function (c) {
@@ -3964,11 +4447,17 @@ var ATLAS = (function () {
       return { c: c, x: xy.x, y: xy.y, onFront: (f.front_ids || []).indexOf(c.id) >= 0 };
     }).filter(function (p) { return p.x != null && p.y != null; });
     if (!cands.length) return null;
-    var W = 1000, H = 440, L = 72, R = 24, T = 20, B = 48;
-    var xs = cands.map(function (p) { return p.x; }), ys = cands.map(function (p) { return p.y; });
+    var W = 1000, H = 420, L = 76, R = 24, T = 20, B = 46;
+    // Scale to the feasible points. An infeasible outlier is still drawn if it
+    // lands inside the frame, and counted if it does not, but it never sets the
+    // scale: the reader is choosing between machines that can be built.
+    var frame = cands.filter(function (p) { return p.c.ok; });
+    if (!frame.length) frame = cands;
+    var xs = frame.map(function (p) { return p.x; }), ys = frame.map(function (p) { return p.y; });
     var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
-    var pad = (xmax - xmin) * 0.06 || xmax * 0.01 || 1; xmin -= pad; xmax += pad;
+    var pad = (xmax - xmin) * 0.07 || xmax * 0.02 || 1; xmin -= pad; xmax += pad;
     var ymax = Math.max.apply(null, ys) * 1.08;
+    var offscreen = 0;
     function X(v) { return L + (v - xmin) / (xmax - xmin) * (W - L - R); }
     function Y(v) { return T + (1 - v / ymax) * (H - T - B); }
     var ns = "http://www.w3.org/2000/svg";
@@ -3986,355 +4475,264 @@ var ATLAS = (function () {
     }
     ticks(0, ymax, 6).forEach(function (v) {
       elx("line", { x1: L, y1: Y(v), x2: W - R, y2: Y(v), stroke: "#e8eef1", "stroke-width": 1 });
-      var t = elx("text", { x: L - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11, fill: "#5f7280" }); t.textContent = rfmt(v);
+      var t = elx("text", { x: L - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11, fill: "#5f7280" }); t.textContent = rint(v);
     });
     ticks(xmin, xmax, 7).forEach(function (v) {
-      var t = elx("text", { x: X(v), y: H - B + 18, "text-anchor": "middle", "font-size": 11, fill: "#5f7280" }); t.textContent = rfmt(v);
+      var t = elx("text", { x: X(v), y: H - B + 18, "text-anchor": "middle", "font-size": 11, fill: "#5f7280" }); t.textContent = rint(v);
     });
     elx("line", { x1: L, y1: H - B, x2: W - R, y2: H - B, stroke: "#1c2a33", "stroke-width": 1.2 });
     elx("line", { x1: L, y1: T, x2: L, y2: H - B, stroke: "#1c2a33", "stroke-width": 1.2 });
     var xl = elx("text", { x: (L + W - R) / 2, y: H - 8, "text-anchor": "middle", "font-size": 12, fill: "#3d4f5c" });
-    xl.textContent = "total silicon (mm\u00b2) \u2014 analog floor + composed digital";
-    var yl = elx("text", { x: 14, y: (T + H - B) / 2, "font-size": 12, fill: "#3d4f5c", transform: "rotate(-90 14 " + ((T + H - B) / 2) + ")", "text-anchor": "middle" });
-    yl.textContent = "decode tokens / s (= 1 / beat)";
+    xl.textContent = "total silicon (mm²)";
+    var yl = elx("text", { x: 15, y: (T + H - B) / 2, "font-size": 12, fill: "#3d4f5c", transform: "rotate(-90 15 " + ((T + H - B) / 2) + ")", "text-anchor": "middle" });
+    yl.textContent = RS.headlineUnit || "decode tokens / s";
     var front = cands.filter(function (p) { return p.onFront; }).sort(function (a, b) { return a.x - b.x; });
     if (front.length > 1) {
       elx("polyline", { points: front.map(function (p) { return X(p.x) + "," + Y(p.y); }).join(" "), fill: "none", stroke: m.hex, "stroke-width": 2, "stroke-opacity": 0.5 });
     }
     cands.forEach(function (p) {
-      var shipped = p.c.id === f.selected_id, picked = p.c.id === RS.sel;
-      if (shipped) elx("circle", { cx: X(p.x), cy: Y(p.y), r: 10, fill: "none", stroke: m.hex, "stroke-width": 1.6 });
-      if (picked) elx("circle", { cx: X(p.x), cy: Y(p.y), r: 13, fill: "none", stroke: m.hex, "stroke-width": 1.6, "stroke-dasharray": "4 3" });
+      if (p.x < xmin || p.x > xmax || p.y > ymax) { offscreen++; return; }
+      var picked = p.c.id === RS.sel;
+      if (picked) elx("circle", { cx: X(p.x), cy: Y(p.y), r: 11, fill: "none", stroke: m.hex, "stroke-width": 1.8 });
       var c = elx("circle", {
-        cx: X(p.x), cy: Y(p.y), r: picked ? 7 : 5,
-        fill: p.c.ok ? m.hex : "#ffffff",
-        stroke: m.hex, "stroke-width": p.c.ok ? 0 : 1.6,
+        cx: X(p.x), cy: Y(p.y), r: picked ? 6.5 : 5,
+        fill: p.c.ok ? m.hex : "#ffffff", stroke: m.hex, "stroke-width": p.c.ok ? 0 : 1.6,
         opacity: p.c.ok ? (p.onFront || picked ? 1 : 0.45) : 0.85, cursor: "pointer"
       });
       rsHover(c, function () { return candTip(p.c); });
-      c.addEventListener("click", function () { RS.sel = p.c.id; rsRenderFrontier(); rsRenderSelCand(); });
+      c.addEventListener("click", function () {
+        RS.sel = p.c.id;
+        rsRenderFrontier(); rsRenderSelCand();
+      });
     });
-    var sp = cands.filter(function (p) { return p.c.id === f.selected_id; })[0];
-    if (sp) {
-      var t2 = elx("text", { x: X(sp.x) + 13, y: Y(sp.y) - 11, "font-size": 10.5, fill: m.hex, "font-weight": 600 });
-      t2.textContent = "shipped";
-    }
+    RS.offscreen = offscreen;
     return svg;
   }
   function rsRenderFrontier() {
     var sec = $("h-frontsec"); if (!sec) return;
     if (RS.solo) { sec.innerHTML = ""; return; }
-    sec.innerHTML = '<h2 class="sect">Frontier \u2014 (area, decode tokens/s); the digital side is derived at every point, never swept</h2>'
-      + '<div class="panel2"><div id="h-frontier"></div></div>'
-      + '<div id="h-selcand"></div><div id="h-refused"></div>';
-    var host = $("h-frontier");
-    var f = RS.frontier;
+    sec.innerHTML = '<h2 class="sect">Design space — silicon area against decode throughput</h2>'
+      + '<div class="panel2"><div id="h-frontier"></div></div><div id="h-selcand"></div>';
+    var host = $("h-frontier"), f = RS.frontier;
     if (!f || !Array.isArray(f.candidates) || !f.candidates.length) {
-      host.innerHTML = '<p class="rerr">no frontier artifact for this model (../dse/' + esc(RS.id || "?") + '_frontier/dse_report.json)</p>';
-      return;
+      host.innerHTML = '<p class="rerr">no design-space data for this model</p>'; return;
     }
     var svg = rsFrontierPlot();
-    if (!svg) { host.innerHTML = '<p class="rerr">the sweep carries no plottable (area, tokens/s) pairs</p>'; return; }
+    if (!svg) { host.innerHTML = '<p class="rerr">no plottable points</p>'; return; }
     host.appendChild(svg);
     var lg = document.createElement("p"); lg.className = "rnote";
-    lg.innerHTML = "\u25cf feasible \u00b7 \u25cb refused (hover it for the named verdict) \u00b7 solid ring = shipped \u00b7 dashed ring = your selection \u00b7 line = the Pareto front \u00b7 click any point to pin its accounting below";
+    var nBad = (f.candidates || []).filter(function (c) { return !c.ok; }).length;
+    lg.innerHTML = "● works · ○ does not fit" + (nBad ? " (" + nBad + " of them, hover for why)" : "")
+      + " · ring = the design this page describes · click a point for its numbers"
+      + (RS.offscreen ? " · " + RS.offscreen + " point(s) outside the frame, listed below" : "");
     host.appendChild(lg);
-    rsRenderRefused();
   }
   function rsRenderSelCand() {
     var host = $("h-selcand"); if (!host) return;
-    var f = RS.frontier;
-    if (RS.solo || !f) { host.innerHTML = ""; return; }
-    var c = rsCand(RS.sel) || rsCand(f.selected_id);
-    if (!c) { host.innerHTML = ""; return; }
-    var shipped = c.id === f.selected_id;
-    var xy = candXY(c);
-    var mm = c.metrics || {};
-    var knobs = Object.keys(c.knobs || {}).map(function (k) { return k + " = " + c.knobs[k]; }).join(" \u00b7 ");
+    var c = rsPicked();
+    if (RS.solo || !c) { host.innerHTML = ""; return; }
+    var xy = candXY(c), mm = c.metrics || {}, pl = c.placement || {};
+    var knobs = Object.keys(c.knobs || {}).map(function (k) { return k + " = " + c.knobs[k]; }).join(" · ");
     var rows = [];
-    function row(label, val, basis) {
-      if (val == null || val === "") return;
-      rows.push("<tr><td>" + esc(label) + "</td><td>" + val + '</td><td class="basis">' + esc(basis || "") + "</td></tr>");
-    }
-    row("decode tokens / s", mm.tokens_per_s != null ? rfmt(mm.tokens_per_s) : null, mm.headline_basis || "");
-    row("pipeline beat", mm.beat_s != null ? rfmt(mm.beat_s * 1e6, 2) + " \u00b5s" : null, "throughput = 1 / beat (D29)");
-    row("resident streams (D)", mm.resident_streams != null ? String(mm.resident_streams) : null, "one stream per pipeline stage, local batch 1 (D29)");
-    row("per-stream tokens / s", mm.per_stream_tokens_per_s != null ? rfmt(mm.per_stream_tokens_per_s) : null, "");
-    row("per-token latency", mm.per_token_latency_s != null ? rsSecs(mm.per_token_latency_s) : null, "");
-    row("total silicon", xy.x != null ? rfmt(xy.x) + " mm\u00b2" : null, xy.xkey || "");
-    row("worst stage state", mm.max_stage_state_bytes != null ? rbytes(mm.max_stage_state_bytes) : null,
-      mm.state_residency_verdict ? "verdict: " + mm.state_residency_verdict : "");
-    if (c.binding_device_class) row("binding device class", esc(String(c.binding_device_class)), "the slowest device class sets the beat");
-    var ent = entriesOf(mm);
-    var expand = ent.length
-      ? "<details><summary>every metric this candidate carries \u2014 " + ent.length + "</summary>"
-        + '<table class="rtable"><tr><th>key</th><th>value</th><th>basis</th></tr>'
-        + ent.map(function (e) {
-            return "<tr><td><code>" + esc(e.key) + "</code></td><td>" + rfmt(e.value, 4) + (e.unit ? " " + esc(e.unit) : "") + '</td><td class="basis">' + esc(e.basis || "") + "</td></tr>";
-          }).join("") + "</table></details>"
-      : "";
-    var verdict = c.ok
-      ? '<span class="verd-ok">FEASIBLE</span>' + (shipped ? " \u00b7 <b>SHIPPED</b>" : "")
-      : '<span class="verd-bad">REFUSED at ' + esc(c.fail_stage || "?") + "</span>";
+    function row(k, v) { if (v != null && v !== "" && v !== "—") rows.push("<tr><td>" + esc(k) + "</td><td>" + v + "</td></tr>"); }
+    row(RS.headlineUnit || "decode tokens / s",
+        rint(mm.tokens_per_s != null ? mm.tokens_per_s : mm.requests_per_s));
+    row("pipeline beat", mm.beat_s != null ? rfmt(mm.beat_s * 1e6, 2) + " µs" : null);
+    row("streams in flight", mm.resident_streams != null ? String(mm.resident_streams) : null);
+    row("per-token latency", mm.per_token_latency_s != null ? rsSecs(mm.per_token_latency_s) : null);
+    row("total silicon", xy.x != null ? rint(xy.x) + " mm²" : null);
+    row("chiplets", (pl.analog_chips != null ? pl.analog_chips + " analog" : "")
+      + (pl.shared_digital_chiplets != null ? " + " + pl.shared_digital_chiplets + " digital" : ""));
+    row("state per stage", mm.max_stage_state_bytes != null ? rbytes(mm.max_stage_state_bytes)
+      + (mm.state_residency_verdict ? ' <span class="' + (String(mm.state_residency_verdict).toUpperCase().indexOf("VIOL") >= 0 ? "verd-bad" : "verd-ok") + '">'
+        + esc(mm.state_residency_verdict) + "</span>" : "") : null);
     var fail = (!c.ok && c.fail_message)
-      ? '<div class="disc2"><div class="d"><b>named verdict</b><p>' + esc(c.fail_message) + "</p></div></div>" : "";
+      ? '<div class="disc2"><div class="d"><b>why it does not fit</b><p>' + esc(c.fail_message) + "</p></div></div>" : "";
+    var shipped = c.id === (RS.frontier || {}).selected_id;
     var note = shipped
-      ? "This is the shipped design point: the pipeline map and the drilldown below are its placement."
-      : "The pipeline map and drilldown below stay on the SHIPPED point \u2014 a placement artifact exists only for the design the sweep shipped. The numbers here are this candidate's own accounting.";
+      ? "This is the design the rest of the page describes."
+      : "You are looking at ANOTHER design point. Everything else on this page — the "
+        + "headline, the chiplet cards, the map and the tables — still describes the "
+        + "shipped design (" + esc((RS.frontier || {}).selected_id || "?") + ").";
     host.innerHTML = '<div class="selcand' + (c.ok ? "" : " bad") + '">'
-      + "<h3>Design point <code>" + esc(c.id) + "</code> \u2014 " + verdict + "</h3>"
+      + "<h3>" + esc(c.id) + (shipped ? " — the shipped design" : "")
+      + (c.ok ? "" : ' — <span class="verd-bad">does not fit</span>') + "</h3>"
       + '<div class="knobs">' + esc(knobs) + "</div>"
-      + (rows.length ? '<table class="rtable"><tr><th>metric</th><th>value</th><th>basis</th></tr>' + rows.join("") + "</table>" : "")
-      + fail + expand
+      + (rows.length ? '<table class="rtable">' + rows.join("") + "</table>" : "") + fail
       + '<p class="rnote">' + note + "</p></div>";
   }
-  function rsRenderRefused() {
-    var host = $("h-refused"); if (!host) return;
-    var f = RS.frontier;
-    if (RS.solo || !f) { host.innerHTML = ""; return; }
-    var refused = (f.candidates || []).filter(function (c) { return !c.ok; });
-    if (!refused.length) { host.innerHTML = ""; return; }
-    host.innerHTML = '<h3 class="rsub">' + refused.length + " candidate(s) refused, each by name</h3>"
-      + '<table class="rtable"><tr><th>id</th><th>knobs</th><th>stage</th><th>named verdict</th></tr>'
-      + refused.map(function (c) {
-          var kn = Object.keys(c.knobs || {}).map(function (k) { return k + " = " + c.knobs[k]; }).join(", ");
-          return "<tr><td><code>" + esc(c.id) + "</code></td><td>" + esc(kn) + "</td><td>" + esc(c.fail_stage || "") + '</td><td class="basis">' + esc(c.fail_message || "") + "</td></tr>";
-        }).join("") + "</table>"
-      + '<p class="rnote">a hollow point above is one of these rows; click it to pin the full accounting.</p>';
+
+  // ---- where the beat goes -------------------------------------------------
+  function rsStageTimes() {
+    var ds = ((RS.report || {}).evaluation || {}).digital_silicon || {};
+    var eng = (ds.derived_engine_sizing || {}).per_stage;
+    var fab = (ds.derived_fabric_sizing || {}).per_stage;
+    if (!Array.isArray(eng) || !eng.length) return null;
+    var byStage = {};
+    eng.forEach(function (r) {
+      byStage[r.stage] = { stage: r.stage, analog: r.analog_time_s || 0, scan: r.time_s || 0, attn: 0 };
+    });
+    (Array.isArray(fab) ? fab : []).forEach(function (r) {
+      if (byStage[r.stage]) byStage[r.stage].attn = r.time_s || 0;
+      else byStage[r.stage] = { stage: r.stage, analog: r.analog_time_s || 0, scan: 0, attn: r.time_s || 0 };
+    });
+    var rows = Object.keys(byStage).map(function (k) { return byStage[k]; })
+      .sort(function (a, b) { return a.stage - b.stage; });
+    var bind = ds.binding_term || {};
+    return { rows: rows, binding: bind.stage, beat: bind.span_s || 0 };
+  }
+  function rsRenderBeat() {
+    var host = $("h-beat"); if (!host) return;
+    var data = RS.solo ? null : rsStageTimes();
+    if (!data) { host.innerHTML = ""; return; }
+    var rows = data.rows;
+    var W = 1180, rowH = 26, top = 40, L = 84, R = 210, barH = 6, gap = 1;
+    var H = top + rows.length * rowH + 16;
+    var maxT = 0;
+    rows.forEach(function (r) { maxT = Math.max(maxT, r.analog, r.scan, r.attn); });
+    if (maxT <= 0) { host.innerHTML = ""; return; }
+    var plotW = W - L - R;
+    function X(t) { return Math.max(1, plotW * t / maxT); }
+    var SERIES = [
+      { key: "analog", label: "analog weight pass", colour: "#176778" },
+      { key: "scan", label: "scan / vector engine", colour: "#8a5a10" },
+      { key: "attn", label: "attention fabric", colour: "#7a2e2e" }
+    ];
+    var p = [];
+    p.push('<text x="' + L + '" y="16" font-size="11" fill="#5f7280" letter-spacing=".06em">TIME EACH STAGE SPENDS PER BEAT</text>');
+    if (data.beat > 0 && data.beat <= maxT * 1.05) {
+      var bx = L + X(data.beat);
+      p.push('<line x1="' + bx + '" y1="' + (top - 8) + '" x2="' + bx + '" y2="' + (top + rows.length * rowH - 4) + '" stroke="#1c2a33" stroke-width="1" stroke-dasharray="3 3"/>');
+      p.push('<text x="' + (bx + 4) + '" y="' + (top - 12) + '" font-size="10" fill="#1c2a33">the beat</text>');
+    }
+    rows.forEach(function (r, i) {
+      var y = top + i * rowH;
+      var binds = data.binding != null && r.stage === data.binding;
+      if (binds) p.push('<rect x="' + (L - 76) + '" y="' + (y - 3) + '" width="' + (W - L + 70) + '" height="' + (rowH - 2) + '" rx="3" fill="#f2f6f8"/>');
+      p.push('<text x="' + (L - 8) + '" y="' + (y + 13) + '" text-anchor="end" font-size="10.5" fill="'
+        + (binds ? "#1c2a33" : "#5f7280") + '"' + (binds ? ' font-weight="600"' : "") + ">stage " + r.stage + "</text>");
+      var yy = y;
+      SERIES.forEach(function (ser) {
+        var t = r[ser.key];
+        if (!t) return;
+        p.push('<rect x="' + L + '" y="' + yy + '" width="' + X(t) + '" height="' + barH + '" rx="2" fill="' + ser.colour + '" fill-opacity=".9"/>');
+        yy += barH + gap;
+      });
+      var worst = Math.max(r.analog, r.scan, r.attn);
+      var who = (worst === r.attn && r.attn) ? "attention" : ((worst === r.scan && r.scan) ? "scan" : "analog");
+      p.push('<text x="' + (W - R + 10) + '" y="' + (y + 13) + '" font-size="10" fill="#5f7280">'
+        + rsSecs(worst) + " \u00b7 " + who + (binds ? " \u00b7 sets the beat" : "") + "</text>");
+    });
+    var svg = '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" style="max-width:' + W + 'px">' + p.join("") + "</svg>";
+    var keys = SERIES.map(function (ser) {
+      return '<span class="blk"><span style="display:inline-block;width:11px;height:7px;border-radius:2px;background:'
+        + ser.colour + '"></span>' + ser.label + "</span>";
+    }).join("");
+    host.innerHTML = '<h3 class="rsub">Where the beat goes</h3><div class="panel2">' + svg
+      + '<p class="rnote">' + keys + "<br>"
+      + "Each bar is how long that engine is BUSY on that stage. The beat is the longest stage's span from its first issue to its last finish"
+      + (data.beat > 0 ? " (" + rsSecs(data.beat) + " on stage " + data.binding + ")" : "")
+      + ", which is longer than any single bar because a stage's engines are only partly overlapped \u2014 attention feeds softmax feeds the next matrix. "
+      + "The scan engine is widened until it fits under its own stage's analog pass, which is why it never sticks out. The attention fabric is widened the same way and still does, "
+      + "because widening stops helping once the folds it can run in parallel run out.</p></div>";
   }
 
-  // ---- the pipeline map ----------------------------------------------------
-  function rsPipelineSVG() {
-    var rep = RS.report, atl = RS.atlas;
-    if (!rep || !atl) return null;
-    var pipe = rep.evaluation && rep.evaluation.pipeline;
-    var stages = (pipe && pipe.stages) || [];
-    if (!stages.length) return null;
-    var chipsById = {}; (atl.chips || []).forEach(function (c) { chipsById[c.id] = c; });
-    var analog = (atl.chips || []).filter(function (c) { return c.pool === "analog"; });
-    var digital = (atl.chips || []).filter(function (c) { return c.pool !== "analog"; });
-    function chipByIndex(i) {
-      var hit = null;
-      analog.forEach(function (c) { var mm = c.id.match(/(\d+)$/); if (mm && parseInt(mm[1], 10) === i) hit = c; });
-      return hit || analog[i] || null;
-    }
-    function occupiedSlots(c) {
-      if (!c) return 1;
-      var slots = (c.capacity && (c.capacity.macro_slots || c.capacity.slots)) || (c.macros ? c.macros.length : 1);
-      var occ = (typeof c.occupancy === "number") ? c.occupancy : 1;
-      return Math.max(1, slots * occ);
-    }
-    var W = 1100, rowA_y = 250, rowA_h = 64, rowD_y = 60, rowD_h = 48, L = 30, R = 30, GAP = 8;
-    var widths = stages.map(function (st) {
-      return (st.chips || []).reduce(function (a, ci) { return a + occupiedSlots(chipByIndex(ci)); }, 0) || 1;
-    });
-    var totalW = widths.reduce(function (a, b) { return a + b; }, 0);
-    var usable = W - L - R - GAP * (stages.length - 1);
-    var H = rowA_y + rowA_h + 70;
-    var ns = "http://www.w3.org/2000/svg";
-    var svg = document.createElementNS(ns, "svg");
-    svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.setAttribute("width", "100%"); svg.style.maxWidth = W + "px";
-    function elx(t, att, parent) { var e = document.createElementNS(ns, t); Object.keys(att || {}).forEach(function (k) { e.setAttribute(k, att[k]); }); (parent || svg).appendChild(e); return e; }
-    var bl = elx("text", { x: L, y: rowD_y - 14, "font-size": 11, fill: "#5f7280", "letter-spacing": ".08em" });
-    bl.textContent = "SHARED DIGITAL \u2014 scan / attention engines";
-    var bl2 = elx("text", { x: L, y: rowA_y - 10, "font-size": 11, fill: "#5f7280", "letter-spacing": ".08em" });
-    bl2.textContent = "ANALOG \u2014 weight macros (width \u221d occupied macro slots), pipeline order \u2192";
-    var x = L, seg = [];
-    stages.forEach(function (st, i) {
-      var w = usable * widths[i] / totalW;
-      var chip = chipByIndex((st.chips || [])[0]);
-      var g = elx("g", {});
-      var r = elx("rect", { x: x, y: rowA_y, width: w, height: rowA_h, rx: 4, fill: "#dfe9ee", stroke: "#176778", "stroke-width": 1.2, cursor: "pointer" }, g);
-      var occ = (chip && typeof chip.occupancy === "number") ? chip.occupancy : null;
-      if (occ != null) elx("rect", { x: x, y: rowA_y + rowA_h - 6, width: w * Math.min(1, occ), height: 6, rx: 2, fill: "#176778", "fill-opacity": 0.65 }, g);
-      var t = elx("text", { x: x + w / 2, y: rowA_y + 24, "text-anchor": "middle", "font-size": 11.5, fill: "#1c2a33", "font-weight": 600 }, g);
-      t.textContent = "S" + st.stage;
-      var t2 = elx("text", { x: x + w / 2, y: rowA_y + 40, "text-anchor": "middle", "font-size": 10.5, fill: "#5f7280" }, g);
-      t2.textContent = "L" + st.layers[0] + "\u2013" + st.layers[st.layers.length - 1];
-      (function (stx, chipx, wx) {
-        rsHover(r, function () {
-          var slots = chipx ? occupiedSlots(chipx) : null;
-          return '<div class="t">' + esc(stx.label || ("stage " + stx.stage)) + "</div>"
-            + "chips: " + esc((stx.chips || []).join(", "))
-            + (slots != null ? "<br>occupied macro slots: " + Math.round(slots) : "")
-            + (chipx && chipx.occupancy != null ? "<br>bank occupancy: " + (chipx.occupancy * 100).toFixed(1) + "%" : "")
-            + '<div class="b">click opens this chip in the drilldown below</div>';
-        });
-        r.addEventListener("click", function () {
-          if (chipx && S.ix && S.ix.chip[chipx.id]) {
-            go("chip", chipx.id, null);
-            $("h-canvas").scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        });
-      })(st, chip, w);
-      seg.push({ x: x, w: w, cx: x + w / 2, stage: st, chip: chip });
-      x += w + GAP;
-    });
-    var links = (atl.links || []);
-    links.filter(function (l) { return l.role === "act"; }).forEach(function (l, i) {
-      if (i + 1 >= seg.length) return;
-      var x1 = seg[i].x + seg[i].w, x2 = seg[i + 1].x, ym = rowA_y + rowA_h / 2;
-      elx("path", { d: "M" + (x1 - 2) + " " + ym + " L" + (x2 + 2) + " " + ym, stroke: "#3d4f5c", "stroke-width": 2, fill: "none", "marker-end": "url(#rs-arr)" });
-      var hit = elx("path", { d: "M" + (x1 - 6) + " " + ym + " L" + (x2 + 6) + " " + ym, stroke: "transparent", "stroke-width": 14, fill: "none", cursor: "pointer" });
-      (function (lx) {
-        rsHover(hit, function () {
-          return '<div class="t">' + esc(lx.label || lx.id) + "</div>" + rbytes(lx.bytes) + " per " + esc(lx.per || "?")
-            + '<div class="b">' + esc(lx.basis || "") + "</div>";
-        });
-      })(l);
-    });
-    var defs = elx("defs", {});
-    var mk = elx("marker", { id: "rs-arr", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto" }, defs);
-    elx("path", { d: "M0 0 L10 5 L0 10 z", fill: "#3d4f5c" }, mk);
-    var svc = links.filter(function (l) { return l.role === "svc"; });
-    var served = {}; svc.forEach(function (l) { (served[l.from] = served[l.from] || []).push(l); });
-    var digIds = digital.map(function (c) { return c.id; });
-    var laneY = rowD_y + rowD_h + 26, laneStep = 12;
-    digIds.forEach(function (did, di) {
-      var myLinks = served[did] || [];
-      var xs = [];
-      myLinks.forEach(function (l) { seg.forEach(function (sg) { if (sg.chip && sg.chip.id === l.to) xs.push(sg.cx); }); });
-      var cx0, cw;
-      if (xs.length) { var mn = Math.min.apply(null, xs), mx = Math.max.apply(null, xs); cx0 = (mn + mx) / 2; cw = Math.max(60, mx - mn > 120 ? 110 : 80); }
-      else { cw = 90; cx0 = L + 40 + di * ((W - L - R - 80) / Math.max(1, digIds.length - 1) || 0); if (digIds.length === 1) cx0 = W / 2; }
-      var dx = cx0 - cw / 2;
-      var chip = chipsById[did];
-      var r = elx("rect", { x: dx, y: rowD_y, width: cw, height: rowD_h, rx: 4, fill: "#eee9db", stroke: "#8a5a10", "stroke-width": 1.2, cursor: "pointer" });
-      var t = elx("text", { x: cx0, y: rowD_y + rowD_h / 2 + 4, "text-anchor": "middle", "font-size": 10.5, fill: "#1c2a33" });
-      var mnum = did.match(/(\d+)$/); t.textContent = "DIG " + (mnum ? parseInt(mnum[1], 10) : di);
-      (function (cx, didx, linksx) {
-        rsHover(r, function () {
-          return '<div class="t">' + esc((cx && cx.label) || didx) + "</div>pool: shared digital"
-            + (linksx.length ? "<br>services " + linksx.length + " analog chip(s)" : "<br><span style=\"color:#e8b46a\">no service links exported in this artifact</span>")
-            + '<div class="b">click opens this chip in the drilldown below</div>';
-        });
-        r.addEventListener("click", function () {
-          if (S.ix && S.ix.chip[didx]) {
-            go("chip", didx, null);
-            $("h-canvas").scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        });
-      })(chip, did, myLinks);
-      if (myLinks.length) {
-        var busY = laneY + di * laneStep;
-        var total = myLinks.reduce(function (a, l) { return a + (l.bytes || 0); }, 0);
-        var tw = Math.max(2, Math.min(9, Math.log2(1 + total / 1024)));
-        var trunk = elx("path", { d: "M" + cx0 + " " + (rowD_y + rowD_h) + " L" + cx0 + " " + busY, stroke: "#4a5f6d", "stroke-width": tw, fill: "none" });
-        var dropXs = myLinks.map(function (l) { var hx = null; seg.forEach(function (sg) { if (sg.chip && sg.chip.id === l.to) hx = sg.cx; }); return hx; });
-        var valid = dropXs.filter(function (v) { return v != null; });
-        if (valid.length) {
-          var mn2 = Math.min.apply(null, valid.concat([cx0])), mx2 = Math.max.apply(null, valid.concat([cx0]));
-          elx("path", { d: "M" + mn2 + " " + busY + " L" + mx2 + " " + busY, stroke: "#4a5f6d", "stroke-width": tw, fill: "none" });
-          elx("circle", { cx: cx0, cy: busY, r: 2.6, fill: "#4a5f6d" });
-          myLinks.forEach(function (l, li) {
-            var hx = dropXs[li]; if (hx == null) return;
-            var bw = Math.max(1.4, Math.min(7, Math.log2(1 + (l.bytes || 0) / 1024)));
-            elx("path", { d: "M" + hx + " " + busY + " L" + hx + " " + rowA_y, stroke: "#4a5f6d", "stroke-width": bw, fill: "none" });
-            var hit = elx("path", { d: "M" + hx + " " + busY + " L" + hx + " " + rowA_y, stroke: "transparent", "stroke-width": 14, fill: "none", cursor: "pointer" });
-            (function (lx) {
-              rsHover(hit, function () {
-                return '<div class="t">' + esc(lx.label || lx.id) + "</div>" + rbytes(lx.bytes) + " per " + esc(lx.per || "?")
-                  + '<div class="b">' + esc(lx.basis || "") + "</div>";
-              });
-            })(l);
-          });
-        }
-        rsHover(trunk, function () { return '<div class="t">service trunk</div>' + rbytes(total) + " total per beat across " + myLinks.length + " branch(es)"; });
-      }
-    });
-    var out = document.createElement("div");
-    out.appendChild(svg);
-    if (!svc.length) {
-      var n = document.createElement("p"); n.className = "rnote";
-      n.innerHTML = 'Digital&rarr;analog service wires: <b>not present in this artifact</b> \u2014 <code>role: "svc"</code> links are PRICED rows, so a placement-only export carries none. Only the real boundary links are drawn.';
-      out.appendChild(n);
-    }
-    return out;
-  }
-  function rsRenderPipeline() {
-    var sec = $("h-pipesec"); if (!sec) return;
-    if (RS.solo) { sec.innerHTML = ""; return; }
-    sec.innerHTML = '<h2 class="sect">Pipeline map \u2014 analog stages left to right in pipeline order, shared digital above</h2>'
-      + '<div class="panel2" id="h-pipeline"></div>';
-    var host = $("h-pipeline");
-    var node = rsPipelineSVG();
-    if (node) host.appendChild(node);
-    else host.innerHTML = '<p class="rerr">no pipeline stages in this report</p>';
-  }
-
-  // ---- detailed tables -----------------------------------------------------
-  function rsKv(rows) {
-    return '<table class="rtable"><tr><th>metric</th><th>value</th><th>basis</th></tr>' + rows.join("") + "</table>";
+  // ---- tables --------------------------------------------------------------
+  function rsKv(rows, heads) {
+    var h = (heads || []).map(function (x) { return "<th>" + x + "</th>"; }).join("");
+    return '<table class="rtable">' + (h ? "<tr>" + h + "</tr>" : "") + rows.join("") + "</table>";
   }
   function rsRenderDetails() {
     var host = $("h-details"); if (!host) return;
-    if (RS.solo) { host.innerHTML = ""; return; }
-    var rep = RS.report;
-    if (!rep) { host.innerHTML = '<h2 class="sect">Detailed results</h2><p class="rerr">report artifact missing</p>'; return; }
-    var ev = rep.evaluation || {};
-    var out = '<h2 class="sect">Detailed results \u2014 one accounting per metric (D21)</h2>';
+    if (RS.solo || !RS.report) { host.innerHTML = ""; return; }
+    var ev = RS.report.evaluation || {};
+    var out = '<h2 class="sect">Everything else</h2>';
     var entries = entriesOf(ev.metrics);
-    out += '<h3 class="rsub">All metrics \u2014 ' + entries.length + "</h3>";
-    out += rsKv(entries.map(function (e) {
-      return "<tr><td><code>" + esc(e.key) + '</code><br><span class="rnote">' + esc(e.label || "") + "</span></td>"
-        + "<td>" + rfmt(e.value, 4) + (e.unit ? " " + esc(e.unit) : "") + '</td><td class="basis">' + esc(e.basis || "") + "</td></tr>";
-    }));
+    if (entries.length) {
+      out += '<h3 class="rsub">Timing</h3>';
+      out += rsKv(entries.map(function (e) {
+        var unit = String(e.unit || "");
+        var shown;
+        if (/^s$/.test(unit)) shown = rsSecs(e.value);            // one unit, not two
+        else if (/token|request/.test(unit)) shown = rint(e.value) + " " + esc(unit);
+        else if (/stream/.test(unit)) shown = rint(e.value) + " " + esc(unit);
+        else shown = rfmt(e.value, 4) + (unit ? " " + esc(unit) : "");
+        return "<tr><td>" + esc(clean(e.label || e.key)) + "</td><td>" + shown + "</td></tr>";
+      }));
+    }
     var sr = ev.state_residency;
     try {
       if (sr) {
         var srl = Array.isArray(sr) ? sr : (Array.isArray(sr.stages) ? sr.stages : (Array.isArray(sr.per_stage) ? sr.per_stage : []));
         if (srl.length) {
-          out += '<h3 class="rsub">State / KV residency \u2014 scales with D (D29)</h3>';
-          out += rsKv(srl.map(function (st) {
+          out += '<h3 class="rsub">State the machine holds while decoding</h3>';
+          var same = srl.every(function (st) {
+            return st.state_bytes === srl[0].state_bytes && st.kv_bytes === srl[0].kv_bytes;
+          });
+          if (same && srl.length > 3) {
+            var st0 = srl[0];
+            out += rsKv(["<tr><td>every stage (" + srl.length + " of them)</td><td>" + rbytes(st0.state_bytes) + "</td>"
+              + "<td>" + rbytes(st0.recurrent_state_bytes) + "</td><td>" + rbytes(st0.kv_bytes) + "</td>"
+              + "<td>" + (st0.capacity_bytes ? rbytes(st0.capacity_bytes) : "—") + "</td>"
+              + '<td><span class="verd-ok">' + esc(st0.verdict || "") + "</span></td></tr>"],
+              ["stage", "total", "recurrent", "KV", "store built", ""]);
+            out += '<p class="rnote">Every stage holds the same bill here, because every stage holds the same number of identical layers. '
+              + "The store is built to it rather than checked against a limit, so this is a cost in silicon, not a constraint.</p>";
+            srl = [];
+          }
+          if (srl.length) out += rsKv(srl.map(function (st) {
             var v = st.verdict || (st.fits === true ? "fits" : (st.fits === false ? "VIOLATED" : ""));
             var sb = st.state_bytes != null ? st.state_bytes : (st.total_bytes != null ? st.total_bytes : st.bytes);
-            var detail = "recurrent " + rbytes(st.recurrent_state_bytes) + " + KV " + rbytes(st.kv_bytes)
-              + (st.capacity_bytes ? " vs capacity " + rbytes(st.capacity_bytes) : "");
-            return "<tr><td>" + esc(st.label || ("stage " + st.stage)) + "</td><td>" + rbytes(sb) + " (all D streams)</td>"
-              + '<td class="basis"><span class="' + (String(v).indexOf("VIOL") >= 0 ? "verd-bad" : "verd-ok") + '">' + esc(v) + "</span> " + esc(detail) + " " + esc(st.basis || "") + "</td></tr>";
-          }));
+            return "<tr><td>" + esc(clean(st.label || ("stage " + st.stage))) + "</td><td>" + rbytes(sb) + "</td>"
+              + "<td>" + rbytes(st.recurrent_state_bytes) + "</td><td>" + rbytes(st.kv_bytes) + "</td>"
+              + "<td>" + (st.capacity_bytes ? rbytes(st.capacity_bytes) : "—") + "</td>"
+              + '<td><span class="' + (String(v).indexOf("VIOL") >= 0 ? "verd-bad" : "verd-ok") + '">' + esc(v) + "</span></td></tr>";
+          }), ["stage", "total", "recurrent", "KV", "store built", ""]);
         }
       }
-    } catch (e) { out += '<p class="rerr">state residency failed to render: ' + esc(e.message) + "</p>"; }
+    } catch (e) {}
     var en = ev.energy;
     try {
       if (en && Array.isArray(en.components)) {
-        out += '<h3 class="rsub">Energy per component \u2014 coverage-labeled</h3>';
+        var totalPj = en.total_pj != null ? en.total_pj
+          : en.components.reduce(function (a, c) { return a + (c.energy_pj || 0); }, 0);
+        out += '<h3 class="rsub">Energy per token</h3>';
         out += rsKv(en.components.map(function (c) {
           var epj = c.energy_pj != null ? c.energy_pj : (c.value_pj != null ? c.value_pj : c.pj);
-          return "<tr><td>" + esc(c.label || c.name || c.key || c.component) + "</td><td>"
-            + (epj != null && epj >= 1e9 ? rfmt(epj / 1e9, 3) + " mJ" : rfmt(epj, 3) + " pJ")
-            + '</td><td class="basis">[' + esc(c.coverage || "?") + "] " + esc(c.basis || "") + "</td></tr>";
-        }));
+          return "<tr><td>" + esc(clean(c.label || c.name || c.key || c.component)) + "</td>"
+            + "<td>" + mJ(epj) + "</td>"
+            + "<td>" + (totalPj ? rpct((epj || 0) / totalPj, 1) : "—") + "</td></tr>";
+        }).concat([
+          '<tr><td><b>total</b></td><td><b>' + mJ(totalPj) + "</b></td><td><b>100%</b></td></tr>"
+        ]), ["component", "per token", "share"]);
       }
-    } catch (e) { out += '<p class="rerr">energy failed to render: ' + esc(e.message) + "</p>"; }
-    var occ = ev.occupancy;
+    } catch (e) {}
+    var util = ev.utilization;
     try {
-      if (Array.isArray(occ) && occ.length) {
-        out += '<h3 class="rsub">Utilization per device class \u2014 mean / max over devices</h3>';
-        var agg = {};
-        occ.forEach(function (o) {
-          var k = o.device_class || "?"; (agg[k] = agg[k] || { n: 0, sum: 0, max: 0, maxOwner: "" });
-          agg[k].n++; agg[k].sum += o.occupancy || 0;
-          if ((o.occupancy || 0) > agg[k].max) { agg[k].max = o.occupancy; agg[k].maxOwner = o.owner || ""; }
-        });
-        out += rsKv(Object.keys(agg).map(function (k) {
-          var a = agg[k];
-          return "<tr><td>" + esc(k) + " (" + a.n + " devices)</td><td>mean " + (a.sum / a.n * 100).toFixed(3) + "% \u00b7 max " + (a.max * 100).toFixed(2) + "%"
-            + '</td><td class="basis">busiest: ' + esc(a.maxOwner) + " \u2014 " + esc(ev.occupancy_basis || "") + "</td></tr>";
-        }));
+      if (Array.isArray(util) && util.length) {
+        out += '<h3 class="rsub">Duty cycle — the share of the beat each device is busy</h3>';
+        out += rsKv(util.map(function (u) {
+          var idle = u.idle_devices || 0;
+          return "<tr><td>" + esc(u.device_class || "?") + "</td>"
+            + "<td>" + rint(u.devices) + (idle ? " (" + rint(idle) + " never fire)" : "") + "</td>"
+            + "<td>" + rpct(u.mean_occupancy, 2) + "</td>"
+            + "<td>" + rpct(u.max_occupancy, 2) + "</td></tr>";
+        }), ["device", "instances", "mean", "busiest"]);
+        out += '<p class="rnote">The mean is over EVERY instance of the class, idle ones included, so idle silicon stays visible. '
+          + 'A weight macro fires once per beat and waits out the rest of it, so a low analog duty cycle is the pipeline working as designed, not a stall — '
+          + 'and it is a different question from how full of weights that macro is, which the chiplet card above reports as slots used.</p>';
       }
-    } catch (e) { out += '<p class="rerr">utilization failed to render: ' + esc(e.message) + "</p>"; }
+    } catch (e) {}
     host.innerHTML = out;
   }
 
-  // ---- disclosures, verbatim, dead last ------------------------------------
+  // ---- disclosures, last ---------------------------------------------------
   function discBlock(items) {
     return '<div class="disc2">' + (items || []).map(function (x) {
       if (typeof x === "string") return '<div class="d"><p>' + esc(x) + "</p></div>";
       var name = x.constraint || x.name || x.key || "";
       var val = x.value == null ? "" : (typeof x.value === "string" ? x.value : JSON.stringify(x.value));
-      return '<div class="d"><b>' + esc(name) + "</b>" + (val ? " \u2014 <em>" + esc(val) + "</em>" : "")
+      return '<div class="d"><b>' + esc(name) + "</b>" + (val ? " — <em>" + esc(val) + "</em>" : "")
         + (x.reason ? "<p>" + esc(x.reason) + "</p>" : "") + "</div>";
     }).join("") + "</div>";
   }
@@ -4342,35 +4740,50 @@ var ATLAS = (function () {
   function rsRenderDisc() {
     var host = $("h-disc"); if (!host) return;
     if (RS.solo) { host.innerHTML = ""; return; }
-    var seen = {};
-    (((RS.atlas || {}).relaxations) || []).forEach(function (x) { seen[discKey(x)] = 1; });
-    var all = ((RS.report || {}).disclosures) || [];
-    var repD = all.filter(function (x) { return !seen[discKey(x)]; });
-    var h = "";
-    if (all.length) {
-      h += '<h3 class="rsub">Report disclosures \u2014 ' + all.length
-        + (all.length - repD.length ? " (" + (all.length - repD.length) + " identical to the relaxations above and shown once; the " + repD.length + " others follow)" : "") + "</h3>";
-      h += discBlock(repD);
-    }
-    var fd = ((RS.frontier || {}).disclosures) || [];
-    if (fd.length) h += '<h3 class="rsub">Frontier sweep disclosures \u2014 ' + fd.length + "</h3>" + discBlock(fd);
-    host.innerHTML = h;
+    var seen = {}, items = [];
+    function add(x) { var k = discKey(x); if (!seen[k]) { seen[k] = 1; items.push(x); } }
+    (((RS.atlas || {}).relaxations) || []).forEach(add);
+    (((RS.report || {}).disclosures) || []).forEach(add);
+    (((RS.frontier || {}).disclosures) || []).forEach(add);
+    if (!items.length) { host.innerHTML = ""; return; }
+    host.innerHTML = '<h2 class="sect">What this model does not account for — ' + items.length + " item(s)</h2>"
+      + '<details><summary class="rnote" style="cursor:pointer;margin-bottom:.5rem">show all</summary>' + discBlock(items) + "</details>";
+  }
+
+  function rsRenderFoot() {
+    var host = $("h-foot"); if (!host) return;
+    if (RS.solo || !RS.atlas) { host.innerHTML = ""; return; }
+    var prov = RS.atlas.provenance || {};
+    var checks = (S.res && S.res.errors.length)
+      ? '<span class="verd-bad">' + S.res.errors.length + " conformance refusal(s)</span>"
+      : '<span class="verd-ok">all conformance checks pass</span>';
+    var bits = [
+      "mapping emitted " + esc(prov.authored || "?"),
+      checks,
+      esc(RS.atlas.schema || "")
+    ];
+    var cmd = (prov.reference_run || {}).command;
+    host.innerHTML = '<p class="rnote" style="margin-top:2rem;padding-top:.8rem;border-top:1px solid var(--line)">'
+      + bits.join(" &middot; ")
+      + (cmd ? '<br><code style="font-size:11.5px">' + esc(cmd) + "</code>" : "")
+      + "</p>";
   }
 
   // ---- load ----------------------------------------------------------------
   function rsLoad(id) {
     RS.id = id; RS.sel = null;
-    var m = rsModel();
-    document.title = "QIF Results \u2014 " + m.label;
+    document.title = "QIF Results — " + rsModel().label;
     rsRenderModels();
-    $("h-frontsec").innerHTML = '<h2 class="sect">Frontier</h2><div class="panel2"><p class="ui">loading the sweep\u2026</p></div>';
-    $("h-pipesec").innerHTML = "";
+    $("h-frontsec").innerHTML = '<h2 class="sect">Design space</h2><div class="panel2"><p class="ui">loading…</p></div>';
     Promise.all([
       rsFetch(id + "_report.json"),
       rsFetch("../dse/" + id + "_frontier/dse_report.json"),
       rsFetch(id + ".json")
     ]).then(function (r) {
       RS.report = r[0]; RS.frontier = r[1]; RS.atlas = r[2];
+      var probe = ((RS.frontier || {}).candidates || [])[0] || {};
+      RS.headlineUnit = (probe.metrics && probe.metrics.tokens_per_s != null)
+        ? "decode tokens / s" : "requests / s";
       RS.sel = RS.frontier ? RS.frontier.selected_id : null;
       if (RS.atlas) adopt(RS.atlas, id + ".json");
       else { S.doc = null; S.source = id + ".json (missing)"; render(); }
@@ -4378,8 +4791,16 @@ var ATLAS = (function () {
     });
   }
   function rsRenderAll() {
-    rsRenderModels(); rsRenderHeadline(); rsRenderFrontier(); rsRenderSelCand();
-    rsRenderPipeline(); rsRenderDetails(); rsRenderDisc();
+    rsRenderModels(); rsRenderHeadline(); rsRenderModelInfo(); rsRenderHardware();
+    rsRenderFrontier(); rsRenderSelCand(); rsRenderBeat(); rsRenderDetails(); rsRenderDisc(); rsRenderFoot();
+    var lead = $("pipe-lead");
+    if (lead) {
+      var staged = !!((((RS.report || {}).evaluation || {}).pipeline || {}).stages || []).length;
+      lead.textContent = RS.solo ? ""
+        : (staged
+          ? "Each stage below is one analog chiplet holding a slice of the layers. Colour is the layer number, hatch is the weight block, width is weight columns. Click a chiplet to open it."
+          : "This workload runs one pass rather than a staggered pipeline, so the chiplets are drawn as a package rather than in stage order. Click a chiplet to open it.");
+    }
   }
 
   // ------------------------------------------------------------------ input --
@@ -4462,7 +4883,7 @@ var ATLAS = (function () {
     if (wanted && /[\/\\]/.test(wanted)) wanted = null;
     if (wanted) {
       RS.solo = true;
-      ["h-headline", "h-pipesec", "h-details", "h-disc", "h-models"].forEach(function (id) {
+      ["h-headline", "h-modelinfo", "h-hw", "h-beat", "h-details", "h-disc", "h-models", "h-foot"].forEach(function (id) {
         var n = $(id); if (n) n.innerHTML = "";
       });
       $("h-frontsec").innerHTML = '<p class="rnote" style="margin:.8rem 0">one-document mode (?data=' + esc(wanted)

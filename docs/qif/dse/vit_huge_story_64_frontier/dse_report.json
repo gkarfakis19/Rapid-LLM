@@ -1,0 +1,2270 @@
+{
+  "tool": "fws_qif_dse",
+  "schema": "fws_qif_dse/1",
+  "hardware_config": "configs/hardware-config/fws_cim_vit_frontier.yaml",
+  "model_config": "configs/model-config/vit_huge_story_64_inf.yaml",
+  "model_id": "ViT-Huge-story-64",
+  "mode": "VIT",
+  "objective": "throughput",
+  "headline_metric": "requests_per_s",
+  "headline_conflict": null,
+  "selection_rule": "lexicographic: max headline requests/s (this workload lowers no decode step, so ADJ-6's tokens/s does not exist on its timeline) (ADJ-6, off each candidate's own timeline), then min total silicon, then min analog chips, then min placed tiles, then first in declaration order",
+  "evaluation_path": "fws_mapping.build_mapping -> program.fws_build.build_fws_program -> fws_eval.evaluate_fws, per candidate. No closed form, no period, no shared timeline (A1, ADJ-6).",
+  "sweep": {
+    "block": "mapping_dse",
+    "label": "ViT-Huge-story seq 64: stage granularity, everything else derived",
+    "objective": "throughput",
+    "search": "cross_product",
+    "initializer": {},
+    "repair_axis": null,
+    "max_chips": 0,
+    "max_silicon_mm2": 20000.0,
+    "axes": {
+      "layers_per_chip": [
+        32,
+        16,
+        8,
+        4,
+        2
+      ]
+    },
+    "axis_targets": {
+      "layers_per_chip": "mapping.layers_per_chip"
+    },
+    "refused_axes": {
+      "arrays_per_chip": "ADJ-13 retires the chip's SLOT COUNT as a swept or declared knob. A chip offers exactly the macro slots the layers it holds need, and that number is DERIVED from the placement itself: the sweep places the layers once to learn the requirement and builds the chip to it. Sweeping it produced garbage points at both ends \u2014 a capacity under the requirement is refused by the assembly check and tells you nothing, and a capacity over it enumerates empty slots that are charged as silicon, so the 'frontier' bought area with no throughput and called it a design point. What remains free is the PARTITION (layers_per_chip / layers_per_stage), which is a real choice; the capacity that partition implies is arithmetic.",
+      "num_arrays": "ADJ-10 retires the attention fabric's ARRAY COUNT as a swept or declared knob, for the same reason D31/ADJ-9 retired the scan engine's lane count: it is a count of MEASURED synthesis blocks, so it is DERIVED \u2014 sized UP in integer copies of the measured GEMMINI 32x32 block until every stage's attention time fits that stage's own ANALOG m-pass time \u2014 and REPORTED (evaluation.digital_silicon.derived_fabric_sizing). Sweeping it would sweep the answer. Only the COUNT is derived: rows x cols per array stay as measured and as declared, because inventing array geometry is refused (ADJ-4). An explicit cim.cards.<card>.fabric_num_arrays on a SINGLE machine is still an OVERRIDE that rides its own disclosure; what is refused here is making it an AXIS.",
+      "softmax_lanes": "ADJ-10 retires the softmax pipeline's LANE COUNT as a swept or declared knob on the same grounds as num_arrays: the lane is a MEASURED per-lane census (OPTIMA's softmax collection, block for block), so the width is DERIVED against the same per-stage analog m-pass target and REPORTED. cim.cards.<card>.fabric_softmax_lanes pins ONE machine with a disclosure; as an AXIS it is refused.",
+      "vector_lanes": "D31/ADJ-9 retire the scan/vector engine as a swept or declared knob: its width is DERIVED \u2014 sized UP until every stage's digital per-stage time fits that stage's own ANALOG m-pass time \u2014 and REPORTED (evaluation.digital_silicon.derived_engine_sizing). Sweeping it would sweep the answer. The frontier (P7.4) sweeps stage granularity, mux/bank depth and chip capacity, and derives the digital side at every point. An explicit cim.cards.<card>.vector_lanes on a single machine is still an OVERRIDE that rides its own disclosure (D31); what is refused here is making it an AXIS."
+    },
+    "enumeration": "full cross product in declaration order; explicit candidate lists only, no search and no sampling (D19, D10)"
+  },
+  "stages": [
+    "config",
+    "mapping",
+    "budget",
+    "lowering",
+    "pricing",
+    "memory",
+    "state"
+  ],
+  "num_candidates": 5,
+  "num_valid": 5,
+  "candidates": [
+    {
+      "id": "c000",
+      "knobs": {
+        "layers_per_chip": 32
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        },
+        "state": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 994,
+        "makespan_s": 0.0012660730921052632,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.0012660730921052632,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.request_latency",
+            "label": "end-to-end request latency",
+            "value": 0.0012660730921052632,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.requests_per_s",
+            "label": "completed requests per second",
+            "value": 789.8438141017363,
+            "unit": "requests/s",
+            "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+          }
+        ],
+        "tokens_per_s": null,
+        "prefill_latency_s": 0.0012660730921052632,
+        "decode_step_median_s": null,
+        "serving_regime": "lockstep",
+        "beat_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "max_stage_state_bytes": null,
+        "state_residency_verdict": null,
+        "request_latency_s": 0.0012660730921052632,
+        "requests_per_s": 789.8438141017363,
+        "total_energy_pj": 637673018.8698,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 469900858.8698,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 167772160.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 0,
+          "declared_decode_steps": 0,
+          "extrapolated": false
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "knobs_derived": {
+        "arrays_per_chip": 386
+      },
+      "placement": {
+        "analog_chips": 1,
+        "shared_digital_chiplets": 1,
+        "shared_digital_suggestion": 1,
+        "analog_macro_slots": 386,
+        "macros_holding_tiles": 386,
+        "unowned_macro_slots": 0,
+        "unowned_columns": 280,
+        "tiles": 386,
+        "owners": 130,
+        "devices": 773,
+        "decode_window": 2
+      },
+      "silicon": {
+        "analog_macro_slots": 386,
+        "macro_footprint_mm2": 1.403065,
+        "analog_macro_silicon_mm2": 541.58309,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_area_provenance": "declared",
+        "shared_digital_silicon_mm2": 0.0,
+        "macro_pool_area_mm2_per_macro": 0.0,
+        "macro_pool_area_provenance": "absent",
+        "macro_pool_silicon_mm2": 0.0,
+        "state_sram_macros": 0,
+        "state_sram_bytes_required": 0.0,
+        "state_sram_silicon_mm2": 0.0,
+        "state_sram_provenance": "absent",
+        "digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 541.58309,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+          "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+        ],
+        "basis": "386 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 1 shared digital chiplets x the card's declared area_mm2 0 + 386 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      },
+      "packing": {
+        "law": "dedicated",
+        "measured": false,
+        "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+      },
+      "effective_column_sets_per_tile": 4,
+      "derived_chiplets": {
+        "chiplets_built": 1,
+        "reason": "the run measures no beat, so nothing can be packed against it"
+      },
+      "pipeline": {
+        "serving_regime": "lockstep",
+        "filled": false,
+        "beat_s": null,
+        "beat_converged": null,
+        "steady_beat_spread": null,
+        "converged_tail_beats": null,
+        "ramp_beats_dropped": null,
+        "tokens_per_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "stages": null,
+        "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+      },
+      "state_bill": {
+        "measured": false,
+        "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+        "store_macros": 0,
+        "store_area_mm2": 0.0,
+        "budget_bytes": null,
+        "budget_verdict": "sized"
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "devices": 386,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.004033687341612597,
+          "max_occupancy": 0.004044000328200937
+        },
+        {
+          "device_class": "macro_pool",
+          "devices": 386,
+          "idle_devices": 194,
+          "idle_share": 0.5025906735751295,
+          "mean_occupancy": 0.00033222118867480706,
+          "max_occupancy": 0.004007418088389871
+        },
+        {
+          "device_class": "shared_digital",
+          "devices": 1,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.22234020225509923,
+          "max_occupancy": 0.22234020225509923
+        },
+        {
+          "device_class": "link",
+          "devices": 2,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.12768318907338383,
+          "max_occupancy": 0.19152478361007574
+        }
+      ],
+      "binding_device_class": "shared_digital",
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+          "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "serving_regime",
+          "value": "lockstep (RETIRED D15 semantics)",
+          "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "2.68435e+08 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.403% mean / 0.404% peak (0 of 386 idle), macro_pool 0.033% mean / 0.401% peak (194 of 386 idle), shared_digital 22.234% mean / 22.234% peak (0 of 1 idle), link 12.768% mean / 19.152% peak (0 of 2 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 22.234% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 2,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.4498365521430969,
+        "violated_verdicts": []
+      },
+      "boundaries": [],
+      "wall_s": 0.06908106803894043
+    },
+    {
+      "id": "c001",
+      "knobs": {
+        "layers_per_chip": 16
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        },
+        "state": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 995,
+        "makespan_s": 0.0012685989710115133,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.0012685989710115133,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.request_latency",
+            "label": "end-to-end request latency",
+            "value": 0.0012685989710115133,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.requests_per_s",
+            "label": "completed requests per second",
+            "value": 788.271173830965,
+            "unit": "requests/s",
+            "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+          }
+        ],
+        "tokens_per_s": null,
+        "prefill_latency_s": 0.0012685989710115133,
+        "decode_step_median_s": null,
+        "serving_regime": "lockstep",
+        "beat_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "max_stage_state_bytes": null,
+        "state_residency_verdict": null,
+        "request_latency_s": 0.0012685989710115133,
+        "requests_per_s": 788.271173830965,
+        "total_energy_pj": 638983738.8698,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 469900858.8698,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 169082880.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 0,
+          "declared_decode_steps": 0,
+          "extrapolated": false
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "knobs_derived": {
+        "arrays_per_chip": 193
+      },
+      "placement": {
+        "analog_chips": 2,
+        "shared_digital_chiplets": 2,
+        "shared_digital_suggestion": 2,
+        "analog_macro_slots": 386,
+        "macros_holding_tiles": 386,
+        "unowned_macro_slots": 0,
+        "unowned_columns": 280,
+        "tiles": 386,
+        "owners": 130,
+        "devices": 774,
+        "decode_window": 2
+      },
+      "silicon": {
+        "analog_macro_slots": 386,
+        "macro_footprint_mm2": 1.403065,
+        "analog_macro_silicon_mm2": 541.58309,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_area_provenance": "declared",
+        "shared_digital_silicon_mm2": 0.0,
+        "macro_pool_area_mm2_per_macro": 0.0,
+        "macro_pool_area_provenance": "absent",
+        "macro_pool_silicon_mm2": 0.0,
+        "state_sram_macros": 0,
+        "state_sram_bytes_required": 0.0,
+        "state_sram_silicon_mm2": 0.0,
+        "state_sram_provenance": "absent",
+        "digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 541.58309,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+          "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+        ],
+        "basis": "386 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 2 shared digital chiplets x the card's declared area_mm2 0 + 386 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      },
+      "packing": {
+        "law": "dedicated",
+        "measured": false,
+        "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+      },
+      "effective_column_sets_per_tile": 4,
+      "derived_chiplets": {
+        "chiplets_built": 2,
+        "reason": "the run measures no beat, so nothing can be packed against it"
+      },
+      "pipeline": {
+        "serving_regime": "lockstep",
+        "filled": false,
+        "beat_s": null,
+        "beat_converged": null,
+        "steady_beat_spread": null,
+        "converged_tail_beats": null,
+        "ramp_beats_dropped": null,
+        "tokens_per_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "stages": null,
+        "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+      },
+      "state_bill": {
+        "measured": false,
+        "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+        "store_macros": 0,
+        "store_area_mm2": 0.0,
+        "budget_bytes": null,
+        "budget_verdict": "sized"
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "devices": 386,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.004025655957382115,
+          "max_occupancy": 0.0040359484100145875
+        },
+        {
+          "device_class": "macro_pool",
+          "devices": 386,
+          "idle_devices": 194,
+          "idle_share": 0.5025906735751295,
+          "mean_occupancy": 0.000331559710530919,
+          "max_occupancy": 0.0039994390082792215
+        },
+        {
+          "device_class": "shared_digital",
+          "devices": 2,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.11094875283714398,
+          "max_occupancy": 0.11094875283714466
+        },
+        {
+          "device_class": "link",
+          "devices": 5,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.0513698002839217,
+          "max_occupancy": 0.09557172145845896
+        }
+      ],
+      "binding_device_class": "shared_digital",
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+          "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "serving_regime",
+          "value": "lockstep (RETIRED D15 semantics)",
+          "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "2.68435e+08 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.403% mean / 0.404% peak (0 of 386 idle), macro_pool 0.033% mean / 0.400% peak (194 of 386 idle), shared_digital 11.095% mean / 11.095% peak (0 of 2 idle), link 5.137% mean / 9.557% peak (0 of 5 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 11.095% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 4,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.2252197265625,
+        "violated_verdicts": []
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        }
+      ],
+      "wall_s": 0.07126712799072266
+    },
+    {
+      "id": "c002",
+      "knobs": {
+        "layers_per_chip": 8
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        },
+        "state": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 997,
+        "makespan_s": 0.0012736507288240132,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.0012736507288240132,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.request_latency",
+            "label": "end-to-end request latency",
+            "value": 0.0012736507288240132,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.requests_per_s",
+            "label": "completed requests per second",
+            "value": 785.1446062636966,
+            "unit": "requests/s",
+            "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+          }
+        ],
+        "tokens_per_s": null,
+        "prefill_latency_s": 0.0012736507288240132,
+        "decode_step_median_s": null,
+        "serving_regime": "lockstep",
+        "beat_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "max_stage_state_bytes": null,
+        "state_residency_verdict": null,
+        "request_latency_s": 0.0012736507288240132,
+        "requests_per_s": 785.1446062636966,
+        "total_energy_pj": 641605178.8698,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 469900858.8698,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 171704320.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 0,
+          "declared_decode_steps": 0,
+          "extrapolated": false
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "knobs_derived": {
+        "arrays_per_chip": 97
+      },
+      "placement": {
+        "analog_chips": 4,
+        "shared_digital_chiplets": 4,
+        "shared_digital_suggestion": 4,
+        "analog_macro_slots": 388,
+        "macros_holding_tiles": 386,
+        "unowned_macro_slots": 2,
+        "unowned_columns": 2840,
+        "tiles": 386,
+        "owners": 130,
+        "devices": 780,
+        "decode_window": 2
+      },
+      "silicon": {
+        "analog_macro_slots": 388,
+        "macro_footprint_mm2": 1.403065,
+        "analog_macro_silicon_mm2": 544.38922,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_area_provenance": "declared",
+        "shared_digital_silicon_mm2": 0.0,
+        "macro_pool_area_mm2_per_macro": 0.0,
+        "macro_pool_area_provenance": "absent",
+        "macro_pool_silicon_mm2": 0.0,
+        "state_sram_macros": 0,
+        "state_sram_bytes_required": 0.0,
+        "state_sram_silicon_mm2": 0.0,
+        "state_sram_provenance": "absent",
+        "digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 544.38922,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+          "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+        ],
+        "basis": "388 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 4 shared digital chiplets x the card's declared area_mm2 0 + 388 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      },
+      "packing": {
+        "law": "dedicated",
+        "measured": false,
+        "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+      },
+      "effective_column_sets_per_tile": 4,
+      "derived_chiplets": {
+        "chiplets_built": 4,
+        "reason": "the run measures no beat, so nothing can be packed against it"
+      },
+      "pipeline": {
+        "serving_regime": "lockstep",
+        "filled": false,
+        "beat_s": null,
+        "beat_converged": null,
+        "steady_beat_spread": null,
+        "converged_tail_beats": null,
+        "ramp_beats_dropped": null,
+        "tokens_per_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "stages": null,
+        "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+      },
+      "state_bill": {
+        "measured": false,
+        "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+        "store_macros": 0,
+        "store_area_mm2": 0.0,
+        "budget_bytes": null,
+        "budget_verdict": "sized"
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "devices": 388,
+          "idle_devices": 2,
+          "idle_share": 0.005154639175257732,
+          "mean_occupancy": 0.003989020256277039,
+          "max_occupancy": 0.00401994038407013
+        },
+        {
+          "device_class": "macro_pool",
+          "devices": 388,
+          "idle_devices": 196,
+          "idle_share": 0.5051546391752577,
+          "mean_occupancy": 0.0003285423333426818,
+          "max_occupancy": 0.0039835757917800274
+        },
+        {
+          "device_class": "shared_digital",
+          "devices": 4,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.055254345048806414,
+          "max_occupancy": 0.05525434504880674
+        },
+        {
+          "device_class": "link",
+          "devices": 11,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.023617873282780342,
+          "max_occupancy": 0.047596324783618395
+        }
+      ],
+      "binding_device_class": "shared_digital",
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+          "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "serving_regime",
+          "value": "lockstep (RETIRED D15 semantics)",
+          "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "2.68435e+08 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.399% mean / 0.402% peak (2 of 388 idle), macro_pool 0.033% mean / 0.398% peak (196 of 388 idle), shared_digital 5.525% mean / 5.525% peak (0 of 4 idle), link 2.362% mean / 4.760% peak (0 of 11 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 5.525% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 8,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.1129150390625,
+        "violated_verdicts": []
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        }
+      ],
+      "wall_s": 0.0978233814239502
+    },
+    {
+      "id": "c003",
+      "knobs": {
+        "layers_per_chip": 4
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        },
+        "state": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 1001,
+        "makespan_s": 0.0012837542444490133,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.0012837542444490133,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.request_latency",
+            "label": "end-to-end request latency",
+            "value": 0.0012837542444490133,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.requests_per_s",
+            "label": "completed requests per second",
+            "value": 778.9652920907766,
+            "unit": "requests/s",
+            "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+          }
+        ],
+        "tokens_per_s": null,
+        "prefill_latency_s": 0.0012837542444490133,
+        "decode_step_median_s": null,
+        "serving_regime": "lockstep",
+        "beat_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "max_stage_state_bytes": null,
+        "state_residency_verdict": null,
+        "request_latency_s": 0.0012837542444490133,
+        "requests_per_s": 778.9652920907766,
+        "total_energy_pj": 646848058.8698,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 469900858.8698,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 176947200.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 0,
+          "declared_decode_steps": 0,
+          "extrapolated": false
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "knobs_derived": {
+        "arrays_per_chip": 49
+      },
+      "placement": {
+        "analog_chips": 8,
+        "shared_digital_chiplets": 8,
+        "shared_digital_suggestion": 8,
+        "analog_macro_slots": 392,
+        "macros_holding_tiles": 386,
+        "unowned_macro_slots": 6,
+        "unowned_columns": 7960,
+        "tiles": 386,
+        "owners": 130,
+        "devices": 792,
+        "decode_window": 2
+      },
+      "silicon": {
+        "analog_macro_slots": 392,
+        "macro_footprint_mm2": 1.403065,
+        "analog_macro_silicon_mm2": 550.00148,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_area_provenance": "declared",
+        "shared_digital_silicon_mm2": 0.0,
+        "macro_pool_area_mm2_per_macro": 0.0,
+        "macro_pool_area_provenance": "absent",
+        "macro_pool_silicon_mm2": 0.0,
+        "state_sram_macros": 0,
+        "state_sram_bytes_required": 0.0,
+        "state_sram_silicon_mm2": 0.0,
+        "state_sram_provenance": "absent",
+        "digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 550.00148,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+          "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+        ],
+        "basis": "392 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 8 shared digital chiplets x the card's declared area_mm2 0 + 392 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      },
+      "packing": {
+        "law": "dedicated",
+        "measured": false,
+        "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+      },
+      "effective_column_sets_per_tile": 4,
+      "derived_chiplets": {
+        "chiplets_built": 8,
+        "reason": "the run measures no beat, so nothing can be packed against it"
+      },
+      "pipeline": {
+        "serving_regime": "lockstep",
+        "filled": false,
+        "beat_s": null,
+        "beat_converged": null,
+        "steady_beat_spread": null,
+        "converged_tail_beats": null,
+        "ramp_beats_dropped": null,
+        "tokens_per_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "stages": null,
+        "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+      },
+      "state_bill": {
+        "measured": false,
+        "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+        "store_macros": 0,
+        "store_area_mm2": 0.0,
+        "budget_bytes": null,
+        "budget_verdict": "sized"
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "devices": 392,
+          "idle_devices": 6,
+          "idle_share": 0.015306122448979591,
+          "mean_occupancy": 0.003917241584165045,
+          "max_occupancy": 0.00398830229550478
+        },
+        {
+          "device_class": "macro_pool",
+          "devices": 392,
+          "idle_devices": 200,
+          "idle_share": 0.5102040816326531,
+          "mean_occupancy": 0.0003226305226962442,
+          "max_occupancy": 0.003952223903029002
+        },
+        {
+          "device_class": "shared_digital",
+          "devices": 8,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.02740973872001124,
+          "max_occupancy": 0.027409738720011404
+        },
+        {
+          "device_class": "link",
+          "devices": 23,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.011548792173871739,
+          "max_occupancy": 0.023610863999915556
+        }
+      ],
+      "binding_device_class": "shared_digital",
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+          "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "serving_regime",
+          "value": "lockstep (RETIRED D15 semantics)",
+          "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "2.68435e+08 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.392% mean / 0.399% peak (6 of 392 idle), macro_pool 0.032% mean / 0.395% peak (200 of 392 idle), shared_digital 2.741% mean / 2.741% peak (0 of 8 idle), link 1.155% mean / 2.361% peak (0 of 23 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 2.741% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 16,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.0567626953125,
+        "violated_verdicts": []
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        }
+      ],
+      "wall_s": 0.17534661293029785
+    },
+    {
+      "id": "c004",
+      "knobs": {
+        "layers_per_chip": 2
+      },
+      "ok": true,
+      "fail_stage": null,
+      "fail_message": null,
+      "stages": {
+        "config": {
+          "ok": true
+        },
+        "mapping": {
+          "ok": true
+        },
+        "budget": {
+          "ok": true
+        },
+        "lowering": {
+          "ok": true
+        },
+        "pricing": {
+          "ok": true
+        },
+        "memory": {
+          "ok": true
+        },
+        "state": {
+          "ok": true
+        }
+      },
+      "metrics": {
+        "ops_priced": 1009,
+        "makespan_s": 0.0013039612756990137,
+        "entries": [
+          {
+            "key": "sys.fws.prefill_latency",
+            "label": "prefill latency",
+            "value": 0.0013039612756990137,
+            "unit": "s",
+            "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.request_latency",
+            "label": "end-to-end request latency",
+            "value": 0.0013039612756990137,
+            "unit": "s",
+            "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+          },
+          {
+            "key": "sys.fws.requests_per_s",
+            "label": "completed requests per second",
+            "value": 766.8939397482725,
+            "unit": "requests/s",
+            "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+          }
+        ],
+        "tokens_per_s": null,
+        "prefill_latency_s": 0.0013039612756990137,
+        "decode_step_median_s": null,
+        "serving_regime": "lockstep",
+        "beat_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "max_stage_state_bytes": null,
+        "state_residency_verdict": null,
+        "request_latency_s": 0.0013039612756990137,
+        "requests_per_s": 766.8939397482725,
+        "total_energy_pj": 657333818.8698,
+        "energy_components": [
+          {
+            "component": "analog_arrays",
+            "energy_pj": 469900858.8698,
+            "coverage": "covered"
+          },
+          {
+            "component": "link_traffic",
+            "energy_pj": 187432960.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "digital_reduction",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "macro_pool_helpers",
+            "energy_pj": 0.0,
+            "coverage": "partial"
+          },
+          {
+            "component": "shared_digital_chiplet",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          },
+          {
+            "component": "kv_traffic",
+            "energy_pj": 0.0,
+            "coverage": "uncovered"
+          }
+        ],
+        "extrapolation": {
+          "lowered_decode_steps": 0,
+          "declared_decode_steps": 0,
+          "extrapolated": false
+        },
+        "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+      },
+      "notes": [],
+      "knobs_derived": {
+        "arrays_per_chip": 25
+      },
+      "placement": {
+        "analog_chips": 16,
+        "shared_digital_chiplets": 16,
+        "shared_digital_suggestion": 16,
+        "analog_macro_slots": 400,
+        "macros_holding_tiles": 386,
+        "unowned_macro_slots": 14,
+        "unowned_columns": 18200,
+        "tiles": 386,
+        "owners": 130,
+        "devices": 816,
+        "decode_window": 2
+      },
+      "silicon": {
+        "analog_macro_slots": 400,
+        "macro_footprint_mm2": 1.403065,
+        "analog_macro_silicon_mm2": 561.226,
+        "shared_digital_area_mm2_per_chiplet": 0.0,
+        "shared_digital_area_provenance": "declared",
+        "shared_digital_silicon_mm2": 0.0,
+        "macro_pool_area_mm2_per_macro": 0.0,
+        "macro_pool_area_provenance": "absent",
+        "macro_pool_silicon_mm2": 0.0,
+        "state_sram_macros": 0,
+        "state_sram_bytes_required": 0.0,
+        "state_sram_silicon_mm2": 0.0,
+        "state_sram_provenance": "absent",
+        "digital_silicon_mm2": 0.0,
+        "total_silicon_mm2": 561.226,
+        "uncovered_terms": [
+          "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+          "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+        ],
+        "basis": "400 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 16 shared digital chiplets x the card's declared area_mm2 0 + 400 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      },
+      "packing": {
+        "law": "dedicated",
+        "measured": false,
+        "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+      },
+      "effective_column_sets_per_tile": 4,
+      "derived_chiplets": {
+        "chiplets_built": 16,
+        "reason": "the run measures no beat, so nothing can be packed against it"
+      },
+      "pipeline": {
+        "serving_regime": "lockstep",
+        "filled": false,
+        "beat_s": null,
+        "beat_converged": null,
+        "steady_beat_spread": null,
+        "converged_tail_beats": null,
+        "ramp_beats_dropped": null,
+        "tokens_per_s": null,
+        "resident_streams": null,
+        "per_stream_tokens_per_s": null,
+        "per_token_latency_s": null,
+        "stages": null,
+        "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+      },
+      "state_bill": {
+        "measured": false,
+        "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+        "store_macros": 0,
+        "store_area_mm2": 0.0,
+        "budget_bytes": null,
+        "budget_verdict": "sized"
+      },
+      "utilization": [
+        {
+          "device_class": "analog_macro",
+          "devices": 400,
+          "idle_devices": 14,
+          "idle_share": 0.035,
+          "mean_occupancy": 0.003779406713867415,
+          "max_occupancy": 0.0039264969715111595
+        },
+        {
+          "device_class": "macro_pool",
+          "devices": 400,
+          "idle_devices": 208,
+          "idle_share": 0.52,
+          "mean_occupancy": 0.0003112782138599304,
+          "max_occupancy": 0.00389097767324917
+        },
+        {
+          "device_class": "shared_digital",
+          "devices": 16,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.013492489798897604,
+          "max_occupancy": 0.013492489798897684
+        },
+        {
+          "device_class": "link",
+          "devices": 47,
+          "idle_devices": 0,
+          "idle_share": 0.0,
+          "mean_occupancy": 0.00589367266555277,
+          "max_occupancy": 0.011622487354446721
+        }
+      ],
+      "binding_device_class": "shared_digital",
+      "disclosures": [
+        {
+          "constraint": "network_congestion",
+          "value": "not modeled",
+          "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+        },
+        {
+          "constraint": "intra_chip_activation_movement",
+          "value": "a dependency, not priced bytes",
+          "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+        },
+        {
+          "constraint": "model_type_carrier",
+          "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+          "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+        },
+        {
+          "constraint": "serving_regime",
+          "value": "lockstep (RETIRED D15 semantics)",
+          "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+        },
+        {
+          "constraint": "macro_pool_helper_ops",
+          "value": "absorbed: 0 s, 0 pJ",
+          "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+        },
+        {
+          "constraint": "attention_op_folding",
+          "value": "three serial DAG ops, not one folded stage",
+          "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+        },
+        {
+          "constraint": "shared_digital_energy",
+          "value": "0 pJ: no law",
+          "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+        },
+        {
+          "constraint": "row_block_partial_sum_law",
+          "value": "priced with the shift-and-add tree law",
+          "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+        },
+        {
+          "constraint": "reduction_energy",
+          "value": "0 pJ: no card knob declared",
+          "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+        },
+        {
+          "constraint": "activation_tier_is_per_chip",
+          "value": "2.68435e+08 B applied to EVERY chip",
+          "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+        },
+        {
+          "constraint": "device_class_utilization",
+          "value": "analog_macro 0.378% mean / 0.393% peak (14 of 400 idle), macro_pool 0.031% mean / 0.389% peak (208 of 400 idle), shared_digital 1.349% mean / 1.349% peak (0 of 16 idle), link 0.589% mean / 1.162% peak (0 of 47 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 1.349% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "constraint": "op_durations",
+          "value": "unpriced (0.0)",
+          "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+        }
+      ],
+      "memory": {
+        "verdicts": 32,
+        "violated": 0,
+        "undeclared": 0,
+        "worst_ratio": 0.0286865234375,
+        "violated_verdicts": []
+      },
+      "boundaries": [
+        {
+          "boundary_id": "act.c0->c1",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c1->c2",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c2->c3",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c3->c4",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c4->c5",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c5->c6",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c6->c7",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c7->c8",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c8->c9",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c9->c10",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c10->c11",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c11->c12",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c12->c13",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c13->c14",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        },
+        {
+          "boundary_id": "act.c14->c15",
+          "role": "act",
+          "bytes_per_unit": 163840.0,
+          "unit": "prefill",
+          "required_time_s": 2.5258789062500003e-06,
+          "crosses_link": true
+        }
+      ],
+      "wall_s": 0.4776275157928467
+    }
+  ],
+  "front_ids": [
+    "c000"
+  ],
+  "front_shape": "dominated_chain",
+  "front_note": "one non-dominated point although the candidates differ in silicon: every other candidate is worse on BOTH axes, so no swept axis trades silicon for speed here.",
+  "knee": {
+    "point": null,
+    "basis": "the front has 1 point(s) and a knee needs an INTERIOR: with two or fewer non-dominated points there is nothing between the extremes to bend. No point is named.",
+    "distance": null,
+    "points": [
+      "c000"
+    ]
+  },
+  "ladder_trail": null,
+  "state_bill_summary": {
+    "budget_bytes": null,
+    "budget_basis": "there is no residency budget. The on-chip state store is SIZED to each point's own measured per-stage bill, composed from integer copies of the measured SRAM macro and charged in silicon.state_sram_silicon_mm2, so holding state costs AREA and never refuses a point. The one feasibility budget is mapping_dse.max_silicon_mm2.",
+    "store_area_mm2_min": null,
+    "store_area_mm2_max": null,
+    "points_measured": 0,
+    "max_stage_state_bytes_min": null,
+    "max_stage_state_bytes_max": null,
+    "infeasible_by_state": [],
+    "infeasible_by_memory": [],
+    "basis": "D29: every stage holds ALL D streams' recurrent state and KV for its layers, so the per-stage bill scales with the resident-stream count D and D is the stage count. The bytes are fws_eval's own measured residency (evaluation.state_residency), not a second accounting."
+  },
+  "selected_id": "c000",
+  "selected": {
+    "id": "c000",
+    "knobs": {
+      "layers_per_chip": 32
+    },
+    "ok": true,
+    "fail_stage": null,
+    "fail_message": null,
+    "stages": {
+      "config": {
+        "ok": true
+      },
+      "mapping": {
+        "ok": true
+      },
+      "budget": {
+        "ok": true
+      },
+      "lowering": {
+        "ok": true
+      },
+      "pricing": {
+        "ok": true
+      },
+      "memory": {
+        "ok": true
+      },
+      "state": {
+        "ok": true
+      }
+    },
+    "metrics": {
+      "ops_priced": 994,
+      "makespan_s": 0.0012660730921052632,
+      "entries": [
+        {
+          "key": "sys.fws.prefill_latency",
+          "label": "prefill latency",
+          "value": 0.0012660730921052632,
+          "unit": "s",
+          "basis": "finish of the LAST prefill op minus the first prefill issue, both read off the one timeline. It is measured, never assembled from layers x block latency + endpoints (P4 \u00a73)."
+        },
+        {
+          "key": "sys.fws.request_latency",
+          "label": "end-to-end request latency",
+          "value": 0.0012660730921052632,
+          "unit": "s",
+          "basis": "finish of the last op of the whole DAG minus the first issue \u2014 measured once on the critical path, never assembled from per-stage terms (P4 \u00a73)."
+        },
+        {
+          "key": "sys.fws.requests_per_s",
+          "label": "completed requests per second",
+          "value": 789.8438141017363,
+          "unit": "requests/s",
+          "basis": "1 same-length requests (D15) divided by the observed span of the same timeline. Printed beside the headline (ADJ-6)."
+        }
+      ],
+      "tokens_per_s": null,
+      "prefill_latency_s": 0.0012660730921052632,
+      "decode_step_median_s": null,
+      "serving_regime": "lockstep",
+      "beat_s": null,
+      "resident_streams": null,
+      "per_stream_tokens_per_s": null,
+      "per_token_latency_s": null,
+      "max_stage_state_bytes": null,
+      "state_residency_verdict": null,
+      "request_latency_s": 0.0012660730921052632,
+      "requests_per_s": 789.8438141017363,
+      "total_energy_pj": 637673018.8698,
+      "energy_components": [
+        {
+          "component": "analog_arrays",
+          "energy_pj": 469900858.8698,
+          "coverage": "covered"
+        },
+        {
+          "component": "link_traffic",
+          "energy_pj": 167772160.0,
+          "coverage": "partial"
+        },
+        {
+          "component": "digital_reduction",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        },
+        {
+          "component": "macro_pool_helpers",
+          "energy_pj": 0.0,
+          "coverage": "partial"
+        },
+        {
+          "component": "shared_digital_chiplet",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        },
+        {
+          "component": "kv_traffic",
+          "energy_pj": 0.0,
+          "coverage": "uncovered"
+        }
+      ],
+      "extrapolation": {
+        "lowered_decode_steps": 0,
+        "declared_decode_steps": 0,
+        "extrapolated": false
+      },
+      "headline_basis": "ADJ-6: tokens/s at the decode terminal, read off THIS candidate's own timeline (fws_eval.evaluate_fws over program.fws_build's placed DAG). No closed form and no period is involved anywhere in this row."
+    },
+    "notes": [],
+    "knobs_derived": {
+      "arrays_per_chip": 386
+    },
+    "placement": {
+      "analog_chips": 1,
+      "shared_digital_chiplets": 1,
+      "shared_digital_suggestion": 1,
+      "analog_macro_slots": 386,
+      "macros_holding_tiles": 386,
+      "unowned_macro_slots": 0,
+      "unowned_columns": 280,
+      "tiles": 386,
+      "owners": 130,
+      "devices": 773,
+      "decode_window": 2
+    },
+    "silicon": {
+      "analog_macro_slots": 386,
+      "macro_footprint_mm2": 1.403065,
+      "analog_macro_silicon_mm2": 541.58309,
+      "shared_digital_area_mm2_per_chiplet": 0.0,
+      "shared_digital_area_provenance": "declared",
+      "shared_digital_silicon_mm2": 0.0,
+      "macro_pool_area_mm2_per_macro": 0.0,
+      "macro_pool_area_provenance": "absent",
+      "macro_pool_silicon_mm2": 0.0,
+      "state_sram_macros": 0,
+      "state_sram_bytes_required": 0.0,
+      "state_sram_silicon_mm2": 0.0,
+      "state_sram_provenance": "absent",
+      "digital_silicon_mm2": 0.0,
+      "total_silicon_mm2": 541.58309,
+      "uncovered_terms": [
+        "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+        "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+      ],
+      "basis": "386 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 1 shared digital chiplets x the card's declared area_mm2 0 + 386 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+    },
+    "packing": {
+      "law": "dedicated",
+      "measured": false,
+      "basis": "this point is placed under the DEDICATED law, which runs no packer: there is no cell census to report and printing one would be an invented number (D21). Declare mapping.packing: dense for D27's census."
+    },
+    "effective_column_sets_per_tile": 4,
+    "derived_chiplets": {
+      "chiplets_built": 1,
+      "reason": "the run measures no beat, so nothing can be packed against it"
+    },
+    "pipeline": {
+      "serving_regime": "lockstep",
+      "filled": false,
+      "beat_s": null,
+      "beat_converged": null,
+      "steady_beat_spread": null,
+      "converged_tail_beats": null,
+      "ramp_beats_dropped": null,
+      "tokens_per_s": null,
+      "resident_streams": null,
+      "per_stream_tokens_per_s": null,
+      "per_token_latency_s": null,
+      "stages": null,
+      "basis": "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of ONE token per beat; D = the stage count, DERIVED from the stage plan and never configured; the per-stream rate is 1/(D x beat)."
+    },
+    "state_bill": {
+      "measured": false,
+      "reason": "the retired lockstep regime has no resident streams: state and KV belong to ONE batch stepping through the whole model, which the per-chip memory verdicts already report (D29 supersedes it).",
+      "store_macros": 0,
+      "store_area_mm2": 0.0,
+      "budget_bytes": null,
+      "budget_verdict": "sized"
+    },
+    "utilization": [
+      {
+        "device_class": "analog_macro",
+        "devices": 386,
+        "idle_devices": 0,
+        "idle_share": 0.0,
+        "mean_occupancy": 0.004033687341612597,
+        "max_occupancy": 0.004044000328200937
+      },
+      {
+        "device_class": "macro_pool",
+        "devices": 386,
+        "idle_devices": 194,
+        "idle_share": 0.5025906735751295,
+        "mean_occupancy": 0.00033222118867480706,
+        "max_occupancy": 0.004007418088389871
+      },
+      {
+        "device_class": "shared_digital",
+        "devices": 1,
+        "idle_devices": 0,
+        "idle_share": 0.0,
+        "mean_occupancy": 0.22234020225509923,
+        "max_occupancy": 0.22234020225509923
+      },
+      {
+        "device_class": "link",
+        "devices": 2,
+        "idle_devices": 0,
+        "idle_share": 0.0,
+        "mean_occupancy": 0.12768318907338383,
+        "max_occupancy": 0.19152478361007574
+      }
+    ],
+    "binding_device_class": "shared_digital",
+    "disclosures": [
+      {
+        "constraint": "network_congestion",
+        "value": "not modeled",
+        "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping."
+      },
+      {
+        "constraint": "intra_chip_activation_movement",
+        "value": "a dependency, not priced bytes",
+        "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports."
+      },
+      {
+        "constraint": "model_type_carrier",
+        "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+        "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction."
+      },
+      {
+        "constraint": "serving_regime",
+        "value": "lockstep (RETIRED D15 semantics)",
+        "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result."
+      },
+      {
+        "constraint": "macro_pool_helper_ops",
+        "value": "absorbed: 0 s, 0 pJ",
+        "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope."
+      },
+      {
+        "constraint": "attention_op_folding",
+        "value": "three serial DAG ops, not one folded stage",
+        "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation."
+      },
+      {
+        "constraint": "shared_digital_energy",
+        "value": "0 pJ: no law",
+        "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6)."
+      },
+      {
+        "constraint": "row_block_partial_sum_law",
+        "value": "priced with the shift-and-add tree law",
+        "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21)."
+      },
+      {
+        "constraint": "reduction_energy",
+        "value": "0 pJ: no card knob declared",
+        "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4)."
+      },
+      {
+        "constraint": "activation_tier_is_per_chip",
+        "value": "2.68435e+08 B applied to EVERY chip",
+        "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain."
+      },
+      {
+        "constraint": "device_class_utilization",
+        "value": "analog_macro 0.403% mean / 0.404% peak (0 of 386 idle), macro_pool 0.033% mean / 0.401% peak (194 of 386 idle), shared_digital 22.234% mean / 22.234% peak (0 of 1 idle), link 12.768% mean / 19.152% peak (0 of 2 idle)",
+        "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 22.234% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+      },
+      {
+        "constraint": "op_durations",
+        "value": "unpriced (0.0)",
+        "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21)."
+      }
+    ],
+    "memory": {
+      "verdicts": 2,
+      "violated": 0,
+      "undeclared": 0,
+      "worst_ratio": 0.4498365521430969,
+      "violated_verdicts": []
+    },
+    "boundaries": [],
+    "wall_s": 0.06908106803894043
+  },
+  "best_violation": null,
+  "disclosures": [
+    {
+      "constraint": "digital_provisioning_is_not_an_axis",
+      "value": "refused axes: arrays_per_chip, num_arrays, softmax_lanes, vector_lanes; the engine is DERIVED at every point",
+      "reason": "ADJ-13 retires the chip's SLOT COUNT as a swept or declared knob. A chip offers exactly the macro slots the layers it holds need, and that number is DERIVED from the placement itself: the sweep places the layers once to learn the requirement and builds the chip to it. Sweeping it produced garbage points at both ends \u2014 a capacity under the requirement is refused by the assembly check and tells you nothing, and a capacity over it enumerates empty slots that are charged as silicon, so the 'frontier' bought area with no throughput and called it a design point. What remains free is the PARTITION (layers_per_chip / layers_per_stage), which is a real choice; the capacity that partition implies is arithmetic.; ADJ-10 retires the attention fabric's ARRAY COUNT as a swept or declared knob, for the same reason D31/ADJ-9 retired the scan engine's lane count: it is a count of MEASURED synthesis blocks, so it is DERIVED \u2014 sized UP in integer copies of the measured GEMMINI 32x32 block until every stage's attention time fits that stage's own ANALOG m-pass time \u2014 and REPORTED (evaluation.digital_silicon.derived_fabric_sizing). Sweeping it would sweep the answer. Only the COUNT is derived: rows x cols per array stay as measured and as declared, because inventing array geometry is refused (ADJ-4). An explicit cim.cards.<card>.fabric_num_arrays on a SINGLE machine is still an OVERRIDE that rides its own disclosure; what is refused here is making it an AXIS.; ADJ-10 retires the softmax pipeline's LANE COUNT as a swept or declared knob on the same grounds as num_arrays: the lane is a MEASURED per-lane census (OPTIMA's softmax collection, block for block), so the width is DERIVED against the same per-stage analog m-pass target and REPORTED. cim.cards.<card>.fabric_softmax_lanes pins ONE machine with a disclosure; as an AXIS it is refused.; D31/ADJ-9 retire the scan/vector engine as a swept or declared knob: its width is DERIVED \u2014 sized UP until every stage's digital per-stage time fits that stage's own ANALOG m-pass time \u2014 and REPORTED (evaluation.digital_silicon.derived_engine_sizing). Sweeping it would sweep the answer. The frontier (P7.4) sweeps stage granularity, mux/bank depth and chip capacity, and derives the digital side at every point. An explicit cim.cards.<card>.vector_lanes on a single machine is still an OVERRIDE that rides its own disclosure (D31); what is refused here is making it an AXIS.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "network_congestion",
+      "value": "not modeled",
+      "reason": "A1 / D17: the fabric is fully-connected p2p, analytical. Boundary bytes are placed and reported; no queueing, routing or topology term exists anywhere in this mapping.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "intra_chip_activation_movement",
+      "value": "a dependency, not priced bytes",
+      "reason": "D17 declares one network law and it is the p2p fabric BETWEEN chips. Activations moving between macros of one chip are carried as DAG dependencies with their byte count annotated and no link charge: no on-chip interconnect law is declared anywhere, and inventing one would be a number no card supports.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "model_type_carrier",
+      "value": "model_id 'ViT-Huge-story-64', model_param.model_type 'vit'",
+      "reason": "This model is priced through the 'vit' carrier: model_type selects the FFN/attention arithmetic, not the model's identity. Owners, labels and the atlas all name 'ViT-Huge-story-64'; the carrier is named here so the two spellings are reconciled and not read as a contradiction.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "serving_regime",
+      "value": "lockstep (RETIRED D15 semantics)",
+      "reason": "This mapping is lowered as ONE batch of same-length requests stepping through the whole model together, which is what the pass-1/2 closed form models and what the ADJ-8 bridge compares against. D29 SUPERSEDED it for fws_cim: the shipped regime is the filled pipeline ('filled_pipeline'), and every run that declares a `mapping:` block gets it. This run does not declare one (or asked for lockstep by name), so it is the degenerate comparison mode: its batch, its endpoints and its per-step semantics are the retired ones and none of its numbers is a D29 result.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "macro_pool_helper_ops",
+      "value": "absorbed: 0 s, 0 pJ",
+      "reason": "D12 sizes the per-macro digital pool so it NEVER BLOCKS the pipeline, and no card declares a per-element cost for a norm, an activation, a residual add or a short depthwise conv. These ops therefore carry zero time and zero energy, exactly as the pass-1/2 report's 'helper lanes are absorbed into their stage' assumption does. Their CONCURRENCY is still measured and it drives the derived pool width (P4.5), so 'absorbed' is a sized claim here, not a hope.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "attention_op_folding",
+      "value": "three serial DAG ops, not one folded stage",
+      "reason": "P2's attention law folds QK^T and PV into ONE concurrent systolic stage and runs the softmax pipeline beside it: stage = max(max(qk, pv) + fill_drain, softmax). P3 placed three dependent ops, so the DAG prices three ops and SERIALIZES them. The op-internal fill/drain penalty is charged ONCE, on the QK op, and it is never added to the DAG's own system-level ramp \u2014 two quantities, two names (P4 \u00a71). On disagreement the DAG wins and the closed form is annotated (ADJ-8); this note is that annotation.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "shared_digital_energy",
+      "value": "0 pJ: no law",
+      "reason": "No law prices a shared-digital-chiplet op's energy: the card names no cim.cards.<card>.synthesis_library, so D32's measured block powers are not available and the card schema refuses an energy_per_op_pj knob precisely because nothing would read it (P2.1). Fabric TIME is fully priced; fabric ENERGY is uncovered and the total says so instead of absorbing it into a blanket PARTIAL word (ADJ-6).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "row_block_partial_sum_law",
+      "value": "priced with the shift-and-add tree law",
+      "reason": "A row-block partial sum and a bit-slice composition are the same adder tree on the same per-macro pool, so they are priced by the same P2 law (price_reduction) with the operand count in place of the slice count. Declaring a second law for one shape would be a second accounting (D21).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "reduction_energy",
+      "value": "0 pJ: no card knob declared",
+      "reason": "cim.cards.<card>.pool_energy_per_add_pj is 0, so the priced shift-add trees report zero energy rather than an invented per-add figure. The reduction TIME is fully priced; only its energy is uncovered (ADJ-4).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "activation_tier_is_per_chip",
+      "value": "2.68435e+08 B applied to EVERY chip",
+      "reason": "The hardware config declares ONE activation/SRAM tier size (tech_config.DRAM.size); no per-chip capacity field exists anywhere in the schema. The feasibility check therefore applies the declared size to each chip independently. It is a relaxation and it is disclosed rather than presented as a per-chip capacity the config does not contain.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    },
+    {
+      "constraint": "device_class_utilization",
+      "value": "analog_macro 0.403% mean / 0.404% peak (0 of 386 idle), macro_pool 0.033% mean / 0.401% peak (194 of 386 idle), shared_digital 22.234% mean / 22.234% peak (0 of 1 idle), link 12.768% mean / 19.152% peak (0 of 2 idle)",
+      "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 22.234% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears.",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ],
+      "varies_by_candidate": [
+        {
+          "id": "c001",
+          "value": "analog_macro 0.403% mean / 0.404% peak (0 of 386 idle), macro_pool 0.033% mean / 0.400% peak (194 of 386 idle), shared_digital 11.095% mean / 11.095% peak (0 of 2 idle), link 5.137% mean / 9.557% peak (0 of 5 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 11.095% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c002",
+          "value": "analog_macro 0.399% mean / 0.402% peak (2 of 388 idle), macro_pool 0.033% mean / 0.398% peak (196 of 388 idle), shared_digital 5.525% mean / 5.525% peak (0 of 4 idle), link 2.362% mean / 4.760% peak (0 of 11 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 5.525% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c003",
+          "value": "analog_macro 0.392% mean / 0.399% peak (6 of 392 idle), macro_pool 0.032% mean / 0.395% peak (200 of 392 idle), shared_digital 2.741% mean / 2.741% peak (0 of 8 idle), link 1.155% mean / 2.361% peak (0 of 23 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 2.741% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        },
+        {
+          "id": "c004",
+          "value": "analog_macro 0.378% mean / 0.393% peak (14 of 400 idle), macro_pool 0.031% mean / 0.389% peak (208 of 400 idle), shared_digital 1.349% mean / 1.349% peak (0 of 16 idle), link 0.589% mean / 1.162% peak (0 of 47 idle)",
+          "reason": "D28: idle silicon is a provisioning finding, never a fact to accept, so every device class prints its utilization on every run. The BINDING class here is shared_digital at 1.349% peak occupancy; a class far below it is silicon this provisioning does not need, and the system-sizing sweep is where that is fixed. No threshold decides when this banner appears \u2014 it always appears."
+        }
+      ]
+    },
+    {
+      "constraint": "op_durations",
+      "value": "unpriced (0.0)",
+      "reason": "P3 places; P4 prices (A1). Every op in the emitted DAG carries a zero duration and the annotation P4's pricing table needs. A number here would be a second accounting of a metric P4 owns (D21).",
+      "candidates": [
+        "c000",
+        "c001",
+        "c002",
+        "c003",
+        "c004"
+      ]
+    }
+  ],
+  "silicon_coverage": {
+    "basis_from": "c000",
+    "basis": "386 enumerated analog macro slots x macro_footprint_mm2 1.40307 + 1 shared digital chiplets x the card's declared area_mm2 0 + 386 per-macro digital pools x 0 mm2 (no library to compose it from) + NO state-store term: the card names no synthesis library. The analog term is the P3.6 atlas's enumerated_macro_silicon (slots the machine HAS), NOT CimDeviceModel.total_area_mm2 (arrays a model NEEDS). UNCOVERED (absent law, not a measured zero): shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library); per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)",
+    "uncovered_terms": [
+      "shared digital chiplet area (the card declares no area_mm2 and names no synthesis_library)",
+      "per-macro digital pool area (the card names no synthesis_library, so D32's block composition has nothing to compose)"
+    ]
+  },
+  "total_wall_s": 0.9057812690734863,
+  "verify": {
+    "ran": true,
+    "emitted_config": "docs/qif/dse/vit_huge_story_64_frontier/selected_config.yaml",
+    "report_path": "output/VIT/fws_qif_report.json",
+    "pass": true,
+    "checks": [
+      {
+        "name": "analog_chips",
+        "dse": 1,
+        "simulator": 1,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "tiles",
+        "dse": 386,
+        "simulator": 386,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "analog_macro_slots",
+        "dse": 386,
+        "simulator": 386,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "exact (a count)"
+      },
+      {
+        "name": "prefill_latency",
+        "dse": 0.0012660730921052632,
+        "simulator": 0.0012660730921052632,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "request_latency",
+        "dse": 0.0012660730921052632,
+        "simulator": 0.0012660730921052632,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      },
+      {
+        "name": "requests_per_s",
+        "dse": 789.8438141017363,
+        "simulator": 789.8438141017363,
+        "rel_err": 0.0,
+        "ok": true,
+        "tolerance": "<= 0.1 %"
+      }
+    ],
+    "message": null
+  },
+  "emitted_config": "docs/qif/dse/vit_huge_story_64_frontier/selected_config.yaml"
+}

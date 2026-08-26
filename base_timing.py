@@ -120,8 +120,18 @@ class model_LLM:
         self.hidden_dim = exp_config.model_config.hidden_dim
         self.seq_len = exp_config.model_config.seq_len
         self.decode_len = exp_config.model_config.decode_len
-        self.num_heads = exp_config.model_config.num_heads
-        self.head_dim = getattr(exp_config.model_config, "head_dim", None)
+        # A model with no attention block at all (a pure-recurrence stack)
+        # legally has no head count; LLMConfig refuses the attribute by name.
+        # Zero heads is the honest reading, and every attention term downstream
+        # is gated on a layer that declares attention.
+        try:
+            self.num_heads = exp_config.model_config.num_heads
+        except (AttributeError, ValueError, TypeError):
+            self.num_heads = 0
+        try:
+            self.head_dim = getattr(exp_config.model_config, "head_dim", None)
+        except (AttributeError, ValueError, TypeError):
+            self.head_dim = None
         self.tied_embeddings = exp_config.model_config.tied_embeddings
         self.model_type = exp_config.model_config.model_type
         self.intermediate_size = exp_config.model_config.intermediate_size
@@ -130,14 +140,15 @@ class model_LLM:
         self.disable_embedding_unembedding = bool(
             getattr(exp_config.model_config, "disable_embedding_unembedding", False)
         )
-        self.attention_type = exp_config.model_config.attention.attention_type
-        self.kv_heads = (
-            exp_config.model_config.attention.kv_heads
-            if hasattr(exp_config.model_config.attention, "kv_heads")
-            else None
-        )
-        self.use_flashattention = getattr(exp_config.model_config.attention, "use_flashattention", False)
-        self.attention_tile_size = getattr(exp_config.model_config.attention, "attention_tile_size", None)
+        # A pure-recurrence stack carries no attention block at all, so every
+        # attention knob below is absent rather than defaulted. Reading them as
+        # None keeps the attention laws switched off for a model that declares
+        # no attention layer, which is the honest reading.
+        attention = getattr(exp_config.model_config, "attention", None)
+        self.attention_type = getattr(attention, "attention_type", None)
+        self.kv_heads = getattr(attention, "kv_heads", None)
+        self.use_flashattention = getattr(attention, "use_flashattention", False)
+        self.attention_tile_size = getattr(attention, "attention_tile_size", None)
         self.kv_lora_rank = getattr(exp_config.model_config.attention, "kv_lora_rank", None)
         self.q_lora_rank = getattr(exp_config.model_config.attention, "q_lora_rank", None)
         self.qk_nope_head_dim = getattr(exp_config.model_config.attention, "qk_nope_head_dim", None)
@@ -518,11 +529,20 @@ class TimeCalculation:
             self.num_layers = self.model.num_layers
             self.hidden_dim = self.model.hidden_dim
             self.seq_len = self.model.seq_len
-            self.num_heads = self.model.num_heads
+            # A pure-recurrence stack declares no attention block, so it has
+            # no heads and no head dim: 0, not a division by zero.
+            try:
+                self.num_heads = self.model.num_heads
+            except (AttributeError, ValueError, TypeError):
+                self.num_heads = 0
+            try:
+                declared_head_dim = getattr(self.model, "head_dim", None)
+            except (AttributeError, ValueError, TypeError):
+                declared_head_dim = None
             self.head_dim = (
-                int(self.model.head_dim)
-                if getattr(self.model, "head_dim", None) is not None
-                else self.hidden_dim // self.num_heads
+                int(declared_head_dim)
+                if declared_head_dim is not None
+                else (self.hidden_dim // self.num_heads if self.num_heads else 0)
             )
             self.intermediate_size = self.model.intermediate_size
             self.n_tokens = self.model.n_tokens

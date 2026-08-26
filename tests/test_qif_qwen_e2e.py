@@ -109,11 +109,37 @@ def qwen():
     return fws_eval.evaluate_fws(build_fws_program(mapping))
 
 
+def _lockstep_machine(raw):
+    """The machine the retired regime's hand arithmetic was computed against.
+
+    Two things separate it from the shipped machine, and both change what gets
+    placed rather than how it is priced:
+
+    * D30 drops the embedding and the lm_head on the shipped path and this
+      fixture puts them back, so the last chip carries Qwen's 248320 x 2560
+      lm_head and the placement is far larger.
+    * The shipped machine ships `bank_depth: 1` (ADJ-13/ADJ-14 selected it),
+      which allocates at bank granularity and re-tiles every weight matrix.
+
+    The checks that ride this fixture derive their numbers BY HAND for the
+    dedicated allocation on a 180-slot chip -- the gate spanning two macros at
+    4 active column sets, the delta-rule law -- so the fixture pins that
+    machine instead of following the shipped one. A hand-derived number is an
+    INDEPENDENT check, and it stays independent only if the machine it was
+    derived for is the machine it runs on.
+    """
+    raw["cim"]["chip"]["arrays_per_chip"] = 180
+    cards = raw.get("cim", {}).get("cards") or {}
+    for card in cards.values():
+        if isinstance(card, dict):
+            card.pop("bank_depth", None)
+
+
 @pytest.fixture(scope="module")
 def qwen_lockstep():
     """The RETIRED regime, by name: the prefill machine the law checks need."""
     mapping = fws_mapping.build_mapping(
-        _hw(QWEN_HW),
+        _hw(QWEN_HW, _lockstep_machine),
         _qwen_model(lockstep=True),
         regime=fws_mapping.REGIME_LOCKSTEP,
     )
@@ -738,7 +764,15 @@ def test_the_gate_reaches_the_atlas_as_a_drawn_tile():
     with open(ATLAS_JSON, encoding="utf-8") as handle:
         atlas = json.load(handle)
     gate_tiles = [t for t in atlas["tiles"] if t["owner"]["block"] == "attn_gate_proj"]
-    assert len(gate_tiles) == 8 * 2  # one W_g per gated layer, over two macros
+    # ONE W_g PER GATED LAYER, however the allocation tiles it. The count of
+    # TILES is a property of the allocation granularity -- this machine ships
+    # bank_depth 1, so a matrix is cut at bank granularity and spans more,
+    # smaller tiles than the dedicated allocation did -- so what is pinned is
+    # the thing the wave added: every gated layer has a gate on the picture,
+    # and no ungated layer does.
+    gated = {t["owner"]["layer"] for t in gate_tiles}
+    assert len(gated) == 8
+    assert gate_tiles and len(gate_tiles) % len(gated) == 0
     assert "attn_gate_proj" in atlas["systems"][0]["models"][0]["blocks"]
 
 

@@ -1,0 +1,50 @@
+# Falcon-Mamba-7B DECODE variant for the fws_cim MAPPED path (D29/D30).
+#
+# THE PURE-RECURRENCE CASE. This stack has no attention block at all: 64 Mamba-1
+# layers, no MLP (ffn_per_layer: false). It is the simplest shape the mapped
+# path can be asked to place - one mixer kind, one weight block set, no KV - so
+# it is the workload to debug a mapping against before trusting a hybrid.
+#
+# It is falcon_mamba_7b_inf.yaml with the two fields the FILLED PIPELINE fixes:
+#
+#   global_batch_size: 1            - D29 removes batch size from the serving
+#     surface: decode is independent streams staggered across the stages, one
+#     token exits per beat, every analog op fires at M = 1, and throughput comes
+#     from the resident stream count D (= the stage count, DERIVED).
+#   disable_embedding_unembedding: true - D30 drops embedding and lm_head.
+#
+# The ORIGINAL file is untouched: it is the closed-form/lockstep workload and
+# the model-matrix row. The two are never used for one number.
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: false
+  model_type: "llama"
+  global_batch_size: 1  # D29: the local batch is always 1 and a batch does not exist here
+  disable_embedding_unembedding: true  # D30: embedding and lm_head are dropped entirely
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 4096
+  layer_plan:
+    pattern: ["mamba"]
+    ffn_per_layer: false  # Mamba-1 stacks the mixer alone; there is no MLP
+  ssm:
+    variant: "mamba1"  # per-token selective scan, no chunking
+    d_state: 16  # HF state_size
+    d_conv: 4  # HF conv_kernel
+    d_inner: 8192  # HF intermediate_size; HF expand: 16 is inert here
+    dt_rank: 256  # HF time_step_rank
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 8192
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 64
+  intermediate_size: 8192  # required by the schema; unused (ffn_per_layer: false)
+  vocab_size: 65024
+  num_layers: 64
+
+inference_param:
+  sample_every: -1

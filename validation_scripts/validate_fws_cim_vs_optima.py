@@ -889,7 +889,7 @@ DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_cim_dse")
 QIF_DSE_TOOL = os.path.join(REPO_ROOT, "tools", "fws_qif_dse.py")
 QIF_DSE_OUT_ROOT = os.path.join(REPO_ROOT, "output", "fws_qif_dse")
 QIF_DSE_DEMO = os.path.join(
-    REPO_ROOT, "docs", "qif", "dse", "granite_capacity_banks", "dse_report.json"
+    REPO_ROOT, "docs", "qif", "dse", "granite_capacity_banks_retired", "dse_report.json"
 )
 #: The Wave-D sweep the one above replaced (ADJ-9). FROZEN and labelled: its
 #: config declared `vector_lanes` as an axis and tools/fws_qif_dse.py now
@@ -1405,7 +1405,7 @@ def check_qif_dse_selection(table):
     name = "P3.7 demo sweep"
     if not table.boolean(
         "%s: checked-in artifact exists" % name,
-        "docs/qif/dse/granite_lanes_banks/dse_report.json",
+        "docs/qif/dse/granite_capacity_banks_retired/dse_report.json",
         os.path.exists(QIF_DSE_DEMO),
     ):
         return
@@ -1891,9 +1891,15 @@ def check_qif_dse_verify(table):
     }
     hw_dict["tech_param"]["DRAM"]["size"] = "32 GB"
     hw_dict["mapping_dse"] = {
-        "label": "P3.7 validator: banking x chip slot budget",
+        # ADJ-13 retired the chip slot budget as an axis (a chip is built to
+        # its placement), and ADJ-14 made the CHIPLET COUNT one, so the second
+        # axis here is the count.
+        "label": "P3.7 validator: banking x chiplet count",
         "objective": "throughput",
-        "axes": {"bank_depth": [4, 1], "arrays_per_chip": [120, 8]},
+        # 0 chiplets is refused BY NAME (there is no device to put attention,
+        # scan or state update on), which keeps this gate covering the refusal
+        # path now that a swept chiplet COUNT otherwise produces valid points.
+        "axes": {"bank_depth": [4, 1], "shared_chiplets": [4, 0]},
     }
     hw_path = os.path.join(out_dir, "fws_cim_llama7b_mapped_dse.yaml")
     with open(hw_path, "w") as handle:
@@ -1928,7 +1934,7 @@ def check_qif_dse_verify(table):
     selected = payload["selected"]
     table.exact(
         "%s: selected knobs" % name,
-        {"bank_depth": 1, "arrays_per_chip": 120},
+        {"bank_depth": 1, "shared_chiplets": 4},
         selected["knobs"],
     )
     table.boolean(
@@ -2001,8 +2007,9 @@ def check_qif_synthesis_library(table):
     )
     table.boolean(
         "%s: every block carries a measured provenance" % name,
-        "area_um2 + power_W + 'measured via synthesis, 22nm' on all 13 blocks",
-        len(lib.blocks) == 13
+        "area_um2 + power_W + 'measured via synthesis, 22nm' on all 14 blocks "
+        "(13 logic blocks + the SRAM macro the state store is built from)",
+        len(lib.blocks) == 14
         and all(
             block.provenance == "measured via synthesis, 22nm"
             and block.area_um2 >= 0
@@ -2349,12 +2356,10 @@ def check_qif_filled_pipeline(table):
     )
     table.boolean(
         "%s: the state verdict is named" % name,
-        "fits / VIOLATED / undeclared, per stage and in total",
-        residency["verdict"] in ("fits", "VIOLATED", "undeclared")
-        and all(
-            row["verdict"] in ("fits", "VIOLATED", "undeclared")
-            for row in residency["per_stage"]
-        ),
+        "sized, per stage and in total: the store is BUILT to the bill, so "
+        "there is no verdict a stage can fail (ADJ-11)",
+        residency["verdict"] == "sized"
+        and all(row["verdict"] == "sized" for row in residency["per_stage"]),
         str(residency["verdict"]),
     )
     table.boolean(
@@ -2611,10 +2616,10 @@ def check_qif_frontier(table):
             else "-",
         )
 
-        # (5) The silicon accounting: three terms, and they close.
+        # (5) The silicon accounting: four terms, and they close.
         table.boolean(
-            "%s: total silicon == analog + chiplets + pools" % name,
-            "one accounting, three named terms (D21/D32)",
+            "%s: total silicon == analog + chiplets + pools + state store" % name,
+            "one accounting, four named terms (D21/D32/ADJ-11)",
             bool(valid)
             and all(
                 abs(
@@ -2623,6 +2628,7 @@ def check_qif_frontier(table):
                         c["silicon"]["analog_macro_silicon_mm2"]
                         + c["silicon"]["shared_digital_silicon_mm2"]
                         + c["silicon"]["macro_pool_silicon_mm2"]
+                        + c["silicon"]["state_sram_silicon_mm2"]
                     )
                 )
                 <= 1e-9 * max(1.0, c["silicon"]["total_silicon_mm2"])
@@ -2743,51 +2749,56 @@ def check_qif_frontier(table):
         # (8) Infeasible by residency: a verdict with a stage and bytes.
         summary = payload["state_bill_summary"]
         refused = summary["infeasible_by_state"]
-        if summary["budget_bytes"] is None:
-            # No budget declared on this sweep. That is a CHOICE with a reason,
-            # and the row says which choice it is rather than passing a check
-            # that was never made (D21).
-            table.boolean(
-                "%s: no residency budget declared, and the bill is reported anyway" % name,
-                "max_stage_state_bytes absent -> no point refused for residency, "
-                "every point's measured bill still on its row",
-                not refused and summary["points_measured"] > 0,
-                "%d point(s) with a measured bill, 0 refused"
-                % summary["points_measured"],
-            )
-        else:
-            table.boolean(
-                "%s: residency refusals name the stage and the bytes (D29)" % name,
-                "every refused point lists the violating stage(s) over the budget",
-                bool(refused)
-                and all(
-                    row["violating_stages"]
-                    and all(
-                        stage["state_bytes"] > summary["budget_bytes"]
-                        for stage in row["violating_stages"]
+        # THE STATE STORE IS SIZED, NOT CAPPED. A machine is never refused for
+        # needing memory: the store is built out of integer copies of the
+        # measured SRAM macro and its area is charged as silicon, so what the
+        # gate checks now is that no point was refused for residency and that
+        # every point paid for the store it needs.
+        sized = [
+            c for c in valid
+            if (c.get("state_bill") or {}).get("measured")
+        ]
+        table.boolean(
+            "%s: no point is refused for needing memory" % name,
+            "the residency cap is retired; state is sized and charged as area",
+            not refused and summary["budget_bytes"] is None,
+            "%d point(s) with a measured bill, %d refused for residency"
+            % (summary["points_measured"], len(refused)),
+        )
+        table.boolean(
+            "%s: the state store is sized and PAID FOR in silicon" % name,
+            "every point's store macros x the measured macro area is its "
+            "silicon.state_sram_silicon_mm2, and it is inside the total",
+            bool(sized)
+            and all(
+                c["silicon"]["state_sram_macros"] == c["state_bill"]["store_macros"]
+                and c["silicon"]["state_sram_silicon_mm2"] > 0
+                and abs(
+                    c["silicon"]["total_silicon_mm2"]
+                    - (
+                        c["silicon"]["analog_macro_silicon_mm2"]
+                        + c["silicon"]["shared_digital_silicon_mm2"]
+                        + c["silicon"]["macro_pool_silicon_mm2"]
+                        + c["silicon"]["state_sram_silicon_mm2"]
                     )
-                    for row in refused
-                ),
-                "%d point(s) refused by residency, %d by memory"
-                % (len(refused), len(summary["infeasible_by_memory"])),
-            )
-            table.boolean(
-                "%s: a refused point was PRICED before it was refused" % name,
-                "the state check is last, so an infeasible point still reports its "
-                "throughput and its bill",
-                bool(refused)
-                and all(
-                    row["max_stage_state_bytes"] and row["resident_streams"]
-                    for row in refused
-                ),
-                "%.1f MiB at D=%d on the worst refusal"
-                % (
-                    max(row["max_stage_state_bytes"] for row in refused) / 1024.0 ** 2,
-                    max(row["resident_streams"] for row in refused),
                 )
-                if refused
-                else "NO point was refused, although a budget is declared",
-            )
+                <= 1e-9 * max(1.0, c["silicon"]["total_silicon_mm2"])
+                for c in sized
+            ),
+            "store area %s mm2 over %d point(s)"
+            % (
+                (
+                    "%.1f-%.1f"
+                    % (
+                        min(c["silicon"]["state_sram_silicon_mm2"] for c in sized),
+                        max(c["silicon"]["state_sram_silicon_mm2"] for c in sized),
+                    )
+                    if sized
+                    else "n/a"
+                ),
+                len(sized),
+            ),
+        )
 
         # (9) D28: utilization at every point, idle devices inside the mean.
         table.boolean(

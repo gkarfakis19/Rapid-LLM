@@ -599,10 +599,13 @@ class MemoryEstimator:
                     float(per_token_bytes) * float(kv_tokens_local)
                 )
             else:
-                kv_heads = int(getattr(tc, "kv_heads", tc.num_heads))
+                # A stack with no attention block declares no kv_heads and no
+                # heads; it caches no K and no V, so this census contributes
+                # nothing for it.
+                kv_heads = int(getattr(tc, "kv_heads", None) or tc.num_heads or 0)
                 head_dim = getattr(tc, "head_dim", None)
                 if head_dim is None:
-                    head_dim = tc.hidden_dim // tc.num_heads
+                    head_dim = tc.hidden_dim // tc.num_heads if tc.num_heads else 0
                 kv_heads_per_tp = math.ceil(kv_heads / tp)
                 kv_cache_bytes_per_layer = (
                     float(batch_size)

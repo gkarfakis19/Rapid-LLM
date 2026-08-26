@@ -113,7 +113,7 @@ config carrying it stays runnable through ``run_perf`` unchanged.
       max_silicon_mm2: 0             # 0 = unbounded
       search: ladder                 # or cross_product (the default)
       repair_axis: arrays_per_chip   # ladder only: retry a refused step here
-      max_stage_state_bytes: 0       # 0 = the D29 residency check does not run
+      max_silicon_mm2: 0             # 0 = unbounded; the ONLY feasibility budget
       initializer:                   # required by `ladder`: one declared rung per axis
         layers_per_chip: 4
         arrays_per_chip: 640
@@ -203,9 +203,13 @@ DSE_BLOCK = "mapping_dse"
 AXIS_TARGETS = {
     "bank_depth": "cim.cards.<analog card>.bank_depth",
     "column_sets_per_tile": "cim.allocation.column_sets_per_tile",
-    "arrays_per_chip": "cim.chip.arrays_per_chip",
     "layers_per_chip": "mapping.layers_per_chip",
     "layers_per_stage": "mapping.layers_per_stage",
+    # ADJ-14: how many shared digital chiplets carry the pipeline's digital
+    # work. This is a REAL choice with a real trade — many thin chiplets or few
+    # fat ones — because an engine is now sized for the stages its chiplet
+    # actually serves. It was refused between ADJ-13 and ADJ-14, when sizing
+    # was per-stage and sharing silently under-provisioned the machine.
     "shared_chiplets": "mapping.shared_chiplets",
 }
 
@@ -224,6 +228,18 @@ AXIS_TARGETS = {
 #: derived. The Wave-D demo sweep that swept this axis was regenerated on
 #: D31-legal axes when ADJ-9 landed.
 REFUSED_AXES = {
+    "arrays_per_chip": (
+        "ADJ-13 retires the chip's SLOT COUNT as a swept or declared knob. A chip "
+        "offers exactly the macro slots the layers it holds need, and that number is "
+        "DERIVED from the placement itself: the sweep places the layers once to learn "
+        "the requirement and builds the chip to it. Sweeping it produced garbage "
+        "points at both ends — a capacity under the requirement is refused by the "
+        "assembly check and tells you nothing, and a capacity over it enumerates "
+        "empty slots that are charged as silicon, so the 'frontier' bought area with "
+        "no throughput and called it a design point. What remains free is the "
+        "PARTITION (layers_per_chip / layers_per_stage), which is a real choice; the "
+        "capacity that partition implies is arithmetic."
+    ),
     "num_arrays": (
         "ADJ-10 retires the attention fabric's ARRAY COUNT as a swept or declared "
         "knob, for the same reason D31/ADJ-9 retired the scan engine's lane count: it "
@@ -259,10 +275,10 @@ REFUSED_AXES = {
 
 #: Evaluation stages in order; the index is how far a candidate got.
 #:
-#: ``state`` is D29's own feasibility check and it sits LAST because it needs
-#: the priced timeline: every stage of a filled pipeline holds all D streams'
-#: recurrent state and KV for its layers, and a stage plan whose per-stage bill
-#: exceeds the declared budget is a machine that cannot be built.
+#: ``state`` sits LAST because it needs the priced timeline: every stage of a
+#: filled pipeline holds all D streams' recurrent state and KV for its layers.
+#: It REPORTS that bill and the store sized to hold it; it refuses nothing. A
+#: design is refused by the AREA budget, never by needing memory.
 STAGES = ("config", "mapping", "budget", "lowering", "pricing", "memory", "state")
 
 #: Selection rules, printed verbatim beside the pick.
@@ -368,13 +384,12 @@ class SweepSpec:
     """The parsed ``mapping_dse`` block: axes in declaration order."""
 
     def __init__(self, axes, objective, max_chips, max_silicon_mm2, label,
-                 search="cross_product", initializer=None, max_stage_state_bytes=0.0,
+                 search="cross_product", initializer=None,
                  repair_axis=None):
         self.axes = axes  # OrderedDict-like: {axis: [values]} in declaration order
         self.objective = objective
         self.max_chips = int(max_chips)
         self.max_silicon_mm2 = float(max_silicon_mm2)
-        self.max_stage_state_bytes = float(max_stage_state_bytes)
         self.label = label
         self.search = search
         self.initializer = initializer or {}
@@ -411,7 +426,6 @@ class SweepSpec:
             "repair_axis": self.repair_axis,
             "max_chips": self.max_chips,
             "max_silicon_mm2": self.max_silicon_mm2,
-            "max_stage_state_bytes": self.max_stage_state_bytes,
             "axes": {name: list(values) for name, values in self.axes.items()},
             "axis_targets": {name: AXIS_TARGETS[name] for name in self.axes},
             "refused_axes": dict(REFUSED_AXES),
@@ -440,12 +454,22 @@ class SweepSpec:
                 f"({', '.join(sorted(AXIS_TARGETS))})."
             )
         block = _require_mapping(DSE_BLOCK, block)
+        if "max_stage_state_bytes" in block:
+            raise QifDseUsageError(
+                f"{DSE_BLOCK}.max_stage_state_bytes is REFUSED BY NAME. A machine is "
+                "not infeasible for needing memory: the on-chip state store is SIZED "
+                "to the state the mapping holds, composed from integer copies of the "
+                "measured SRAM macro, and charged as silicon "
+                "(silicon.state_sram_silicon_mm2). Holding more state costs AREA, and "
+                "what refuses a design is the area budget "
+                f"{DSE_BLOCK}.max_silicon_mm2 — a statement about the package, not "
+                "about the memory. Delete this key and declare that budget instead."
+            )
         known = (
             "axes",
             "objective",
             "max_chips",
             "max_silicon_mm2",
-            "max_stage_state_bytes",
             "label",
             "search",
             "initializer",
@@ -569,7 +593,6 @@ class SweepSpec:
             objective=objective,
             max_chips=int(block.get("max_chips", 0) or 0),
             max_silicon_mm2=float(block.get("max_silicon_mm2", 0.0) or 0.0),
-            max_stage_state_bytes=float(block.get("max_stage_state_bytes", 0.0) or 0.0),
             label=str(block.get("label", "") or ""),
             search=search,
             initializer=initializer,
@@ -643,14 +666,6 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
             _card("analog", analog_card)["bank_depth"] = int(value)
         elif axis == "column_sets_per_tile":
             cim.setdefault("allocation", {})["column_sets_per_tile"] = int(value)
-        elif axis == "arrays_per_chip":
-            chip = cim.get("chip")
-            if not isinstance(chip, dict):
-                raise QifDseUsageError(
-                    f"the sweep moves cim.chip.arrays_per_chip, but {source} declares "
-                    "no `cim.chip` block."
-                )
-            chip["arrays_per_chip"] = int(value)
         elif axis in ("layers_per_chip", "layers_per_stage", "shared_chiplets"):
             mapping_block = raw.get("mapping")
             if not isinstance(mapping_block, dict):
@@ -663,6 +678,136 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
         else:  # pragma: no cover - AXIS_TARGETS is the gate
             raise QifDseUsageError(f"unhandled axis {axis!r}")
     return raw
+
+
+# ---------------------------------------------------------------------------
+# ADJ-13 — the machine sizes itself
+# ---------------------------------------------------------------------------
+
+
+def _slots_needed(mapping):
+    """The macro slots the busiest chip of this placement actually needs.
+
+    Counted as the highest slot INDEX a chip uses, plus one — not the number of
+    macros holding tiles — because a chip must offer every slot up to the last
+    one it fills, and a gap is still a slot the chip has to have.
+    """
+    per_chip = {}
+    counts = {}
+    for macro in mapping.macros:
+        if not getattr(macro, "tiles", None):
+            continue
+        chip_id = getattr(macro, "chip_id", None)
+        if chip_id is None:
+            chip_id = getattr(macro, "chip", None)
+        slot = getattr(macro, "slot", None)
+        if slot is None:
+            slot = counts.get(chip_id, 0)
+            counts[chip_id] = slot + 1
+        per_chip[chip_id] = max(per_chip.get(chip_id, 0), int(slot) + 1)
+    return max(list(per_chip.values()) or [1])
+
+
+def _derive_chip_capacity(raw, model_config, model_id, hw_from_raw):
+    """Build the chip to the placement, instead of the placement to the chip.
+
+    Places the layers once against a capacity that cannot bind, reads what the
+    busiest chip needed, and writes that back as the chip's slot count. The
+    machine then enumerates exactly the slots its weights occupy, so no design
+    point is paying for empty silicon it never asked for.
+    """
+    import copy as _copy
+    import fws_mapping
+
+    probe_raw = _copy.deepcopy(raw)
+    chip = probe_raw.setdefault("cim", {}).setdefault("chip", {})
+    # The probe capacity is an UPPER BOUND, not a large number: every array the
+    # whole model needs, which no single chip can exceed however the layers are
+    # partitioned. A merely "big" capacity would make the placement enumerate
+    # millions of empty macro slots before it could be asked what it needed.
+    from cim_timing import CimDeviceModel
+
+    probe_hw = hw_from_raw(probe_raw)
+    inner = getattr(model_config, "model_config", model_config)
+    bound = int(CimDeviceModel(probe_hw, inner).total_arrays())
+    chip["arrays_per_chip"] = max(1, bound)
+    probe_hw = hw_from_raw(probe_raw)
+    probe = fws_mapping.build_mapping(probe_hw, model_config, model_id=model_id)
+    needed = _slots_needed(probe)
+    out = _copy.deepcopy(raw)
+    out.setdefault("cim", {}).setdefault("chip", {})["arrays_per_chip"] = int(needed)
+    return out, int(needed)
+
+
+def _derive_shared_chiplets(evaluation, stages_total):
+    """As few digital chiplets as the beat admits — a BALANCED pipeline.
+
+    A shared chiplet carries the digital work of every stage it serves, one
+    stage after another, inside one beat. So the question is a packing one:
+    with each stage's measured digital busy time in hand, how few chiplets can
+    hold all of them without any chiplet running past the beat. First-fit over
+    the stages sorted heaviest-first answers it, and the answer is reported
+    with the per-chiplet load that produced it rather than as a bare count.
+
+    Returns (count, detail) — or (None, reason) when the timeline does not
+    measure the per-stage digital work, in which case the caller keeps the
+    declared count and says so.
+    """
+    # The per-stage digital sizing lives in the report's digital_silicon block,
+    # which fws_eval composes from the evaluation rather than storing on it.
+    # Asking the evaluation object directly quietly returned nothing, and the
+    # derivation then never ran at all.
+    import fws_eval as _fws_eval
+
+    try:
+        digital = _fws_eval._digital_silicon_block(evaluation) or {}
+    except Exception:
+        digital = {}
+    engine = (digital.get("derived_engine_sizing") or {}).get("per_stage") or []
+    fabric = (digital.get("derived_fabric_sizing") or {}).get("per_stage") or []
+    beat = float((getattr(evaluation, "pipeline", None) or {}).get("beat_s", 0.0) or 0.0)
+    if beat <= 0:
+        return None, "the run measures no beat, so nothing can be packed against it"
+    load = {}
+    for row in engine:
+        load[int(row["stage"])] = load.get(int(row["stage"]), 0.0) + float(row.get("time_s", 0.0) or 0.0)
+    for row in fabric:
+        load[int(row["stage"])] = load.get(int(row["stage"]), 0.0) + float(row.get("time_s", 0.0) or 0.0)
+    if not load:
+        return None, "this run prices no shared-digital work, so it needs no chiplet"
+    order = sorted(load.items(), key=lambda kv: -kv[1])
+    bins = []          # each bin: [busy_s, [stage, ...]]
+    for stage, busy in order:
+        placed = False
+        for slot in bins:
+            if slot[0] + busy <= beat:
+                slot[0] += busy
+                slot[1].append(stage)
+                placed = True
+                break
+        if not placed:
+            bins.append([busy, [stage]])
+    # The duty of the chiplets the machine ACTUALLY BUILDS: one per stage, so
+    # each carries exactly its own stage's digital work.
+    per_stage_duty = sorted((busy / beat) for busy in load.values())
+    detail = {
+        "beat_s": beat,
+        "built_duty_max": per_stage_duty[-1] if per_stage_duty else None,
+        "built_duty_mean": (sum(per_stage_duty) / len(per_stage_duty)) if per_stage_duty else None,
+        "chiplets": len(bins),
+        "stages_served": [sorted(slot[1]) for slot in bins],
+        "busy_s": [slot[0] for slot in bins],
+        "duty": [(slot[0] / beat) for slot in bins],
+        "stages_with_digital_work": len(load),
+        "stages_total": int(stages_total),
+        "basis": (
+            "first-fit over the stages sorted heaviest-first: a chiplet carries the "
+            "measured digital busy time of every stage it serves, and may not run "
+            "past one beat. The count is what falls out, and the per-chiplet duty "
+            "below is how close each one runs."
+        ),
+    }
+    return len(bins), detail
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +831,7 @@ def _metric_by_suffix(metrics, suffix):
     return None
 
 
-def _silicon(mapping, chiplets):
+def _silicon(mapping, chiplets, state_bytes=None):
     """This machine's silicon, term by term, with coverage named.
 
     The analog term is the SAME quantity the P3.6 atlas prints as
@@ -717,6 +862,20 @@ def _silicon(mapping, chiplets):
             device.macro_pool_composition(device.digital_pool_sizing()).area_mm2
         )
     pools = pool_per_macro * slots
+    # The ON-CHIP STATE STORE. A filled pipeline holds every stream's recurrent
+    # state and KV while it decodes, and that store is silicon like any other.
+    # It is SIZED to the state the mapping measured — never assumed, never a
+    # constraint to fail against — so a plan that holds more state buys more
+    # SRAM and pays for it here. `state_bytes` is None on the provisional call
+    # (before pricing there is no bill), and the term is then absent rather
+    # than guessed.
+    state_store = None
+    state_sram = 0.0
+    state_macros = 0
+    if state_bytes is not None and device.has_synthesis_library():
+        state_store = device.state_sram_composition(float(state_bytes))
+        state_sram = float(state_store.area_mm2)
+        state_macros = int(sum(state_store.blocks.values()))
     uncovered = []
     if footprint <= 0:
         uncovered.append("analog macro footprint (cim.analog.area_mm2_per_array = 0)")
@@ -752,8 +911,15 @@ def _silicon(mapping, chiplets):
         "macro_pool_area_mm2_per_macro": pool_per_macro,
         "macro_pool_area_provenance": "composed-measured" if pool_composed else "absent",
         "macro_pool_silicon_mm2": pools,
-        "digital_silicon_mm2": digital + pools,
-        "total_silicon_mm2": analog + digital + pools,
+        "state_sram_macros": state_macros,
+        "state_sram_bytes_required": (None if state_bytes is None else float(state_bytes)),
+        "state_sram_silicon_mm2": state_sram,
+        "state_sram_provenance": (
+            "composed-measured" if state_store is not None
+            else ("unpriced-before-lowering" if state_bytes is None else "absent")
+        ),
+        "digital_silicon_mm2": digital + pools + state_sram,
+        "total_silicon_mm2": analog + digital + pools + state_sram,
         "uncovered_terms": uncovered,
         "basis": (
             f"{slots} enumerated analog macro slots x macro_footprint_mm2 "
@@ -764,6 +930,18 @@ def _silicon(mapping, chiplets):
                 "measured library)"
                 if pool_composed
                 else "0 mm2 (no library to compose it from)"
+            )
+            + (
+                f" + an on-chip state store of {state_macros} measured SRAM macro(s) "
+                f"= {state_sram:.6g} mm2, SIZED to the {float(state_bytes):.6g} B of "
+                "resident state this mapping holds"
+                if state_store is not None
+                else (
+                    " + NO state-store term: this is the provisional area, taken "
+                    "before the run is priced, and the state bill does not exist yet"
+                    if state_bytes is None
+                    else " + NO state-store term: the card names no synthesis library"
+                )
             )
             + ". The analog term is the P3.6 "
             "atlas's enumerated_macro_silicon (slots the machine HAS), NOT "
@@ -895,6 +1073,21 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         return _fail(candidate, "config", exc), None
     candidate["stages"]["config"] = {"ok": True}
 
+    # ADJ-13: the chip is built to the placement. The layers are placed once
+    # against a bound no chip can exceed, and the slot count is rewritten to
+    # what the busiest chip actually needed. This runs AFTER the config stage
+    # on purpose: a card or schema error belongs to `config`, and deriving
+    # first would re-label it as a mapping refusal.
+    try:
+        raw, derived_slots = _derive_chip_capacity(
+            raw, model_config, model_id, _hw_from_raw
+        )
+        candidate["knobs_derived"] = {"arrays_per_chip": derived_slots}
+        hw = _hw_from_raw(raw)
+    except ValueError as exc:
+        candidate["wall_s"] = time.time() - started
+        return _fail(candidate, "mapping", exc), None
+
     # Stage: mapping — P3 places the tiles. Every refusal here is a named
     # MappingError carrying its own stage word (residency / assembly / ...).
     try:
@@ -985,14 +1178,13 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
             f"placement needs {candidate['placement']['analog_chips']} analog chips but "
             f"{DSE_BLOCK}.max_chips = {spec.max_chips}.",
         ), mapping
-    if spec.max_silicon_mm2 > 0 and silicon["total_silicon_mm2"] > spec.max_silicon_mm2:
-        candidate["wall_s"] = time.time() - started
-        return _fail(
-            candidate,
-            "budget",
-            f"placement needs {silicon['total_silicon_mm2']:.6g} mm2 of silicon but "
-            f"{DSE_BLOCK}.max_silicon_mm2 = {spec.max_silicon_mm2:.6g}.",
-        ), mapping
+    # THE AREA BUDGET IS NOT CHECKED HERE, deliberately. This area is
+    # provisional: the digital engine is derived from the beat and the state
+    # store is sized from the measured bill, so neither term exists until the
+    # point has been priced. Refusing here would also throw away the one thing
+    # a refused point is good for — what it WOULD have delivered — and a plot
+    # of the design space would lose the points that did not fit rather than
+    # showing them. The budget is applied after pricing instead.
     candidate["stages"]["budget"] = {"ok": True}
 
     # Stage: lowering — P3.2 builds the placed, annotated, UNPRICED DAG.
@@ -1021,21 +1213,46 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
     # disagreed with fws_eval's own digital_silicon block for the same machine.
     # Recomputing here reads the same device the evaluator just sized, so the
     # sweep and the simulator publish ONE number.
-    silicon = _silicon(mapping, chiplets)
+    # The state store is sized from the bill the priced run just measured, so
+    # the area below already carries it (see _silicon).
+    state_total_bytes = 0.0
+    residency = getattr(evaluation, "state_residency", None) or {}
+    for row in (residency.get("per_stage") or []):
+        state_total_bytes += float(row.get("state_bytes", 0.0) or 0.0)
+    # ADJ-14: the chiplet count is a swept AXIS, and the packing below reports
+    # what the machine would need if its stages shared perfectly. The count is
+    # priced honestly at every point now, because the engine is sized for the
+    # stages its chiplet serves: sharing widens the scan engine, and where the
+    # attention fabric saturates instead, the beat grows and the point pays for
+    # it in throughput. Both directions are visible on the frontier.
+    packed, chiplet_detail = _derive_shared_chiplets(
+        evaluation, summary.get("pipeline_stages") or chiplets
+    )
+    if packed and isinstance(chiplet_detail, dict):
+        chiplet_detail["applied"] = False
+        chiplet_detail["basis"] = (
+            "REPORTED, NOT APPLIED. First-fit over the stages sorted "
+            "heaviest-first, bounded by the beat: this is how few chiplets the "
+            "digital work would fit on IF a chiplet's engines were sized for "
+            "every stage it serves. They are sized per stage today, so the "
+            "machine keeps one chiplet per stage and this row is the headroom "
+            "that sizing leaves on the table."
+        )
+        chiplet_detail["chiplets_if_shared"] = int(packed)
+        chiplet_detail["chiplets_built"] = int(chiplets)
+        candidate["derived_chiplets"] = chiplet_detail
+        candidate["notes"].append(
+            "the %d shared digital chiplets this machine builds (one per stage) "
+            "could carry their work on %d if a chiplet's engines were sized for "
+            "every stage it serves; they are sized per stage, so that is "
+            "reported headroom and not a saving taken here."
+            % (int(chiplets), int(packed))
+        )
+    else:
+        candidate["derived_chiplets"] = {"chiplets_built": int(chiplets),
+                                         "reason": chiplet_detail}
+    silicon = _silicon(mapping, chiplets, state_bytes=state_total_bytes)
     candidate["silicon"] = silicon
-    if spec.max_silicon_mm2 > 0 and silicon["total_silicon_mm2"] > spec.max_silicon_mm2:
-        candidate["wall_s"] = time.time() - started
-        return _fail(
-            candidate,
-            "budget",
-            f"with its DERIVED vector engine (D31) this point needs "
-            f"{silicon['total_silicon_mm2']:.6g} mm2 of silicon but "
-            f"{DSE_BLOCK}.max_silicon_mm2 = {spec.max_silicon_mm2:.6g}. The engine is "
-            "sized from the beat, so this term does not exist until the point has been "
-            "priced; the budget is checked again here rather than passing a candidate "
-            "the pre-derivation area happened to admit.",
-        ), mapping
-
     metrics = [dict(entry.as_dict()) for entry in evaluation.metrics
                if not isinstance(entry.value, (list, tuple))]
     candidate["metrics"] = {
@@ -1124,6 +1341,27 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
             "never configured; the per-stream rate is 1/(D x beat)."
         ),
     }
+    # THE AREA BUDGET, applied here and nowhere else. Both terms it needs — the
+    # derived digital engine and the state store sized to the measured bill —
+    # exist only after pricing, and the metrics are stamped above, so a point
+    # refused here still reports the throughput it would have delivered and
+    # still draws on the design-space plot.
+    if spec.max_silicon_mm2 > 0 and silicon["total_silicon_mm2"] > spec.max_silicon_mm2:
+        candidate["wall_s"] = time.time() - started
+        return _fail(
+            candidate,
+            "budget",
+            f"this point needs {silicon['total_silicon_mm2']:.6g} mm2 of silicon but "
+            f"{DSE_BLOCK}.max_silicon_mm2 = {spec.max_silicon_mm2:.6g}. Its terms: "
+            f"{silicon['analog_macro_silicon_mm2']:.6g} mm2 of analog weight macros + "
+            f"{silicon['shared_digital_silicon_mm2']:.6g} mm2 of shared digital "
+            f"chiplets + {silicon['macro_pool_silicon_mm2']:.6g} mm2 of per-macro pools "
+            f"+ {silicon['state_sram_silicon_mm2']:.6g} mm2 of on-chip state store "
+            f"({silicon['state_sram_macros']} measured SRAM macros sized to the state "
+            "this mapping holds). Area is the one thing that refuses a machine here: "
+            "holding more state costs silicon, it never makes a design infeasible.",
+        ), mapping
+
     # THE STATE BILL (D29's first-class reported quantity). Every stage holds
     # all D streams' recurrent state and KV for its layers, so this is what
     # decides whether a stage plan is buildable at all.
@@ -1247,67 +1485,27 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         ), mapping
     candidate["stages"]["memory"] = {"ok": True}
 
-    # Stage: state — D29's per-stage residency against the sweep's DECLARED
-    # per-stage budget. Every stage of a filled pipeline holds all D streams'
-    # recurrent state and KV for its layers, so a stage plan that buys
-    # throughput by shrinking the stages pays for it here. The budget is a
-    # DECLARED sweep constraint, not a measured capacity and not a margin
-    # (D28): absent, the check does not run and the bill is reported anyway.
+    # Stage: state — the per-stage residency, REPORTED. It is not a gate any
+    # more. Every stage of a filled pipeline holds all D streams' recurrent
+    # state and KV for its layers; that store is sized from this bill and
+    # charged as silicon in `silicon.state_sram_*`. A plan that holds more
+    # state therefore costs more area, and what can refuse it is the AREA
+    # BUDGET (mapping_dse.max_silicon_mm2), which is a statement about the
+    # package. Nothing here refuses a design for needing memory.
     bill = candidate["state_bill"]
-    if spec.max_stage_state_bytes > 0:
-        if not bill.get("measured"):
-            candidate["wall_s"] = time.time() - started
-            return _fail(
-                candidate,
-                "state",
-                f"{DSE_BLOCK}.max_stage_state_bytes is declared, but this candidate "
-                "measures NO per-stage residency: " + str(bill.get("reason", ""))
-                + " A budget cannot be checked against a quantity the run does not "
-                "produce, and passing it silently would report an unmade check as a "
-                "pass (D21).",
-            ), mapping
-        worst_stage = max(
-            bill["per_stage"], key=lambda row: row["state_bytes"], default=None
+    store_macros = int(candidate["silicon"].get("state_sram_macros", 0) or 0)
+    store_area = float(candidate["silicon"].get("state_sram_silicon_mm2", 0.0) or 0.0)
+    candidate["state_bill"]["store_macros"] = store_macros
+    candidate["state_bill"]["store_area_mm2"] = store_area
+    candidate["state_bill"]["budget_bytes"] = None
+    candidate["state_bill"]["budget_verdict"] = "sized"
+    if bill.get("measured") and store_macros:
+        candidate["notes"].append(
+            f"the on-chip state store is SIZED to this mapping: {store_macros} measured "
+            f"SRAM macro(s) = {store_area:.6g} mm2 hold the "
+            f"{bill['max_stage_state_bytes']:.6g} B worst stage and every other stage's "
+            "share. Holding state costs area here; it never refuses a point."
         )
-        if bill["max_stage_state_bytes"] > spec.max_stage_state_bytes:
-            over = [
-                row
-                for row in bill["per_stage"]
-                if row["state_bytes"] > spec.max_stage_state_bytes
-            ]
-            candidate["state_bill"]["budget_bytes"] = float(spec.max_stage_state_bytes)
-            candidate["state_bill"]["budget_verdict"] = "VIOLATED"
-            candidate["state_bill"]["budget_violating_stages"] = [
-                {
-                    "stage": row["stage"],
-                    "label": row["label"],
-                    "layers": row["layers"],
-                    "state_bytes": row["state_bytes"],
-                }
-                for row in over
-            ]
-            candidate["wall_s"] = time.time() - started
-            return _fail(
-                candidate,
-                "state",
-                f"INFEASIBLE BY MEMORY (D29): {len(over)} of {bill['stages']} pipeline "
-                f"stage(s) hold more resident state than {DSE_BLOCK}."
-                f"max_stage_state_bytes = {spec.max_stage_state_bytes:.6g} B. The worst "
-                f"is stage {worst_stage['stage']} ({worst_stage['label']}, "
-                f"{worst_stage['layers']} layer(s)) at "
-                f"{worst_stage['state_bytes']:.6g} B = "
-                f"{worst_stage['recurrent_state_bytes']:.6g} B of recurrent state + "
-                f"{worst_stage['kv_bytes']:.6g} B of KV for all "
-                f"{bill['resident_streams']} resident streams.",
-            ), mapping
-        candidate["state_bill"]["budget_bytes"] = float(spec.max_stage_state_bytes)
-        candidate["state_bill"]["budget_verdict"] = "fits"
-        candidate["state_bill"]["budget_headroom_bytes"] = float(
-            spec.max_stage_state_bytes - bill["max_stage_state_bytes"]
-        )
-    else:
-        candidate["state_bill"]["budget_bytes"] = None
-        candidate["state_bill"]["budget_verdict"] = "undeclared"
     candidate["stages"]["state"] = {"ok": True}
     if undeclared:
         candidate["notes"].append(
@@ -1941,15 +2139,23 @@ def _state_bill_summary(candidates, spec):
         if cand.get("fail_stage") == "memory"
     ]
     return {
-        "budget_bytes": spec.max_stage_state_bytes or None,
+        "budget_bytes": None,
         "budget_basis": (
-            f"{DSE_BLOCK}.max_stage_state_bytes — a DECLARED per-stage residency "
-            "budget for this sweep, checked against the MEASURED per-stage bill. It "
-            "is not a measured capacity and it is not a margin (D28); absent, the "
-            "check does not run and the bill is still reported."
-            if spec.max_stage_state_bytes > 0
-            else f"{DSE_BLOCK}.max_stage_state_bytes is not declared, so no point is "
-            "refused for residency; every point's measured bill is still reported."
+            "there is no residency budget. The on-chip state store is SIZED to each "
+            "point's own measured per-stage bill, composed from integer copies of the "
+            "measured SRAM macro and charged in silicon.state_sram_silicon_mm2, so "
+            "holding state costs AREA and never refuses a point. The one feasibility "
+            f"budget is {DSE_BLOCK}.max_silicon_mm2."
+        ),
+        "store_area_mm2_min": min(
+            ((cand.get("state_bill") or {}).get("store_area_mm2") for cand in measured
+             if (cand.get("state_bill") or {}).get("store_area_mm2") is not None),
+            default=None,
+        ),
+        "store_area_mm2_max": max(
+            ((cand.get("state_bill") or {}).get("store_area_mm2") for cand in measured
+             if (cand.get("state_bill") or {}).get("store_area_mm2") is not None),
+            default=None,
         ),
         "points_measured": len(measured),
         "max_stage_state_bytes_min": min(
@@ -2445,6 +2651,17 @@ def emit_selected_config(raw_base, selected, out_path, *, base_path, model_path,
     """Write the winning point as a complete, runnable hardware YAML."""
     raw = apply_point(raw_base, selected["knobs"], analog_card, digital_card, source)
     raw.pop(DSE_BLOCK, None)
+    # ADJ-13: the emitted machine carries the sizing the sweep DERIVED for it.
+    # run_perf does not derive — deriving is what the sweep is for — so a
+    # config that shipped the base file's declared capacity would describe a
+    # different machine from the one the sweep selected, and the round-trip
+    # check below would catch it as a mismatch (it did).
+    derived = selected.get("knobs_derived") or {}
+    if derived.get("arrays_per_chip"):
+        raw.setdefault("cim", {}).setdefault("chip", {})["arrays_per_chip"] = int(
+            derived["arrays_per_chip"]
+        )
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     header = EMITTED_HEADER.format(
@@ -2452,7 +2669,11 @@ def emit_selected_config(raw_base, selected, out_path, *, base_path, model_path,
         base=base_path,
         model=model_path,
         cand=selected["id"],
-        knobs=", ".join(f"{k} = {_knob_cell(v)}" for k, v in selected["knobs"].items()),
+        knobs=", ".join(
+            [f"{k} = {_knob_cell(v)}" for k, v in selected["knobs"].items()]
+            + [f"{k} = {_knob_cell(v)} (DERIVED)"
+               for k, v in sorted((selected.get("knobs_derived") or {}).items())]
+        ),
         headline=headline_text(selected),
     )
     out_path.write_text(header + yaml.safe_dump(raw, sort_keys=False))
