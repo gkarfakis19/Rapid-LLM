@@ -1,0 +1,47 @@
+# ViT-Large-story, seq 64 (128px / 16px patches, 0 prefix tokens), inference.
+# ViT-L/16 geometry: H1024 I4096 L24 h16 — the same story-64 convention as
+# vit_huge_story_64_inf.yaml (H1280 I5120 L32 h16), one model size down.
+# vision.num_prefix_tokens: 0 overrides the ViT default of 1 CLS token so the
+# derived seq_len is exactly (128/16)^2 = 64.
+#
+# Published dims and total verified 2026-08-28 against the timm checkpoint card
+# for ViT-L/16 at 224px. THIS FILE IS THE STORY-64 CROP of that architecture:
+# every weight matrix is identical, and only the position table differs (64
+# positions and no CLS here, 197 there), which is 0.15% of the total — inside
+# the 3% P6.1 gate with no widening.
+provenance:
+  source: "https://huggingface.co/timm/vit_large_patch16_224.augreg_in21k_ft_in1k"
+  verified: "2026-08-28"
+  published_total_params: 304326632  # HF safetensors total (F32), 1000-class head
+  d2_status: supported  # 0.30B RAW, far inside the 7B D2 cutoff
+  # D4: ViTs are trivially supported and not interesting on their own. This row
+  # exists because subset_v1 needs a SECOND vision point one size below
+  # vit_huge_story_64, so the report can show a size trend on the lockstep
+  # (prefill-only) regime rather than a single vision datum.
+model_param:
+  mode: "ViT"
+  model_type: "vit"          # plain (non-gated) MLP
+  run_type: "inference"
+  tied_embeddings: true
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  decode_len: 0
+  hidden_dim: 1024
+  vocab_size: 1000           # classifier head size (num_classes)
+  intermediate_size: 4096
+  num_layers: 24
+  vision:
+    image_size: 128
+    patch_size: 16
+    num_prefix_tokens: 0
+  attention:
+    attention_type: "mha"
+    num_heads: 16
+    use_flashattention: false   # fws_cim rejects flash attention
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0

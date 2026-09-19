@@ -42,16 +42,36 @@ across the PP stages, one token exits per beat, the local batch is always 1 and
 the resident-stream count D IS the stage count. That changes what a design
 point is, so it changes what this tool sweeps:
 
-* **stage granularity** (``layers_per_chip``, or ``layers_per_stage`` when the
-  stage plan is decoupled from the chip split) is the axis that matters. It
-  moves D, the beat, the per-stage state bill and the chip count AT ONCE, and
-  it is the only axis on the sweep that trades throughput for anything.
-* **mux/bank depth** (``bank_depth``) where the card admits it — a depth the
-  card's ``adc_mux`` does not divide is refused BY THE CARD and recorded.
-* **chip capacity** (``arrays_per_chip``) — the slot budget a chip offers. It
-  is the AREA axis: Invariant W (D27) pins the analog macro count at the global
-  cell floor, so the only way a point spends analog silicon is by enumerating
-  slots no tensor lands on.
+* **the platform box** (``macro_z``, ``macro_y``) on a card that DERIVES its
+  numbers from the ADC-macro sheet (``cim.cards.<card>.calc_profile``). The
+  macro is X x Y : Z and the fold ``mux = Y/Z`` is DERIVED (D35-REVISED), so
+  the sweep walks the two CONSTRAINT-NATIVE coordinates and lets the fold fall
+  out: Z is converter count / output interface / calibration, Y is wordline
+  length / tile granularity. Holding Y and halving Z halves the ADC bill and
+  doubles ``vec_cycles`` — and with it the beat and the per-vector energy.
+  On a hand-declared card both axes are REFUSED BY NAME: a hand-pinned card
+  cannot be macro-swept honestly, because its area and energy would stay at
+  the macro a human wrote them for. ``adc_capacity_mux`` is refused outright
+  (:data:`REFUSED_AXES`): sweeping a derived quantity walks a diagonal through
+  the legal box and hides its corners. ``analog_clock_mhz`` is refused too:
+  the sheet's 100 MHz is the operating point every analog constant was
+  measured at.
+* **the fill fraction** (``pp_util``, D38) — the axis that REPLACED the
+  partition. Stage granularity no longer trades anything because it no longer
+  varies: the machine is always maximally disaggregated (finest
+  motif-compatible stages, local microbatch 1, everything time-matched by area
+  sizing), so ``layers_per_chip`` and ``layers_per_stage`` are refused BY NAME
+  and the stage plan DERIVES. What is still a choice is how full that pipeline
+  is run — resident streams = ``max(1, round(pp_util * stages))`` — which
+  trades throughput (linear in the fill) against state and KV area (linear in
+  the resident streams). Usually dominated; for a state-limited large LLM it
+  is the escape valve, and it is priced and disclosed like any other point.
+
+**Chip capacity is NOT an axis.** ADJ-13 retired ``arrays_per_chip``: a chip
+offers exactly the macro slots its layers need and that number is DERIVED from
+the placement. Under D35-REVISED/D37 the packer fills chips in pipeline order
+to a capacity the macro footprint sets, so the slot budget is arithmetic and
+the single tail is reported rather than swept.
 
 **Digital provisioning is NOT an axis.** D31/ADJ-9 retire the scan/vector engine
 as a declared or swept knob: it is DERIVED per point — sized UP until every
@@ -107,40 +127,42 @@ config carrying it stays runnable through ``run_perf`` unchanged.
 .. code-block:: yaml
 
     mapping_dse:
-      label: "Granite-4.0-H-Tiny: vector lanes x banking"
+      label: "Granite-4.0-H-Tiny: the platform box x the fill fraction"
       objective: throughput          # or min_silicon
       max_chips: 0                   # 0 = unbounded
-      max_silicon_mm2: 0             # 0 = unbounded
       search: ladder                 # or cross_product (the default)
-      repair_axis: arrays_per_chip   # ladder only: retry a refused step here
+      repair_axis: macro_y           # ladder only: retry a refused step here
       max_silicon_mm2: 0             # 0 = unbounded; the ONLY feasibility budget
       initializer:                   # required by `ladder`: one declared rung per axis
-        layers_per_chip: 4
-        arrays_per_chip: 640
+        macro_z: 128
+        macro_y: 2048
+        pp_util: 1.0
       axes:
-        layers_per_chip: [10, 5, 4, 2, 1]       # STAGE GRANULARITY -> D, beat, state
-        arrays_per_chip: [160, 320, 560, 640]   # CHIP CAPACITY -> the area axis
-        bank_depth: [1, 2]                      # analog card banking (A3/D10)
-        # layers_per_stage: [4, 2]              # stages decoupled from chips (D29)
-        # column_sets_per_tile: [1]             # cim.allocation (D10)
-        # shared_chiplets: [1, 10]              # ADJ-5's declared count
-        # vector_lanes: [...]                   # REFUSED BY NAME (D31/ADJ-9)
-        # num_arrays: [...]                     # REFUSED BY NAME (ADJ-10)
-        # softmax_lanes: [...]                  # REFUSED BY NAME (ADJ-10)
+        macro_z: [64, 128]           # Z, the ADC count      (pow2 8..X)
+        macro_y: [2048, 4096]        # Y, total CTT columns  (pow2 X..8X, Y >= Z)
+        pp_util: [1.0, 0.5]          # THE FILL FRACTION (D38)
+        # layers_per_chip: [...]     # REFUSED BY NAME (D38: the partition is intent)
+        # layers_per_stage: [...]    # REFUSED BY NAME (D38: granularity derives)
+        # bank_depth: [...]          # REFUSED BY NAME (D38: parked)
+        # column_sets_per_tile: [...] # REFUSED BY NAME (D38: parked, bank_depth's alias)
+        # conv_placement: [...]      # REFUSED BY NAME (D38: always shared digital)
+        # shared_chiplets: [...]     # REFUSED BY NAME (D36: derived, linearity-checked)
+        # arrays_per_chip: [...]     # REFUSED BY NAME (ADJ-13)
+        # adc_capacity_mux: [...]    # REFUSED BY NAME (D35-REVISED: mux is derived)
+        # vector_lanes: [...]        # REFUSED BY NAME (D31/ADJ-9)
+        # num_arrays: [...]          # REFUSED BY NAME (ADJ-10)
+        # softmax_lanes: [...]       # REFUSED BY NAME (ADJ-10)
 
 Axis -> the config field it moves (one field each, never two):
-  ``bank_depth``            ``cim.cards.<analog card>.bank_depth``
-  ``column_sets_per_tile``  ``cim.allocation.column_sets_per_tile``
-  ``arrays_per_chip``       ``cim.chip.arrays_per_chip``
-  ``layers_per_chip``       ``mapping.layers_per_chip``
-  ``layers_per_stage``      ``mapping.layers_per_stage``
-  ``shared_chiplets``       ``mapping.shared_chiplets``
+  ``macro_z``               ``cim.cards.<analog card>.params.adcs``
+  ``macro_y``               ``cim.cards.<analog card>.params.cols``
+  ``pp_util``               ``mapping.pp_util``
 
-``bank_depth`` and ``column_sets_per_tile`` both set the allocation
-granularity and ``cim.allocation`` WINS (``CimDeviceModel.column_sets_per_tile``
-is the one law that decides). A candidate that declares both records the
-EFFECTIVE granularity and a precedence note, so no report ever implies the
-card's bank was the unit when the allocation block overrode it.
+That is the whole table. Every other spelling this tool has ever offered is in
+:data:`REFUSED_AXES` with the decision that took it, because an axis that was
+real until a decision retired it has to be spellable far enough to be REFUSED:
+a config written against the old law gets a sentence naming the law that moved
+and the axis that replaced it, never a silent no-op.
 
 Conventions (the established DSE ones, kept)
 --------------------------------------------
@@ -161,6 +183,49 @@ Conventions (the established DSE ones, kept)
   block stripped); ``--verify`` reruns it through ``run_perf`` and
   cross-checks the headline metrics within 0.1 %.
 
+What every run stamps and every candidate carries (D33)
+--------------------------------------------------------
+D33 removes the atlas's privileged point: the FRONTIER is the entry and the
+point a reader clicks binds the whole page. Two things follow, and both are
+this tool's to emit.
+
+**ONE RUN IDENTITY.** ``run_identity`` takes a content hash over the emitter's
+version, the sources that price a candidate, both input configs, the mode, the
+model id, the objective and the sweep block. It rides ``dse_report.json`` at
+top level (``run_id`` plus the whole ``run`` block), the header comment of the
+emitted config, and every per-front-point atlas document. A page assembled from
+artifacts whose ids differ was assembled from two generations, and now it can
+be told.
+
+**ENOUGH ON EVERY CANDIDATE TO BIND A PAGE.** Not just the selected point:
+
+* ``binding_term`` — the evaluator's own beat-setting stage and its terms by op
+  block, plus a per-stage roll-up ``{stage, analog_time_s, engine_time_s,
+  fabric_time_s}``: where the beat goes.
+* ``state_bill.per_stage[]`` — the per-stage state rows with the store each
+  stage buys, present (and empty, with a reason) even when nothing was measured.
+* ``pipeline.stage_count`` (the count) and ``pipeline.stages[]`` (the compact
+  stage MAP: chips, layers, block census over the placed tiles).
+* ``derived_digital`` on EVERY candidate, including cards that name no
+  synthesis library — the block is then present with ``composed: false`` and its
+  absences named, rather than missing.
+* ``binding_device_class`` (what SETS THE BEAT) and ``busiest_device_class``
+  (D28's peak max-occupancy). One name used to carry both accountings and they
+  disagreed on every point of the shipped curves.
+
+**A MAP PER CANDIDATE.** Every candidate that BUILDS A MACHINE writes a full
+``fws_atlas/1`` document to ``<output_dir>/points/<candidate_id>.json``, stamped
+with the run id, and carries ``atlas_point`` in the report. Not the front — every
+point, because the atlas has no privileged point and clicking any of them must
+show everything. The document is written INSIDE
+:func:`evaluate_candidate`, from the mapping and evaluation that are still in
+scope, so a map costs an export and not a second pricing pass; there is
+therefore no cap, no sampling and no truncation note. An INFEASIBLE candidate
+built no machine, so it carries ``atlas_point: null`` beside its own
+``fail_stage`` and ``fail_message`` — a refusal with a reason, not an absence.
+``--no-atlas-points`` turns the whole thing off. These are heavy generated
+artifacts and ``docs/qif/.gitignore`` ignores ``dse/*/points/``.
+
 Runtime is what it is. Every candidate's wall time is measured and printed,
 the total is printed, and NOTHING is sampled, capped or skipped to save time.
 
@@ -174,6 +239,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import datetime
+import hashlib
 import itertools
 import json
 import math
@@ -181,6 +248,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -201,16 +269,36 @@ DSE_BLOCK = "mapping_dse"
 #: and ADJ-10 refuse all three by name (:data:`REFUSED_AXES`), and an axis this
 #: table lists is an axis the tool offers to sweep.
 AXIS_TARGETS = {
-    "bank_depth": "cim.cards.<analog card>.bank_depth",
-    "column_sets_per_tile": "cim.allocation.column_sets_per_tile",
-    "layers_per_chip": "mapping.layers_per_chip",
-    "layers_per_stage": "mapping.layers_per_stage",
-    # ADJ-14: how many shared digital chiplets carry the pipeline's digital
-    # work. This is a REAL choice with a real trade — many thin chiplets or few
-    # fat ones — because an engine is now sized for the stages its chiplet
-    # actually serves. It was refused between ADJ-13 and ADJ-14, when sizing
-    # was per-stage and sharing silently under-provisioned the machine.
-    "shared_chiplets": "mapping.shared_chiplets",
+    # THE PLATFORM BOX (D35-REVISED, 2026-08-29). The macro is X x Y : Z and
+    # the fold mux = Y/Z is DERIVED, so the sweep walks the two axes the
+    # PHYSICAL CONSTRAINTS are native to and lets the fold fall out:
+    #
+    #   macro_z — the ADC count. Converter area, the output interface and the
+    #     calibration burden are all counted in Z. Powers of two 8..X: never
+    #     more converters than there are rows to feed them.
+    #   macro_y — total CTT columns. Wordline length and tile granularity are
+    #     counted in Y. Powers of two X..8X, and Y >= Z always (mux = 1 legal).
+    #
+    # Sweeping the FOLD instead would let an absurd corner hide inside a
+    # derived quantity, which is why adc_capacity_mux is refused BY NAME
+    # (:data:`REFUSED_AXES`). Both axes are legal only on a card that DERIVES
+    # its numbers (cim.cards.<card>.calc_profile): on a hand-declared card they
+    # would move the label and leave the declared area and energy at the old
+    # macro's values.
+    "macro_z": "cim.cards.<analog card>.params.adcs",
+    "macro_y": "cim.cards.<analog card>.params.cols",
+    # THE FILL FRACTION (D38, 2026-08-29). This is the axis that REPLACED the
+    # partition. D38 retired layers_per_stage and layers_per_chip because the
+    # machine is always maximally disaggregated — finest motif-compatible
+    # stages, local microbatch 1, everything time-matched by area sizing — so
+    # stage granularity DERIVES and is not a choice anybody makes. What IS a
+    # choice is how FULL that pipeline is run: resident streams =
+    # max(1, round(pp_util * stages)), throughput linear in the fill and the
+    # per-stage state/KV bill linear in the resident streams. Usually
+    # dominated; for a state-limited large LLM it is the escape valve. The
+    # values are closed (config.PP_UTIL_VALUES) because a free fraction would
+    # let a sweep dial throughput to any number and call it a design point.
+    "pp_util": "mapping.pp_util",
 }
 
 #: Axes REFUSED BY NAME, with the decision that killed them (D31, ADJ-9).
@@ -227,7 +315,63 @@ AXIS_TARGETS = {
 #: may carry — it is a machine whose digital side was chosen instead of
 #: derived. The Wave-D demo sweep that swept this axis was regenerated on
 #: D31-legal axes when ADJ-9 landed.
+#: The macro spellings D35-REVISED refuses, each pointing at what replaced it.
+#: A sweep does not get to rename the thing it is trying to move: ``rows`` is
+#: the platform-FIXED height X, ``cols_adc``/``adc_mux``/``adc_capacity_mux``
+#: are the retired schema and the retired fold, and the two axes that exist are
+#: ``macro_z`` and ``macro_y``. All of them are refused BY NAME and none is
+#: left as an "unknown axis" the reader has to interpret.
+MACRO_GEOMETRY_AXES = (
+    "rows",
+    "cols",
+    "cols_adc",
+    "stored_cols",
+    "macro_rows",
+    "macro_cols",
+    "array_rows",
+    "array_cols",
+    "macro_size",
+    "adc_mux",
+    "adc_capacity_mux",
+    "mux",
+)
+
+#: The one refusal every retired macro spelling raises (D35-REVISED).
+MACRO_GEOMETRY_REFUSAL = (
+    "D35-REVISED (GEORGE, 2026-08-29) closes the sweepable list around the macro. The "
+    "macro is X x Y : Z — X rows (height, the analog sheet's constrained dimension), Y "
+    "total CTT columns (the storage tile), Z ADCs (the FLOP producers; muxed columns "
+    "are storage) — and mux = Y/Z is DERIVED NOTATION, never an input and never an "
+    "axis. X is FIXED per platform, so it is not swept under any spelling, including "
+    "the retired rows-equals-hidden convention: a machine that changes shape per "
+    "workload is not a buildable chiplet platform, and it quietly flattered every "
+    "comparison because a macro cut to fit the matrix never pays a tiling remainder. "
+    "THE TWO AXES THAT EXIST ARE macro_z (Z, powers of two 8..X) and macro_y (Y, "
+    "powers of two X..8X, with Y >= Z). They are the CONSTRAINT-NATIVE coordinates: "
+    "converter count, output interface and calibration are counted in Z; wordline "
+    "length and tile granularity are counted in Y. Total system ADC throughput is "
+    "cells/(X*mux) — Y cancels — so mux is the right density LABEL and the right plot "
+    "LENS, and it is printed on every point; but sweeping it would walk a diagonal "
+    "through the legal box and let an absurd corner hide inside a derived quantity. "
+    "Weights TILE onto the fixed macro (ceil row/col splits, the priced P7.2 "
+    "K-accumulator) and the dimension-mismatch remainder is D27's reported waste "
+    "metric, never hidden."
+)
+
 REFUSED_AXES = {
+    "analog_clock_mhz": (
+        "George 2026-08-27: mux only; the analog clock stays at the sheet's 100 MHz. "
+        "The clock is not a free number on this device: it is a MEASURED operating "
+        "point of the ADC-macro sheet this repo ports (cim_analog_calc, "
+        "OPTIMA_CALC_PROFILES['george_cima_mux1'] analog_clock_MHz = analog_clock_MAX "
+        "= 100), and the settle/compute times, currents and the ADC FoM that price a "
+        "slice were all taken at it. OPTIMA's own mux sweep (perf_model/"
+        "run_vla_sweep.py) sweeps pools.analog.mux_degree with the analog clock pinned "
+        "for the same reason. Sweeping it here would move every analog number in the "
+        "report with nothing behind the move, so it is refused BY NAME rather than "
+        "offered. What IS on the sweep is adc_capacity_mux, which trades the same "
+        "throughput against area with a sheet behind every point."
+    ),
     "arrays_per_chip": (
         "ADJ-13 retires the chip's SLOT COUNT as a swept or declared knob. A chip "
         "offers exactly the macro slots the layers it holds need, and that number is "
@@ -273,6 +417,83 @@ REFUSED_AXES = {
     ),
 }
 
+# D35: every spelling of the macro's shape, refused by name with the decision
+# quoted. Written as one loop over one message because there is ONE reason and
+# restating it per spelling would be the same law written ten times.
+REFUSED_AXES.update({name: MACRO_GEOMETRY_REFUSAL for name in MACRO_GEOMETRY_AXES})
+
+#: THE AXES D36 AND D38 RETIRED (2026-08-29), each quoting the decision that
+#: took it and naming what replaced it.
+#:
+#: These were REAL axes with real trades right up until the decision that
+#: retired them, which is exactly why they are refused BY NAME rather than
+#: dropped from the table: a sweep that still declares one was written against
+#: the old law, and the sentence it gets back has to say which law moved and
+#: what to sweep instead. Silently ignoring them would sweep something else;
+#: leaving them live would let a config buy a number the machine no longer
+#: offers.
+REFUSED_AXES.update({
+    "layers_per_stage": (
+        "D38 (GEORGE, 2026-08-29) RETIRES layers_per_stage as a sweep axis: 'The "
+        "machine is always maximally disaggregated: local microbatch 1, finest "
+        "motif-compatible stages, everything time-matched by area sizing (the "
+        "derive-to-floor doctrine is what makes 100% utilization possible). Stage "
+        "granularity DERIVES.' The partition is INTENT, not a design point — one "
+        "layer per stage is the finest the motif admits and it is what the mapper "
+        "builds, so there is no partition input anywhere and nothing here to move. "
+        "THE AXIS THAT REPLACED IT IS pp_util, the fill fraction: the pipeline's "
+        "granularity is settled, how full it is run is not."
+    ),
+    "layers_per_chip": (
+        "D38 (GEORGE, 2026-08-29) RETIRES the partition as a sweep axis, under this "
+        "spelling as under layers_per_stage: 'The partition is INTENT, not an axis. "
+        "The fill fraction is the axis.' Stage granularity DERIVES (finest "
+        "motif-compatible stages, local microbatch 1) and the chip split follows "
+        "from the packer filling analog chips in pipeline order, so neither number "
+        "is a choice a sweep gets to make. SWEEP pp_util INSTEAD — resident streams "
+        "= max(1, round(pp_util * stages)) — which is the trade the partition used "
+        "to stand in for: throughput against per-stage state and KV area."
+    ),
+    "bank_depth": (
+        "D38 (GEORGE, 2026-08-29) PARKS bank_depth: 'bank_depth is PARKED for "
+        "ground-up reformulation (the mux-slot allocation question, next).' It is "
+        "not merely dominated — it won depth 1 nearly everywhere on the old cards "
+        "and D35-REVISED put it on probation — it is a knob whose QUESTION is being "
+        "restated, so sweeping it now would price rungs against a law that is about "
+        "to be replaced. The card freezes depth 1 until the reformulation lands. "
+        "There is no replacement axis: what a parked knob asks for is a decision, "
+        "not a substitute."
+    ),
+    "column_sets_per_tile": (
+        "D38 (GEORGE, 2026-08-29) PARKS the mux-slot allocation question, and "
+        "column_sets_per_tile is that question in its cim.allocation spelling — the "
+        "same allocation granularity bank_depth sets, with cim.allocation winning "
+        "the precedence. A sweep does not get to rename the thing it is trying to "
+        "move: refusing bank_depth while leaving its alias live would park the knob "
+        "in name only. Parked with bank_depth, and returning with it when the "
+        "ground-up reformulation lands."
+    ),
+    "conv_placement": (
+        "D38 (GEORGE, 2026-08-29) RETIRES conv_placement: 'the conv's work is ALWAYS "
+        "on the shared digital chiplet. Not an axis.' The trade this axis priced — a "
+        "per-macro pool on every enumerated slot against engine width and beat time "
+        "on the shared chiplet — is settled by decision, not by the sweep, so both "
+        "rungs no longer exist to walk. cim.allocation.conv_placement still parses "
+        "for a single declared machine; what is refused here is making it an AXIS."
+    ),
+    "shared_chiplets": (
+        "D36 (GEORGE, 2026-08-29) DEMOTES shared_chiplets 'from axis to a STANDING "
+        "LINEARITY CHECK (price one point at 1x/2x/4x sharing; assert linearity "
+        "within a few percent)'. The nonlinearity that once made it a real axis was "
+        "fabric saturation, which the context-split law removed, so the rungs now "
+        "buy a straight line and a straight line is not a frontier. Digital is a "
+        "derived FUNCTION of the analog point (D36 stage 2): the chiplet is derived "
+        "per group and the count follows from the packaging band, never from a "
+        "sweep. 'If any future law reintroduces a cliff the check fails loudly and "
+        "the axis returns.'"
+    ),
+})
+
 #: Evaluation stages in order; the index is how far a candidate got.
 #:
 #: ``state`` sits LAST because it needs the priced timeline: every stage of a
@@ -316,6 +537,119 @@ VERIFY_METRIC_SUFFIXES = (
 )
 
 
+#: THE EMITTER'S OWN VERSION (D33). Bumped whenever the SHAPE of what this
+#: tool writes changes. It rides the run identity below so an artifact an older
+#: emitter wrote is distinguishable from one this build wrote even when the
+#: inputs are byte-identical.
+TOOL_VERSION = "fws_qif_dse/1.1-d33-emitter"
+
+#: The sources the run id FINGERPRINTS. D33 asks the atlas to band a page whose
+#: artifacts came from different generations, and "generation" cannot mean the
+#: inputs alone: an emitter change, an evaluator change or a device-law change
+#: all move the numbers under identical YAML. These are the files that can move
+#: them, so their content is inside the id.
+RUN_ID_SOURCES = (
+    "tools/fws_qif_dse.py",
+    "fws_eval.py",
+    "fws_mapping.py",
+    "fws_atlas_export.py",
+    "cim_timing.py",
+)
+
+#: Where the per-candidate documents land, relative to the sweep output dir.
+#:
+#: There is NO cap on how many are written, and the absence of one is the
+#: point (D33). A cap existed while a document cost a second full pricing pass;
+#: the export now runs inside the evaluation that already priced the machine,
+#: so there is nothing left to ration. Rationing it was the architectural
+#: mistake: it made "click any point" mean "click one of twenty".
+ATLAS_POINTS_DIR = "points"
+
+
+def _sha256_of_file(path):
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def code_fingerprint():
+    """A hash of the sources that decide this run's numbers (:data:`RUN_ID_SOURCES`).
+
+    A missing source is recorded as ``absent`` rather than skipped: a
+    fingerprint that silently ignored a file it could not read would call two
+    different trees the same generation.
+    """
+    parts = []
+    for relative in RUN_ID_SOURCES:
+        path = REPO_ROOT / relative
+        parts.append(
+            "%s:%s" % (relative, _sha256_of_file(path) if path.exists() else "absent")
+        )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def run_identity(hw_path, model_path, *, mode, model_id, objective, sweep_echo):
+    """ONE identity for every artifact this run writes (D33).
+
+    The id is a CONTENT HASH, not a uuid, and that is the whole point: two runs
+    of the same tool over the same inputs on the same tree ARE the same
+    generation and get the same id, so a regenerated artifact still matches its
+    siblings. Anything that could move a number moves the id — the emitter's
+    own version, the fingerprint of the sources that price a candidate, both
+    input files' bytes, the mode, the model id, the objective and the sweep
+    block itself.
+
+    ``generated_at`` is a WALL-CLOCK stamp and is deliberately NOT inside the
+    hash: it says when this copy was written, and folding it in would make
+    every run a new generation and the comparison useless.
+    """
+    fingerprint = code_fingerprint()
+    material = json.dumps(
+        {
+            "tool": "fws_qif_dse",
+            "tool_version": TOOL_VERSION,
+            "code_fingerprint": fingerprint,
+            "hardware_config": Path(hw_path).read_text(),
+            "model_config": Path(model_path).read_text(),
+            "mode": str(mode),
+            "model_id": str(model_id or ""),
+            "objective": str(objective),
+            "sweep": _json_safe(sweep_echo),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return OrderedDict(
+        (
+            ("run_id", hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]),
+            ("tool", "fws_qif_dse"),
+            ("tool_version", TOOL_VERSION),
+            ("code_fingerprint", fingerprint),
+            (
+                "generated_at",
+                datetime.datetime.now(datetime.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            ),
+            (
+                "basis",
+                "the run id is a sha256 over this tool's version, the content of "
+                + ", ".join(RUN_ID_SOURCES)
+                + ", both input configs, the mode, the model id, the objective and "
+                "the sweep block. EVERY artifact this run writes carries it - the "
+                "report at top level, the emitted config in its header comment and "
+                "each per-front-point atlas document - so a reader holding two of "
+                "them can tell whether they describe one machine or two "
+                "generations (D33). generated_at is outside the hash: it is when "
+                "this copy was written, not what it was written from."
+            ),
+        )
+    )
+
+
 class QifDseUsageError(ValueError):
     """Tool-level configuration error (exit code 2)."""
 
@@ -332,38 +666,29 @@ def _require_mapping(context, value):
 
 
 def _axis_value(axis, raw, context):
-    """One candidate value for one axis, validated by the axis's own shape."""
-    if axis == "layers_per_stage":
-        # D29: an int is a uniform stage width, a list is the per-stage plan.
-        # 'auto' does NOT exist here, because the default stage plan is not a
-        # search: mapping.layers_per_stage absent means one stage per chip, and
-        # a sweep that wanted that would sweep layers_per_chip instead.
-        if isinstance(raw, (list, tuple)):
-            if not raw:
-                raise QifDseUsageError(f"{context} list must not be empty.")
-            return [int(item) for item in raw]
-        value = int(raw)
-        if value < 1:
-            raise QifDseUsageError(f"{context} must be >= 1 (got {value}).")
-        return value
-    if axis == "layers_per_chip":
-        if isinstance(raw, str):
-            if raw.strip().lower() != "auto":
-                raise QifDseUsageError(
-                    f"{context} must be an integer, a list of integers or 'auto' "
-                    f"(got {raw!r}); it is spelled exactly like "
-                    "mapping.layers_per_chip."
-                )
-            return "auto"
-        if isinstance(raw, (list, tuple)):
-            if not raw:
-                raise QifDseUsageError(f"{context} list must not be empty.")
-            return [int(item) for item in raw]
-        return int(raw)
+    """One candidate value for one axis, validated by the axis's own shape.
+
+    Only the axes :data:`AXIS_TARGETS` still offers reach here: a retired or
+    refused spelling is stopped by name in :meth:`SweepSpec.from_raw` before
+    any value of it is read, so this function never has to guess what a dead
+    axis's values were supposed to mean.
+    """
+    if axis == "pp_util":
+        # D38's fill fraction. A CLOSED list of floats, and the config surface
+        # owns it (config.PP_UTIL_VALUES) so the sweep and the mapper cannot
+        # disagree about which fractions exist. Refused here rather than at the
+        # first candidate, because a sweep that only failed on its tenth point
+        # would have printed nine rows of a machine it was never going to
+        # finish.
+        try:
+            return config_module.parse_pp_util(raw, context)
+        except ValueError as exc:
+            raise QifDseUsageError(str(exc)) from exc
+    # macro_z / macro_y: integer rungs, checked against the PLATFORM lists in
+    # _check_platform_axis_values once the whole axis is parsed.
     value = int(raw)
-    minimum = 0 if axis == "shared_chiplets" else 1
-    if value < minimum:
-        raise QifDseUsageError(f"{context} must be >= {minimum} (got {value}).")
+    if value < 1:
+        raise QifDseUsageError(f"{context} must be >= 1 (got {value}).")
     return value
 
 
@@ -378,6 +703,33 @@ def _axis_value(axis, raw, context):
 #: with a random seed and it is not sampling: every point it visits is
 #: evaluated in full and recorded, and the walk is deterministic.
 SEARCH_MODES = ("cross_product", "ladder")
+
+
+def _check_platform_axis_values(axes):
+    """Every macro_z / macro_y value is one the PLATFORM admits (D35-REVISED).
+
+    The lists live in :mod:`cim_analog_calc` — one place, one law. A value off
+    them is refused here rather than at the config layer, because a sweep that
+    only failed on the tenth candidate would have printed nine rows first.
+    """
+    import cim_analog_calc as _calc
+
+    for axis, legal, what in (
+        ("macro_z", _calc.MACRO_Z_VALUES, "Z, the ADC count"),
+        ("macro_y", _calc.MACRO_Y_VALUES, "Y, the total CTT columns"),
+    ):
+        for value in axes.get(axis, ()):
+            if int(value) not in legal:
+                raise QifDseUsageError(
+                    f"{DSE_BLOCK}.axes.{axis} declares {value!r}, which is not a value "
+                    f"the platform admits for {what}. Legal: {list(legal)} "
+                    f"({_calc.PLATFORM_MACRO_DECISION}: Z is powers of two 8..X and Y is "
+                    f"powers of two X..{_calc.MACRO_Y_CEILING_MULTIPLE}X, at "
+                    f"X = {_calc.PLATFORM_MACRO_ROWS} rows). The 8X ceiling on Y is "
+                    "ADJUDICATED, not physical: if a model's front crowds it the "
+                    "edge-crowding check says so by name and raising it is a one-line "
+                    "change with data behind it."
+                )
 
 
 class SweepSpec:
@@ -395,15 +747,91 @@ class SweepSpec:
         self.initializer = initializer or {}
         self.repair_axis = repair_axis
 
+    def illegal_reason(self, point):
+        """Why this (Z, Y) corner is not a macro, or None (D35-REVISED).
+
+        The platform box is axis-aligned, so almost every corner is legal —
+        but not the ones below the diagonal. Y >= Z always: mux = Y/Z is the
+        muxed columns behind ONE converter, and a Y under Z would be an ADC
+        with less than one column to digitize. mux = 1 is the legal floor and
+        it is a real design point, not an edge case.
+
+        The refusal NAMES the corner rather than dropping it: a point the
+        sweep skipped in silence is a hole a reader cannot see.
+        """
+        z = point.get("macro_z")
+        y = point.get("macro_y")
+        if z is None or y is None:
+            return None
+        z = int(z)
+        y = int(y)
+        if y < z:
+            return (
+                f"macro_y = {y} < macro_z = {z}: mux = Y/Z would be {y / z:g}, and a "
+                "converter cannot digitize less than one column. Y >= Z always "
+                "(D35-REVISED); mux = 1 is the legal floor and IS a design point."
+            )
+        if y % z:
+            return (
+                f"macro_z = {z} does not divide macro_y = {y}: mux = Y/Z is DERIVED "
+                "(D35-REVISED), so a fold with a remainder would strand columns behind "
+                "no converter. Both axes are powers of two, so this corner cannot "
+                "arise from the declared platform lists."
+            )
+        import cim_analog_calc as _calc
+
+        mux = y // z
+        if mux not in _calc.ALLOWED_CAPACITY_MUX:
+            return (
+                f"macro_y = {y} against macro_z = {z} derives mux = {mux}, which is "
+                f"outside {_calc.ALLOWED_CAPACITY_MUX[0]}.."
+                f"{_calc.ALLOWED_CAPACITY_MUX[-1]} — the range the ADC-macro sheet has "
+                "MEASUREMENTS for (OPTIMA config/loader.py ALLOWED_MUX_DEGREES). The "
+                "declared box is a rectangle and the sheet's coverage is not, so this "
+                "corner exists on paper and has no physics behind it. It is named and "
+                "skipped rather than extrapolated — which is exactly the kind of absurd "
+                "corner D35-REVISED walks the box to make visible."
+            )
+        return None
+
     @property
     def points(self):
-        """The full cross product, in declaration order. Nothing is skipped."""
+        """The cross product, in declaration order, minus the illegal corners.
+
+        The ONLY thing skipped is a corner :meth:`illegal_reason` names — the
+        sub-diagonal of the (Z, Y) box, which is not a macro at all. Every
+        skipped corner is reported by name in the sweep's own output
+        (:attr:`illegal_points`), so the hole is a fact and not a silence.
+        """
+        for point, reason in self.enumerated_points:
+            if reason is None:
+                yield point
+
+    @property
+    def enumerated_points(self):
+        """``(point, illegal_reason_or_None)`` over the whole declared box."""
         names = list(self.axes)
         for combo in itertools.product(*(self.axes[name] for name in names)):
-            yield dict(zip(names, combo))
+            point = dict(zip(names, combo))
+            yield point, self.illegal_reason(point)
+
+    @property
+    def illegal_points(self):
+        """The corners the box declares and the platform refuses, with reasons."""
+        return [
+            {"knobs": point, "reason": reason}
+            for point, reason in self.enumerated_points
+            if reason is not None
+        ]
 
     @property
     def size(self):
+        """Points the sweep will actually price: the box minus its illegal corners."""
+        return sum(1 for _ in self.points)
+
+    @property
+    def declared_size(self):
+        """Every corner of the declared box, legal or not."""
         total = 1
         for values in self.axes.values():
             total *= len(values)
@@ -412,6 +840,13 @@ class SweepSpec:
     @property
     def initializer_index(self):
         """The initializer as an index vector over the declared axis lists."""
+        reason = self.illegal_reason(self.initializer)
+        if reason is not None:
+            raise QifDseUsageError(
+                f"{DSE_BLOCK}.initializer is not a macro the platform admits: {reason} "
+                "The ladder steps outward FROM this point, so an illegal start is not a "
+                "step the walk could repair — it is refused here, by name."
+            )
         return tuple(
             self.axes[name].index(self.initializer[name]) for name in self.axes
         )
@@ -517,6 +952,7 @@ class SweepSpec:
                     )
                 seen.append(key)
             axes[name] = parsed
+        _check_platform_axis_values(axes)
         if not axes:
             raise QifDseUsageError(f"{DSE_BLOCK}.axes declares no axis; the sweep is empty.")
         objective = str(block.get("objective", "throughput")).strip().lower()
@@ -633,6 +1069,38 @@ def _card_names(base_hw, source):
     return cards.default_analog, cards.default_digital
 
 
+def _sync_analog_fallback(cim, params_block, card_block, source):
+    """Keep `cim.analog` on the SAME macro as the card the sweep just moved.
+
+    ONE FILE, ONE MACRO. The card is what the run prices, but `cim.analog` is
+    what a reader sees when no card is named and what the emitted config
+    carries; leaving it at the base point would put two macros in one file and
+    the config layer refuses exactly that. The numbers come from ONE call to
+    the same derivation the card uses — this is the sheet answering twice for
+    one macro, not a second model of it.
+    """
+    import cim_analog_calc as _calc
+
+    analog = cim.get("analog")
+    if not isinstance(analog, dict):
+        return
+    rows = int(params_block.get("rows", analog.get("rows")))
+    cols = int(params_block.get("cols", analog.get("cols")))
+    adcs = int(params_block.get("adcs", analog.get("adcs")))
+    profile = str(card_block.get("calc_profile") or "").strip()
+    try:
+        derived = _calc.derive_analog_card(rows, cols, adcs, profile=profile, context=source)
+    except _calc.AnalogCalcError as exc:
+        raise QifDseUsageError(str(exc)) from exc
+    analog["rows"] = rows
+    analog["cols"] = cols
+    analog["adcs"] = adcs
+    analog["slice_cycles"] = int(derived.slice_cycles)
+    analog["analog_clock_mhz"] = float(derived.analog_clock_mhz)
+    analog["energy_per_vec_pj"] = float(derived.energy_per_vec_pj)
+    analog["area_mm2_per_array"] = float(derived.area_mm2_per_array)
+
+
 def apply_point(raw_base, point, analog_card, digital_card, source):
     """One candidate's raw hardware dict: the base with this point's knobs set.
 
@@ -662,11 +1130,31 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
         return cards[name]
 
     for axis, value in point.items():
-        if axis == "bank_depth":
-            _card("analog", analog_card)["bank_depth"] = int(value)
-        elif axis == "column_sets_per_tile":
-            cim.setdefault("allocation", {})["column_sets_per_tile"] = int(value)
-        elif axis in ("layers_per_chip", "layers_per_stage", "shared_chiplets"):
+        if axis in ("macro_z", "macro_y"):
+            card_block = _card("analog", analog_card)
+            if not str(card_block.get("calc_profile") or "").strip():
+                raise QifDseUsageError(
+                    f"the sweep moves cim.cards.{analog_card}.params."
+                    f"{'adcs' if axis == 'macro_z' else 'cols'} ({axis}), but that card "
+                    f"in {source} names no `calc_profile`, so it is HAND-PINNED: a "
+                    "hand-pinned card cannot be macro-swept honestly. Its "
+                    "area_mm2_per_array, energy_per_vec_pj and slice_cycles are numbers "
+                    "a human wrote for ONE macro; moving Y or Z would relabel the macro "
+                    "and leave all three at the old one's values, so every point past "
+                    "the first would price silicon that does not exist. Give the card a "
+                    "calc_profile (the numbers are then DERIVED from the ADC-macro sheet "
+                    "at each (X, Y, Z)) or drop the axis."
+                )
+            params_block = card_block.get("params")
+            if not isinstance(params_block, dict):
+                raise QifDseUsageError(
+                    f"the sweep moves cim.cards.{analog_card}.params, but that card in "
+                    f"{source} declares no `params` block. A derived card states the "
+                    "MACRO it is (rows X, cols Y, adcs Z) and the profile prices it."
+                )
+            params_block["adcs" if axis == "macro_z" else "cols"] = int(value)
+            _sync_analog_fallback(cim, params_block, card_block, source)
+        elif axis == "pp_util":
             mapping_block = raw.get("mapping")
             if not isinstance(mapping_block, dict):
                 raise QifDseUsageError(
@@ -674,7 +1162,7 @@ def apply_point(raw_base, point, analog_card, digital_card, source):
                     "`mapping:` block. A mapped sweep needs a mapped config: the "
                     "block is what makes P3 place and P4 price the run (ADJ-5/ADJ-6)."
                 )
-            mapping_block[axis] = value
+            mapping_block[axis] = float(value)
         else:  # pragma: no cover - AXIS_TARGETS is the gate
             raise QifDseUsageError(f"unhandled axis {axis!r}")
     return raw
@@ -736,10 +1224,204 @@ def _derive_chip_capacity(raw, model_config, model_id, hw_from_raw):
     needed = _slots_needed(probe)
     out = _copy.deepcopy(raw)
     out.setdefault("cim", {}).setdefault("chip", {})["arrays_per_chip"] = int(needed)
+    # THE SLOT COUNT HAS TWO LEGAL HOMES and the config may declare either.
+    # Writing only `cim.chip.arrays_per_chip` left a stale
+    # `mapping.macros_per_chip` behind, and the very next validation refused the
+    # candidate for a disagreement this function had just created - blaming the
+    # user for the tool's own edit. If the config declares the mapping-side
+    # field, it is derived too.
+    mapping_block = out.get("mapping")
+    if isinstance(mapping_block, dict) and mapping_block.get("macros_per_chip") is not None:
+        mapping_block["macros_per_chip"] = int(needed)
     return out, int(needed)
 
 
-def _derive_shared_chiplets(evaluation, stages_total):
+def _digital_silicon_of(evaluation):
+    """``fws_eval``'s own digital block for this evaluation, or ``{}``.
+
+    Taken ONCE per candidate and handed to every consumer below. It used to be
+    recomputed by each of them, which is three compositions of one quantity
+    under one name — the shape D21 exists to stop — and it is not cheap.
+    """
+    import fws_eval as _fws_eval
+
+    try:
+        return _fws_eval._digital_silicon_block(evaluation) or {}
+    except Exception:
+        return {}
+
+
+def _pipeline_stage_rows(mapping):
+    """The compact per-stage MAP of the filled pipeline (D29's stage plan).
+
+    One row per PP stage: which chips carry it, which layers sit on it, and
+    what those layers put on analog silicon, counted by op block. It is the
+    CHEAP summary that rides the report row itself, so a frontier plot can draw
+    a point's pipeline without opening that point's full inventory
+    (:func:`export_point_atlas` writes one of those per candidate too, and they
+    are megabytes each).
+
+    The block census is over PLACED TILES, so it is the machine's own inventory
+    and not a re-derivation of the model: a stage's ``blocks`` are the op names
+    of the tile owners whose layer this stage holds, counted.
+    """
+    stage_of_layer = {}
+    for stage in mapping.stages:
+        for layer in stage.layers:
+            stage_of_layer[int(layer)] = int(stage.index)
+    blocks_by_stage = {}
+    owners_by_stage = {}
+    unassigned = 0
+    for tile in mapping.tiles:
+        index = stage_of_layer.get(int(tile.owner.layer))
+        if index is None:
+            # A TILE ON NO STAGE. The stage plan is a partition of the BACKBONE
+            # layers, so under D30 (embedding and lm_head dropped on the mapped
+            # path) there should be none. It is counted rather than dropped:
+            # the row census below has to close against the placement, and a
+            # silently skipped tile would make it close by losing evidence.
+            unassigned += 1
+            continue
+        blocks = blocks_by_stage.setdefault(index, {})
+        key = str(tile.owner.op)
+        blocks[key] = blocks.get(key, 0) + 1
+        owners_by_stage.setdefault(index, set()).add(tile.owner.label)
+    rows = []
+    for stage in mapping.stages:
+        index = int(stage.index)
+        blocks = blocks_by_stage.get(index, {})
+        rows.append(
+            OrderedDict(
+                (
+                    ("stage", index),
+                    ("label", str(stage.label)),
+                    ("chips", [int(chip) for chip in stage.chips]),
+                    ("layers", len(stage.layers)),
+                    ("layer_ids", [int(layer) for layer in stage.layers]),
+                    ("tiles", int(sum(blocks.values()))),
+                    ("owners", len(owners_by_stage.get(index, ()))),
+                    (
+                        "blocks",
+                        OrderedDict(
+                            sorted(blocks.items(), key=lambda kv: (-kv[1], kv[0]))
+                        ),
+                    ),
+                )
+            )
+        )
+    return rows, unassigned
+
+
+def _binding_term_block(evaluation, digital):
+    """WHERE THE BEAT GOES on this candidate (ADJ-10), stage by stage.
+
+    Two things under one key, because they answer one question:
+
+    * the evaluator's own ``binding_term`` — the stage with the longest span on
+      the PRICED slice and its terms by op block, mirrored here verbatim so the
+      sweep publishes no second version of it (D21);
+    * a per-stage roll-up of the two DERIVED sizings, one row per stage:
+      ``{stage, analog_time_s, engine_time_s, fabric_time_s}``. The engine and
+      the fabric are sized against the SAME per-stage analog m-pass time
+      (D31/ADJ-9 and ADJ-10), so the three columns are one comparison and a
+      reader can see which stages the analog floor really binds.
+
+    A run whose card composes nothing derives nothing, so the per-stage roll-up
+    is EMPTY and says why rather than printing zeros.
+    """
+    binding = dict(getattr(evaluation, "binding_term", None) or {})
+    engine_rows = ((digital or {}).get("derived_engine_sizing") or {}).get(
+        "per_stage"
+    ) or []
+    fabric_rows = ((digital or {}).get("derived_fabric_sizing") or {}).get(
+        "per_stage"
+    ) or []
+    rows = {}
+
+    def _row(stage):
+        return rows.setdefault(
+            int(stage),
+            OrderedDict(
+                (
+                    ("stage", int(stage)),
+                    ("analog_time_s", None),
+                    ("analog_time_source", None),
+                    ("engine_time_s", None),
+                    ("fabric_time_s", None),
+                    ("digital_time_s", None),
+                    ("analog_bound", None),
+                )
+            ),
+        )
+
+    for source, entries, key in (
+        ("derived_engine_sizing", engine_rows, "engine_time_s"),
+        ("derived_fabric_sizing", fabric_rows, "fabric_time_s"),
+    ):
+        for entry in entries:
+            row = _row(entry["stage"])
+            row[key] = float(entry.get("time_s") or 0.0)
+            analog = float(entry.get("analog_time_s") or 0.0)
+            if row["analog_time_s"] is None:
+                row["analog_time_s"] = analog
+                row["analog_time_source"] = source
+            elif abs(row["analog_time_s"] - analog) > 1e-15 * max(
+                1.0, abs(analog)
+            ):
+                # TWO READINGS OF ONE QUANTITY. Both sizings measure the SAME
+                # per-stage analog m-pass, so a disagreement is a finding, not
+                # a rounding: it is carried under its own name instead of one
+                # of the two silently winning (D21).
+                row["analog_time_s_%s" % source] = analog
+    for row in rows.values():
+        engine = row["engine_time_s"] or 0.0
+        fabric = row["fabric_time_s"] or 0.0
+        row["digital_time_s"] = engine + fabric
+        if row["analog_time_s"] is not None:
+            row["analog_bound"] = bool(row["analog_time_s"] >= row["digital_time_s"])
+    ordered = [rows[key] for key in sorted(rows)]
+    block = OrderedDict(
+        (
+            ("measured", bool(binding)),
+            ("stage", binding.get("stage")),
+            ("span_s", binding.get("span_s")),
+            ("analog_time_s", binding.get("analog_time_s")),
+            ("analog_is_largest_term", binding.get("analog_is_largest_term")),
+            ("terms", list(binding.get("terms") or ())),
+            ("basis", binding.get("basis", "")),
+            ("per_stage", ordered),
+        )
+    )
+    block["per_stage_basis"] = (
+        "one row per stage from evaluation.digital_silicon.derived_engine_sizing "
+        "and .derived_fabric_sizing: the DERIVED scan/vector engine's per-stage "
+        "time, the DERIVED attention fabric's per-stage time, and the stage's own "
+        "analog m-pass time that both were sized against (D31/ADJ-9, ADJ-10). "
+        "analog_bound is analog_time_s >= engine_time_s + fabric_time_s - the two "
+        "digital engines share one chiplet queue, so the comparison is against "
+        "their SUM."
+        if ordered
+        else "EMPTY, and not a measured zero: this candidate's card composes no "
+        "synthesis library, so D31/ADJ-10 derived neither engine and there are no "
+        "per-stage sizing rows to roll up. The evaluator's binding_term above is "
+        "still measured - it is read off the priced timeline, not off a "
+        "composition."
+    )
+    if not binding:
+        block["reason"] = (
+            "NOT MEASURED, and not a zero: fws_eval reads the binding term off the "
+            "ops inside its MEASUREMENT SLICE (the last lowered beat under the "
+            "filled pipeline, the last lowered DECODE STEP under the retired "
+            "lockstep regime), and this run put no op in that slice - a "
+            "prefill-only workload lowered under lockstep has no decode step at "
+            "all. No stage therefore has a span to be the longest and nothing "
+            "binds by measurement here. What is still measured is the per-class "
+            "utilization: see busiest_device_class."
+        )
+    return block
+
+
+def _derive_shared_chiplets(evaluation, stages_total, digital=None):
     """As few digital chiplets as the beat admits — a BALANCED pipeline.
 
     A shared chiplet carries the digital work of every stage it serves, one
@@ -756,13 +1438,9 @@ def _derive_shared_chiplets(evaluation, stages_total):
     # The per-stage digital sizing lives in the report's digital_silicon block,
     # which fws_eval composes from the evaluation rather than storing on it.
     # Asking the evaluation object directly quietly returned nothing, and the
-    # derivation then never ran at all.
-    import fws_eval as _fws_eval
-
-    try:
-        digital = _fws_eval._digital_silicon_block(evaluation) or {}
-    except Exception:
-        digital = {}
+    # derivation then never ran at all. The block is composed ONCE per candidate
+    # by the caller (_digital_silicon_of) and handed in here.
+    digital = _digital_silicon_of(evaluation) if digital is None else (digital or {})
     engine = (digital.get("derived_engine_sizing") or {}).get("per_stage") or []
     fabric = (digital.get("derived_fabric_sizing") or {}).get("per_stage") or []
     beat = float((getattr(evaluation, "pipeline", None) or {}).get("beat_s", 0.0) or 0.0)
@@ -869,13 +1547,21 @@ def _silicon(mapping, chiplets, state_bytes=None):
     # SRAM and pays for it here. `state_bytes` is None on the provisional call
     # (before pricing there is no bill), and the term is then absent rather
     # than guessed.
+    # `state_bytes` is a LIST, one entry per pipeline stage: each stage gets its
+    # own store because each sits on its own chip. A bare number is accepted as
+    # one store, for the callers that hold only a total.
     state_store = None
     state_sram = 0.0
     state_macros = 0
-    if state_bytes is not None and device.has_synthesis_library():
-        state_store = device.state_sram_composition(float(state_bytes))
-        state_sram = float(state_store.area_mm2)
-        state_macros = int(sum(state_store.blocks.values()))
+    bills = None
+    if state_bytes is not None:
+        bills = ([float(b) for b in state_bytes]
+                 if isinstance(state_bytes, (list, tuple)) else [float(state_bytes)])
+    if bills is not None and device.has_synthesis_library():
+        stores = [device.state_sram_composition(b) for b in bills if b > 0]
+        state_store = stores[0] if stores else None
+        state_sram = math.fsum(float(store.area_mm2) for store in stores)
+        state_macros = int(sum(sum(store.blocks.values()) for store in stores))
     uncovered = []
     if footprint <= 0:
         uncovered.append("analog macro footprint (cim.analog.area_mm2_per_array = 0)")
@@ -893,6 +1579,17 @@ def _silicon(mapping, chiplets, state_bytes=None):
         uncovered.append(
             "per-macro digital pool area (the card names no synthesis_library, so "
             "D32's block composition has nothing to compose)"
+        )
+    # THE STATE STORE, WHEN IT COULD NOT BE BUILT. `state_sram_provenance` said
+    # "absent" while uncovered_terms stayed empty, so a total that omits the
+    # store read as complete. A workload that holds no resident state at all
+    # (a ViT encoder decodes nothing) is a measured zero and needs no row; a
+    # store that could not be COMPOSED is an absent law and gets one.
+    if bills is not None and math.fsum(bills) > 0 and state_store is None:
+        uncovered.append(
+            "on-chip state store area (this mapping holds "
+            f"{math.fsum(bills):.6g} B of resident state, and the card names no "
+            "synthesis library to compose the SRAM macro that would hold it)"
         )
     digital_basis = (
         f"the card's COMPOSED area {per_chiplet:.6g} mm2 (D32: measured "
@@ -912,7 +1609,7 @@ def _silicon(mapping, chiplets, state_bytes=None):
         "macro_pool_area_provenance": "composed-measured" if pool_composed else "absent",
         "macro_pool_silicon_mm2": pools,
         "state_sram_macros": state_macros,
-        "state_sram_bytes_required": (None if state_bytes is None else float(state_bytes)),
+        "state_sram_bytes_required": (None if bills is None else math.fsum(bills)),
         "state_sram_silicon_mm2": state_sram,
         "state_sram_provenance": (
             "composed-measured" if state_store is not None
@@ -933,8 +1630,8 @@ def _silicon(mapping, chiplets, state_bytes=None):
             )
             + (
                 f" + an on-chip state store of {state_macros} measured SRAM macro(s) "
-                f"= {state_sram:.6g} mm2, SIZED to the {float(state_bytes):.6g} B of "
-                "resident state this mapping holds"
+                f"= {state_sram:.6g} mm2, one store PER STAGE, sized to the "
+                f"{math.fsum(bills):.6g} B of resident state this mapping holds"
                 if state_store is not None
                 else (
                     " + NO state-store term: this is the provisional area, taken "
@@ -955,24 +1652,105 @@ def _silicon(mapping, chiplets, state_bytes=None):
     }
 
 
-def _digital_block(evaluation):
+#: What each of the two device-class fields on a candidate MEASURES. They used
+#: to share the name ``binding_device_class`` at candidate top level and inside
+#: ``derived_digital`` while answering different questions, and on the shipped
+#: Granite curve they disagreed on every point (top level ``link``, the digital
+#: block ``shared_digital``). Two accountings under one name is what D21
+#: forbids, so each now has its own name and its own sentence.
+BINDING_CLASS_BASIS = (
+    "the device class of the LARGEST BUSY TERM on the beat-setting stage, read "
+    "off this candidate's priced timeline (evaluation.binding_term.terms[0], "
+    "ADJ-10). This is what SETS THE BEAT, and it is the one authoritative "
+    "'binding' field on the candidate; derived_digital.binding_device_class is "
+    "the same number from the same place."
+)
+BUSIEST_CLASS_BASIS = (
+    "the device class with the highest MAX OCCUPANCY over the whole timeline "
+    "(D28's per-class utilization). It answers 'which class is busiest', which "
+    "is NOT 'which class sets the beat': on a weight-stationary machine "
+    "hundreds of analog macros each fire once per beat, so max_occupancy can "
+    "never select analog_macro however much of the beat the analog m-pass "
+    "takes. This field used to be called binding_device_class and contradicted "
+    "the beat-setting one on every point of the shipped Granite curve."
+)
+
+
+def _digital_block(evaluation, block=None):
     """What the DERIVED digital side came out as at this point (D31/D32).
 
     Read off ``fws_eval``'s own ``digital_silicon`` block so the sweep never
-    recomposes a second version of it (D21). ``None`` when the card names no
-    synthesis library — there is then nothing composed to report, and the
-    silicon accounting already says so in its own uncovered terms.
-    """
-    import fws_eval
+    recomposes a second version of it (D21).
 
-    block = fws_eval._digital_silicon_block(evaluation)
+    A card that names NO synthesis library still gets a block. It used to get
+    none at all, so a ViT candidate — whose frontier card declares no library —
+    carried no digital row of any kind and a reader could not tell an absent
+    law from an unasked question. The block is now always present and names its
+    absences the way ``fws_eval``'s own does: ``composed: false``, every derived
+    width ``None``, and the terms that could not be composed listed by name.
+    What is still MEASURED in that case is measured: the beat-setting stage
+    comes off the timeline, not off a composition.
+    """
+    block = _digital_silicon_of(evaluation) if block is None else (block or {})
+    binding = block.get("binding_term") or dict(
+        getattr(evaluation, "binding_term", None) or {}
+    )
+    largest_any = (binding.get("terms") or [{}])[0]
     if not block.get("composed"):
-        return None
+        return {
+            "composed": False,
+            "reason": (
+                "this candidate's analog card names no cim.cards.<card>."
+                "synthesis_library, so D32 has no measured blocks to compose and "
+                "D31/ADJ-10 derived nothing: there is no vector engine width, no "
+                "attention-fabric array count and no softmax lane count to report, "
+                "and no composed area or power. These are ABSENT LAWS, not "
+                "measured zeros, and the silicon accounting names the same gap in "
+                "silicon.uncovered_terms."
+            ),
+            "library_technology": None,
+            "vector_lanes": None,
+            "vector_lanes_provenance": None,
+            "engine_duty": None,
+            "sizing_target": None,
+            "analog_bound_stages": None,
+            "stages_sized": None,
+            "analog_beat_s": None,
+            "fabric_num_arrays": None,
+            "fabric_num_arrays_provenance": None,
+            "fabric_softmax_lanes": None,
+            "fabric_time_over_target": None,
+            "fabric_analog_bound_stages": None,
+            "fabric_saturated_stages": None,
+            "fabric_stages_sized": None,
+            # MEASURED, not composed: the beat-setting stage and its terms are
+            # read off the priced timeline, so an uncomposed card still says
+            # what binds it.
+            "binding_stage": binding.get("stage"),
+            "binding_device_class": largest_any.get("device_class"),
+            "binding_block": largest_any.get("block"),
+            "binding_busy_s": largest_any.get("busy_s"),
+            "binding_analog_time_s": binding.get("analog_time_s"),
+            "binding_is_analog": binding.get("analog_is_largest_term"),
+            "binding_device_class_basis": BINDING_CLASS_BASIS,
+            "shared_digital_chiplet_area_mm2": block.get(
+                "shared_digital_area_mm2_per_chiplet"
+            ),
+            "shared_digital_area_provenance": "declared",
+            "digital_area_mm2_total": None,
+            "digital_power_W_total": None,
+            "absent_terms": [
+                "derived vector engine (D31/ADJ-9)",
+                "derived attention fabric and softmax pipeline (ADJ-10)",
+                "composed digital area and power (D32)",
+            ],
+            "disclosures": list(block.get("disclosures") or ()),
+        }
     sizing = block.get("derived_engine_sizing") or {}
     fabric = block.get("derived_fabric_sizing") or {}
-    binding = block.get("binding_term") or {}
-    largest = (binding.get("terms") or [{}])[0]
+    largest = largest_any
     return {
+        "composed": True,
         "library_technology": (block.get("library") or {}).get("technology"),
         "vector_lanes": block.get("vector_lanes"),
         "vector_lanes_provenance": block.get("vector_lanes_provenance"),
@@ -996,12 +1774,55 @@ def _digital_block(evaluation):
         "binding_busy_s": largest.get("busy_s"),
         "binding_analog_time_s": binding.get("analog_time_s"),
         "binding_is_analog": binding.get("analog_is_largest_term"),
+        # The SAME number the candidate carries at top level, from the SAME
+        # place (evaluation.binding_term). One accounting, spelled once here
+        # and mirrored there for readers who never open this block.
+        "binding_device_class_basis": BINDING_CLASS_BASIS,
+        "shared_digital_area_provenance": "composed-measured",
         "shared_digital_chiplet_area_mm2": (
             block.get("shared_digital_chiplet") or {}
         ).get("area_mm2_per_chiplet"),
         "digital_area_mm2_total": block.get("digital_area_mm2_total"),
         "digital_power_W_total": block.get("digital_power_W_total"),
+        # D36's PACKAGING READING of the two areas just above: engines + this
+        # chiplet's share of the state store in ONE area, walked against the
+        # [50, 400] mm2 band. Read straight off fws_eval's own block so the
+        # sweep never composes a second version of it (D21), and REPORTED, NOT
+        # APPLIED — digital_area_mm2_total is unchanged by it.
+        "chiplet_packaging": block.get("chiplet_packaging"),
     }
+
+
+def stage_mismatch_warning(candidate):
+    """One plain line naming a lopsided partition, or ``None`` (D34).
+
+    George: the mapper's whole job is to eliminate stage mismatch even at an
+    area cost, so a partition that is lopsided is a FAILURE and has to be
+    impossible to miss in a regeneration log — not a field somebody has to go
+    looking for. Plain language, no decision codenames: this is read by whoever
+    is watching a sweep scroll past.
+    """
+    balance = (candidate.get("pipeline") or {}).get("stage_balance") or {}
+    if not balance.get("measured") or balance.get("verdict") != "MISMATCHED":
+        return None
+    worst = (balance.get("long_stages") or [{}])[0]
+    bound = float(balance.get("balanced_beat_bound_s") or 0.0)
+    measured = float((candidate.get("metrics") or {}).get("tokens_per_s") or 0.0)
+    balanced_rate = (1.0 / bound) if bound > 0 else None
+    return (
+        f"STAGE MISMATCH {candidate['id']}: stage {worst.get('stage')} busy "
+        f"{float(worst.get('busy_s') or 0.0):.3g} s = "
+        f"{float(worst.get('ratio_to_median') or 0.0):.1f}x median; dominant "
+        f"{worst.get('dominant_block') or 'unknown'} on "
+        f"{worst.get('dominant_device_class') or 'unknown'}; "
+        + ("beat set here" if worst.get("sets_the_beat") else "beat set elsewhere")
+        + "; balanced bound ~"
+        + (f"{balanced_rate:.6g}" if balanced_rate else "unknown")
+        + " tok/s vs measured "
+        + (f"{measured:.6g}" if measured else "none")
+        + f" ({len(balance.get('long_stages') or ())} of "
+        f"{balance.get('stages')} stages run long)"
+    )
 
 
 def _extend_disclosures(candidate, items):
@@ -1033,12 +1854,18 @@ def _extend_disclosures(candidate, items):
 
 
 def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card,
-                       digital_card, source, model_id=None):
+                       digital_card, source, model_id=None, atlas=None):
     """One candidate, evaluated end to end on the REAL mapped path.
 
     Returns the candidate record. Evaluation stops at the FIRST stage that
     refuses, and the stage tag plus the refusal's own message are recorded —
     nothing is dropped and no message is rewritten.
+
+    ``atlas`` is the export context (``{"output_dir", "run", "model_path",
+    "mode"}``) or ``None``. When it is given, a candidate that gets all the way
+    through writes its ``fws_atlas/1`` document HERE, from the mapping and
+    evaluation that are still in scope — see :func:`export_point_atlas` for why
+    the export lives inside the evaluation rather than in a pass after it.
     """
     import fws_eval
     import fws_mapping
@@ -1055,6 +1882,11 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         "stages": {},
         "metrics": {},
         "notes": [],
+        # D33: PRESENT ON EVERY ROW, null until a machine is built and drawn.
+        # An infeasible candidate keeps the null and carries its own
+        # fail_stage / fail_message beside it, so a reader who clicks it sees a
+        # REFUSAL WITH A REASON rather than a missing file.
+        "atlas_point": None,
     }
     # Stage: config — the candidate's own YAML, parsed and validated exactly
     # as run_perf would parse it (card admissibility lives here: a bank_depth
@@ -1084,6 +1916,14 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         )
         candidate["knobs_derived"] = {"arrays_per_chip": derived_slots}
         hw = _hw_from_raw(raw)
+        # D35-REVISED: the macro this point actually built, and the fold that
+        # falls out of it. mux is DERIVED — it is never an axis and never a
+        # config field — so this is the ONE place a reader meets it, under the
+        # X x Y : Z label every artifact uses.
+        _macro = hw.cim_config.analog_card.params
+        candidate["knobs_derived"]["macro"] = _macro.label
+        candidate["knobs_derived"]["macro_mux"] = int(_macro.mux)
+        candidate["knobs_derived"]["macro_cells"] = int(_macro.rows) * int(_macro.cols)
     except ValueError as exc:
         candidate["wall_s"] = time.time() - started
         return _fail(candidate, "mapping", exc), None
@@ -1140,6 +1980,14 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
             "real_cells": float(packing_summary["real_cells"]),
             "committed_cells": float(packing_summary["committed_cells"]),
             "waste_pct": float(packing_summary["waste_pct"]),
+            # THE STUB PACKER'S CHIP ARITHMETIC (D35-REVISED / the stub round).
+            # `packing_summary` has carried these since the pipeline-order packer
+            # landed; the sweep was dropping them on the floor, so a mapped point
+            # reported a chip split whose CAPACITY and TAIL were invisible. Both
+            # are read from the one packing summary, never recomputed here (D21).
+            "chips_packed": int(packing_summary["chips_packed"]),
+            "chip_capacity_slots": int(packing_summary["chip_capacity_slots"]),
+            "tail_slots": int(packing_summary["tail_slots"]),
             "basis": (
                 "D27's waste, counted in CELLS: committed cells that hold no real "
                 "weight, over the committed total. cell_floor_macros is the GLOBAL "
@@ -1160,14 +2008,14 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
                 "census."
             ),
         }
+    # THE EFFECTIVE ALLOCATION GRANULARITY, still REPORTED though D38 parked
+    # the knob: the number the point was actually priced at is a fact about the
+    # machine, and it does not stop being one because nobody may sweep it any
+    # more. There is no precedence note here now — bank_depth and
+    # column_sets_per_tile are both refused as axes (D38), so no point can
+    # declare the two at once and no report has to explain which won.
     effective_bank = int(mapping.device.column_sets_per_tile)
     candidate["effective_column_sets_per_tile"] = effective_bank
-    if "bank_depth" in point and "column_sets_per_tile" in point:
-        candidate["notes"].append(
-            "both bank_depth and column_sets_per_tile are swept: cim.allocation "
-            f"WINS, so the effective allocation granularity is {effective_bank} mux "
-            "slot(s) (CimDeviceModel.column_sets_per_tile is the one law that decides)."
-        )
 
     # Stage: budget — the DECLARED caps, checked against the placement.
     if spec.max_chips > 0 and candidate["placement"]["analog_chips"] > spec.max_chips:
@@ -1215,18 +2063,28 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
     # sweep and the simulator publish ONE number.
     # The state store is sized from the bill the priced run just measured, so
     # the area below already carries it (see _silicon).
-    state_total_bytes = 0.0
+    # The store is sized PER STAGE and summed - not pooled and ceiled once -
+    # because the stages sit on different chips and a macro cannot straddle two.
+    # Pooling first under-charged by up to (stages - 1) macros and published a
+    # different macro count from the evaluator's for the same bill (D21).
     residency = getattr(evaluation, "state_residency", None) or {}
-    for row in (residency.get("per_stage") or []):
-        state_total_bytes += float(row.get("state_bytes", 0.0) or 0.0)
+    state_stage_bytes = [
+        float(row.get("state_bytes", 0.0) or 0.0)
+        for row in (residency.get("per_stage") or [])
+    ]
     # ADJ-14: the chiplet count is a swept AXIS, and the packing below reports
     # what the machine would need if its stages shared perfectly. The count is
     # priced honestly at every point now, because the engine is sized for the
     # stages its chiplet serves: sharing widens the scan engine, and where the
     # attention fabric saturates instead, the beat grows and the point pays for
     # it in throughput. Both directions are visible on the frontier.
+    # ONE composition of fws_eval's digital block per candidate, handed to
+    # every consumer below (the chiplet packing, the derived-digital row and
+    # the binding-term roll-up). Three independent calls composed it three
+    # times under one name and cost three times the work.
+    digital_silicon = _digital_silicon_of(evaluation)
     packed, chiplet_detail = _derive_shared_chiplets(
-        evaluation, summary.get("pipeline_stages") or chiplets
+        evaluation, summary.get("pipeline_stages") or chiplets, digital=digital_silicon
     )
     if packed and isinstance(chiplet_detail, dict):
         chiplet_detail["applied"] = False
@@ -1251,7 +2109,7 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
     else:
         candidate["derived_chiplets"] = {"chiplets_built": int(chiplets),
                                          "reason": chiplet_detail}
-    silicon = _silicon(mapping, chiplets, state_bytes=state_total_bytes)
+    silicon = _silicon(mapping, chiplets, state_bytes=state_stage_bytes)
     candidate["silicon"] = silicon
     metrics = [dict(entry.as_dict()) for entry in evaluation.metrics
                if not isinstance(entry.value, (list, tuple))]
@@ -1318,6 +2176,7 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
     # candidate publishes none of it and says so rather than reporting zeros.
     residency = dict(evaluation.state_residency)
     measured_pipeline = dict(getattr(evaluation, "pipeline", {}) or {})
+    stage_rows, tiles_off_stage = _pipeline_stage_rows(mapping)
     candidate["pipeline"] = {
         "serving_regime": str(getattr(evaluation.serving, "regime", "")),
         "filled": str(getattr(evaluation.serving, "regime", "")) == REGIME_FILLED,
@@ -1334,7 +2193,47 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         "resident_streams": _metric_by_suffix(metrics, "resident_streams"),
         "per_stream_tokens_per_s": _metric_by_suffix(metrics, "per_stream_tokens_per_s"),
         "per_token_latency_s": _metric_by_suffix(metrics, "per_token_latency"),
-        "stages": residency.get("stages"),
+        # THE STAGE COUNT, under a name that says it is a count. It was spelled
+        # `stages` while every other `stages` in this document is a LIST, so a
+        # consumer that wanted the stage plan got an integer. The plan itself is
+        # `stages` below - one compact row per stage, enough to draw the
+        # pipeline map of THIS candidate without a full atlas document.
+        "stage_count": residency.get("stages"),
+        "stages": stage_rows,
+        # Tiles whose owner sits on no PP stage. Expected to be 0 under D30;
+        # reported so the per-stage census can be checked against
+        # placement.tiles instead of being trusted.
+        "tiles_off_stage": tiles_off_stage,
+        # D34: is this partition BALANCED? Mirrored from the evaluator, which
+        # measures it off the same per-beat stage occupancy that sets the beat.
+        # A lopsided partition is a mapper failure, so it rides every row and
+        # the sweep WARNS on stdout for each one (see _stage_mismatch_warning).
+        "stage_balance": measured_pipeline.get("stage_balance") or {
+            "measured": False,
+            "reason": (
+                "this candidate is lowered under the "
+                f"'{str(getattr(evaluation.serving, 'regime', '')) or 'unknown'}' "
+                "regime, which has NO stage plan: one batch steps through the whole "
+                "model rather than D streams rotating through stages, so there are "
+                "no stage times to compare and no partition to call balanced or "
+                "mismatched. Absent, not balanced."
+            ),
+        },
+        "stages_basis": (
+            "one compact row per PP stage of the stage plan (D29): the chips that "
+            "carry it, the layers on it and what those layers put on analog "
+            "silicon, counted by op block over the PLACED TILES. Enough to draw "
+            "THIS candidate's pipeline map without a full atlas document; the full "
+            "inventories are in report.atlas_points, one per candidate."
+            if stage_rows
+            else "EMPTY, and not a measured zero: this candidate is lowered under "
+            f"the '{str(getattr(evaluation.serving, 'regime', '')) or 'unknown'}' "
+            "regime, which has NO stage plan - one batch steps through the whole "
+            "model rather than D streams rotating through stages - so there are no "
+            "PP stages to draw. The placement is still in `placement` and the "
+            "chips are still in the atlas document."
+        ),
+        "stage_plan_basis": str(summary.get("stage_plan_basis", "")),
         "basis": (
             "D29: the pipeline is ALWAYS FULL. tokens/s = 1/beat is the exit rate of "
             "ONE token per beat; D = the stage count, DERIVED from the stage plan and "
@@ -1392,9 +2291,25 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
                     "stage": int(row["stage"]),
                     "label": row["label"],
                     "layers": int(row["layers"]),
+                    # WHICH CHIPS hold this stage. The state a stage holds sits
+                    # on the chips the stage runs on, so a per-stage bill that
+                    # did not name them could not be placed on the map.
+                    "chips": [int(chip) for chip in (row.get("chips") or ())],
                     "recurrent_state_bytes": float(row["recurrent_state_bytes"]),
                     "kv_bytes": float(row["kv_bytes"]),
                     "state_bytes": float(row["state_bytes"]),
+                    "per_stream_state_bytes": float(
+                        row.get("per_stream_state_bytes", 0.0) or 0.0
+                    ),
+                    # WAS THE STORE ACTUALLY BUILT? "sized" is a claim that one
+                    # was; a row whose card could compose no SRAM macro says
+                    # "uncovered" and store_built is False. Reporting the macro
+                    # count alone would let an absent law read as a zero-sized
+                    # store (D21).
+                    "store_macros": int(row.get("store_macros", 0) or 0),
+                    "store_area_mm2": float(row.get("store_area_mm2", 0.0) or 0.0),
+                    "store_provenance": str(row.get("store_provenance", "absent")),
+                    "store_built": str(row.get("store_provenance", "")) == "composed-measured",
                     "verdict": str(row["verdict"]),
                 }
                 for row in residency.get("per_stage", ())
@@ -1405,6 +2320,10 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         candidate["state_bill"] = {
             "measured": False,
             "reason": str(residency.get("reason", "")),
+            # PRESENT AND EMPTY, so a consumer never has to tell a missing key
+            # from a missing measurement. An unmeasured bill has no rows, and
+            # the reason above says why.
+            "per_stage": [],
         }
     # D28: per-device-class utilization at EVERY point, idle devices inside the
     # mean, so idle silicon on the frontier is always visible.
@@ -1419,15 +2338,28 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         }
         for row in evaluation.utilization
     ]
-    binding = max(
+    busiest = max(
         evaluation.utilization, key=lambda row: row.max_occupancy, default=None
     )
-    candidate["binding_device_class"] = None if binding is None else binding.device_class
+    # TWO QUESTIONS, TWO NAMES (D21). See BUSIEST_CLASS_BASIS / BINDING_CLASS_BASIS:
+    # `busiest_device_class` is D28's peak-occupancy class and used to be called
+    # `binding_device_class`, which made it contradict the beat-setting field of
+    # the same name inside derived_digital on every point of the shipped curves.
+    candidate["busiest_device_class"] = None if busiest is None else busiest.device_class
+    candidate["busiest_device_class_basis"] = BUSIEST_CLASS_BASIS
+    # WHERE THE BEAT GOES: the evaluator's own binding term, mirrored, plus the
+    # per-stage analog / engine / fabric roll-up (ADJ-9, ADJ-10).
+    candidate["binding_term"] = _binding_term_block(evaluation, digital_silicon)
+    # THE ONE AUTHORITATIVE BINDING FIELD. Same accounting, same source and same
+    # value as derived_digital.binding_device_class.
+    candidate["binding_device_class"] = (
+        (candidate["binding_term"].get("terms") or [{}])[0].get("device_class")
+    )
+    candidate["binding_device_class_basis"] = BINDING_CLASS_BASIS
     # D31/D32: the digital side is DERIVED at this point, never swept. What it
-    # derived to is a reported quantity of the point.
-    digital = _digital_block(evaluation)
-    if digital is not None:
-        candidate["derived_digital"] = digital
+    # derived to is a reported quantity of the point. A card that composes
+    # nothing still gets the block, with its absences named (see _digital_block).
+    candidate["derived_digital"] = _digital_block(evaluation, digital_silicon)
 
     candidate["disclosures"] = []
     _extend_disclosures(
@@ -1493,10 +2425,28 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
     # BUDGET (mapping_dse.max_silicon_mm2), which is a statement about the
     # package. Nothing here refuses a design for needing memory.
     bill = candidate["state_bill"]
-    store_macros = int(candidate["silicon"].get("state_sram_macros", 0) or 0)
-    store_area = float(candidate["silicon"].get("state_sram_silicon_mm2", 0.0) or 0.0)
+    # THE STORE COMES FROM THE EVALUATOR'S OWN PER-STAGE ROWS, not from the
+    # silicon block. Copying the silicon figures here made the "one accounting"
+    # gate below (and its twin in the validator) compare a value with its own
+    # copy, so both passed unconditionally while the two sides genuinely
+    # disagreed. Two independent computations of the same quantity is exactly
+    # what D21 asks a gate to catch, and it can only catch it if they stay
+    # independent.
+    store_macros = int(sum(
+        int(row.get("store_macros", 0) or 0)
+        for row in (residency.get("per_stage") or [])
+    ))
+    store_area = float(math.fsum(
+        float(row.get("store_area_mm2", 0.0) or 0.0)
+        for row in (residency.get("per_stage") or [])
+    ))
     candidate["state_bill"]["store_macros"] = store_macros
     candidate["state_bill"]["store_area_mm2"] = store_area
+    candidate["state_bill"]["store_source"] = (
+        "evaluation.state_residency.per_stage, summed; silicon.state_sram_* is the "
+        "SAME quantity taken independently through _silicon, and the two are gated "
+        "against each other rather than copied"
+    )
     candidate["state_bill"]["budget_bytes"] = None
     candidate["state_bill"]["budget_verdict"] = "sized"
     if bill.get("measured") and store_macros:
@@ -1539,6 +2489,35 @@ def evaluate_candidate(cand_id, raw_base, point, model_config, spec, analog_card
         ),
     )
     candidate["wall_s"] = time.time() - started
+    # THE MAP OF THIS POINT, drawn where the machine exists (D33). `wall_s` is
+    # stamped above and deliberately excludes this: it is the time to EVALUATE
+    # the candidate, which is what the report's column says it is. The export's
+    # own cost rides `atlas_export_s`.
+    if atlas is not None:
+        export_started = time.time()
+        try:
+            candidate["atlas_point"] = export_point_atlas(
+                candidate,
+                mapping,
+                evaluation,
+                output_dir=atlas["output_dir"],
+                run=atlas["run"],
+                source=source,
+                model_path=atlas.get("model_path", ""),
+                mode=atlas.get("mode", "LLM"),
+                model_id=model_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - an export must not kill a sweep
+            # A machine that priced and then could not be DRAWN is a finding,
+            # not a reason to throw away a long sweep. The row keeps its
+            # numbers, atlas_point stays null and the failure is named.
+            candidate["atlas_point_error"] = f"{type(exc).__name__}: {exc}"
+            candidate["notes"].append(
+                "this point was priced in full but its atlas document could not be "
+                f"written: {candidate['atlas_point_error']}. The row's numbers stand; "
+                "only its map is missing."
+            )
+        candidate["atlas_export_s"] = time.time() - export_started
     return candidate, mapping
 
 
@@ -1716,6 +2695,13 @@ class LadderWalk:
         self.values = {name: list(spec.axes[name]) for name in self.names}
         self.trail = []
         self.steps = 0
+        #: Corners the walk was offered and the PLATFORM refuses (D35-REVISED
+        #: Y >= Z). Kept so a reader can see the wall the walk stopped at
+        #: rather than infer it from a missing step.
+        self.skipped = []
+
+    def _point_of(self, index):
+        return {name: self.values[name][rung] for name, rung in zip(self.names, index)}
 
     def neighbours(self, index):
         """(index, axis, direction) for every ONE-RUNG move, both directions.
@@ -1729,15 +2715,20 @@ class LadderWalk:
         for position, name in enumerate(self.names):
             for direction in (-1, 1):
                 rung = index[position] + direction
-                if 0 <= rung < len(self.values[name]):
-                    out.append(
-                        (
-                            index[:position] + (rung,) + index[position + 1:],
-                            name,
-                            direction,
-                            position,
-                        )
+                if not (0 <= rung < len(self.values[name])):
+                    continue
+                probe = index[:position] + (rung,) + index[position + 1:]
+                # D35-REVISED: the sub-diagonal of the (Z, Y) box is not a
+                # macro. The walk does not step there and does not pretend the
+                # step was declined on merit — the corner is recorded as
+                # REFUSED BY THE PLATFORM, with the reason.
+                reason = self.spec.illegal_reason(self._point_of(probe))
+                if reason is not None:
+                    self.skipped.append(
+                        {"knobs": self._point_of(probe), "axis": name, "reason": reason}
                     )
+                    continue
+                out.append((probe, name, direction, position))
         return out
 
     def repair(self, index, refused, phase, origin_id, axis, direction):
@@ -2024,6 +3015,126 @@ def ladder_candidates(spec, evaluate, announce=None):
 KNEE_FLAT_TOL = 1e-9
 
 
+def axis_vitality(candidates, front_ids, axes, declared=None):
+    """PER AXIS: how many distinct values it contributed to the FRONT.
+
+    THE REFEREE (D35-REVISED). "Every axis is refereed": an axis that lands the
+    same value on every non-dominated point did not choose anything — the front
+    would be the same front without it, and its rungs cost evaluation time and
+    reader attention. One distinct value is the DEMOTION signal, and it is
+    printed by name rather than left for somebody to notice.
+
+    It is a SIGNAL, not a verdict: a bundle-wide run over several models is what
+    actually retires an axis, and one model's front is one datum toward that.
+    The note says so, so a single flagged run cannot be quoted as a decision.
+
+    AN AXIS THAT WAS ONLY OFFERED ONE VALUE IS NOT A DEMOTION CANDIDATE. It is
+    PINNED, which is a fact about this sweep and not about the axis, and the
+    two are told apart by name — otherwise every smoke run would nominate
+    whatever it happened to hold fixed.
+
+    Counted over the FRONT and not over the valid set on purpose. An axis whose
+    values are all priced but all dominated contributed nothing to the answer,
+    which is exactly what this is asking.
+    """
+    front = [c for c in candidates if c["id"] in front_ids]
+    rows = []
+    for axis in axes:
+        values = []
+        for cand in front:
+            value = (cand.get("knobs") or {}).get(axis)
+            key = json.dumps(value, sort_keys=True)
+            if key not in values:
+                values.append(key)
+        distinct = [json.loads(key) for key in values]
+        row = {
+            "axis": axis,
+            "front_values": distinct,
+            "distinct": len(distinct),
+            "vital": len(distinct) >= 2,
+        }
+        if not front:
+            row["note"] = (
+                f"axis {axis!r} cannot be refereed: the front is empty, so no point "
+                "carried any value of it. This is not a demotion signal."
+            )
+            row["vital"] = None
+        elif declared is not None and len(list(declared.get(axis, ()))) < 2:
+            row["vital"] = None
+            row["note"] = (
+                f"axis {axis!r} was PINNED by this sweep: it declares "
+                f"{list(declared.get(axis, ()))}, so one value on the front is "
+                "arithmetic, not a finding. It is not refereed here."
+            )
+        elif len(distinct) < 2:
+            row["note"] = (
+                f"DEMOTION CANDIDATE: axis {axis!r} contributed ONE distinct value "
+                f"({distinct[0]!r}) to the whole non-dominated set, so on this model it "
+                "chose nothing — the front is the front it would have been with the "
+                "axis pinned. D35-REVISED refers this to the BUNDLE: an axis is retired "
+                "on agreement across models, and this run is one datum toward that."
+            )
+        else:
+            row["note"] = (
+                f"axis {axis!r} is VITAL here: {len(distinct)} distinct value(s) "
+                f"{distinct!r} sit on the non-dominated set, so the front really is "
+                "two-dimensional in it."
+            )
+        rows.append(row)
+    return rows
+
+
+def edge_crowding(candidates, front_ids):
+    """Front points sitting ON a platform BOUND, named (D35-REVISED).
+
+    The Y ceiling (8X) and the Z bounds are ADJUDICATED numbers, not physics.
+    A front that crowds a wall is the measurement that would justify moving it,
+    and it has to be visible to be that: a front whose best points all sit at
+    Y = 8X is telling you the box is too small, and a report that only printed
+    the winner would hide it.
+    """
+    import cim_analog_calc as _calc
+
+    front = [c for c in candidates if c["id"] in front_ids]
+    bounds = (
+        ("macro_y", "Y", max(_calc.MACRO_Y_VALUES), "ceiling", "8X"),
+        ("macro_y", "Y", min(_calc.MACRO_Y_VALUES), "floor", "X"),
+        ("macro_z", "Z", max(_calc.MACRO_Z_VALUES), "ceiling", "X"),
+        ("macro_z", "Z", min(_calc.MACRO_Z_VALUES), "floor", "8"),
+    )
+    rows = []
+    for axis, letter, value, which, spelled in bounds:
+        at_bound = [
+            cand["id"]
+            for cand in front
+            if (cand.get("knobs") or {}).get(axis) is not None
+            and int((cand.get("knobs") or {})[axis]) == int(value)
+        ]
+        if not at_bound:
+            continue
+        share = len(at_bound) / len(front) if front else 0.0
+        rows.append(
+            {
+                "axis": axis,
+                "bound": which,
+                "value": int(value),
+                "spelled": spelled,
+                "front_points": at_bound,
+                "share_of_front": share,
+                "note": (
+                    f"{len(at_bound)} of {len(front)} front point(s) sit AT the {axis} "
+                    f"{which} {letter} = {value} ({spelled}). That bound is ADJUDICATED, "
+                    "not physical: the platform box is where the sweep was told to look, "
+                    "and a front that crowds a wall is the data that would justify moving "
+                    "it. Extending the list is a one-line change in "
+                    "cim_analog_calc; it is NOT taken automatically, because the wall may "
+                    "also be the honest answer."
+                ),
+            }
+        )
+    return rows
+
+
 def knee_of(candidates, front_ids):
     """The KNEE of the front: max distance from the chord joining its extremes.
 
@@ -2234,6 +3345,35 @@ def _fmt(value, spec=".6g"):
     return str(value)
 
 
+def balance_threshold_of(payload):
+    """The balance threshold this report was judged against (D34).
+
+    READ OFF THE EMITTED ROWS, never re-declared here. The law is
+    ``fws_eval.STAGE_BALANCE_MAX_RATIO`` and it rides every measured candidate
+    as ``stage_balance.threshold``; a second copy in this file would be a
+    second accounting of one number and could drift from the one that actually
+    produced the verdicts (D21).
+    """
+    for candidate in payload.get("candidates") or ():
+        balance = (candidate.get("pipeline") or {}).get("stage_balance") or {}
+        if balance.get("measured"):
+            return balance.get("threshold")
+    return None
+
+
+def _balance_cell(candidate):
+    """The candidates table's stage-balance cell (D34)."""
+    balance = (candidate.get("pipeline") or {}).get("stage_balance") or {}
+    if not balance.get("measured"):
+        return "-"
+    ratio = _fmt(balance.get("ratio"), ".3g")
+    return (
+        f"**MISMATCHED {ratio}x**"
+        if balance.get("verdict") == "MISMATCHED"
+        else f"ok {ratio}x"
+    )
+
+
 def _knob_cell(value):
     if isinstance(value, list):
         return "[" + ",".join(str(item) for item in value) + "]"
@@ -2250,6 +3390,15 @@ def render_markdown(payload):
     if payload["sweep"]["label"]:
         lines.append(f"**{payload['sweep']['label']}**")
         lines.append("")
+    run = payload.get("run") or {}
+    if run:
+        lines.append(
+            f"- run id: `{run['run_id']}` "
+            f"(emitter {run['tool_version']}, code `{run['code_fingerprint']}`, "
+            f"generated {run['generated_at']}). Every artifact this run wrote "
+            "carries it: this report, the emitted config's header and each "
+            f"`{ATLAS_POINTS_DIR}/<id>.json`."
+        )
     lines.append(f"- hardware config: `{payload['hardware_config']}`")
     lines.append(f"- model config: `{payload['model_config']}` (model id `{payload['model_id']}`)")
     lines.append(f"- objective: {payload['objective']}")
@@ -2332,7 +3481,12 @@ def render_markdown(payload):
                 f"{bill.get('budget_verdict', 'undeclared')})"
             )
         digital = selected.get("derived_digital")
-        if digital:
+        if digital and not digital.get("composed"):
+            lines.append(
+                "- derived digital (D31/D32/ADJ-10): NOT COMPOSED. "
+                + str(digital.get("reason", ""))
+            )
+        if digital and digital.get("composed"):
             lines.append(
                 f"- derived digital (D31/D32/ADJ-10): {digital['vector_lanes']} vector "
                 f"lanes ({digital['vector_lanes_provenance']}), "
@@ -2343,9 +3497,10 @@ def render_markdown(payload):
                 f"{_fmt(digital['digital_power_W_total'])} W composed from the measured "
                 f"{digital['library_technology']} synthesis library"
             )
+        if digital and digital.get("binding_block"):
             lines.append(
-                "- WHAT BINDS AFTER THE DERIVATION (ADJ-10, measured on the priced "
-                f"timeline): stage {digital['binding_stage']} spends "
+                "- WHAT BINDS (ADJ-10, measured on the priced timeline): stage "
+                f"{digital['binding_stage']} spends "
                 f"{_fmt(digital['binding_busy_s'], '.4g')} s on "
                 f"{digital['binding_device_class']}/{digital['binding_block']} against "
                 f"{_fmt(digital['binding_analog_time_s'], '.4g')} s of analog m-pass"
@@ -2356,6 +3511,46 @@ def render_markdown(payload):
                     "disclosure for which real limit is"
                 )
             )
+            lines.append(
+                "- BUSIEST DEVICE CLASS (D28, a different question): "
+                f"{selected.get('busiest_device_class') or '-'} has the highest max "
+                "occupancy over the timeline. It is not what sets the beat and it is "
+                "no longer spelled `binding_device_class`."
+            )
+        balance = (selected.get("pipeline") or {}).get("stage_balance") or {}
+        if balance.get("measured"):
+            if balance.get("verdict") == "MISMATCHED":
+                worst = (balance.get("long_stages") or [{}])[0]
+                bound = float(balance.get("balanced_beat_bound_s") or 0.0)
+                lines.append(
+                    "- **STAGE BALANCE: MISMATCHED** - the busiest stage runs "
+                    f"{_fmt(balance['ratio'], '.3g')}x the median "
+                    f"({_fmt(balance['max_stage_busy_s'], '.4g')} s against "
+                    f"{_fmt(balance['median_stage_busy_s'], '.4g')} s), and "
+                    f"{len(balance.get('long_stages') or ())} of {balance['stages']} "
+                    "stages run long. The worst is stage "
+                    f"{worst.get('stage')}, dominated by "
+                    f"{worst.get('dominant_block')} on "
+                    f"{worst.get('dominant_device_class')}"
+                    + ("; it sets the beat" if worst.get("sets_the_beat") else "")
+                    + ". A balanced partition of the same work could reach a beat of "
+                    f"{_fmt(bound, '.4g')} s"
+                    + (
+                        f" ({_fmt(1.0 / bound)} tokens/s)"
+                        if bound > 0
+                        else ""
+                    )
+                    + f", bounded by its {balance.get('balanced_beat_bound_binding')}. "
+                    "This is a MAPPER failure, not a property of the workload: the "
+                    "partitioner should spend area to even the stages out. Nothing is "
+                    "refused for it here."
+                )
+            else:
+                lines.append(
+                    "- stage balance: **balanced** - the busiest stage runs "
+                    f"{_fmt(balance['ratio'], '.3g')}x the median, inside the "
+                    f"{_fmt(balance['threshold'])}x threshold."
+                )
         lines.append(f"- energy {_fmt(metrics['total_energy_pj'])} pJ over the timeline")
         lines.append(f"- wall time to evaluate this candidate: {_fmt(selected['wall_s'], '.3g')} s")
     lines.append("")
@@ -2364,7 +3559,8 @@ def render_markdown(payload):
     lines.append("")
     header = ["id"] + axes + [
         "ok", "fail stage", headline_unit, "silicon mm2", "analog mm2", "digital mm2",
-        "chips", "D", "beat s", "MiB/stage", "binding class", "energy pJ", "wall s",
+        "chips", "D", "beat s", "MiB/stage", "binding class", "stage balance",
+        "energy pJ", "wall s",
     ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "---|" * len(header))
@@ -2389,6 +3585,7 @@ def render_markdown(payload):
                 else "-"
             ),
             str(cand.get("binding_device_class") or "-"),
+            _balance_cell(cand),
             _fmt(metrics.get("total_energy_pj"), ".4g"),
             _fmt(cand.get("wall_s"), ".3g"),
         ]
@@ -2399,6 +3596,27 @@ def render_markdown(payload):
         "DERIVED from the stage plan, never configured; `beat s` is the measured "
         "interval between token exits and the headline is 1/beat; `MiB/stage` is the "
         "worst stage's resident state and KV for all D streams."
+    )
+    lines.append("")
+    lines.append(
+        "`stage balance` is D34's verdict: the busiest stage's per-beat occupancy "
+        f"over the median, flagged **MISMATCHED** past "
+        f"{_fmt(balance_threshold_of(payload))}x. "
+        "A lopsided partition is a MAPPER FAILURE - it sets the beat while the other "
+        "stages idle - so every mismatched candidate also prints a WARNING line on "
+        "the sweep's stdout naming the stage, what makes it long, and the beat a "
+        "balanced partition of the same work could reach. It refuses nothing; the "
+        "balance-aware partitioner is the follow-on."
+    )
+    lines.append("")
+    lines.append(
+        "`binding class` is the device class of the LARGEST BUSY TERM on the "
+        "beat-setting stage - what SETS THE BEAT (ADJ-10, "
+        "`candidate.binding_device_class`, the same number as "
+        "`derived_digital.binding_device_class`). It is NOT the busiest class: that "
+        "is `candidate.busiest_device_class` (D28's peak max-occupancy) and it sits "
+        "in the utilization table below. The two used to share this name and "
+        "disagreed on every point."
     )
     lines.append("")
 
@@ -2422,12 +3640,44 @@ def render_markdown(payload):
         lines.append(
             f"- `{cand['id']}`: {_fmt(cand['metrics'][headline_key])} {headline_unit} at "
             f"{_fmt(cand['silicon']['total_silicon_mm2'])} mm2{state}"
+            + (
+                f" — map `{cand['atlas_point']}`"
+                if cand.get("atlas_point")
+                else " — NO MAP (see the point-maps note below)"
+            )
         )
     if not payload["front_ids"]:
         lines.append("(empty — no valid candidate)")
     lines.append("")
     lines.append(f"Front shape — **{payload['front_shape']}**: {payload['front_note']}")
     lines.append("")
+    points = payload.get("atlas_points")
+    if points:
+        if points["enabled"]:
+            lines.append(
+                f"Point maps: {len(points['emitted'])} of {points['valid']} valid "
+                f"candidate(s) have an `fws_atlas/1` document under "
+                f"`{points['dir']}/`, each written from that candidate's OWN live "
+                f"evaluation and stamped with run id `{points['run_id']}`. Every "
+                "point is drawable, not only the front: the atlas has no privileged "
+                "point (D33). The "
+                f"{len(points['skipped_infeasible'])} infeasible candidate(s) built "
+                "no machine, so they carry `atlas_point: null` and their own "
+                "`fail_stage` / `fail_message` instead."
+            )
+        else:
+            lines.append(
+                "Point maps: NONE. This sweep ran with `--no-atlas-points`, so every "
+                "candidate carries `atlas_point: null` for that reason and not "
+                "because a machine was missing."
+            )
+        for failure in points.get("failed") or ():
+            lines.append("")
+            lines.append(
+                f"**`{failure['id']}` was priced in full but could NOT be drawn**: "
+                f"{failure['message']}. Its numbers stand; only its map is missing."
+            )
+        lines.append("")
 
     knee = payload.get("knee") or {}
     lines.append("## The knee")
@@ -2528,7 +3778,9 @@ def render_markdown(payload):
             if row["device_class"] not in classes:
                 classes.append(row["device_class"])
     if valid_rows and classes:
-        util_header = ["id"] + [f"{name} mean" for name in classes] + ["binding"]
+        util_header = (
+            ["id"] + [f"{name} mean" for name in classes] + ["busiest", "binding"]
+        )
         lines.append("| " + " | ".join(util_header) + " |")
         lines.append("|" + "---|" * len(util_header))
         for cand in valid_rows:
@@ -2540,12 +3792,24 @@ def render_markdown(payload):
                     else "-"
                 )
                 for name in classes
-            ] + [str(cand.get("binding_device_class") or "-")]
+            ] + [
+                str(cand.get("busiest_device_class") or "-"),
+                str(cand.get("binding_device_class") or "-"),
+            ]
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
         lines.append(
             "Idle devices are INSIDE every mean (D28): a class average taken over the "
             "busy devices only would report idle silicon as well used."
+        )
+        lines.append("")
+        lines.append(
+            "`busiest` is the class with the highest MAX OCCUPANCY on this timeline; "
+            "`binding` is the class of the largest busy term on the beat-setting "
+            "stage. They are different questions and they routinely give different "
+            "answers - on a weight-stationary machine hundreds of analog macros each "
+            "fire once per beat, so max occupancy can never select `analog_macro` "
+            "however much of the beat the analog m-pass takes."
         )
     else:
         lines.append("(no valid candidate)")
@@ -2643,11 +3907,19 @@ EMITTED_HEADER = """\
 # candidate:   {cand} ({knobs})
 # headline:    {headline}, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
+#
+# run id:      {run_id}
+# emitter:     {tool_version} (code {code_fingerprint})
+# generated:   {generated_at}
+#              D33: the SAME run id rides dse_report.json and every
+#              points/<id>.json this run wrote. An artifact whose id differs
+#              from its siblings' came out of a different generation and the
+#              numbers on it were never compared with theirs.
 """
 
 
 def emit_selected_config(raw_base, selected, out_path, *, base_path, model_path,
-                         analog_card, digital_card, source):
+                         analog_card, digital_card, source, run=None):
     """Write the winning point as a complete, runnable hardware YAML."""
     raw = apply_point(raw_base, selected["knobs"], analog_card, digital_card, source)
     raw.pop(DSE_BLOCK, None)
@@ -2661,6 +3933,12 @@ def emit_selected_config(raw_base, selected, out_path, *, base_path, model_path,
         raw.setdefault("cim", {}).setdefault("chip", {})["arrays_per_chip"] = int(
             derived["arrays_per_chip"]
         )
+        # Both homes, for the same reason apply_point writes both: an emitted
+        # config that carries a stale mapping.macros_per_chip is not runnable,
+        # whatever the header claims.
+        emitted_mapping = raw.get("mapping")
+        if isinstance(emitted_mapping, dict) and emitted_mapping.get("macros_per_chip") is not None:
+            emitted_mapping["macros_per_chip"] = int(derived["arrays_per_chip"])
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2675,6 +3953,10 @@ def emit_selected_config(raw_base, selected, out_path, *, base_path, model_path,
                for k, v in sorted((selected.get("knobs_derived") or {}).items())]
         ),
         headline=headline_text(selected),
+        run_id=(run or {}).get("run_id", "(none: this config was emitted outside a run)"),
+        tool_version=(run or {}).get("tool_version", TOOL_VERSION),
+        code_fingerprint=(run or {}).get("code_fingerprint", "unknown"),
+        generated_at=(run or {}).get("generated_at", "unknown"),
     )
     out_path.write_text(header + yaml.safe_dump(raw, sort_keys=False))
     return out_path
@@ -2836,13 +4118,138 @@ def verify_selected(emitted_path, model_path, mode, output_dir, selected):
 
 
 # ---------------------------------------------------------------------------
+# Per-candidate atlas documents (D33)
+# ---------------------------------------------------------------------------
+
+
+def export_point_atlas(candidate, mapping, evaluation, *, output_dir, run, source,
+                       model_path, mode="LLM", model_id=None):
+    """One ``fws_atlas/1`` document for THIS candidate, from ITS LIVE evaluation.
+
+    D33: the atlas has no privileged point. Clicking ANY point has to show the
+    whole machine, so EVERY candidate that built one gets a document — not the
+    front, not a sample of the front. The report is the one source of all
+    results and every row in it points at its own map.
+
+    THE DOCUMENT IS BUILT WHERE THE MACHINE EXISTS. This runs inside
+    :func:`evaluate_candidate`, at the moment ``mapping``, the lowered program
+    and ``evaluation`` are all still in hand, so a map costs an export and
+    nothing else. The earlier design re-walked ``apply_point ->
+    _derive_chip_capacity -> build_mapping -> build_fws_program ->
+    evaluate_fws`` per exported point, which priced every machine twice (8.07 s
+    per document on Granite-4.0-H-1B) and is exactly why the old code capped
+    how many points it was willing to draw. There is no cap now because there
+    is nothing left to ration: the second pricing pass is gone.
+
+    An INFEASIBLE candidate never built a machine, so it gets no document and
+    keeps ``atlas_point: null`` beside its own ``fail_message`` — the absence is
+    a refusal with a reason, not a missing file.
+
+    Returns the report-relative path, or ``None`` with the failure recorded on
+    the candidate.
+    """
+    import fws_atlas_export
+
+    points_dir = Path(output_dir) / ATLAS_POINTS_DIR
+    points_dir.mkdir(parents=True, exist_ok=True)
+    knobs = ", ".join(f"{k}={_knob_cell(v)}" for k, v in candidate["knobs"].items())
+    cand_id = candidate["id"]
+    document = fws_atlas_export.export_atlas(
+        [mapping],
+        boundary_rows=[mapping.boundary_table()],
+        title=f"{mapping.label} - point {cand_id}",
+        subtitle=(
+            f"QIF P3.7 sweep point {cand_id} ({knobs}); {headline_text(candidate)}, "
+            f"{_fmt(candidate['silicon']['total_silicon_mm2'])} mm2. Placed by P3 "
+            "and priced by P4 on THIS point's own timeline - no number here is "
+            "carried over from another point of the sweep."
+        ),
+        reference_command=(
+            "tools/fws_qif_dse.py --hardware_config "
+            f"{source} --model_config {model_path} --mode {mode}"
+            + (f" --model_id {model_id}" if model_id else "")
+            + f"   (sweep point {cand_id}: {knobs})"
+        ),
+        duty_cycles=[evaluation.atlas_duty_cycles()],
+        extra_metrics=[evaluation.atlas_metrics()],
+        pool_sizing=[evaluation.atlas_pool_sizing()],
+        extra_relaxations=[evaluation.atlas_relaxations()],
+        service_links=[evaluation.atlas_service_links()],
+    )
+    # THE ARTIFACT SAYS WHICH RUN MADE IT (D33). Same id as the report and as
+    # the emitted config; `dse_point` says which row of that report this
+    # document is the map of. It does NOT claim front membership: the front is
+    # a property of the whole sweep and does not exist yet when this is
+    # written. `report.front_ids` is where that lives, once.
+    document["run_id"] = run["run_id"]
+    document["run"] = dict(run)
+    document["dse_point"] = OrderedDict(
+        (
+            ("report", "dse_report.json"),
+            ("candidate_id", cand_id),
+            ("knobs", dict(candidate["knobs"])),
+            ("knobs_derived", dict(candidate.get("knobs_derived") or {})),
+            ("headline", headline_text(candidate)),
+            ("total_silicon_mm2", candidate["silicon"]["total_silicon_mm2"]),
+            (
+                "front_membership",
+                "not stated here: whether this point is on the Pareto front is a "
+                "property of the SWEEP, and the sweep is not finished when this "
+                "document is written. dse_report.json front_ids / knee say it, once.",
+            ),
+        )
+    )
+    fws_atlas_export.write_atlas_json(document, points_dir / f"{cand_id}.json")
+    return f"{ATLAS_POINTS_DIR}/{cand_id}.json"
+
+
+def atlas_points_block(candidates, run, enabled):
+    """The report's roll-up of what got a map and what did not, by name."""
+    emitted = [c["id"] for c in candidates if c.get("atlas_point")]
+    infeasible = [c["id"] for c in candidates if not c["ok"]]
+    failed = [
+        {"id": c["id"], "message": c["atlas_point_error"]}
+        for c in candidates
+        if c.get("atlas_point_error")
+    ]
+    return OrderedDict(
+        (
+            ("schema", "fws_atlas/1"),
+            ("dir", ATLAS_POINTS_DIR),
+            ("run_id", run["run_id"]),
+            ("enabled", bool(enabled)),
+            ("candidates", len(candidates)),
+            ("valid", sum(1 for c in candidates if c["ok"])),
+            ("emitted", emitted),
+            ("skipped_infeasible", infeasible),
+            ("failed", failed),
+            (
+                "basis",
+                "ONE fws_atlas/1 document per candidate that BUILT A MACHINE, "
+                "written from that candidate's own live evaluation at the moment it "
+                "existed - no second pricing pass, no sampling, no cap (D33: the "
+                "atlas has no privileged point, so clicking any point must show "
+                "everything). Every document carries this run's run_id. A candidate "
+                "with atlas_point: null is an INFEASIBLE one: it never built a "
+                "machine, so there is no inventory to draw, and its fail_stage and "
+                "fail_message say what refused it."
+                if enabled
+                else "NO documents were written: this sweep ran with "
+                "--no-atlas-points. Every candidate carries atlas_point: null for "
+                "that reason and not because a machine was missing.",
+            ),
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # The sweep
 # ---------------------------------------------------------------------------
 
 
 def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
               output_dir=None, objective=None, emit_config=None, verify=False,
-              quiet=False):
+              quiet=False, atlas_points=True):
     """Run the mapped sweep; return ``(exit_code, payload)``.
 
     Artifacts are ALWAYS written once the sweep has started evaluating: an
@@ -2885,6 +4292,25 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ONE IDENTITY FOR EVERYTHING THIS RUN WRITES (D33). Taken here, before the
+    # first candidate is priced, so the report, the emitted config and every
+    # per-front-point atlas document carry the same id even when the sweep runs
+    # for hours.
+    run = run_identity(
+        hw_path,
+        model_path,
+        mode=mode,
+        model_id=model_id,
+        objective=spec.objective,
+        sweep_echo=spec.echo(),
+    )
+    if not quiet:
+        print(
+            f"[QIF DSE] run {run['run_id']} ({run['tool_version']}, code "
+            f"{run['code_fingerprint']}, {run['generated_at']}); every artifact "
+            "this run writes carries it."
+        )
+
     if not quiet:
         if spec.search == "ladder":
             print(
@@ -2908,6 +4334,13 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
     counter = [0]
 
     def _announce(candidate):
+        # D34's WARNING is printed even under --quiet. Quiet suppresses the
+        # per-candidate progress rows, which are noise; a mapper failure is not
+        # noise, and the whole point of the line is that it survives into a
+        # regeneration log that nobody was watching live.
+        warning = stage_mismatch_warning(candidate)
+        if warning:
+            print(f"[QIF DSE] WARNING: {warning}")
         if quiet:
             return
         knobs = ", ".join(f"{k}={_knob_cell(v)}" for k, v in candidate["knobs"].items())
@@ -2925,6 +4358,12 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
                 f"{_fmt(candidate['silicon']['total_silicon_mm2'])} mm2, "
                 f"{candidate['placement']['analog_chips']} chips{state} "
                 f"[{candidate['wall_s']:.1f} s]"
+                + (
+                    f" -> {candidate['atlas_point']} "
+                    f"[{candidate.get('atlas_export_s', 0.0):.1f} s]"
+                    if candidate.get("atlas_point")
+                    else ""
+                )
             )
         else:
             print(
@@ -2932,6 +4371,20 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
                 f"{candidate['fail_stage']} [{candidate['wall_s']:.1f} s] "
                 f"{candidate['fail_message']}"
             )
+
+    # D33: the export context, or None under --no-atlas-points. It is handed to
+    # every candidate so the map is written where the machine exists, and the
+    # sweep never prices a point twice.
+    atlas_context = (
+        {
+            "output_dir": output_dir,
+            "run": run,
+            "model_path": str(model_path),
+            "mode": mode,
+        }
+        if atlas_points
+        else None
+    )
 
     def _evaluate(point):
         cand_id = f"c{counter[0]:03d}"
@@ -2946,6 +4399,7 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
             digital_card,
             str(hw_path),
             model_id=model_id,
+            atlas=atlas_context,
         )
         return candidate
 
@@ -3090,6 +4544,12 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
     payload = {
         "tool": "fws_qif_dse",
         "schema": "fws_qif_dse/1",
+        # D33: the run id at TOP LEVEL, and the whole identity block beside it.
+        # Every artifact this run writes carries the same id, so a page built
+        # from a report and a set of point documents can tell one generation
+        # from two.
+        "run_id": run["run_id"],
+        "run": run,
         "hardware_config": str(hw_path),
         "model_config": str(model_path),
         "model_id": model_id or "",
@@ -3119,6 +4579,11 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
         "front_shape": shape,
         "front_note": note,
         "knee": knee_of(rankable, front_ids),
+        "axis_vitality": axis_vitality(
+            rankable, front_ids, tuple(spec.axes), declared=dict(spec.axes)
+        ),
+        "edge_crowding": edge_crowding(rankable, front_ids),
+        "illegal_points": spec.illegal_points,
         "ladder_trail": ladder_trail,
         "state_bill_summary": _state_bill_summary(candidates, spec),
         "selected_id": None if selected is None else selected["id"],
@@ -3127,8 +4592,14 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
         "disclosures": disclosures,
         "silicon_coverage": silicon_coverage,
         "total_wall_s": total_wall,
+        "atlas_points": None,
         "verify": None,
     }
+
+    # THE MAPS ARE ALREADY ON DISK. Every candidate that built a machine wrote
+    # its own document from its own live evaluation inside evaluate_candidate
+    # (D33), so there is nothing to export here - only to roll up.
+    payload["atlas_points"] = atlas_points_block(candidates, run, atlas_points)
 
     exit_code = 0
     if headline_conflict:
@@ -3148,6 +4619,7 @@ def run_sweep(hardware_config, model_config_path, *, mode="LLM", model_id=None,
                 analog_card=analog_card,
                 digital_card=digital_card,
                 source=str(hw_path),
+                run=run,
             )
             payload["emitted_config"] = str(emitted)
             if verify:
@@ -3215,6 +4687,21 @@ def main(argv=None):
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-candidate lines.")
+    parser.add_argument(
+        "--no-atlas-points",
+        dest="atlas_points",
+        action="store_false",
+        help=(
+            "Do NOT write the per-candidate fws_atlas/1 documents "
+            f"(<output-dir>/{ATLAS_POINTS_DIR}/<id>.json). They are on by default: "
+            "D33 makes the CLICKED POINT bind the atlas page and gives no point a "
+            "privileged status, so every candidate that builds a machine gets one. "
+            "They are written from each candidate's own live evaluation, so they "
+            "cost an export rather than a second pricing pass - but they are large, "
+            "and this turns them off."
+        ),
+    )
+    parser.set_defaults(atlas_points=True)
     args = parser.parse_args(argv)
 
     try:
@@ -3228,6 +4715,7 @@ def main(argv=None):
             emit_config=args.emit_config,
             verify=args.verify,
             quiet=args.quiet,
+            atlas_points=args.atlas_points,
         )
     except ValueError as exc:
         print(f"[QIF DSE] error: {exc}")
@@ -3267,6 +4755,21 @@ def main(argv=None):
     )
     knee = payload.get("knee") or {}
     print(f"[QIF DSE] knee: {knee.get('point') or 'NONE'} — {knee.get('basis', '-')}")
+    # D35-REVISED: every axis is refereed, and the referee speaks OUT LOUD.
+    # A demotion candidate printed only into JSON is a finding nobody reads
+    # during a regeneration, which is the same reason the stage-balance
+    # verdict (D34) prints here.
+    for row in payload.get("axis_vitality") or ():
+        if row.get("vital") is False:
+            print(f"[QIF DSE] AXIS VITALITY — {row['note']}")
+    for row in payload.get("edge_crowding") or ():
+        print(f"[QIF DSE] EDGE CROWDING — {row['note']}")
+    illegal = payload.get("illegal_points") or ()
+    if illegal:
+        print(
+            f"[QIF DSE] {len(illegal)} declared corner(s) are not macros and were not "
+            f"priced: {illegal[0]['reason']}"
+        )
     bill = payload.get("state_bill_summary") or {}
     if bill.get("points_measured"):
         print(

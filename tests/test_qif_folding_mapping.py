@@ -96,11 +96,32 @@ def _hw(path, mutate=None):
 
 def _fine_bank(depth=1, cols_adc=None):
     """Mutator: a card that allocates in single mux slots (and, optionally, a
-    wider ADC so a tensor fits inside one macro's stored width)."""
+    wider ADC so a tensor fits inside one macro's stored width).
+
+    D35-REVISED (2026-08-29) fixes the macro at X = 512 rows with Z and Y over
+    the platform box, so fws_cim_moe.yaml (1024 x 1024 : 256) is already OFF
+    it and carries the override for the reason its own header states. Widening
+    the storage tile here keeps it NONSTANDARD on purpose — the geometry these
+    K-stack tests need is a macro whose stored width swallows a whole tensor,
+    which is the shape that puts both K blocks of an output block in one macro.
+    So the mutator restates the override with the reason it is being taken,
+    exactly as a config would: the exemption exists to be used out loud, and a
+    test that needed it silently would be the first place the constant rotted.
+    """
 
     def mutate(raw):
         if cols_adc is not None:
-            raw["cim"]["analog"]["cols_adc"] = cols_adc
+            # D35-REVISED names the macro X x Y : Z. This fixture widens the
+            # STORAGE TILE while holding the converter count, which is exactly
+            # "a wider ADC" meant under the old schema: Z stays and Y grows.
+            raw["cim"]["analog"]["cols"] = cols_adc * (
+                raw["cim"]["analog"]["cols"] // raw["cim"]["analog"]["adcs"]
+            )
+            raw["cim"]["analog"]["adcs"] = cols_adc
+            raw["cim"]["analog"]["nonstandard_macro"] = (
+                "test fixture: a macro wide enough to hold one tensor's whole output "
+                "block, which is the geometry the P7.2 K-stack law is exercised on"
+            )
         raw["cim"]["cards"] = {
             "ctt": {"kind": "analog_macro", "device": "ctt", "bank_depth": depth}
         }
@@ -352,14 +373,24 @@ def test_same_layer_co_residency_is_priced_and_disclosed_not_hidden(moe_dense):
     # shared expert), and the packer can land them in one macro. That DOES
     # serialize, the timeline already prices it, and the run says so by name.
     sharing = moe_dense.bank_sharing
-    assert sharing["cross_tensor_same_layer_delay_s"] > 0.0
+    # THE NUMBER AND THE BANNER MUST AGREE - that is the claim. The delay itself
+    # is MEASURED and may be zero: ADJ-16/M6 fires only `top_k` routed experts
+    # per beat, so a shared expert sharing a macro with a routed one collides
+    # only when that routed expert is one this beat actually routed to. A zero
+    # here is a measurement, not a missing law, and the banner must then be
+    # absent for the same reason.
+    delay = sharing["cross_tensor_same_layer_delay_s"]
+    assert delay >= 0.0
     banners = [
         item
         for item in moe_dense.disclosures
         if item.constraint == "same_layer_bank_sharing_serializes"
     ]
-    assert len(banners) == 1
-    assert "CROSS-LAYER" in banners[0].reason
+    if delay > 0.0:
+        assert len(banners) == 1
+        assert "CROSS-LAYER" in banners[0].reason
+    else:
+        assert banners == []
 
 
 def test_the_dedicated_placement_shares_no_banks_at_all(moe_dedicated):
@@ -381,15 +412,27 @@ def test_each_macro_walks_its_occupied_banks_once_per_decode_step(fixture, reque
     evaluation = request.getfixturevalue(fixture)
     passes = evaluation.bank_passes
     assert passes["measured"] is True
-    assert passes["macros_walked_exactly_once"] == passes["macros_holding_tiles"]
-    assert passes["column_sets_never_read"] == 0.0
     assert passes["column_sets_read_more_than_once"] == 0.0
-    # The charge is the placement's own column-set count — no more, no less.
     occupied = sum(
         macro.claimed_column_sets for macro in evaluation.mapping.macros if macro.tiles
     )
-    assert passes["column_set_passes_charged"] == float(occupied)
     assert passes["column_sets_occupied"] == float(occupied)
+    # RESIDENCY IS NOT ACTIVITY (ADJ-16/M6). A MoE layer routes one token to
+    # `top_k` experts, so the other E - top_k hold their weights and sit the
+    # beat out - `column_sets_never_read` counts exactly those, and on a sparse
+    # model a large value there is the CORRECT reading. What Invariant W
+    # forbids is space that holds NOTHING; it never promised that everything
+    # resident fires. Asserting never_read == 0 is what let every idle expert
+    # be charged a full analog pass.
+    params = evaluation.mapping.device.params
+    sparse = int(getattr(params, "num_experts", 0) or 0) > int(getattr(params, "top_k", 0) or 0) > 0
+    if sparse:
+        assert passes["column_sets_never_read"] > 0.0
+        assert passes["column_set_passes_charged"] < float(occupied)
+    else:
+        assert passes["macros_walked_exactly_once"] == passes["macros_holding_tiles"]
+        assert passes["column_sets_never_read"] == 0.0
+        assert passes["column_set_passes_charged"] == float(occupied)
 
 
 def test_dense_packing_charges_the_same_bank_passes_on_fewer_macros(
@@ -397,9 +440,14 @@ def test_dense_packing_charges_the_same_bank_passes_on_fewer_macros(
 ):
     # THE INVARIANT W STATEMENT, on a timeline. The same weights are read the
     # same number of times per token; what changes is how many macros hold
-    # them. 1776 banks is the model, 445 vs 459 macros is the packing.
-    assert moe_dense.bank_passes["column_set_passes_charged"] == 1776.0
-    assert moe_dedicated.bank_passes["column_set_passes_charged"] == 1776.0
+    # them. The PACKING must not move the charge - that is the claim - and the
+    # absolute number is the model's, not this test's (ADJ-16 made it the
+    # ACTIVE count, so the idle experts no longer inflate it).
+    assert (
+        moe_dense.bank_passes["column_set_passes_charged"]
+        == moe_dedicated.bank_passes["column_set_passes_charged"]
+    )
+    assert moe_dense.bank_passes["column_set_passes_charged"] > 0.0
     assert moe_dense.bank_passes["macros_holding_tiles"] == 445
     assert moe_dedicated.bank_passes["macros_holding_tiles"] == 459
     assert moe_dense.mapping.packing_summary()["banks_used"] == 1776
@@ -704,22 +752,22 @@ def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
     assert document["delta"]["cell_floor_macros"] == 2876
     assert document["delta"]["macros_above_floor"] == 4828 - 2876
     assert document["delta"]["waste_pct"] == pytest.approx(40.44203949185308)
-    # Fact 1 under D29: the same weights are read the same number of times per
-    # BEAT — every stage fires every beat, so one beat reads the whole model
-    # once and one token leaves.
+    # Fact 1 under D29: the PACKING does not change how many column sets a beat
+    # reads. Granite is a MoE model, so that number is the ACTIVE count (3064 of
+    # the 19304 it holds) - ADJ-16/M6: one token reaches `top_k` experts and the
+    # rest sit the beat out. What this asserts is that re-packing the same
+    # weights onto fewer macros charges the same passes.
     assert dense["serving_regime"] == dedicated["serving_regime"] == "filled_pipeline"
     assert dense["bank_passes"]["unit"] == dedicated["bank_passes"]["unit"] == "beat"
     assert (
         dense["bank_passes"]["column_set_passes_charged"]
         == dedicated["bank_passes"]["column_set_passes_charged"]
-        == 19304.0
     )
-    # ... and every macro of both placements walked its own banks exactly once.
+    assert dense["bank_passes"]["column_set_passes_charged"] > 0.0
+    # ... and no macro of either placement read a bank TWICE. Some read none:
+    # those hold experts this beat did not route to.
     for point in (dedicated, dense):
-        assert (
-            point["bank_passes"]["macros_walked_exactly_once"]
-            == point["bank_passes"]["macros_holding_tiles"]
-        )
+        assert point["bank_passes"]["column_sets_read_more_than_once"] == 0.0
 
 
 def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
@@ -752,12 +800,12 @@ def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["accumulator_ops"] == 0
-    assert dense["accumulator_ops"] == 684
+    assert dense["accumulator_ops"] == 1188
     assert document["delta"]["median_decode_step_delta_s"] == pytest.approx(
-        -4.0e-08, rel=1e-6
+        -6.3157894734e-09, rel=1e-6
     )
     assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(
-        -0.26063723879889633
+        -0.029804080844601937
     )
     assert dense["tokens_per_s"] > dedicated["tokens_per_s"]
 

@@ -411,12 +411,17 @@ axis ranks package footprint rather than silicon area), and the
 report states the front's SHAPE, read off the data: a one-point front on
 flat area means no swept axis trades silicon for speed.
 
+> FROZEN: this command no longer runs. Its config declares an axis
+> (`vector_lanes`, and later `arrays_per_chip`) that the tool now refuses
+> by name, because both are DERIVED. The report it produced is kept as
+> history under the `_retired` directory and cannot be re-derived.
+
 ```bash
 .venv/bin/python tools/fws_qif_dse.py \
   --hardware_config configs/hardware-config/fws_cim_granite_tiny_dse.yaml \
   --model_config configs/model-config/granite_4_0_h_tiny_inf.yaml \
   --model_id Granite-4.0-H-Tiny \
-  --output-dir docs/qif/dse/granite_lanes_banks \
+  --output-dir docs/qif/dse/granite_lanes_banks_retired \
   --emit-config configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml \
   --verify
 ```
@@ -426,7 +431,7 @@ flat area means no swept axis trades silicon for speed.
 Granite-4.0-H-Tiny over `vector_lanes {512, 1024, 2048, 4096}` x
 `bank_depth {1, 2}` — 8 candidates, 8 valid, ~100 s of wall clock, every
 candidate placed and priced on its own timeline. Artifacts:
-`docs/qif/dse/granite_lanes_banks/dse_report.{json,md}`; the winner is
+`docs/qif/dse/granite_lanes_banks_retired/dse_report.{json,md}`; the winner is
 `configs/hardware-config/fws_cim_granite_tiny_dse_selected.yaml`.
 `tests/test_qif_dse_allocation.py` regenerates the sweep and compares the
 artifact; the validator reads it for the selection rows and runs a live

@@ -296,6 +296,10 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
+# The platform macro (D35-REVISED) is declared ONCE, in the sheet module, beside
+# the (Z, Y) lists it has to stay consistent with. cim_analog_calc imports the
+# standard library only, so this is not a cycle.
+import cim_analog_calc as _analog_calc
 import llm_util
 
 
@@ -561,6 +565,18 @@ class AttentionTiming:
     call_k: int = 0
     call_n: int = 0
     softmax_tokens: int = 0
+    #: CTX-SPLIT: how many arrays one fold's CONTEXT was dealt across, per
+    #: group, and what putting it back together cost. All three default to the
+    #: unsplit values, so a hand-built AttentionTiming and every
+    #: declared-geometry run still read as the pre-split law.
+    qk_split: int = 1
+    pv_split: int = 1
+    combine_cycles: int = 0
+    combine_adds: int = 0
+    combine_lanes: int = 1
+    #: Score bytes the QK gather moves before the softmax can run. REPORTED and
+    #: priced at zero seconds under the intra-chip convention (D17).
+    gather_bytes: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -952,6 +968,23 @@ class MacroFill:
         return self.real_cells / self.committed_cells
 
 
+def _contiguous_runs(macro_ids: Sequence[int]) -> Tuple[Tuple[int, int], ...]:
+    """``[(macro_id, length), ...]`` for each maximal run of equal ids.
+
+    The K-inner walk lands a stack's blocks in one contiguous bank stream, so a
+    macro that appears twice appears twice IN A ROW. Runs, not a set: a macro
+    that a stack returns to after leaving it would be two accumulations, not
+    one, and this reports what actually happened rather than a grouping.
+    """
+    runs: List[Tuple[int, int]] = []
+    for macro_id in macro_ids:
+        if runs and runs[-1][0] == macro_id:
+            runs[-1] = (macro_id, runs[-1][1] + 1)
+        else:
+            runs.append((int(macro_id), 1))
+    return tuple(runs)
+
+
 @dataclass(frozen=True)
 class KStack:
     """The K blocks of ONE output block of one tensor, in walk order.
@@ -959,6 +992,14 @@ class KStack:
     ``depth`` is how many K blocks reduce into the block: ``depth == 1`` needs
     no accumulator at all. ``local`` is the whole point of the K-inner walk —
     every block in one macro, so the partials never leave it.
+
+    THE SAME TYPE DESCRIBES A SEGMENT. A stack that does not fit in one macro
+    still lands in RUNS: the K-inner walk is contiguous, so its blocks occupy
+    macro A, then macro B, and never interleave. Each run of length > 1 is a
+    LOCAL SEGMENT — a real in-macro accumulation, with the same law and the
+    same cost as a whole local stack — and :attr:`DensePacking.local_k_segments`
+    carries them. A stack that IS local has exactly one segment, equal to
+    itself, which is why describing segments changes no local number.
     """
 
     owner: TileOwner
@@ -1011,6 +1052,13 @@ class DensePacking:
     tail_cells: int
     cell_floor_macros: int
     disclosures: Tuple[str, ...] = ()
+    #: The in-macro RUNS of every K stack, depth > 1 only (P7.2). One entry per
+    #: (output block, macro) that really accumulates: for a local stack this is
+    #: the stack itself, and for a spread stack it is the part of it that reduces
+    #: without leaving a macro. The DAG builder prices exactly these; the
+    #: BETWEEN-macro reduction is the row-block partial-sum law's and is not
+    #: repeated here (D21).
+    local_k_segments: Tuple[KStack, ...] = ()
 
     @property
     def waste_cells(self) -> int:
@@ -1058,6 +1106,7 @@ class DensePacking:
                 ("k_stacks", len(self.k_stacks)),
                 ("local_k_stacks", len(self.local_k_stacks)),
                 ("spread_k_stacks", len(self.spread_k_stacks)),
+                ("local_k_segments", len(self.local_k_segments)),
             )
         )
 
@@ -1927,7 +1976,7 @@ class BlockCount:
     """``count`` copies of one measured block, and what they cost."""
 
     block: str
-    count: int
+    count: float
     unit_area_mm2: float
     unit_power_w: float
     role: str
@@ -1941,6 +1990,25 @@ class BlockCount:
     @property
     def power_w(self) -> float:
         return self.count * self.unit_power_w
+
+    @property
+    def whole(self) -> bool:
+        """Is this row a whole number of blocks?
+
+        Every count in this module is an INTEGER copy of a measured block
+        except one: a fabric whose GEOMETRY was derived (SA-GEOM) prices an
+        R x C array LINEARLY in its MAC count against the measured 32 x 32
+        block, and a fraction of a block is exactly what that says. The
+        summary and the report print the integer form whenever the count is
+        whole, so no existing number changes shape.
+        """
+        return float(self.count).is_integer()
+
+    def count_json(self) -> object:
+        return int(self.count) if self.whole else float(self.count)
+
+    def count_text(self) -> str:
+        return f"{int(self.count):<8d}" if self.whole else f"{self.count:<8.6g}"
 
 
 @dataclass(frozen=True)
@@ -1971,10 +2039,10 @@ class EngineComposition:
         return math.fsum(unit.power_w for unit in self.units)
 
     @property
-    def blocks(self) -> "OrderedDict[str, int]":
-        out: "OrderedDict[str, int]" = OrderedDict()
+    def blocks(self) -> "OrderedDict[str, object]":
+        out: "OrderedDict[str, object]" = OrderedDict()
         for unit in self.units:
-            out[unit.block] = out.get(unit.block, 0) + int(unit.count)
+            out[unit.block] = out.get(unit.block, 0) + unit.count_json()
         return out
 
     def summary(self) -> "OrderedDict[str, object]":
@@ -1992,7 +2060,7 @@ class EngineComposition:
                             (
                                 ("block", unit.block),
                                 ("role", unit.role),
-                                ("count", int(unit.count)),
+                                ("count", unit.count_json()),
                                 ("unit_area_mm2", unit.unit_area_mm2),
                                 ("unit_power_W", unit.unit_power_w),
                                 ("area_mm2", unit.area_mm2),
@@ -2016,7 +2084,7 @@ class EngineComposition:
         ]
         for unit in self.units:
             lines.append(
-                f"  {unit.block:<32} x {unit.count:<8d} {unit.area_mm2:>12.6g} mm2 "
+                f"  {unit.block:<32} x {unit.count_text()} {unit.area_mm2:>12.6g} mm2 "
                 f"{unit.power_w:>10.6g} W  [{unit.count_provenance}/{unit.unit_provenance}]"
                 f"  {unit.role}"
             )
@@ -2027,15 +2095,29 @@ class EngineComposition:
 
 def _units(
     library: SynthesisLibrary,
-    rows: Sequence[Tuple[str, int, str]],
+    rows: Sequence[Tuple[str, float, str]],
     *,
     count_provenance: str,
+    allow_fractional: bool = False,
 ) -> Tuple[BlockCount, ...]:
-    """Build BlockCount rows, refusing any block the library does not name."""
+    """Build BlockCount rows, refusing any block the library does not name.
+
+    A ZERO-COUNT ROW IS KEPT AND PRINTED AS ZERO (M5). Dropping it made a
+    measured zero read exactly like a term nobody asked about: the pool's
+    FP_ADD row vanished from the census when `n_slices = 1`, so a reader
+    checking the composition saw no adders and no statement that there were
+    none. A negative count is still refused - that is a broken law, not a
+    measurement.
+    """
     out: List[BlockCount] = []
     for block_name, count, role in rows:
-        count = int(count)
-        if count <= 0:
+        # OPT-IN ONLY (SA-GEOM). A fractional count is legal for exactly one
+        # composer — the derived-geometry SA fabric, which prices an R x C
+        # array LINEARLY in MAC count against the measured 32 x 32 block — and
+        # every other caller keeps the integer truncation it was written with,
+        # so no existing composition moves.
+        count = float(count) if allow_fractional else int(count)
+        if count < 0:
             continue
         block = library.block(block_name)
         out.append(
@@ -2254,6 +2336,140 @@ def compose_sa_fabric(
     )
 
 
+def compose_sa_fabric_derived(
+    library: SynthesisLibrary,
+    geometry: "DerivedSAGeometry",
+    groups: Sequence[Tuple[str, int]],
+    replicas: int = 1,
+    *,
+    combine_lanes: int = 0,
+    count_provenance: str = PROVENANCE_DERIVED_COUNT,
+) -> EngineComposition:
+    """The SA fabric at a DERIVED geometry, priced LINEARLY in MAC count.
+
+    ``groups`` is ``(("qk", a_qk), ("pv", a_pv))``: the array counts the fold
+    split gave each engine group, each at that group's own derived ``C``.
+
+    WHY LINEAR HERE AND CEILED THERE. :func:`compose_sa_fabric` composes a
+    DECLARED geometry from INTEGER copies of the measured 32 x 32
+    ``GEMMINI_SYS_ARRAY`` block, and ceils, because a declared 32 x 64 fabric
+    is two whole synthesised blocks and the remainder of a non-multiple is
+    idle silicon a chip really pays for. A DERIVED geometry is not a tiling of
+    that block at all — a 4 x 512 array is not four 32 x 32 blocks with 28 rows
+    dark, it is an array with 2048 MAC cells — so its silicon is the measured
+    block's area and power SCALED BY MAC COUNT, ``R * C / (32 * 32)``, and the
+    fraction is KEPT. That is a MODEL of an unsynthesised shape and it is
+    labelled as one on every artifact
+    (``derived-linear-from-measured-block``): the per-cell number is measured,
+    the shape it is spent on is not. THE DECLARED PATH IS UNTOUCHED — a
+    ``geometry: declared`` card still gets integer block copies and the same
+    numbers it always had.
+
+    The TRANSPOSER is composed exactly as :func:`compose_sa_fabric` composes
+    it: ONE per attention replica, for the same reason (ADJ-4).
+    """
+    replicas = max(1, int(replicas))
+    gemmini = library.block("GEMMINI_SYS_ARRAY")
+    phys_rows = int(gemmini.rows or 0)
+    phys_cols = int(gemmini.cols or 0)
+    if phys_rows < 1 or phys_cols < 1:
+        raise SynthesisLibraryError(
+            f"{library.technology} GEMMINI_SYS_ARRAY declares no rows/cols geometry, so "
+            "the MAC count a derived R x C array is scaled against does not exist. The "
+            "block's own geometry is what makes the scale a measurement rather than an "
+            "assumption."
+        )
+    block_macs = phys_rows * phys_cols
+    rows_out: List[Tuple[str, float, str]] = []
+    terms: List[str] = []
+    for label, count in groups:
+        count = max(0, int(count))
+        cols = geometry.cols_for(str(label))
+        macs = int(geometry.rows) * int(cols)
+        blocks = (macs / block_macs) * count * replicas
+        rows_out.append(
+            (
+                "GEMMINI_SYS_ARRAY",
+                blocks,
+                f"{str(label).upper()} group: {count} array(s) x {replicas} replica(s) "
+                f"of {int(geometry.rows)}x{int(cols)} = {macs} MACs each, "
+                f"{macs}/{block_macs} of the measured {phys_rows}x{phys_cols} block",
+            )
+        )
+        terms.append(
+            f"{str(label)}: {macs}/{block_macs} x {count} x {replicas} = {blocks:.6g}"
+        )
+    rows_out.append(("TRANSPOSER", replicas, "K-matrix preparation, one per replica"))
+    # CTX-SPLIT: the add-reduce that puts a split call back together is REAL
+    # SILICON on this chiplet, so it is composed here rather than being timed
+    # for free. INTEGER FP_ADD blocks — a lane is a whole adder, not a
+    # fraction of one — from the same measured library the arrays come from.
+    combine_lanes = max(0, int(combine_lanes))
+    if combine_lanes > 0:
+        rows_out.append(
+            (
+                "FP_ADD",
+                combine_lanes * replicas,
+                f"context-split add-reduce: {combine_lanes} lane(s) x {replicas} "
+                "replica(s), one adder per lane retiring one partial sum per cycle",
+            )
+        )
+        terms.append(f"combine: {combine_lanes} x {replicas} FP_ADD")
+    return EngineComposition(
+        name="SA attention fabric (derived geometry)",
+        technology=library.technology,
+        units=_units(
+            library,
+            rows_out,
+            count_provenance=count_provenance,
+            allow_fractional=True,
+        ),
+        basis=(
+            f"derived-linear-from-measured-block: R x C / ({phys_rows} x {phys_cols}) "
+            f"measured GEMMINI_SYS_ARRAY blocks per array — " + "; ".join(terms)
+            + f" — plus {replicas} TRANSPOSER"
+        ),
+        disclosures=(
+            "AREA AND POWER OF A DERIVED-GEOMETRY ARRAY ARE LINEAR IN MAC COUNT. The "
+            f"measured {phys_rows}x{phys_cols} GEMMINI_SYS_ARRAY block is charged at "
+            f"{1.0 / block_macs:.6g} of itself per MAC cell and the FRACTION IS KEPT, "
+            "because a derived R x C array is not a tiling of that block and ceiling to "
+            "whole blocks here would charge for silicon the shape does not contain. The "
+            "PER-CELL number is measured; the SHAPE is not synthesised, and that is the "
+            "modelling step this line names. Integer block copies remain the law for a "
+            "DECLARED geometry (compose_sa_fabric), which is what every shipped card "
+            "still uses.",
+            "no overhead fraction is applied (D28).",
+            "the attention datapath's converter blocks (COMBINED_CONV, "
+            "COMBINED_CONV_SEQUENTIAL, INT8_BUFF_DIV_SYS_ARRAY_PENALTY) are NOT "
+            "composed, for the reason compose_sa_fabric gives: all three are measured "
+            "at 0 area and 0 power in both checked-in libraries and OPTIMA's own source "
+            "note records its counts for them as unexplained placeholders.",
+            "TRANSPOSER: ONE per attention replica, exactly as the declared-geometry "
+            "composition does it (ADJ-4); OPTIMA's 9 is unexplained in its own source "
+            "and is not copied.",
+            SA_GEOMETRY_RULE_DISCLOSURE,
+            SA_GEOMETRY_DATAFLOW_DISCLOSURE,
+            SA_GEOMETRY_BANDWIDTH_DISCLOSURE,
+        )
+        + (
+            (
+                "CTX-SPLIT: the FP_ADD row above is the CONTEXT-SPLIT ADD-REDUCE, and it "
+                "is here because the split is not free. A fold whose context is dealt "
+                "across S arrays comes back as S partial output blocks, and their sum is "
+                f"{combine_lanes} measured FP_ADD block(s) per replica — INTEGER blocks, "
+                "unlike the arrays above, because a lane is a whole adder. Its TIME is "
+                "charged on the PV op in the same beat (depth + ceil(results / lanes) - "
+                "1, the pipelined-tree expression this module already uses for every "
+                "other reduction), so the silicon here and the cycles there are the same "
+                "engine counted once.",
+            )
+            if combine_lanes > 0
+            else ()
+        ),
+    )
+
+
 def compose_macro_pool(
     library: SynthesisLibrary,
     sizing: "DigitalPoolSizing",
@@ -2275,7 +2491,8 @@ def compose_macro_pool(
     lanes = max(0, int(sizing.lanes))
     conv_lanes = max(0, int(sizing.conv_lanes))
     rows = [
-        ("FP_ADD", int(sizing.adders), "shift-add tree adders (bit-slice reduction)"),
+        ("FP_ADD", int(sizing.adders), "shift-add adders: one per lane to retire "
+                                      "a result per cycle, plus the bit-slice tree"),
         ("FP_MULT", conv_lanes, "short depthwise conv taps (ADJ-3)"),
         ("FP_ADD", conv_lanes, "short depthwise conv accumulate (ADJ-3)"),
         ("M_REG", lanes + conv_lanes, "one holding register per pool lane"),
@@ -2495,6 +2712,14 @@ class DerivedEngineSizing:
     #: global because a report is written long after the derivation ran, and a
     #: global would hand one run's evidence to another run's report (D21).
     beat_setting_stage: Optional[Mapping[str, object]] = None
+    #: ADJ-14's widening, when a chiplet serves more than one stage. The width
+    #: is then minimal for the GROUP - the busiest chiplet's SUMMED per-stage
+    #: time must fit one beat - and NOT for any single stage. A reader (or a
+    #: check) asking "is one lane fewer too narrow?" must ask it of the group,
+    #: or it calls a correctly sized engine over-provisioned. Carried here
+    #: because it was computed and then dropped, so no artifact could see which
+    #: target actually bound.
+    shared_widened: Optional[Mapping[str, object]] = None
 
     @property
     def binding_row(self) -> Optional[StageEngineSizing]:
@@ -2729,6 +2954,497 @@ def fold_group_split(
     return int(best[2]), int(best[3])
 
 
+def fold_group_split_ladder(
+    num_arrays: int, folds: int, context: int, qk_at, pv_at
+) -> Tuple[int, int]:
+    """:func:`fold_group_split`, restricted to the CONTEXT-SPLIT LADDER.
+
+    Same objective and the same tie rules — minimise ``qk_at(a_qk) +
+    pv_at(a_pv)`` because the lowering runs the pair serially, then break
+    toward the more balanced pair, then toward the smaller ``a_qk``. Two
+    things differ, and both are consequences of the ladder rather than new
+    policy:
+
+    * THE CANDIDATES ARE RUNGS, not every integer. Between two rungs
+      :func:`sa_context_split` returns the lower split, so an intermediate
+      count is strictly more silicon for identical cycles; pricing it would
+      only give the search a way to buy nothing (D28). The rung set is small —
+      ``folds`` fold-granular counts plus one rung per doubling of the context
+      — so this enumerates the whole lattice rather than walking it.
+    * THE PAIR MAY SUM TO LESS THAN ``num_arrays``. The unsplit law partitions
+      an exact width because every array carried a fold; on the ladder a width
+      between rungs cannot be spent, and charging for arrays that carry nothing
+      would be the margin this module refuses. The caller therefore reads the
+      PAIR as the provisioned count, not its own ``num_arrays``.
+    """
+    rungs = sa_split_ladder(folds, context)
+    # PRICE EACH RUNG ONCE. The pair loop below is O(rungs^2) and both terms
+    # depend on ONE group's width, so evaluating inside it re-priced the PV
+    # rungs once per QK rung — the same numbers, len(rungs) times over. The
+    # ladder is walked with the law; the lattice is walked with arithmetic.
+    qk_vals = [int(qk_at(rung)) for rung in rungs]
+    pv_vals = [int(pv_at(rung)) for rung in rungs]
+    best: Optional[Tuple[int, int, int, int]] = None
+    for i, a_qk in enumerate(rungs):
+        if a_qk >= num_arrays:
+            break
+        qk = qk_vals[i]
+        for j, a_pv in enumerate(rungs):
+            if a_qk + a_pv > num_arrays:
+                break
+            pv = pv_vals[j]
+            key = (qk + pv, max(qk, pv), a_qk)
+            if best is None or key < best[:3]:
+                best = (key[0], key[1], key[2], a_pv)
+    if best is None:
+        return 1, 1
+    return int(best[2]), int(best[3])
+
+
+# --- SA-GEOM: the fabric's GEOMETRY derives too, on a DECODE machine, opt-in --
+
+#: How this run fixes ``cim.fabric``'s ``rows x cols``.
+#:
+#: ``declared`` is the shipped law and the DEFAULT. The array is the card's own
+#: ``rows x cols`` and its silicon is INTEGER COPIES of the measured
+#: ``GEMMINI_SYS_ARRAY`` block, exactly as before. Every config that does not
+#: spell this key produces bit-identical numbers, which is the gate this flag
+#: was put behind rather than a hope.
+#:
+#: ``derived`` asks for the SA GEOMETRY RULE (:func:`sa_geometry_rows` and
+#: :meth:`CimDeviceModel.derive_sa_geometry`). It is a DECODE rule — it is read
+#: off the decode attention call's own row count — so it is refused BY NAME on
+#: a lockstep / prefill-regime machine (config.py), where 32 x 64 stays right.
+FABRIC_GEOMETRY_DECLARED = "declared"
+FABRIC_GEOMETRY_DERIVED = "derived"
+FABRIC_GEOMETRY_MODES: Tuple[str, ...] = (
+    FABRIC_GEOMETRY_DECLARED,
+    FABRIC_GEOMETRY_DERIVED,
+)
+
+#: The COLUMN candidates the derivation searches: powers of two in [32, 2048].
+#: The floor is the measured block's own column count (a narrower array is not
+#: a shape the measurement covers). THE CEILING WAS 1024 AND IS NOW 2048
+#: (George 2026-08-28): granite's QK argmin sat ON the old ceiling with its
+#: cycles still falling, which is a search that stopped rather than a law that
+#: turned. The at-ceiling disclosure is KEPT — a ceiling that moves once can be
+#: hit again, and the artifact must still say when the answer is the range's
+#: rather than the law's.
+SA_GEOMETRY_COLS_CANDIDATES: Tuple[int, ...] = (32, 64, 128, 256, 512, 1024, 2048)
+
+#: R is clamped to [1, 32]: 32 is the measured block's own row count and the
+#: study never measured a taller one; 1 is the shortest array that exists.
+SA_GEOMETRY_MIN_ROWS = 1
+SA_GEOMETRY_MAX_ROWS = 32
+
+#: The study the rule is taken from, quoted verbatim on every artifact.
+SA_GEOMETRY_STUDY = "SA geometry study 2026-08-28"
+
+#: (a) THE RULE AND ITS BASIS. Rides every derived-geometry artifact.
+SA_GEOMETRY_RULE_DISCLOSURE = (
+    "SA FABRIC GEOMETRY IS DERIVED ON THIS RUN, not declared. R = next_pow2(decode m) "
+    f"clamped to [{SA_GEOMETRY_MIN_ROWS}, {SA_GEOMETRY_MAX_ROWS}], where m is the "
+    "decode attention call's own row count (the shared_heads path the pricing law "
+    "already computes); C is derived PER ENGINE GROUP — the QK group and the PV group "
+    "may differ — as the power of two in "
+    f"[{SA_GEOMETRY_COLS_CANDIDATES[0]}, {SA_GEOMETRY_COLS_CANDIDATES[-1]}] that "
+    "minimises the stage's SERIAL attention time (qk + fill/drain + softmax + pv) "
+    "under the EXACT sa_cycles law, against the same analog-floor target, with the "
+    "same 2 x folds saturation semantics and the same stopping rules ADJ-10 already "
+    f"uses for the array COUNT. Basis: {SA_GEOMETRY_STUDY} — at iso-MAC budgets the "
+    "best decode 2D geometry has R = next_pow2(decode M) on every model measured "
+    "(llama M=1 -> R1, gemma M=2 -> R2, granite M=3 -> R4, qwen/moe M=4 -> R4, "
+    "minicpm M=8 -> R8), the short-R re-shape wins 5.7x (granite) to 20x (llama) in "
+    "decode attention cycles over 32 x 64, and SPLIT QK/PV groups beat MERGED on all "
+    "72 decode rows. PREFILL AND ViT INVERT: 32 x 64 is optimal there, which is why "
+    "this is opt-in, defaults to declared, and is refused by name on a "
+    "lockstep/prefill-regime machine. WHAT THE RULE DOES NOT MOVE, SAID OUT LOUD: the "
+    "SOFTMAX PIPELINE'S ELEMENT WIDTH stays the card's DECLARED cim.fabric.cols. The "
+    "softmax engine is a separate measured census with its own ADJ-10 lane derivation, "
+    "and re-reading its width off the derived QK columns would re-shape a second engine "
+    "on the strength of a study that measured the systolic array — so the width is left "
+    "where it was and the seam is named here rather than crossed. The consequence is "
+    "arithmetic and visible: the softmax term is CONSTANT across the column search, so "
+    "the argmin above is taken on the qk and pv terms alone. The FILL/DRAIN does follow "
+    "the derived R (3 x R, charged once on the QK op, no PV fill added), because that "
+    "is the existing convention read at the array the run actually has."
+)
+
+#: (b) THE VALIDITY CONDITION OF THE LAW THE RULE IS SEARCHED WITH.
+SA_GEOMETRY_DATAFLOW_DISCLOSURE = (
+    "OS-DATAFLOW VALIDITY CONDITION. The geometry above is searched with "
+    "cim_timing.sa_cycles, which is ALGEBRAICALLY IDENTICAL to ScaleSim's "
+    "OUTPUT-STATIONARY schedule: 50 of 50 real ScaleSim runs reproduce it bit-exactly "
+    "at every geometry tried (8x128, 4x256, 1x1024, prime and non-power-of-two shapes, "
+    "M = 1 edges). THAT IDENTITY IS CONDITIONAL ON OS. Under ScaleSim's ws and is "
+    "dataflows the same law UNDER-PREDICTS by up to 58x at decode shapes, so a machine "
+    "whose fabric runs weight- or input-stationary is NOT covered by this derivation "
+    "and the numbers on this artifact do not apply to it."
+)
+
+#: (c) THE ASSUMPTION, NAMED AS AN ASSUMPTION RATHER THAN MODELLED.
+SA_GEOMETRY_BANDWIDTH_DISCLOSURE = (
+    "STALL-FREE OPERAND BANDWIDTH IS AN ASSUMPTION, NOT A MEASUREMENT. The sa_cycles "
+    "law and the ScaleSim runs it was checked against both assume the array is fed "
+    "without stalls. A wider C asks for proportionally more operand bandwidth per "
+    "cycle, AND A DEEPER CONTEXT SPLIT ASKS FOR MORE STILL — S arrays read the same K/V "
+    "bytes in 1/S of the time — and NO STALL MODEL IS INVENTED HERE to charge for it: "
+    "the derived geometry is priced as if the feed keeps up. What the split adds is a "
+    "CHECK: the derived bytes-per-cycle is computed and compared against "
+    "cim.cards.<card>.state_bytes_per_cycle where a card declares one, and REPORTED as "
+    "an unbounded assumption where none is declared. If the feed does not keep up, the "
+    "attention time reported for a derived geometry is optimistic by exactly the stall "
+    "fraction, which this repo does not estimate (ADJ-4)."
+)
+
+
+# --- CTX-SPLIT: a fold's context may be dealt across arrays ------------------
+#
+# WHY THIS EXISTS. ADJ-10 deals FOLDS across arrays and stops: past
+# ``2 * folds`` an array carries no fold, and the old law said so and refused
+# to go further ("splitting one fold's N across arrays needs a claim about how
+# the K matrix is broadcast and how the column tiles are merged that no
+# recorded reference in this repo covers"). On a hybrid decode machine that
+# refusal IS the beat: Granite-4.0-H-1B carries 4 folds, so the fabric
+# saturates at 8 arrays with the attention stage still an order of magnitude
+# over its own analog m-pass, and more silicon buys nothing.
+#
+# WHAT CHANGED, AND WHAT DID NOT. The claim the old note would not make is now
+# made EXPLICITLY and priced: a fold's QK run is dealt across S arrays over the
+# CONTEXT dimension, each array running THE SAME sa_cycles law on an n/S chunk,
+# and the PV run is dealt the same way over its own contraction (also the
+# context), producing S partial output vectors that are then ADD-REDUCED. No
+# new timing law is introduced for the chunk: sa_cycles is proven bit-exact
+# against ScaleSim's output-stationary schedule AT ANY GEOMETRY AND ANY n, so a
+# chunk of n/S columns is a shape the same validated law already covers. What
+# IS new is the COMBINE, and it is priced rather than assumed free.
+
+#: The split factor is a power of two. A non-power-of-two deal would leave a
+#: ragged last chunk whose own ``ceil`` the law would then have to carry twice;
+#: powers of two keep one chunk shape per group and keep the ladder the same
+#: shape as every other width this module derives.
+SA_SPLIT_MIN = 1
+
+
+def sa_context_split(folds: int, arrays: int) -> Tuple[int, int]:
+    """How ``arrays`` arrays carry ``folds`` folds: ``(folds_per_array, S)``.
+
+    BELOW fold saturation nothing changes: with ``arrays <= folds`` each array
+    carries ``ceil(folds / arrays)`` folds at the FULL context, which is
+    ADJ-10's law bit for bit and the expression the pass-1 numbers came from.
+
+    ABOVE it the surplus arrays are spent on the CONTEXT: ``S`` is the largest
+    POWER OF TWO not exceeding ``arrays // folds``, every fold runs on S arrays
+    and each of them sees ``ceil(n / S)`` of the context. ``S = 1`` is returned
+    wherever the surplus cannot fund a whole doubling, so the ladder only ever
+    moves on a rung it can pay for and an array count between two rungs buys
+    nothing — which is exactly what makes the smallest-count answer meaningful.
+    """
+    folds = max(1, int(folds))
+    arrays = max(1, int(arrays))
+    if arrays <= folds:
+        return _ceil_div(folds, arrays), 1
+    return 1, 1 << ((arrays // folds).bit_length() - 1)
+
+
+def sa_split_ladder(folds: int, context: int, *, cap: int = 1 << 20) -> Tuple[int, ...]:
+    """The ARRAY COUNTS worth pricing for one group, smallest first.
+
+    Two regimes, concatenated, and no count that is not on one of them:
+
+    * ``1 .. folds`` — ADJ-10's fold-granular deal, where every extra array
+      takes real folds off its neighbours.
+    * ``folds * S`` for S a power of two — the context-split rungs. Between two
+      rungs :func:`sa_context_split` returns the LOWER S, so an intermediate
+      count is strictly more silicon for identical cycles and is never worth
+      pricing (D28).
+
+    The ladder stops when a chunk reaches ONE context column: past that the
+    split has nothing left to deal and ``ceil(n / S)`` stops moving. ``cap``
+    is a defence against a pathological context, not a design margin — it is
+    far above any shape this repo prices.
+    """
+    folds = max(1, int(folds))
+    context = max(1, int(context))
+    out: List[int] = list(range(1, folds + 1))
+    split = 2
+    while split <= context and folds * split <= cap:
+        out.append(folds * split)
+        split *= 2
+    return tuple(sorted(set(out)))
+
+
+@dataclass(frozen=True)
+class ContextSplitCombine:
+    """What ONE attention call pays to put a context-split call back together.
+
+    TWO COMBINES, ONE PER RUN, AND THEY ARE NOT THE SAME KIND OF THING.
+
+    ``gather`` is the QK side. The S score chunks CONCATENATE — chunk s holds
+    the scores for context columns [s*n/S, (s+1)*n/S), and the full row is the
+    chunks laid end to end. There is NO ARITHMETIC in it. What there is, is
+    MOVEMENT: the softmax normalises over the whole row, so the chunks have to
+    meet before it runs. Those bytes are reported here and priced at ZERO
+    SECONDS, which is not a claim that movement is free — it is this repo's
+    existing intra-chip convention (``intra_chip_activation_movement``): D17
+    declares one network law and it is the p2p fabric BETWEEN chips, no
+    on-chip interconnect law is declared anywhere, and inventing one would be a
+    number no card supports. The DAG time is optimistic by exactly this
+    movement and the bytes are on the artifact so the size of that optimism is
+    visible rather than implied.
+
+    ``reduce`` is the PV side and it IS arithmetic. Each of the S arrays
+    contracts over its own slice of the context, so each returns a PARTIAL
+    ``m x k`` output block and the true output is their SUM. That is
+    ``(S - 1)`` adds per output element over a tree of depth ``ceil(log2 S)``,
+    priced on FP_ADD lanes composed from the measured 22nm library (D32) and
+    timed with the same pipelined expression every other reduction in this
+    module uses: ``depth + ceil(results / lanes) - 1``.
+
+    AT ``S = 1`` EVERY FIELD IS ZERO. That is the whole bit-identity argument
+    in one sentence: an unsplit call pays no combine, so the extension cannot
+    move a number on any machine that does not split.
+    """
+
+    split: int
+    #: Output elements the PV reduce produces for the whole call.
+    results: int
+    #: Adds the PV reduce performs: ``results * (split - 1)``.
+    adds: int
+    #: ``ceil(log2(split))`` — the tree's own pipeline fill.
+    depth: int
+    #: FP_ADD lanes the reduce was priced on.
+    lanes: int
+    #: Cycles the PV add-reduce costs. 0 when there is no split.
+    reduce_cycles: int
+    #: Score bytes the QK gather moves. Reported, priced at zero (see above).
+    gather_bytes: float
+    #: Cycles the QK gather costs. ALWAYS 0, and the field exists so the zero
+    #: is a number on the artifact rather than a term nobody wrote down.
+    gather_cycles: int = 0
+
+    @property
+    def cycles(self) -> int:
+        return int(self.reduce_cycles) + int(self.gather_cycles)
+
+    @property
+    def saturation_lanes(self) -> int:
+        """Lanes past which no further lane shortens the reduce.
+
+        One lane per output element: at that width the whole call's reduce is
+        one pass of the tree and another lane has nothing to retire.
+        """
+        return max(1, int(self.results))
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("context_split", int(self.split)),
+                ("reduce_results", int(self.results)),
+                ("reduce_adds", int(self.adds)),
+                ("reduce_tree_depth", int(self.depth)),
+                ("reduce_lanes", int(self.lanes)),
+                ("reduce_cycles", int(self.reduce_cycles)),
+                ("gather_bytes", float(self.gather_bytes)),
+                ("gather_cycles", int(self.gather_cycles)),
+                ("gather_pricing", "intra_chip_activation_movement (D17): reported, 0 s"),
+            )
+        )
+
+
+def sa_split_combine(
+    m: int,
+    k: int,
+    n: int,
+    folds: int,
+    split: int,
+    lanes: int,
+    *,
+    act_bytes: float = 2.0,
+) -> ContextSplitCombine:
+    """Price ONE call's combine at split ``S`` on ``lanes`` FP_ADD lanes.
+
+    ``results = folds * m * k``: every fold produces its own ``m x k`` output
+    block and every element of it is the sum of S partials. The tree is
+    pipelined, so the call costs its fill plus one pass of the results over the
+    lanes — ``depth + ceil(results / lanes) - 1`` — which is the identical
+    expression :meth:`CimDeviceModel.price_reduction` and the softmax law both
+    use. One law shape, three sites (M7).
+
+    ``gather_bytes`` is the score matrix that has to meet before the softmax:
+    ``folds * m * n * act_bytes``, the whole row set once. Priced at 0 s under
+    the intra-chip convention and reported.
+    """
+    split = max(1, int(split))
+    folds = max(1, int(folds))
+    results = max(0, int(folds) * int(m) * int(k))
+    gather = float(folds) * float(m) * float(n) * float(act_bytes)
+    if split <= 1 or results <= 0:
+        # NO SPLIT, NO COMBINE, NO BYTES. The gather exists only because the
+        # row was taken apart; a call that was never taken apart has nothing to
+        # put back together, and reporting bytes here would invent traffic.
+        return ContextSplitCombine(
+            split=1, results=results, adds=0, depth=0,
+            lanes=max(1, int(lanes)), reduce_cycles=0, gather_bytes=0.0,
+        )
+    lanes = max(1, int(lanes))
+    depth = (split - 1).bit_length()
+    return ContextSplitCombine(
+        split=split,
+        results=results,
+        adds=results * (split - 1),
+        depth=depth,
+        lanes=lanes,
+        reduce_cycles=depth + _ceil_div(results, lanes) - 1,
+        gather_bytes=gather,
+    )
+
+
+#: WHAT THE FABRIC IS UP AGAINST once ADJ-10 has spent every array it can. The
+#: derivation names exactly one of these on every stage, and the point of the
+#: list is that three of the four are REAL physics and the fourth is an
+#: admission.
+FABRIC_FLOOR_ANALOG_PACE = "analog_pace"
+FABRIC_FLOOR_OPERAND_BANDWIDTH = "operand_bandwidth"
+FABRIC_FLOOR_COMBINE_DOMINATED = "combine_dominated"
+FABRIC_FLOOR_SATURATED_GEOMETRY = "saturated_geometry"
+FABRIC_FLOORS: Tuple[str, ...] = (
+    FABRIC_FLOOR_ANALOG_PACE,
+    FABRIC_FLOOR_OPERAND_BANDWIDTH,
+    FABRIC_FLOOR_COMBINE_DOMINATED,
+    FABRIC_FLOOR_SATURATED_GEOMETRY,
+)
+
+#: What each named floor MEANS, quoted verbatim onto the artifact.
+FABRIC_FLOOR_REASONS = {
+    FABRIC_FLOOR_ANALOG_PACE: (
+        "ANALOG PACE. The stage's attention time fits inside that stage's own measured "
+        "analog m-pass, so the fabric is no longer the term that sets the beat and "
+        "buying more of it would buy nothing. This is the floor ADJ-10 exists to reach "
+        "and the only one of the four that is a success."
+    ),
+    FABRIC_FLOOR_OPERAND_BANDWIDTH: (
+        "OPERAND BANDWIDTH. Widening stopped because the arrays cannot be FED any "
+        "faster: the K/V stream the split arrays consume per cycle has reached the "
+        "state-store bandwidth this card DECLARES. The systolic law assumes a stall-free "
+        "feed, so past this point the law's own precondition fails and a narrower answer "
+        "is the honest one. This floor can only be named by a card that declares "
+        "cim.cards.<card>.state_bytes_per_cycle; a card that declares none gets the "
+        "assumption said out loud instead and never this verdict."
+    ),
+    FABRIC_FLOOR_COMBINE_DOMINATED: (
+        "COMBINE DOMINATED. Widening stopped because putting the call back together now "
+        "costs more than splitting it saves: the PV add-reduce grows with log2(S) and "
+        "its results pass, while the systolic runs shrink as ceil(n / S), so the sum "
+        "turns. The turning point is priced, not assumed, and the derivation stops at "
+        "the rung before it rather than paying for arrays that lengthen the stage."
+    ),
+    FABRIC_FLOOR_SATURATED_GEOMETRY: (
+        "SATURATED GEOMETRY. Widening stopped because this call cannot be split at all: "
+        "there is no context left to deal (a one-column context has no chunks) or the "
+        "card runs a geometry that the split does not apply to. This is the ONE verdict "
+        "of the four that is an admission rather than a physical limit, and it is named "
+        "so a reader can tell the difference."
+    ),
+}
+
+
+def _next_pow2(value: int) -> int:
+    """The smallest power of two >= ``value`` (and 1 for anything <= 1)."""
+    n = int(value)
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def sa_geometry_rows(m: int) -> int:
+    """THE R HALF OF THE RULE: ``R = next_pow2(m)``, clamped to [1, 32].
+
+    ``m`` is the decode attention call's ROW COUNT — ``shared_heads`` on the
+    decode path — and the clamp is at the measured block's own row count. The
+    study measured the best decode 2D geometry at iso-MAC on six models and R
+    landed on ``next_pow2(M)`` on every one of them; this function is that
+    result and nothing else.
+    """
+    return max(SA_GEOMETRY_MIN_ROWS, min(SA_GEOMETRY_MAX_ROWS, _next_pow2(m)))
+
+
+def sa_cycles_at(m: int, n: int, k: int, rows: int, cols: int) -> int:
+    """The systolic closed form at an EXPLICIT geometry — one law, one site.
+
+    ``ceil(M/R) * ceil(N/C) * (K + R + C - 2) - 1``.
+    :meth:`CimDeviceModel.sa_cycles` is this function at the geometry the run
+    resolved, so the derivation and the pricing cannot drift apart (M7).
+    """
+    r = max(1, int(rows))
+    c = max(1, int(cols))
+    return _ceil_div(m, r) * _ceil_div(n, c) * (int(k) + r + c - 2) - 1
+
+
+@dataclass(frozen=True)
+class DerivedSAGeometry:
+    """The array shape the SA GEOMETRY RULE derived, and what it was read off.
+
+    ``rows`` is ONE R for BOTH groups (the rule derives a single row count from
+    the decode call's own m). ``cols_qk`` and ``cols_pv`` are PER GROUP,
+    because the QK run and the PV run are separate engines on disjoint arrays
+    (``fold_group_split``) and the study found SPLIT beats MERGED on every
+    decode row it measured.
+    """
+
+    rows: int
+    cols_qk: int
+    cols_pv: int
+    declared_rows: int
+    declared_cols: int
+    #: The decode row count R was read off, and the R the rule returned for it.
+    call_m: int
+    #: The array count the column argmin landed on: the sum of the two groups'
+    #: own best split rungs. It is where the SHAPE was chosen, not a width the
+    #: derivation is bound to — the count search runs afterwards and may stop
+    #: narrower if the analog target is met sooner.
+    searched_at_arrays: int
+    #: Every candidate that was priced, per group: ``cols -> cycles``.
+    qk_search: Tuple[Tuple[int, int], ...] = ()
+    pv_search: Tuple[Tuple[int, int], ...] = ()
+    basis: str = ""
+
+    @property
+    def macs(self) -> int:
+        """MAC cells of ONE array of each group, summed. The iso-MAC unit."""
+        return int(self.rows) * (int(self.cols_qk) + int(self.cols_pv))
+
+    def cols_for(self, group: str) -> int:
+        return int(self.cols_pv) if str(group) == "pv" else int(self.cols_qk)
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("rule", "R = next_pow2(decode m); C per group to the analog floor"),
+                ("study", SA_GEOMETRY_STUDY),
+                ("rows", int(self.rows)),
+                ("cols_qk", int(self.cols_qk)),
+                ("cols_pv", int(self.cols_pv)),
+                ("rows_declared", int(self.declared_rows)),
+                ("cols_declared", int(self.declared_cols)),
+                ("decode_call_m", int(self.call_m)),
+                ("searched_at_arrays", int(self.searched_at_arrays)),
+                ("cols_candidates", list(SA_GEOMETRY_COLS_CANDIDATES)),
+                ("qk_search_cycles", [[int(c), int(v)] for c, v in self.qk_search]),
+                ("pv_search_cycles", [[int(c), int(v)] for c, v in self.pv_search]),
+                ("basis", self.basis),
+                (
+                    "disclosures",
+                    [
+                        SA_GEOMETRY_RULE_DISCLOSURE,
+                        SA_GEOMETRY_DATAFLOW_DISCLOSURE,
+                        SA_GEOMETRY_BANDWIDTH_DISCLOSURE,
+                    ],
+                ),
+            )
+        )
+
+
 #: Why one stage's FABRIC width is what it is (ADJ-10). The first three mirror
 #: :data:`TARGET_ANALOG_STAGE` and friends; the fourth is ADJ-10's own and has
 #: no ADJ-9 twin.
@@ -2771,10 +3487,24 @@ class AttentionCallDemand:
         """
         return 2 * max(1, int(self.folds))
 
-    @property
-    def saturation_softmax_width(self) -> int:
-        """The softmax width past which no further lane shortens THIS call."""
-        return max(1, int(self.softmax_tokens) * int(self.heads_chip))
+    def saturation_softmax_copies(self, softmax_width: int) -> int:
+        """The COPY count past which no further pipeline shortens THIS call.
+
+        THE UNIT MUST MATCH WHAT THE SEARCH SPENDS (M2). The timing law is
+        `per_copy = ceil(rows * ceil(keys / width) / copies)`, so the searched
+        quantity is COPIES and it saturates at the CHUNK COUNT - one pipeline
+        per chunk finishes the call in one pass, and nothing beyond that helps.
+
+        This used to return `self.n`, the key count. On Qwen that is 1823
+        against a chunk count of 464, so the derivation provisioned 1359 excess
+        pipelines that shorten nothing: the same 20 cycles at 464 copies and at
+        4000. A bound in the wrong unit is not conservative, it is waste (D28).
+        """
+        width = max(1, int(softmax_width))
+        rows = max(0, int(self.softmax_tokens)) * max(0, int(self.heads_chip))
+        if rows <= 0:
+            return 1
+        return max(1, rows * _ceil_div(max(1, int(self.n)), width))
 
 
 @dataclass(frozen=True)
@@ -2796,10 +3526,11 @@ class FabricDemand:
     def saturation_arrays(self) -> int:
         return max((call.saturation_arrays for call in self.calls), default=2)
 
-    @property
-    def saturation_softmax_width(self) -> int:
+    def saturation_softmax_copies(self, softmax_width: int) -> int:
+        """The copy count past which no further pipeline shortens ANY call here."""
         return max(
-            (call.saturation_softmax_width for call in self.calls), default=1
+            (call.saturation_softmax_copies(softmax_width) for call in self.calls),
+            default=1,
         )
 
 
@@ -2829,6 +3560,24 @@ class StageFabricSizing:
     #: declared rows x cols geometry leaves behind. Equal to ``time_s``
     #: whenever the derivation saturated.
     floor_time_s: float = 0.0
+    #: CTX-SPLIT: the context split each group runs, the reduce that puts the
+    #: call back together, and the bytes the gather moves. All at the unsplit
+    #: values on a declared-geometry machine.
+    qk_split: int = 1
+    pv_split: int = 1
+    combine_cycles: int = 0
+    combine_lanes: int = 1
+    combine_adds: int = 0
+    gather_bytes: float = 0.0
+    #: WHICH REAL LIMIT stopped the widening on this stage — one of
+    #: :data:`FABRIC_FLOORS`. Empty on a declared-geometry run, where the
+    #: widening has no split ladder to run out of and ``target_kind`` already
+    #: says what happened.
+    floor_kind: str = ""
+    #: The K/V bytes per fabric cycle this stage's split arrays ask for, and
+    #: the bandwidth the card declares to feed them (0.0 = none declared).
+    operand_bytes_per_cycle: float = 0.0
+    operand_bytes_per_cycle_declared: float = 0.0
 
     @property
     def analog_bound(self) -> bool:
@@ -2888,6 +3637,15 @@ class DerivedFabricSizing:
     per_stage: Tuple[StageFabricSizing, ...]
     composition: Optional[EngineComposition] = None
     softmax_composition: Optional[EngineComposition] = None
+    #: SA-GEOM: the array SHAPE the geometry rule derived, or None when the
+    #: card DECLARES its geometry (the default, and every shipped card). When
+    #: it is set, ``rows``/``cols`` above are that shape's QK reading and
+    #: ``cols`` may differ from :attr:`DerivedSAGeometry.cols_pv`.
+    geometry: Optional["DerivedSAGeometry"] = None
+    #: CTX-SPLIT: FP_ADD lanes the split's add-reduce is provisioned on. 0 on a
+    #: run that never split, where there is no reduce and a lane count would be
+    #: silicon nobody asked for.
+    combine_lanes: int = 0
     basis: str = ""
     disclosures: Tuple[str, ...] = ()
 
@@ -2926,6 +3684,33 @@ class DerivedFabricSizing:
         )
 
     @property
+    def floors(self) -> "OrderedDict[str, List[int]]":
+        """CTX-SPLIT: which REAL limit stopped each stage, stage ids per name.
+
+        The point of the census is that a reader can tell an ACHIEVEMENT
+        (``analog_pace``: the fabric got under the analog m-pass and stopped
+        because there was nothing left to win) from a PHYSICAL WALL
+        (``operand_bandwidth``, ``combine_dominated``) from an ADMISSION
+        (``saturated_geometry``: this call cannot be split at all). Empty on a
+        declared-geometry run, which has no split ladder to run out of.
+        """
+        out: "OrderedDict[str, List[int]]" = OrderedDict(
+            (name, []) for name in FABRIC_FLOORS
+        )
+        for row in self.per_stage:
+            if row.floor_kind in out:
+                out[row.floor_kind].append(int(row.stage))
+        return OrderedDict((k, v) for k, v in out.items() if v)
+
+    @property
+    def context_split(self) -> int:
+        """The deepest context split any stage runs (1 = never split)."""
+        return max(
+            (max(int(row.qk_split), int(row.pv_split)) for row in self.per_stage),
+            default=1,
+        )
+
+    @property
     def unreachable_stages(self) -> Tuple[int, ...]:
         return tuple(
             int(row.stage)
@@ -2944,7 +3729,27 @@ class DerivedFabricSizing:
                 ("array_provenance", PROVENANCE_DERIVED_COUNT),
                 ("array_rows", int(self.rows)),
                 ("array_cols", int(self.cols)),
-                ("array_geometry_provenance", PROVENANCE_DECLARED_COUNT),
+                (
+                    "array_geometry_provenance",
+                    PROVENANCE_DECLARED_COUNT
+                    if self.geometry is None
+                    else PROVENANCE_DERIVED_COUNT,
+                ),
+                # SA-GEOM rides the summary ONLY when a geometry was derived.
+                # A declared-geometry run must serialize BYTE for BYTE what it
+                # always did — the shipped atlas artifacts are compared as
+                # bytes against a fresh run — so an opt-in rule adds an opt-in
+                # key and never a null placeholder.
+                *(
+                    (
+                        ("sa_geometry", self.geometry.summary()),
+                        ("context_split", int(self.context_split)),
+                        ("combine_lanes", int(self.combine_lanes)),
+                        ("fabric_floors", OrderedDict(self.floors)),
+                    )
+                    if self.geometry is not None
+                    else ()
+                ),
                 ("replicas", int(self.replicas)),
                 ("binding_stage", int(self.binding_stage)),
                 ("fabric_clock_hz", self.clock_hz),
@@ -2980,6 +3785,30 @@ class DerivedFabricSizing:
                                 ("floor_time_s", row.floor_time_s),
                                 ("slack_s", row.slack_s),
                             )
+                            # CTX-SPLIT rides the row ONLY where there is a
+                            # split law running. A declared-geometry run must
+                            # serialize byte for byte what it always did.
+                            + (
+                                (
+                                    ("qk_split", int(row.qk_split)),
+                                    ("pv_split", int(row.pv_split)),
+                                    ("combine_cycles", int(row.combine_cycles)),
+                                    ("combine_lanes", int(row.combine_lanes)),
+                                    ("combine_adds", int(row.combine_adds)),
+                                    ("gather_bytes", float(row.gather_bytes)),
+                                    ("floor_kind", row.floor_kind),
+                                    (
+                                        "operand_bytes_per_cycle",
+                                        row.operand_bytes_per_cycle,
+                                    ),
+                                    (
+                                        "operand_bytes_per_cycle_declared",
+                                        row.operand_bytes_per_cycle_declared,
+                                    ),
+                                )
+                                if self.geometry is not None
+                                else ()
+                            )
                         )
                         for row in self.per_stage
                     ],
@@ -3005,7 +3834,15 @@ class DerivedFabricSizing:
             f"  analog beat             {self.analog_beat_s:.6g} s",
             f"  num_arrays              {self.num_arrays} (DERIVED, integer copies of "
             f"the measured {self.rows}x{self.cols} array; declared "
-            f"{self.declared_num_arrays})",
+            f"{self.declared_num_arrays})"
+            if self.geometry is None
+            else (
+                f"  num_arrays              {self.num_arrays} (DERIVED; declared "
+                f"{self.declared_num_arrays}) on a DERIVED "
+                f"{self.geometry.rows}x{self.geometry.cols_qk} QK / "
+                f"{self.geometry.rows}x{self.geometry.cols_pv} PV array (SA-GEOM; "
+                f"declared {self.geometry.declared_rows}x{self.geometry.declared_cols})"
+            ),
             f"  softmax_lanes           {self.softmax_lanes} (DERIVED; declared "
             f"{self.declared_softmax_lanes})",
             f"  analog-bound stages     {len(self.analog_bound_stages)} of "
@@ -3062,6 +3899,653 @@ class MLAReplication:
     matrices: Tuple[Tuple[str, int, int, int], ...]   # (name, K, N, arrays)
 
 
+# ---------------------------------------------------------------------------
+# THE PLATFORM LAW LAYER (D35-REVISED / D36 / D38, plus the interim link prices)
+#
+# Everything in this section is a LAW in the narrow sense: a closed form over
+# numbers the CALLER measured, with no config read, no device state and no
+# I/O. That is deliberate and it is what makes the hard gate below true.
+#
+# THE HARD GATE. The DECLARED and LEGACY paths — the OPTIMA validator's cards,
+# every non-fws_cim device, every run that does not go through the mapper —
+# call NOTHING in this section. Not one existing method was rewired to consult
+# it. A law here can therefore only change a number on the MAPPED path, where
+# the mapper asks for it by name, and `tests/test_fws_cim.py` proves the
+# legacy numbers did not move.
+#
+# WHAT LIVES HERE AND WHY IT LIVES HERE. The mapper (fws_mapping) places
+# macros and the sweep (tools/fws_qif_dse) walks axes; neither is allowed to
+# own a physical constant, because a number owned by a consumer is a number
+# that gets re-stated at the next consumer (D21: one accounting per number).
+# So the platform's rows, its link prices, its chip area, its chiplet band and
+# its parked knob are declared once, here, and every consumer reads them.
+# ---------------------------------------------------------------------------
+
+#: X — the macro's row count, the platform's fixed dimension. This is an ALIAS,
+#: not a second declaration: the number itself lives in
+#: :data:`cim_analog_calc.PLATFORM_MACRO_ROWS` beside the (Z, Y) lists it has to
+#: stay consistent with, and this name exists so a law-layer caller does not
+#: have to reach into the sheet module to learn the platform's height.
+PLATFORM_ROWS: int = _analog_calc.PLATFORM_MACRO_ROWS
+
+
+# --- The interim link prices (George, 2026-08-29) --------------------------
+#
+# A mapped run hands a stage's activations to the next stage. Until now the
+# mapped path ran with `links: zeroed` — every handoff free — which is a
+# statement no machine can make. These two numbers replace that default. They
+# are INTERIM and they are priced as LATENCY per hop, not as bandwidth: a
+# bandwidth law needs a link width this repo has not measured, and inventing
+# one to look more complete would be a guess wearing a formula.
+
+#: One stage handoff that stays inside a chip (macro to macro on the same die,
+#: or a stage boundary the packer kept on one chip).
+# 5 ns: tightly packed macros on one 22nm die. A 400 mm2 chip is ~20 mm on a
+# side; repeated on-chip wires run ~0.1 ns/mm, so a typical macro-to-macro hop
+# is under 2 ns of flight plus mux/registering margin. 5 ns is a conservative
+# flat price (George 2026-08-29: "tightly packed macros - you choose"; replaces
+# the earlier 50 ns placeholder). Cross-chip stays 500 ns: no fancy packaging.
+T_HOP_INTRA_CHIP: float = 5e-9
+
+#: One stage handoff that leaves the chip.
+T_HOP_CROSS_CHIP: float = 500e-9
+
+#: Where the two numbers come from, quoted wherever they are charged (D21: a
+#: number carries its basis or it is not reportable).
+LINK_PRICE_BASIS: str = (
+    "George, 2026-08-29: interim link prices, 50 ns intra-chip and 500 ns "
+    "cross-chip per stage handoff. They are LATENCY per hop and nothing else — "
+    "no bandwidth term, no per-byte term, no serialization — because this repo "
+    "has measured no link width and a per-byte law would be an invented number "
+    "with a formula around it. They are the standing default for MAPPED fws_cim "
+    "runs, REPLACING links: zeroed (which priced every handoff at 0 s and is a "
+    "statement no built machine can make). The zeroed flag stays available as an "
+    "explicit, disclosed choice; it is no longer what a run gets by saying "
+    "nothing."
+)
+
+#: The three hop kinds, by name. Intra-MACRO is free and that is a law, not an
+#: omission: a K-stack's partials never leave the macro they accumulate in
+#: (P7.2's accumulator), so there is no link to charge.
+HOP_INTRA_MACRO: str = "intra_macro"
+HOP_INTRA_CHIP: str = "intra_chip"
+HOP_CROSS_CHIP: str = "cross_chip"
+
+#: The price of each, in seconds. One mapping, so a caller can never charge a
+#: hop kind this module does not price.
+HOP_TIME_S: "OrderedDict[str, float]" = OrderedDict(
+    (
+        (HOP_INTRA_MACRO, 0.0),
+        (HOP_INTRA_CHIP, T_HOP_INTRA_CHIP),
+        (HOP_CROSS_CHIP, T_HOP_CROSS_CHIP),
+    )
+)
+
+
+class LinkPriceError(ValueError):
+    """A hop was asked for under a name this module does not price."""
+
+
+def hop_kind(from_chip: int, to_chip: int, *, from_macro=None, to_macro=None) -> str:
+    """Which hop a stage handoff is: intra-macro, intra-chip or cross-chip.
+
+    The macro ids are OPTIONAL and they matter only when both are given and
+    equal: a handoff that never leaves one macro is free (the K-stack
+    accumulates in place, P7.2), and a caller that cannot tell — the common
+    case, because a stage boundary is a boundary between macros — leaves them
+    None and gets the chip-level answer.
+    """
+    if (
+        from_macro is not None
+        and to_macro is not None
+        and int(from_macro) == int(to_macro)
+        and int(from_chip) == int(to_chip)
+    ):
+        return HOP_INTRA_MACRO
+    return HOP_INTRA_CHIP if int(from_chip) == int(to_chip) else HOP_CROSS_CHIP
+
+
+def hop_time_s(kind: str) -> float:
+    """Seconds one hop of ``kind`` costs, or a refusal that names the register."""
+    if kind not in HOP_TIME_S:
+        raise LinkPriceError(
+            f"{kind!r} is not a hop this repo prices. The priced kinds are "
+            f"{tuple(HOP_TIME_S)} (cim_timing.HOP_TIME_S). {LINK_PRICE_BASIS}"
+        )
+    return float(HOP_TIME_S[kind])
+
+
+def stage_handoff_time_s(
+    from_chip: int, to_chip: int, *, from_macro=None, to_macro=None
+) -> float:
+    """The link price of ONE stage handoff (D-interim link prices).
+
+    This is the whole law: classify the hop, charge its latency. Stage
+    handoffs charge the applicable hop; a handoff inside one macro is free.
+    """
+    return hop_time_s(
+        hop_kind(from_chip, to_chip, from_macro=from_macro, to_macro=to_macro)
+    )
+
+
+def link_price_disclosures() -> Tuple[str, ...]:
+    """What the priced links do and do NOT include, named on the artifact."""
+    return (
+        LINK_PRICE_BASIS,
+        f"link prices: intra-chip hop {T_HOP_INTRA_CHIP * 1e9:.6g} ns, cross-chip hop "
+        f"{T_HOP_CROSS_CHIP * 1e9:.6g} ns, intra-macro 0 s. The intra-macro zero is a "
+        "LAW and not an omission: a K-stack's partial sums accumulate inside the macro "
+        "that holds them (P7.2), so there is no link to charge.",
+        "these prices are LATENCY ONLY. A handoff's cost does not depend on how many "
+        "bytes it carries, so a stage that hands over a large activation is priced the "
+        "same as one that hands over a small one. That is a known GAP, named here "
+        "rather than closed with an invented bandwidth (D28).",
+    )
+
+
+# --- The analog chip: capacity is AREA, and area is the package ------------
+#
+# A chip offers slots because it has a fixed area to fill, not because a
+# config declared a count. That is the whole content of the law below, and it
+# is what retires ADJ-13's per-point capacity PROBE on the mapped path: the
+# probe existed to discover a slot count by building the machine twice, and a
+# derived capacity does not need discovering.
+#
+# ON THE DECISION NUMBER. D37 (the analog dense-carrier doctrine) was agreed
+# on 2026-08-29 but reached the register LATE — an audit caught code citing it
+# before the entry existed. It is recorded now (docs/qif/DECISIONS.md, D37) and
+# shares D36's 400 mm2 area cap deliberately: one constant, read below by both
+# accountings. If either decision ever moves the area, this is the one place
+# it changes.
+
+#: The area one chip offers, mm2. D36 hard-sets the chiplet band's upper bound
+#: at 400 mm2; the analog chip is the same package statement read for macros.
+ANALOG_CHIP_AREA_MM2: float = 400.0
+
+#: Why (D21: the number and its basis travel together).
+ANALOG_CHIP_AREA_BASIS: str = (
+    "the analog chip offers 400.0 mm2 of macro slots. That is D36's hard-set chiplet "
+    "area band upper bound (\"chiplet area band [50, 400] mm2 (configurable, hard-set "
+    "for now)\") read as the package statement it is: one die's usable area. It is "
+    "NOT a second number — cim_timing.ANALOG_CHIP_AREA_MM2 is the same constant the "
+    "digital band's ceiling reads."
+)
+
+
+class AnalogChipCapacityError(ValueError):
+    """A macro that no chip of the platform's area can hold, refused by name."""
+
+
+def analog_chip_capacity(
+    macro_footprint_mm2: float, *, context: str = "cim.analog"
+) -> int:
+    """Slots one analog chip offers: ``floor(400.0 / macro_footprint_mm2)``.
+
+    THE FOOTPRINT, NOT THE SILICON. The divisor is the macro's PACKAGE
+    footprint (:meth:`CimDeviceModel.macro_footprint_mm2` — silicon area
+    divided by the 3D stack height), because what a chip runs out of is floor
+    plan, not transistors. A stacked macro therefore buys slots, which is the
+    only thing stacking is allowed to buy.
+
+    FLOOR, NOT ROUND. A slot the area does not contain is not a slot. There is
+    no margin either way (D28): the remainder ``400 - C * footprint`` is real
+    unused die and belongs in the packer's tail report, not in a rounded-up
+    count here.
+
+    A macro larger than the whole chip is REFUSED rather than returned as
+    capacity 0. Zero would flow into the packer as "this chip holds nothing"
+    and the run would fail somewhere downstream with a count, not a cause.
+    """
+    footprint = float(macro_footprint_mm2)
+    if footprint <= 0:
+        raise AnalogChipCapacityError(
+            f"{context}: analog chip capacity needs a positive macro footprint (got "
+            f"{footprint!r} mm2). {ANALOG_CHIP_AREA_BASIS} Capacity is "
+            "floor(chip area / macro footprint), and a zero or negative footprint is "
+            "not a macro that was built."
+        )
+    if footprint > ANALOG_CHIP_AREA_MM2:
+        raise AnalogChipCapacityError(
+            f"{context}: one analog macro has a {footprint:.6g} mm2 package footprint, "
+            f"which does not fit a {ANALOG_CHIP_AREA_MM2:.6g} mm2 chip at all — the "
+            "chip holds ZERO macros. This is refused rather than reported as capacity "
+            "0, because 0 would reach the packer as a slot count and fail there as an "
+            f"unplaceable macro instead of here as an unbuildable one. "
+            f"{ANALOG_CHIP_AREA_BASIS}"
+        )
+    return int(math.floor(ANALOG_CHIP_AREA_MM2 / footprint))
+
+
+def analog_chip_capacity_basis(macro_footprint_mm2: float) -> str:
+    """The capacity, its arithmetic and its leftover die, in one line."""
+    footprint = float(macro_footprint_mm2)
+    slots = analog_chip_capacity(footprint)
+    leftover = ANALOG_CHIP_AREA_MM2 - slots * footprint
+    return (
+        f"analog chip capacity C = floor({ANALOG_CHIP_AREA_MM2:.6g} mm2 / "
+        f"{footprint:.6g} mm2 per macro footprint) = {slots} slot(s), leaving "
+        f"{leftover:.6g} mm2 of the die unused ({leftover / ANALOG_CHIP_AREA_MM2 * 100:.3f}%). "
+        "The capacity is DERIVED from area and is never declared: ADJ-13's per-point "
+        "capacity probe (build the machine once to count its arrays, then again at that "
+        "count) retires on the mapped path, because a derived capacity has nothing to "
+        "discover."
+    )
+
+
+def analog_chip_capacity_disclosures(macro_footprint_mm2: float) -> Tuple[str, ...]:
+    """What the derived capacity says, and what it deliberately does not."""
+    return (
+        analog_chip_capacity_basis(macro_footprint_mm2),
+        ANALOG_CHIP_AREA_BASIS,
+        "the chip's area budget prices MACRO FOOTPRINT ONLY. Its own interconnect, its "
+        "I/O ring and its control logic are not subtracted, because this repo declares "
+        "no law that sizes them — so the slot count is an UPPER bound on what a real "
+        "die would offer, named here rather than shaved by a guessed overhead (D28).",
+    )
+
+
+# --- D36: the digital chiplet is a FUNCTION of the layer plan --------------
+#
+# STAGE 2 of the two-stage DSE is not a search. The group is read off the
+# model, one chiplet design is derived for it with the SAME ADJ-9/10/14
+# machinery that already sizes engines against the analog floor, the state
+# store goes inside that chiplet's area, and the packaging arithmetic that
+# follows is arithmetic — reported, never swept.
+
+#: The chiplet area band, mm2 (D36, hard-set for now). The ceiling is the same
+#: constant the analog chip reads: one package statement, one number.
+DIGITAL_CHIPLET_AREA_MIN_MM2: float = 50.0
+DIGITAL_CHIPLET_AREA_MAX_MM2: float = ANALOG_CHIP_AREA_MM2
+
+#: The decision, quoted where the band binds.
+DIGITAL_GROUP_DECISION: str = "D36 (GEORGE, 2026-08-29)"
+
+
+class LayerGroupError(ValueError):
+    """A layer plan the group derivation cannot read, refused by name."""
+
+
+def minimal_motif(layer_mixers: Sequence[Sequence[str]]) -> Tuple[Tuple[str, ...], ...]:
+    """The model's minimal repeating motif of layer mixers (D36).
+
+    The motif is the SHORTEST prefix whose repetition reproduces the whole
+    stack, and whose length DIVIDES the depth. Divisibility is required, not
+    incidental: the group is the pattern digital chiplets attach at, so a motif
+    that does not tile the stack would leave a partial group at the end with a
+    different work mix — which is exactly the non-uniform chiplet D36 exists to
+    avoid. A stack no proper divisor reproduces has ONE group: itself.
+
+    A homogeneous stack returns a motif of length 1, which is D36's stated
+    answer for it.
+    """
+    plan = tuple(tuple(str(kind) for kind in kinds) for kinds in layer_mixers)
+    if not plan:
+        raise LayerGroupError(
+            "minimal_motif was given an empty layer plan. The GROUP is the model's "
+            f"minimal repeating motif ({DIGITAL_GROUP_DECISION}), and a stack with no "
+            "layers has no motif to be minimal about."
+        )
+    depth = len(plan)
+    for period in range(1, depth + 1):
+        if depth % period:
+            continue
+        if all(plan[i] == plan[i % period] for i in range(depth)):
+            return plan[:period]
+    return plan   # unreachable: period == depth always matches
+
+
+@dataclass(frozen=True)
+class LayerGroupPlan:
+    """The GROUP, derived (D36): what repeats, how often, and which stages.
+
+    ``stage_groups`` is the derivation's output for the engine sizer: one tuple
+    per group INSTANCE, holding the stage indices that instance's chiplet
+    serves. It is exactly the shape :meth:`CimDeviceModel.derive_engine_sizing`
+    already takes for ADJ-14, so the group-scope width derivation IS the
+    existing machinery, called with a group's stages instead of a chiplet's.
+    """
+
+    motif: Tuple[Tuple[str, ...], ...]
+    period: int
+    layers: int
+    instances: int
+    stage_groups: Tuple[Tuple[int, ...], ...]
+    basis: str = ""
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def homogeneous(self) -> bool:
+        """Every layer runs the same mixers, so the group is one layer (D36)."""
+        return self.period == 1
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("motif", [list(kinds) for kinds in self.motif]),
+                ("period", int(self.period)),
+                ("layers", int(self.layers)),
+                ("group_instances", int(self.instances)),
+                ("homogeneous", bool(self.homogeneous)),
+                ("provenance", PROVENANCE_DERIVED_COUNT),
+                ("stage_groups", [list(group) for group in self.stage_groups]),
+                ("basis", self.basis),
+                ("disclosures", list(self.disclosures)),
+            )
+        )
+
+    def report(self) -> str:
+        lines = [
+            f"[FWS-CIM] layer groups ({DIGITAL_GROUP_DECISION} — DERIVED from the "
+            "layer plan, never declared)",
+            f"  motif                   {[list(k) for k in self.motif]} "
+            f"(period {self.period}"
+            + (", homogeneous" if self.homogeneous else "")
+            + ")",
+            f"  group instances         {self.instances} over {self.layers} layer(s)",
+        ]
+        for note in self.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+
+def derive_layer_groups(
+    layer_mixers: Sequence[Sequence[str]], *, stages: Optional[Sequence[int]] = None
+) -> LayerGroupPlan:
+    """Read the group off the layer plan and hand back its stage sets (D36).
+
+    STAGE GRANULARITY IS ONE LAYER PER STAGE (D38: the machine is maximally
+    disaggregated and the granularity DERIVES), so stage i is layer i unless
+    the caller passes its own ``stages`` list — which it does when the mapper's
+    stage ids are not 0..depth-1.
+
+    EXECUTION IS UNTOUCHED. The pipeline stays per-layer staggered; the group
+    is the pattern at which a chiplet ATTACHES, so every chiplet sees the same
+    per-beat work mix and the chiplets are uniform by construction rather than
+    by an averaging step.
+    """
+    motif = minimal_motif(layer_mixers)
+    period = len(motif)
+    depth = len(layer_mixers)
+    ids = tuple(int(s) for s in stages) if stages is not None else tuple(range(depth))
+    if len(ids) != depth:
+        raise LayerGroupError(
+            f"derive_layer_groups was given {depth} layer(s) but {len(ids)} stage id(s). "
+            "Under D38 the stage granularity is one layer per stage, so the two lists "
+            "are the same length or the caller is grouping stages that are not the "
+            "layers it read the motif from."
+        )
+    instances = depth // period
+    stage_groups = tuple(
+        tuple(ids[i * period:(i + 1) * period]) for i in range(instances)
+    )
+    basis = (
+        f"minimal repeating motif of model_param.layer_plan.layer_mixers: period "
+        f"{period} over {depth} layer(s) = {instances} group instance(s); stage "
+        "granularity is one layer per stage (D38)"
+    )
+    disclosures = [
+        f"THE GROUP IS DERIVED, never declared ({DIGITAL_GROUP_DECISION}): it is the "
+        f"model's minimal repeating motif, {[list(k) for k in motif]} (period "
+        f"{period}), and it tiles the {depth}-layer stack exactly {instances} time(s). "
+        "A homogeneous model has period 1, which is the same law and not a special case.",
+        "GROUPING IS CHIPLET ATTACHMENT, NEVER EXECUTION. The pipeline stays per-layer "
+        "staggered (D29); the group is only the pattern at which digital chiplets "
+        "attach, so each chiplet serves one group's stages and therefore sees the same "
+        "per-beat work mix. The chiplets are uniform BY CONSTRUCTION — nothing is "
+        "averaged to make them so.",
+    ]
+    if period == depth and depth > 1:
+        disclosures.append(
+            f"NO PROPER MOTIF TILES THIS STACK: no period shorter than the full depth "
+            f"{depth} both repeats and divides it, so the whole stack is ONE group and "
+            "one chiplet design serves every stage. That is the honest reading of an "
+            "irregular layer_types list; it is not a failure, but it does mean the "
+            "chiplet is sized for the union of every layer kind the model has."
+        )
+    return LayerGroupPlan(
+        motif=motif,
+        period=period,
+        layers=depth,
+        instances=instances,
+        stage_groups=stage_groups,
+        basis=basis,
+        disclosures=tuple(disclosures),
+    )
+
+
+@dataclass(frozen=True)
+class DigitalChipletPackaging:
+    """D36's stage-2 arithmetic: one group's chiplet, and how it packages.
+
+    ``area_mm2`` is the WHOLE chiplet — its engines plus its state store, which
+    lives INSIDE the chiplet and inside its area (D36). The two halves are kept
+    beside the total so the total never has to be un-summed to be read (D21).
+
+    ``chips_per_group`` and ``groups_per_chiplet`` are DERIVED and REPORTED and
+    are never axes. Exactly one of them can exceed 1: a chiplet is either over
+    the band's ceiling or under its floor, never both.
+    """
+
+    engines_mm2: float
+    state_mm2: float
+    area_mm2: float
+    band_min_mm2: float
+    band_max_mm2: float
+    chips_per_group: int
+    groups_per_chiplet: int
+    groups_available: int
+    groups_merged: int
+    basis: str = ""
+    disclosures: Tuple[str, ...] = ()
+
+    @property
+    def in_band(self) -> bool:
+        return self.band_min_mm2 <= self.area_mm2 <= self.band_max_mm2
+
+    @property
+    def state_share(self) -> float:
+        """The state store's share of the chiplet it lives in."""
+        return (self.state_mm2 / self.area_mm2) if self.area_mm2 > 0 else 0.0
+
+    def summary(self) -> "OrderedDict[str, object]":
+        return OrderedDict(
+            (
+                ("engines_mm2", self.engines_mm2),
+                ("state_mm2", self.state_mm2),
+                ("chiplet_area_mm2", self.area_mm2),
+                ("state_share", self.state_share),
+                ("band_mm2", [self.band_min_mm2, self.band_max_mm2]),
+                ("in_band", bool(self.in_band)),
+                ("chips_per_group", int(self.chips_per_group)),
+                ("groups_per_chiplet", int(self.groups_per_chiplet)),
+                ("groups_available", int(self.groups_available)),
+                ("groups_merged", int(self.groups_merged)),
+                ("provenance", PROVENANCE_DERIVED_COUNT),
+                ("basis", self.basis),
+                ("disclosures", list(self.disclosures)),
+            )
+        )
+
+    def report(self) -> str:
+        lines = [
+            f"[FWS-CIM] digital chiplet packaging ({DIGITAL_GROUP_DECISION} — a "
+            "FUNCTION of the analog point, not a search)",
+            f"  chiplet area            {self.area_mm2:.6g} mm2 "
+            f"= {self.engines_mm2:.6g} engines + {self.state_mm2:.6g} state "
+            f"({self.state_share * 100:.3f}% state)",
+            f"  band [{self.band_min_mm2:.6g}, {self.band_max_mm2:.6g}] mm2   "
+            + ("INSIDE" if self.in_band else "OUTSIDE"),
+            f"  chips per group         {self.chips_per_group}",
+            f"  groups per chiplet      {self.groups_per_chiplet} "
+            f"(merged {self.groups_merged} of {self.groups_available} available)",
+        ]
+        for note in self.disclosures:
+            lines.append(f"  [NOTE] {note}")
+        return "\n".join(lines)
+
+
+def derive_digital_chiplet_packaging(
+    engines_mm2: float,
+    state_mm2: float,
+    *,
+    groups_available: int = 1,
+    context: str = "cim.cards.<digital card>",
+) -> DigitalChipletPackaging:
+    """One group's chiplet area and the band arithmetic that follows (D36).
+
+    THE AREA. ``chiplet_area = engines + state_share``. The state store is not
+    a sidecar and not a constraint to fail against — it is silicon inside the
+    chiplet, so a plan that holds more state buys a bigger chiplet and pays for
+    it here (which is exactly what :func:`compose_state_sram` already does at
+    the block level; this only says where the result lives).
+
+    THE BAND, [50, 400] mm2, is packaging arithmetic and NEVER an axis:
+
+    * over 400 -> ``chips_per_group = ceil(area / 400)``. The group's chiplet
+      is cut across that many dies.
+    * under 50 -> ``groups_per_chiplet = ceil(50 / area)``. Groups merge onto
+      one chiplet toward the band.
+    * inside -> both 1, and the chiplet is the group.
+
+    Only one can bind, because the band's two edges are on opposite sides of
+    the area. When merging cannot reach the floor — a model with fewer group
+    instances than the merge asks for — the shortfall is REPORTED by name and
+    the chiplet stays under-area. It is not padded up to 50 mm2 (D28) and the
+    groups are not invented.
+    """
+    engines = float(engines_mm2)
+    state = float(state_mm2)
+    if engines < 0 or state < 0:
+        raise ValueError(
+            f"{context}: chiplet area needs non-negative engine and state areas (got "
+            f"engines = {engines!r} mm2, state = {state!r} mm2). "
+            f"{DIGITAL_GROUP_DECISION} puts the state store INSIDE the chiplet, so "
+            "both halves are silicon and neither can be negative."
+        )
+    area = engines + state
+    available = max(1, int(groups_available))
+    chips_per_group = 1
+    groups_per_chiplet = 1
+    if area > DIGITAL_CHIPLET_AREA_MAX_MM2:
+        chips_per_group = int(math.ceil(area / DIGITAL_CHIPLET_AREA_MAX_MM2))
+    elif 0 < area < DIGITAL_CHIPLET_AREA_MIN_MM2:
+        groups_per_chiplet = int(math.ceil(DIGITAL_CHIPLET_AREA_MIN_MM2 / area))
+    merged = min(groups_per_chiplet, available)
+    basis = (
+        f"chiplet area = {engines:.6g} mm2 engines + {state:.6g} mm2 state store "
+        f"(inside the chiplet, {DIGITAL_GROUP_DECISION}) = {area:.6g} mm2, against the "
+        f"band [{DIGITAL_CHIPLET_AREA_MIN_MM2:.6g}, {DIGITAL_CHIPLET_AREA_MAX_MM2:.6g}] "
+        f"mm2 -> chips_per_group = {chips_per_group}, groups_per_chiplet = "
+        f"{groups_per_chiplet}"
+    )
+    disclosures = [
+        f"STAGE 2 IS A FUNCTION, NOT A SEARCH ({DIGITAL_GROUP_DECISION}): the packaging "
+        "numbers below are arithmetic on the derived digital area. STUB ROUND HONESTY: "
+        "the engines here are sized against the WHOLE stage stack, not per group - the "
+        "group-scope sizing (derive_group_engine_sizing) exists in the law layer and is "
+        "NOT YET WIRED, so the area this arithmetic divides is the stack-level number. "
+        "Neither chips_per_group nor groups_per_chiplet is a swept axis, and neither is "
+        "a declared knob.",
+        f"THE STATE STORE IS INSIDE THE CHIPLET AND INSIDE ITS AREA: {state:.6g} mm2 of "
+        f"the {area:.6g} mm2 total "
+        f"({(state / area * 100) if area > 0 else 0.0:.3f}%). It is not a separate "
+        "accounting and it must not be added to a system total a second time (D21).",
+    ]
+    if chips_per_group > 1:
+        disclosures.append(
+            f"OVER THE BAND: {area:.6g} mm2 exceeds the {DIGITAL_CHIPLET_AREA_MAX_MM2:.6g} "
+            f"mm2 ceiling, so the group's chiplet is cut across chips_per_group = "
+            f"ceil({area:.6g} / {DIGITAL_CHIPLET_AREA_MAX_MM2:.6g}) = {chips_per_group} "
+            "dies. The CUT ITSELF IS NOT PRICED: this repo declares no law for what "
+            "crossing that cut costs in latency or energy, so the split is reported as "
+            "packaging and its traffic is a named gap, not a zero anyone measured."
+        )
+    if groups_per_chiplet > 1:
+        disclosures.append(
+            f"UNDER THE BAND: {area:.6g} mm2 is below the "
+            f"{DIGITAL_CHIPLET_AREA_MIN_MM2:.6g} mm2 floor, so groups merge toward it — "
+            f"groups_per_chiplet = ceil({DIGITAL_CHIPLET_AREA_MIN_MM2:.6g} / "
+            f"{area:.6g}) = {groups_per_chiplet}."
+        )
+        if merged < groups_per_chiplet:
+            disclosures.append(
+                f"THE MERGE CANNOT REACH THE FLOOR: the band asks for "
+                f"{groups_per_chiplet} group(s) per chiplet and this model has only "
+                f"{available} group instance(s), so {merged} merge and the chiplet "
+                f"stays at {area * merged:.6g} mm2, under the "
+                f"{DIGITAL_CHIPLET_AREA_MIN_MM2:.6g} mm2 floor. It is NOT padded up to "
+                "the band (D28 forbids inventing silicon) and no group is invented to "
+                "fill it; the shortfall is the report."
+            )
+    return DigitalChipletPackaging(
+        engines_mm2=engines,
+        state_mm2=state,
+        area_mm2=area,
+        band_min_mm2=DIGITAL_CHIPLET_AREA_MIN_MM2,
+        band_max_mm2=DIGITAL_CHIPLET_AREA_MAX_MM2,
+        chips_per_group=chips_per_group,
+        groups_per_chiplet=groups_per_chiplet,
+        groups_available=available,
+        groups_merged=merged,
+        basis=basis,
+        disclosures=tuple(disclosures),
+    )
+
+
+# --- D38: bank_depth is PARKED, and the mapped card freezes at depth 1 -----
+
+#: The bank depth every MAPPED run uses: one mux slot per allocatable bank.
+MAPPED_BANK_DEPTH: int = 1
+
+#: The decision, quoted by the refusal.
+BANK_DEPTH_PARKED_DECISION: str = "D38 (GEORGE, 2026-08-29)"
+BANK_DEPTH_PARKED_QUOTE: str = (
+    "bank_depth is PARKED for ground-up reformulation (the mux-slot allocation "
+    "question, next)."
+)
+
+
+class BankDepthParkedError(ValueError):
+    """A mapped config declared ``bank_depth``, which D38 parked."""
+
+
+def check_mapped_bank_depth(declared: int, *, context: str = "cim.cards.<analog card>") -> int:
+    """Freeze the mapped path's bank depth at 1, refusing any other DECLARED value.
+
+    ``declared`` is the card's raw ``bank_depth`` field: 0 means the card said
+    nothing (the whole macro is one bank, which is the pre-D38 default) and any
+    positive value is a declaration. Saying nothing is fine and freezes to 1.
+    Declaring 1 is fine and is what it already was. Declaring anything else is
+    REFUSED by name, because D38 parked the knob: the mapped path must not
+    quietly honour a value from a formulation that is being replaced, and it
+    must not silently overwrite one either.
+    """
+    value = int(declared)
+    if value in (0, MAPPED_BANK_DEPTH):
+        return MAPPED_BANK_DEPTH
+    raise BankDepthParkedError(
+        f"{context}.bank_depth = {value} on a MAPPED fws_cim run. "
+        f"{BANK_DEPTH_PARKED_DECISION}: {BANK_DEPTH_PARKED_QUOTE} The mapped path "
+        f"freezes the card at bank_depth = {MAPPED_BANK_DEPTH} (one mux slot per "
+        "allocatable bank, the finest granularity the packer has) and refuses a "
+        "declared alternative rather than honouring a number whose law is being "
+        "rewritten — or silently replacing it, which would let a config believe it "
+        "swept something it did not. Remove the key (absent means the frozen depth), "
+        "or run the DECLARED path, where bank_depth is untouched and still means what "
+        "it always meant."
+    )
+
+
+def bank_depth_disclosures() -> Tuple[str, ...]:
+    """What the frozen depth is, and that it is frozen rather than selected."""
+    return (
+        f"bank_depth = {MAPPED_BANK_DEPTH} on this mapped run, FROZEN and not selected: "
+        f"{BANK_DEPTH_PARKED_DECISION} parks the knob ({BANK_DEPTH_PARKED_QUOTE}), so "
+        "it is not an axis, it is not a sweep result, and a config declaring another "
+        "value is refused by name rather than honoured.",
+    )
+
+
 class CimDeviceModel:
     """Closed-form FWS-CIM device laws (see module docstring for each law)."""
 
@@ -3080,6 +4564,11 @@ class CimDeviceModel:
         self.analog = cim.analog if cards is None else cards.analog_card.params
         self.fabric = cim.fabric if cards is None else cards.digital_card.fabric
         self.chip = cim.chip
+        # The SOURCE model is kept beside the adapted params because a few
+        # laws need a block the params flatten away - the short depthwise conv
+        # is declared on `short_conv` or on `ssm`, and the pool has to size for
+        # whichever one this model carries (ADJ-3).
+        self.model = model_params if not isinstance(model_params, CimModelParams) else None
         if isinstance(model_params, CimModelParams):
             self.params = model_params
         else:
@@ -3098,6 +4587,23 @@ class CimDeviceModel:
         #: analog m-pass times, installed by :meth:`install_derived_fabric`.
         #: None means "not derived yet" — never "no arrays".
         self._derived_fabric: Optional[DerivedFabricSizing] = None
+        #: SA-GEOM: the array SHAPE the geometry rule derived, when
+        #: ``cim.fabric.geometry: derived`` asked for it. None means the
+        #: shipped law: the array is the DECLARED rows x cols. Installed (and
+        #: cleared) with the fabric sizing that carries it, so the shape a run
+        #: is priced on is always the shape the derivation was taken at.
+        self._derived_geometry: Optional[DerivedSAGeometry] = None
+        #: CTX-SPLIT: bytes per activation element, taken from the run's own
+        #: DECLARED precision when there is one. 0.0 means the device was built
+        #: without a full hw_config and :meth:`sa_act_bytes` names its fallback.
+        self._act_bytes = float(
+            getattr(
+                getattr(getattr(hw_config, "sw_config", None), "precision", None),
+                "activations",
+                0.0,
+            )
+            or 0.0
+        )
         if self.fabric.model == "sa" and int(self.fabric.num_arrays) < 2:
             print(
                 "[WARNING]: cim.fabric.num_arrays < 2 — the folded attention law "
@@ -3185,7 +4691,29 @@ class CimDeviceModel:
 
     @property
     def softmax_width(self) -> int:
-        """The softmax law's own width: lanes x replicas (ADJ-10 or declared)."""
+        """The ELEMENT WIDTH of one softmax pipeline: the SA's output width.
+
+        OPTIMA carries TWO numbers and this repo collapsed them into one.
+        `create_softmax_collection(softmax_width = cfg.digital.cols)` builds a
+        pipeline as wide as the systolic array's output, because the softmax
+        consumes scores at the rate the array produces them.
+        `DIGITAL_SOFTMAX_LANES = 1` is a different quantity - the number of
+        COPIES of that pipeline, passed to `get_execution_cycles(items, copies)`.
+
+        Mapping OPTIMA's COPIES onto this repo's WIDTH made every card declare
+        a one-element-wide softmax engine. The old row-based timing law hid it,
+        because a law that never reads the row width cannot notice that the
+        engine is too narrow to span a row.
+        """
+        return max(1, int(self.fabric.cols))
+
+    @property
+    def softmax_copies(self) -> int:
+        """How many softmax pipelines run beside each other: lanes x replicas.
+
+        OPTIMA's `copies`. This is the number ADJ-10 derives, and it divides the
+        chunk count rather than widening the row.
+        """
         return max(1, self.fabric_softmax_lanes * int(self.fabric.replicas))
 
     @property
@@ -3197,6 +4725,44 @@ class CimDeviceModel:
             PROVENANCE_DERIVED_COUNT
             if self._derived_fabric is not None
             else PROVENANCE_DECLARED_COUNT
+        )
+
+    def analog_card_disclosures(self) -> Tuple[str, ...]:
+        """Where the ANALOG card's numbers came from (D21).
+
+        A card that names a ``calc_profile`` states the profile, the source
+        file it was ported from and the fold its area/energy/cycles were
+        computed at — the same way a derived engine states the measurement it
+        was sized against. A hand-declared card says nothing here: its numbers
+        are a human's declaration and the config is where they live.
+        """
+        derivation = getattr(self.card, "calc_derivation", None)
+        if not derivation:
+            return ()
+        return (f"cim.cards.{self.card.name}: {derivation['provenance']}",)
+
+    def nonstandard_macro_disclosures(self) -> Tuple[str, ...]:
+        """The D35 exemption this card runs under, or silence (D35, D21).
+
+        A card that IS the platform macro says nothing here, because there is
+        nothing to say. A card admitted under ``cim.analog.nonstandard_macro``
+        states the geometry it actually built, the platform constant it departs
+        from and the config's own reason — the SENTENCE comes from the law
+        module that owns the constant, so the number is not restated here.
+        """
+        reason = getattr(self.card, "nonstandard_macro", None)
+        if not reason:
+            return ()
+        import cim_analog_calc as _calc
+
+        return (
+            _calc.nonstandard_macro_disclosure(
+                int(self.analog.rows),
+                int(self.analog.cols),
+                int(self.analog.adcs),
+                str(reason),
+                context=f"cim.cards.{self.card.name}",
+            ),
         )
 
     def fabric_sizing_disclosures(self) -> Tuple[str, ...]:
@@ -3229,18 +4795,105 @@ class CimDeviceModel:
     def install_derived_fabric(
         self, sizing: Optional["DerivedFabricSizing"]
     ) -> None:
-        """Install (or clear) the fabric ADJ-10 derived from this run's stages."""
+        """Install (or clear) the fabric ADJ-10 derived from this run's stages.
+
+        SA-GEOM rides along: a sizing taken at a DERIVED array shape installs
+        that shape too, and clearing the sizing clears it. The two are one
+        answer — a cycle count from one geometry priced on another would be two
+        machines in one report (D21) — so they are never installed apart.
+        """
         self._derived_fabric = sizing
+        self._derived_geometry = sizing.geometry if sizing is not None else None
 
     @property
     def derived_fabric(self) -> Optional["DerivedFabricSizing"]:
         return self._derived_fabric
 
-    def sa_cycles(self, m: int, n: int, k: int) -> int:
-        """Systolic-array closed form: ceil(M/R)*ceil(N/C)*(K+R+C-2) - 1."""
-        r = int(self.fabric.rows)
-        c = int(self.fabric.cols)
+    def sa_cycles(self, m: int, n: int, k: int, *, group: str = "qk") -> int:
+        """Systolic-array closed form: ceil(M/R)*ceil(N/C)*(K+R+C-2) - 1.
+
+        ``group`` names WHICH ENGINE the run belongs to, ``qk`` or ``pv``. It
+        is inert under the shipped ``geometry: declared`` law — one card, one
+        array shape, and both groups read the declared rows x cols — and it
+        selects the group's own derived C under ``geometry: derived``, where
+        the SA GEOMETRY RULE derives a column count per group.
+        """
+        r, c = self.sa_geometry(group)
         return _ceil_div(m, r) * _ceil_div(n, c) * (int(k) + r + c - 2) - 1
+
+    # -- SA-GEOM: which array shape this run is priced on -------------------
+
+    @property
+    def fabric_geometry_mode(self) -> str:
+        """``declared`` (the default and every shipped card) or ``derived``."""
+        return str(getattr(self.fabric, "geometry", FABRIC_GEOMETRY_DECLARED))
+
+    @property
+    def derived_sa_geometry(self) -> Optional["DerivedSAGeometry"]:
+        """The derived array shape, or None when the geometry is declared."""
+        return self._derived_geometry
+
+    def sa_geometry(self, group: str = "qk") -> Tuple[int, int]:
+        """``(rows, cols)`` of ONE array of ``group`` on this run.
+
+        THE DECLARED CARD IS THE DEFAULT AND IS BIT-IDENTICAL: with no derived
+        geometry installed this returns the card's own rows x cols for both
+        groups, which is the expression :meth:`sa_cycles` carried before the
+        rule existed.
+        """
+        geometry = self._derived_geometry
+        if geometry is None:
+            return int(self.fabric.rows), int(self.fabric.cols)
+        return int(geometry.rows), geometry.cols_for(group)
+
+    @property
+    def fabric_rows(self) -> int:
+        """R of one array — DERIVED (SA-GEOM) or declared."""
+        return self.sa_geometry("qk")[0]
+
+    @property
+    def fabric_cols(self) -> int:
+        """C of one QK array — DERIVED (SA-GEOM) or declared.
+
+        The QK group is the one this reads because it is the group the fill/
+        drain and the softmax feed hang off. The PV group's own C is
+        :meth:`sa_geometry`, and a derived fabric can differ between them.
+        """
+        return self.sa_geometry("qk")[1]
+
+    @property
+    def fabric_combine_lanes(self) -> int:
+        """FP_ADD lanes the CTX-SPLIT reduce runs on — DERIVED, or the default.
+
+        0 means "not derived yet", and the split law then falls back to ONE
+        LANE PER OUTPUT ELEMENT of the call — the saturation width, where the
+        reduce is a single pass. That fallback is what the search itself
+        evaluates array counts at, so an un-installed device prices the same
+        arrays the derivation was taken on; the derivation then narrows the
+        lanes to the smallest count that still fits the target (D28) and
+        installs THAT.
+        """
+        sizing = self._derived_fabric
+        if sizing is not None and int(getattr(sizing, "combine_lanes", 0)) > 0:
+            return int(sizing.combine_lanes)
+        return 0
+
+    @property
+    def fabric_fill_drain_cycles(self) -> int:
+        """The array's fill/drain, charged ONCE on the QK op (ADJ-8).
+
+        The convention does not change: it is the card's declared value when
+        the card declares one, and ``3 * R`` of the QK engine otherwise. What
+        moves under a DERIVED geometry is R, so an undeclared penalty follows
+        the derived rows the same way it followed the declared ones. No PV
+        fill is added — the lowering charges one penalty per call and that is
+        the convention this rule inherits, not one it revisits.
+        """
+        if self._derived_geometry is None or bool(
+            getattr(self.fabric, "fill_drain_declared", False)
+        ):
+            return int(self.fabric.fill_drain_penalty_cycles)
+        return 3 * int(self._derived_geometry.rows)
 
     def heads_chip(self, kv_heads: Optional[int] = None, tp: int = 1) -> int:
         """KV heads resident on one chip: ceil(kv_heads/tp) when tp >= 2."""
@@ -3248,20 +4901,89 @@ class CimDeviceModel:
         tp = max(1, int(tp))
         return _ceil_div(kv, tp) if tp >= 2 else kv
 
-    def softmax_cycles(self, tokens_q: int, heads_chip: int) -> int:
-        """Softmax-lanes law: pipeline_depth + ceil(tokens_q*heads_chip/lanes) - 1.
+    #: AN OPEN CONTRADICTION, NAMED RATHER THAN DECIDED (M5, M9).
+    #:
+    #: `softmax_cycles` spends the width on ROWS: `ceil(tokens_q * heads_chip /
+    #: width)`. The row's own width - the number of keys it normalises over -
+    #: never enters. `compose_softmax_engine` builds the OPPOSITE machine, and
+    #: it is copied term for term from OPTIMA's `create_softmax_collection`:
+    #: for width w it instantiates `BF16_EXP: w` and `BF16_RECIP: 1` - ONE
+    #: reciprocal per row, shared by the whole width. That is a unit which
+    #: consumes w ELEMENTS OF ONE ROW per pass, so a 1793-key row needs
+    #: ceil(1793/w) passes, not one.
+    #:
+    #: Both halves came from OPTIMA, so the contradiction is INHERITED. Pricing
+    #: in elements is the physics the composition describes, and it costs 20 of
+    #: the validator's 508 checks - every recorded T1/T2/T3 period, fps and
+    #: bottleneck, and all five bridge attention-fold identities. Those checks
+    #: assert that this repo reproduces OPTIMA's PUBLISHED numbers, so paying
+    #: that price is a decision about whether OPTIMA is ground truth or a peer
+    #: model, and it is not this module's to take.
+    #:
+    #: The law below therefore stays on the reference's unit and the divergence
+    #: is stated here. Measured cost of the element reading, when it is taken:
+    #: Qwen duty x1793, one stage 17,828 -> 19,620 cycles (+4.7% on the beat),
+    #: composed softmax area 0.106 -> 186.57 mm2.
+    SOFTMAX_UNIT_UNRESOLVED = (
+        "softmax timing spends its width on ROWS while the composition it ships "
+        "(OPTIMA's own collection: BF16_EXP w, BF16_RECIP 1) is a ROW-WIDTH unit "
+        "consuming w elements of one row per pass. The two describe different "
+        "machines. The timing law keeps the reference's unit so the repo still "
+        "reproduces OPTIMA's published T1/T2/T3 numbers; the element reading "
+        "costs 20 of 508 validator checks and is a decision about the reference, "
+        "not about the physics."
+    )
 
-        tokens_q is the query-row count of the score call (prefill: S — the
-        pass-1 form is unchanged; decode: B * shared_heads). The width is
-        :attr:`softmax_width` — ``softmax_lanes * replicas`` with the lane
-        count DERIVED under ADJ-10 when a derivation is installed and DECLARED
-        otherwise, so this law and the derivation cannot drift apart.
+    def softmax_cycles(self, tokens_q: int, heads_chip: int, keys: int = 1) -> int:
+        """Softmax law: pipeline_depth + ceil(ELEMENTS / width) - 1.
+
+        `keys` is the score-row width the call normalises over (decode: the
+        context). The width is :attr:`softmax_width` - ``softmax_lanes *
+        replicas`` with the lane count DERIVED under ADJ-10 when a derivation
+        is installed and DECLARED otherwise, so this law and the derivation
+        cannot drift apart. THIS IS THE ONLY SOFTMAX TIMING LAW (M7); the copy
+        that used to live inline in `attention_cycles_at` now calls it.
         """
-        return (
-            int(self.fabric.softmax_pipeline_depth)
-            + _ceil_div(int(tokens_q) * int(heads_chip), self.softmax_width)
-            - 1
+        return self._softmax_cycles_at(
+            int(tokens_q), int(heads_chip), int(keys), int(self.softmax_copies)
         )
+
+    def _softmax_cycles_at(
+        self, tokens_q: int, heads_chip: int, keys: int, copies: int
+    ) -> int:
+        """THE softmax timing law, applied at an arbitrary width.
+
+        passes = rows * ceil(keys / width).
+
+        WHY ONE ROW AT A TIME. The census is not `BF16_RECIP: 1` blocking the
+        engine - that unit is a Newton-Raphson reciprocal with a 3-cycle
+        PIPELINE (3472.065 um2, measured), so one copy retires one reciprocal
+        per cycle and is never the limit. OPTIMA's own LayerNorm collection
+        proves it: `BF16_RECIP: 1` beside `throughput_items_per_cycle =
+        base_width`.
+
+        What holds the engine to one row is the REDUCTION TREES. `FP_COMP:
+        w - 1` is a single running-max tree over the width and `FP_ADD:
+        2w - 1` carries a single sum tree. A softmax row needs both reductions
+        over its OWN elements, so two rows cannot share one tree in one pass.
+        The width therefore buys elements WITHIN a row - `BF16_EXP: w`
+        exponentials, each pipelined at one per cycle - and a row of `keys`
+        elements takes ceil(keys / width) passes.
+
+        The row width never entered the old law at all, so a 1793-key row
+        counted as one pass.
+        """
+        rows = max(0, int(tokens_q)) * max(0, int(heads_chip))
+        if rows <= 0:
+            return 0
+        # ONE PIPELINE spans `softmax_width` elements of ONE row per pass, so a
+        # row of `keys` elements is ceil(keys / width) chunks. `copies` such
+        # pipelines run beside each other and share the chunks out. This is
+        # OPTIMA's get_execution_cycles(items, copies) with `items` counted
+        # honestly: row CHUNKS, not rows.
+        chunks = rows * _ceil_div(max(1, int(keys)), self.softmax_width)
+        per_copy = _ceil_div(chunks, max(1, int(copies)))
+        return int(self.fabric.softmax_pipeline_depth) + per_copy - 1
 
     def attention_call_timing(
         self,
@@ -3292,19 +5014,35 @@ class CimDeviceModel:
         # ADJ-10: the arrays are a POOL of concurrent folds, partitioned per
         # call. At num_arrays = 2 the split is (1, 1) and the two expressions
         # below are the pass-1 law bit for bit.
-        a_qk, a_pv = fold_group_split(
-            self.fabric_num_arrays,
-            lambda arrays: self.sa_cycles(m, n, int(k) * _ceil_div(folds, arrays)),
-            lambda arrays: self.sa_cycles(m, k, int(n) * _ceil_div(folds, arrays)),
-        )
-        qk_per_array = _ceil_div(folds, a_qk)
-        pv_per_array = _ceil_div(folds, a_pv)
-        qk = self.sa_cycles(m, n, int(k) * qk_per_array)
-        pv = self.sa_cycles(m, k, int(n) * pv_per_array)
-        total = max(qk, pv) + int(self.fabric.fill_drain_penalty_cycles)
-        sa_time = total / self.f_fabric_hz
+        #
+        # CTX-SPLIT: past fold saturation the surplus arrays are dealt on the
+        # CONTEXT instead, and the decision is taken by the SAME method the
+        # derivation inverts (attention_split_at), so the width the derivation
+        # chose is the width this call is priced at. With the split off both
+        # `s_*` come back 1 and every expression below is the old one.
         sm_tokens = int(s_fold * m if softmax_tokens is None else softmax_tokens)
-        sm_cycles = self.softmax_cycles(sm_tokens, h_chip)
+        demand = AttentionCallDemand(
+            m=int(m), k=int(k), n=int(n), folds=folds,
+            softmax_tokens=sm_tokens,
+            heads_chip=h_chip,
+        )
+        a_qk, a_pv, s_qk, s_pv, qk_per_array, pv_per_array, combine = (
+            self.attention_split_at(
+                demand, self.fabric_num_arrays, self.fabric_combine_lanes
+            )
+        )
+        qk = self.sa_cycles(
+            m, _ceil_div(int(n), s_qk), int(k) * qk_per_array, group="qk"
+        )
+        pv = self.sa_cycles(
+            m, k, _ceil_div(int(n), s_pv) * pv_per_array, group="pv"
+        )
+        # THE COMBINE LANDS ON THE PV RUN. The reduce cannot start before the
+        # last partial arrives and the pair runs concurrently, so it extends
+        # the PV branch of the max rather than sitting beside it.
+        total = max(qk, pv + combine.cycles) + self.fabric_fill_drain_cycles
+        sa_time = total / self.f_fabric_hz
+        sm_cycles = self.softmax_cycles(sm_tokens, h_chip, int(n))
         sm_time = sm_cycles / self.f_fabric_hz
         return AttentionTiming(
             qk_cycles=qk,
@@ -3326,6 +5064,12 @@ class CimDeviceModel:
             call_k=int(k),
             call_n=int(n),
             softmax_tokens=sm_tokens,
+            qk_split=int(s_qk),
+            pv_split=int(s_pv),
+            combine_cycles=int(combine.cycles),
+            combine_adds=int(combine.adds),
+            combine_lanes=int(combine.lanes),
+            gather_bytes=float(combine.gather_bytes),
         )
 
     def attention_timing(
@@ -4288,14 +6032,17 @@ class CimDeviceModel:
     def softmax_engine_composition(self) -> EngineComposition:
         """The softmax pipeline of ONE shared digital chiplet, in blocks (D32).
 
-        ADJ-10: the WIDTH is the derived lane count when a derivation is
-        installed, so the composed silicon is the silicon the softmax law was
-        actually priced on. The per-lane census is unchanged.
+        THE CENSUS IS THE MACHINE THE LAW SPENDS (M9). One pipeline is
+        `softmax_width` elements wide - the SA's output width, which is what
+        OPTIMA builds - and `softmax_copies` of them run beside each other.
+        This used to build ONE pipeline whose width was the COPY count, which
+        is neither quantity: it made the silicon a linear cost in copies while
+        the reduction trees inside a pipeline were never built at all.
         """
         return compose_softmax_engine(
             self.synthesis_library(),
-            self.fabric_softmax_lanes,
-            int(self.fabric.replicas),
+            self.softmax_width,
+            self.softmax_copies,
             count_provenance=self.fabric_provenance,
         )
 
@@ -4305,21 +6052,156 @@ class CimDeviceModel:
         ADJ-10: ``num_arrays`` is DERIVED (integer copies of the measured
         32x32 block); ``rows`` and ``cols`` stay declared, because array
         geometry is never invented (ADJ-4).
+
+        SA-GEOM is the ONE exception and it is opt-in: a card that declares
+        ``cim.fabric.geometry: derived`` and has had its shape installed is
+        composed LINEARLY in MAC count instead (see
+        :func:`compose_sa_fabric_derived`), split across the QK and PV groups
+        at the split the fabric's own fold law gives at this width.
         """
-        return compose_sa_fabric(
+        geometry = self._derived_geometry
+        if geometry is None:
+            return compose_sa_fabric(
+                self.synthesis_library(),
+                int(self.fabric.rows),
+                int(self.fabric.cols),
+                self.fabric_num_arrays,
+                int(self.fabric.replicas),
+                count_provenance=PROVENANCE_DERIVED_COUNT,
+            )
+        sizing = self._derived_fabric
+        row = sizing.binding_row if sizing is not None else None
+        if row is not None:
+            groups = (("qk", int(row.qk_arrays)), ("pv", int(row.pv_arrays)))
+        else:
+            a_qk = max(1, self.fabric_num_arrays // 2)
+            groups = (("qk", a_qk), ("pv", max(1, self.fabric_num_arrays - a_qk)))
+        return compose_sa_fabric_derived(
             self.synthesis_library(),
-            int(self.fabric.rows),
-            int(self.fabric.cols),
-            self.fabric_num_arrays,
+            geometry,
+            groups,
             int(self.fabric.replicas),
+            combine_lanes=self.fabric_combine_lanes,
             count_provenance=PROVENANCE_DERIVED_COUNT,
         )
+
+    @property
+    def conv_placement(self) -> str:
+        """Where this machine runs the short depthwise conv's WORK.
+
+        ``macro_pool`` absorbs it into every macro's own pool (ADJ-3);
+        ``shared_digital`` makes it a timed op on the shared digital chiplet.
+        The conv's WEIGHTS are on analog arrays under neither: a k-tap
+        depthwise kernel would light a handful of cells in a macro that holds
+        millions, which is the one thing Invariant W exists to prevent.
+        """
+        alloc = getattr(self.cim, "allocation", None)
+        return str(getattr(alloc, "conv_placement", "macro_pool") or "macro_pool")
+
+    def conv_dims(self) -> "OrderedDict[str, int]":
+        """The conv this model declares, wherever it declares it.
+
+        Read whatever the placement: the operator exists either way, and the
+        two placements differ only in which device carries it.
+        """
+        return self._conv_dims_declared()
+
+    def conv_pool_dims(self) -> "OrderedDict[str, int]":
+        """The short depthwise conv this model runs, from either declaration.
+
+        `short_conv:` states the operator directly; an `ssm:` block states the
+        SAME operator as ``d_conv`` over ``d_inner`` channels, which is where
+        Mamba-1 and Mamba-2 keep it. Both are per-macro pool work (ADJ-3), so
+        the pool below is sized for either. Empty means the model declares no
+        conv at all - a measured absence, not an unasked question.
+        """
+        # Under `shared_digital` the pool sizes NO conv lanes, because the conv
+        # is not the pool's work: it is a timed op on the chiplet, and charging
+        # both would price one operator twice (D21).
+        if self.conv_placement != "macro_pool":
+            return OrderedDict()
+        return self._conv_dims_declared()
+
+    def _conv_dims_declared(self) -> "OrderedDict[str, int]":
+        """Kernel and channel width of the conv, from whichever schema has it."""
+        model = getattr(self, "model", None)
+        short_conv = getattr(model, "short_conv", None)
+        if short_conv is not None:
+            return {
+                "conv_kernel": int(short_conv.kernel_size),
+                "conv_channels": int(short_conv.conv_dim),
+            }
+        ssm = getattr(model, "ssm", None)
+        kernel = int(getattr(ssm, "d_conv", 0) or 0) if ssm is not None else 0
+        if kernel > 0:
+            channels = 0
+            if hasattr(ssm, "resolve_d_inner"):
+                channels = int(ssm.resolve_d_inner(int(self.params.hidden_dim)) or 0)
+            if channels <= 0:
+                channels = int(getattr(ssm, "d_inner", 0) or 0)
+            if channels > 0:
+                return {"conv_kernel": kernel, "conv_channels": channels}
+        # A gated linear-attention block states it a THIRD way: `conv_kernel`
+        # over the key/value projections it convolves (Qwen3.5's k = 4).
+        la = getattr(model, "linear_attention", None)
+        kernel = int(getattr(la, "conv_kernel", 0) or 0) if la is not None else 0
+        if kernel > 0:
+            channels = (
+                int(getattr(la, "num_key_heads", 0) or 0) * int(getattr(la, "key_head_dim", 0) or 0)
+                + int(getattr(la, "num_value_heads", 0) or 0) * int(getattr(la, "value_head_dim", 0) or 0)
+            )
+            if channels > 0:
+                return {"conv_kernel": kernel, "conv_channels": channels}
+        return {}
+
+    #: THE CONV POOL'S WIDTH IS AN OPEN QUESTION (ADJ-15), and it is named
+    #: rather than answered. The per-unit pool law sizes conv lanes so a macro
+    #: can convolve its own outputs AS FAST AS IT CAN EMIT THEM back to back -
+    #: 1.92e10 results/s on the shipped analog card. Two things are wrong with
+    #: that as a silicon number:
+    #:
+    #:   * the RATE is a peak the filled pipeline never runs at. With local
+    #:     batch 1 a macro fires ONCE PER BEAT (~1.2e6 times/s on Falcon-Mamba),
+    #:     so the width is ~40x the duty the design actually imposes;
+    #:   * EVERY macro slot is charged, including the ones whose outputs never
+    #:     reach a conv. On Falcon-Mamba only the ssm_in_proj x-half feeds it;
+    #:     ssm_out_proj (29.6% of tiles) and ssm_dt_proj (9.9%) do not.
+    #:
+    #: Together: the machine needs ~4,791 conv lanes and the law provisions
+    #: 508,928 - a 106x over-provision that would charge 19% of the silicon to
+    #: an operator that is 0.057% of the compute.
+    #:
+    #: So the composed pool does NOT carry the conv today. That is a NAMED
+    #: ABSENCE, not a measured zero: the conv's WORK is real and is priced
+    #: correctly wherever it is TIMED (conv_placement: shared_digital prices it
+    #: from tokens x channels x ops on the vector engine). What is missing is a
+    #: defensible per-macro WIDTH law, which needs a decision about what "sized
+    #: never to block" means for an operator the pipeline runs once a beat -
+    #: and that decision moves the shift-add and accumulate terms too, which sit
+    #: on the same peak-rate basis and are merely cheap enough to have hidden it.
+    CONV_POOL_WIDTH_UNRESOLVED = (
+        "per-macro conv pool width: the per-unit law sizes it from the macro's "
+        "PEAK back-to-back result rate and charges every enumerated slot, which "
+        "over-provisions ~106x against the work the filled pipeline actually runs "
+        "(4,791 lanes needed machine-wide, 508,928 provisioned on Falcon-Mamba). "
+        "The conv's WORK is priced where it is timed (conv_placement: "
+        "shared_digital); its per-macro SILICON is UNPRICED until the width law "
+        "is settled, and is named here rather than reported as a number nobody "
+        "would defend."
+    )
 
     def macro_pool_composition(
         self, sizing: Optional[DigitalPoolSizing] = None
     ) -> EngineComposition:
-        """ONE analog macro's digital pool, in measured blocks (D12 x D32)."""
-        sizing = self.digital_pool_sizing() if sizing is None else sizing
+        """ONE analog macro's digital pool, in measured blocks (D12 x D32).
+
+        The conv is NOT composed in - see CONV_POOL_WIDTH_UNRESOLVED. The pool
+        here is the shift-add reduction and its holding registers, which DO
+        consume ADC results one for one and are honestly sized by the per-unit
+        law.
+        """
+        if sizing is None:
+            sizing = self.digital_pool_sizing()
         return compose_macro_pool(self.synthesis_library(), sizing)
 
     def state_sram_composition(self, required_bytes: float) -> EngineComposition:
@@ -4448,11 +6330,102 @@ class CimDeviceModel:
     # ADJ-10: derive the ATTENTION FABRIC to the ANALOG FLOOR
     # ------------------------------------------------------------------
 
+    @property
+    def context_split_enabled(self) -> bool:
+        """Is CTX-SPLIT live on this run?
+
+        ONLY under a DERIVED geometry, and that gate is the whole bit-identity
+        argument: a card that declares its geometry gets ADJ-10's fold-granular
+        law, the original :func:`fold_group_split`, no combine term and no
+        ladder — the same expressions, in the same order, on the same
+        candidates it always had.
+
+        THE GATE IS THE DECLARED MODE, NOT THE INSTALLED SHAPE, and the
+        difference is load-bearing: :meth:`derive_sa_geometry` runs BEFORE any
+        shape is installed, so a gate that read ``_derived_geometry is not
+        None`` would evaluate the geometry rule with the split switched off and
+        hand the split a shape chosen to make splitting useless. That is
+        exactly the failure the geometry rule's own docstring describes. At the
+        DECLARED SEED width the split is inert anyway — two arrays is one per
+        group, which is at or below fold granularity — so the probe pass reads
+        the same numbers either way.
+        """
+        return self.fabric_geometry_mode == FABRIC_GEOMETRY_DERIVED
+
+    def attention_split_at(
+        self,
+        call: "AttentionCallDemand",
+        num_arrays: int,
+        combine_lanes: int = 0,
+    ) -> Tuple[int, int, int, int, int, int, "ContextSplitCombine"]:
+        """How ``num_arrays`` are dealt to ONE call, and what the combine costs.
+
+        Returns ``(a_qk, a_pv, s_qk, s_pv, fpa_qk, fpa_pv, combine)``. With
+        CTX-SPLIT off this is ADJ-10's partition with both splits pinned at 1
+        and a zero combine, so every caller reads the old law unchanged.
+
+        THE COMBINE IS THE PV SIDE'S. The QK gather is bytes and zero seconds
+        (intra-chip convention, D17); the PV add-reduce is the arithmetic and
+        it is charged at ``s_pv``, the split the PV GROUP actually runs — not
+        at the QK group's, which can differ because the two groups are sized
+        against different shapes.
+        """
+        folds = max(1, int(call.folds))
+        if not self.context_split_enabled:
+            a_qk, a_pv = fold_group_split(
+                num_arrays,
+                lambda arrays: self.sa_cycles(
+                    call.m, call.n, int(call.k) * _ceil_div(folds, arrays), group="qk"
+                ),
+                lambda arrays: self.sa_cycles(
+                    call.m, call.k, int(call.n) * _ceil_div(folds, arrays), group="pv"
+                ),
+            )
+            return (
+                a_qk, a_pv, 1, 1,
+                _ceil_div(folds, a_qk), _ceil_div(folds, a_pv),
+                sa_split_combine(call.m, call.k, call.n, folds, 1, 1),
+            )
+        lanes = int(combine_lanes) if int(combine_lanes) > 0 else max(
+            1, folds * int(call.m) * int(call.k)
+        )
+
+        def _qk_at(arrays: int) -> int:
+            fpa, split = sa_context_split(folds, arrays)
+            return self.sa_cycles(
+                call.m, _ceil_div(int(call.n), split), int(call.k) * fpa, group="qk"
+            )
+
+        def _pv_at(arrays: int) -> int:
+            fpa, split = sa_context_split(folds, arrays)
+            base = self.sa_cycles(
+                call.m, call.k, _ceil_div(int(call.n), split) * fpa, group="pv"
+            )
+            # THE COMBINE RIDES THE PV GROUP'S OWN OBJECTIVE. A partition that
+            # bought a deeper split without paying for the reduce it implies
+            # would be chosen against one number and judged against another —
+            # the exact two-accountings error D21 forbids, and the reason
+            # combine_dominated is reachable at all.
+            return base + sa_split_combine(
+                call.m, call.k, call.n, folds, split, lanes
+            ).cycles
+
+        a_qk, a_pv = fold_group_split_ladder(
+            num_arrays, folds, int(call.n), _qk_at, _pv_at
+        )
+        fpa_qk, s_qk = sa_context_split(folds, a_qk)
+        fpa_pv, s_pv = sa_context_split(folds, a_pv)
+        return (
+            a_qk, a_pv, s_qk, s_pv, fpa_qk, fpa_pv,
+            sa_split_combine(call.m, call.k, call.n, folds, s_pv, lanes),
+        )
+
     def attention_cycles_at(
         self,
         call: "AttentionCallDemand",
         num_arrays: int,
         softmax_width: int,
+        combine_lanes: int = 0,
     ) -> Tuple[int, int, int, int, int]:
         """One attention call's cycles at a candidate width — THE PRICING LAW.
 
@@ -4463,33 +6436,70 @@ class CimDeviceModel:
         the derivation compares against a target is
         ``qk + fill_drain + softmax + pv``.
         """
-        folds = max(1, int(call.folds))
-        a_qk, a_pv = fold_group_split(
-            num_arrays,
-            lambda arrays: self.sa_cycles(
-                call.m, call.n, int(call.k) * _ceil_div(folds, arrays)
-            ),
-            lambda arrays: self.sa_cycles(
-                call.m, call.k, int(call.n) * _ceil_div(folds, arrays)
-            ),
-        )
-        qk = self.sa_cycles(call.m, call.n, int(call.k) * _ceil_div(folds, a_qk))
-        pv = self.sa_cycles(call.m, call.k, int(call.n) * _ceil_div(folds, a_pv))
-        softmax = (
-            int(self.fabric.softmax_pipeline_depth)
-            + _ceil_div(
-                int(call.softmax_tokens) * int(call.heads_chip),
-                max(1, int(softmax_width)),
-            )
-            - 1
+        qk, pv, softmax, a_qk, a_pv, _combine = self.attention_cycles_full(
+            call, num_arrays, softmax_width, combine_lanes
         )
         return int(qk), int(pv), int(softmax), int(a_qk), int(a_pv)
+
+    def attention_cycles_full(
+        self,
+        call: "AttentionCallDemand",
+        num_arrays: int,
+        softmax_width: int,
+        combine_lanes: int = 0,
+    ) -> Tuple[int, int, int, int, int, "ContextSplitCombine"]:
+        """:meth:`attention_cycles_at` with the COMBINE record beside it.
+
+        ``pv`` here is the SYSTOLIC run only; the combine's cycles are the
+        sixth element and the caller adds them, so a reader of either number
+        can see which engine spent it. The five-element method above stays the
+        five-element method it always was, because its callers unpack it.
+        """
+        folds = max(1, int(call.folds))
+        a_qk, a_pv, s_qk, s_pv, fpa_qk, fpa_pv, combine = self.attention_split_at(
+            call, num_arrays, combine_lanes
+        )
+        qk = self.sa_cycles(
+            call.m, _ceil_div(int(call.n), s_qk), int(call.k) * fpa_qk, group="qk"
+        )
+        pv = self.sa_cycles(
+            call.m, call.k, _ceil_div(int(call.n), s_pv) * fpa_pv, group="pv"
+        )
+        # ONE LAW, ONE SITE (M7): this used to re-implement softmax_cycles
+        # inline, and the two drifted - the inline copy could not be fixed by
+        # fixing the law. The width is a parameter here because the caller is
+        # searching over widths, so the law is applied at the width under test.
+        # THE SOFTMAX STILL SEES THE WHOLE ROW: it normalises over all `call.n`
+        # keys however many chunks produced them, which is exactly why the QK
+        # gather has to happen before it and is named rather than skipped.
+        softmax = self._softmax_cycles_at(
+            int(call.softmax_tokens), int(call.heads_chip), int(call.n),
+            int(softmax_width),
+        )
+        return int(qk), int(pv), int(softmax), int(a_qk), int(a_pv), combine
+
+    def call_fill_drain(self, call: "AttentionCallDemand") -> int:
+        """The fill/drain of one RECORDED call, read at the LIVE geometry.
+
+        ``AttentionCallDemand.fill_drain_cycles`` is what the PROBE measured,
+        and the probe ran at the DECLARED geometry — so under a derived
+        geometry it is a number from a different array. The derivation and the
+        priced run must charge the same penalty (M7), so the live
+        :attr:`fabric_fill_drain_cycles` is what is charged as soon as a
+        derived shape is installed, and the recorded value is what is charged
+        otherwise. Under ``geometry: declared`` the two are the same number and
+        nothing moves.
+        """
+        if self._derived_geometry is None:
+            return int(call.fill_drain_cycles)
+        return int(self.fabric_fill_drain_cycles)
 
     def _stage_attention_cycles(
         self,
         calls: Sequence["AttentionCallDemand"],
         num_arrays: int,
         softmax_width: int,
+        combine_lanes: int = 0,
     ) -> Tuple[int, int, int, int, int, int]:
         """A stage's whole attention bill at a candidate width.
 
@@ -4509,17 +6519,436 @@ class CimDeviceModel:
         would still be priced call by call and only this one reported field
         would speak for the last of them.
         """
-        total = qk_t = pv_t = sm_t = 0
+        detail = self._stage_attention_detail(
+            calls, num_arrays, softmax_width, combine_lanes
+        )
+        return (
+            detail["total"], detail["qk"], detail["pv"], detail["softmax"],
+            detail["a_qk"], detail["a_pv"],
+        )
+
+    def _stage_attention_detail(
+        self,
+        calls: Sequence["AttentionCallDemand"],
+        num_arrays: int,
+        softmax_width: int,
+        combine_lanes: int = 0,
+    ) -> "OrderedDict[str, object]":
+        """:meth:`_stage_attention_cycles` with the CTX-SPLIT terms kept.
+
+        The six-tuple above is what the search and two report sites unpack, and
+        it is deliberately unchanged in shape. This record carries the parts
+        that tuple has no room for — the two groups' splits, the combine
+        cycles, the reduce lane count and the gather bytes — so the artifact
+        can state them without the search having to thread them through.
+        """
+        total = qk_t = pv_t = sm_t = combine_t = 0
         a_qk = a_pv = 1
+        s_qk = s_pv = 1
+        lanes = 1
+        adds = 0
+        gather_bytes = 0.0
+        depth = 0
         for call in calls:
-            qk, pv, softmax, a_qk, a_pv = self.attention_cycles_at(
-                call, num_arrays, softmax_width
+            # ONE SPLIT DECISION PER CALL. This used to call
+            # attention_cycles_full and then attention_split_at again just to
+            # read the QK split back, which ran the ladder partition TWICE per
+            # call for a number the first call already knew.
+            folds = max(1, int(call.folds))
+            a_qk, a_pv, s_qk, s_pv, fpa_qk, fpa_pv, combine = self.attention_split_at(
+                call, num_arrays, combine_lanes
             )
-            total += qk + pv + softmax + int(call.fill_drain_cycles)
+            qk = self.sa_cycles(
+                call.m, _ceil_div(int(call.n), s_qk), int(call.k) * fpa_qk, group="qk"
+            )
+            pv = self.sa_cycles(
+                call.m, call.k, _ceil_div(int(call.n), s_pv) * fpa_pv, group="pv"
+            )
+            softmax = self._softmax_cycles_at(
+                int(call.softmax_tokens), int(call.heads_chip), int(call.n),
+                int(softmax_width),
+            )
+            # THE COMBINE IS PART OF THE STAGE'S SERIAL BILL. The lowering runs
+            # qk -> softmax -> pv and the reduce lands on the PV op's tail, so
+            # it is summed here exactly like the three runs it joins. Charging
+            # the split's saving without its cost is the only way this
+            # extension could produce a wrong number, so it is charged first.
+            total += qk + pv + softmax + combine.cycles + self.call_fill_drain(call)
             qk_t += qk
             pv_t += pv
             sm_t += softmax
-        return total, qk_t, pv_t, sm_t, a_qk, a_pv
+            combine_t += combine.cycles
+            adds += int(combine.adds)
+            gather_bytes += float(combine.gather_bytes)
+            lanes = int(combine.lanes)
+            depth = max(depth, int(combine.depth))
+        return OrderedDict(
+            (
+                ("total", int(total)),
+                ("qk", int(qk_t)),
+                ("pv", int(pv_t)),
+                ("softmax", int(sm_t)),
+                ("a_qk", int(a_qk)),
+                ("a_pv", int(a_pv)),
+                ("qk_split", int(s_qk)),
+                ("pv_split", int(s_pv)),
+                ("combine_cycles", int(combine_t)),
+                ("combine_lanes", int(lanes)),
+                ("combine_adds", int(adds)),
+                ("combine_tree_depth", int(depth)),
+                ("gather_bytes", float(gather_bytes)),
+            )
+        )
+
+    def sa_act_bytes(self) -> float:
+        """Bytes per activation element, for the CTX-SPLIT byte counts.
+
+        Read from the run's DECLARED precision when the device was built with
+        a full hw_config; 2.0 (bf16) otherwise, which is what every shipped
+        fws_cim card declares. The fallback is named rather than silent because
+        it feeds two REPORTED quantities — the gather bytes and the operand
+        stream rate — and a byte count nobody declared should say so.
+        """
+        return float(self._act_bytes) if float(self._act_bytes) > 0 else 2.0
+
+    def _operand_stream_bytes(
+        self, calls: Sequence["AttentionCallDemand"]
+    ) -> float:
+        """K AND V bytes one stage's attention calls stream in one beat.
+
+        ``2 * folds * n * k * act_bytes`` per call: every fold reads its whole
+        K matrix and its whole V matrix once, and THE SPLIT DOES NOT CHANGE
+        THAT — S arrays each read 1/S of the context, so together they read it
+        exactly once. What the split changes is the TIME the read happens in,
+        which is precisely why a deeper split raises the bytes-per-cycle the
+        card has to deliver and why this number is the one checked against a
+        declared bandwidth.
+        """
+        act = self.sa_act_bytes()
+        return math.fsum(
+            2.0 * max(1, int(call.folds)) * float(call.n) * float(call.k) * act
+            for call in calls
+        )
+
+    def _stage_split_search(
+        self,
+        entry: "FabricDemand",
+        budget: int,
+        sat_width: int,
+    ) -> "OrderedDict[str, object]":
+        """CTX-SPLIT: widen on the ladder until a REAL floor binds, and NAME it.
+
+        THE LADDER IS THE CANDIDATE SET. Group widths worth pricing are the
+        fold-granular counts ``1..folds`` and the context-split rungs
+        ``folds * 2^i``; totals are the pairwise sums of those, which is a few
+        hundred candidates rather than a walk over every integer. Every one is
+        priced in full with the same law the run is priced with.
+
+        THE ORDER IS LEXICOGRAPHIC AND ARRAYS COME FIRST, for the reason ADJ-10
+        already gives: a GEMMINI_SYS_ARRAY is the largest block in the library
+        by orders of magnitude, so buying softmax copies or reduce lanes to
+        avoid buying arrays would be buying the wrong silicon. Within each of
+        the three, the answer is the SMALLEST width that meets the target.
+
+        THE FOUR FLOORS, decided here and reported verbatim:
+
+        ``analog_pace``
+            some rung got the stage under its own analog m-pass. The search
+            stops at the smallest such rung; this is the success case.
+        ``operand_bandwidth``
+            the card DECLARES ``state_bytes_per_cycle`` and the rungs past a
+            point ask for K/V faster than that. Those rungs are struck out
+            before they are compared, because the systolic law assumes a
+            stall-free feed and a rung that breaks the law's precondition is
+            not a rung this repo may quote.
+        ``combine_dominated``
+            the cycle count TURNED: the add-reduce's ``log2(S)`` fill and its
+            results pass grew faster than ``ceil(n / S)`` shrank. The search
+            keeps the minimum and does not pay for the rungs past it.
+        ``saturated_geometry``
+            the ladder ran out with the cycles still falling, or this call
+            cannot be split at all (a one-column context has no chunks). The
+            one verdict of the four that is an admission.
+        """
+        calls = entry.calls
+        folds = max((max(1, int(call.folds)) for call in calls), default=1)
+        context = max((max(1, int(call.n)) for call in calls), default=1)
+        sat_lanes = max(
+            (
+                max(1, int(call.folds)) * max(1, int(call.m)) * max(1, int(call.k))
+                for call in calls
+            ),
+            default=1,
+        )
+        rungs = sa_split_ladder(folds, context)
+        deepest_split = max(
+            (sa_context_split(folds, rung)[1] for rung in rungs), default=1
+        )
+        totals = sorted({a + b for a in rungs for b in rungs if a + b >= 2})
+        stream_bytes = self._operand_stream_bytes(calls)
+        declared_bpc = float(getattr(self.digital_card, "state_bytes_per_cycle", 0.0) or 0.0)
+
+        priced: List[Tuple[int, int, float]] = []
+        struck: List[int] = []
+        for total in totals:
+            cycles = self._stage_attention_cycles(
+                calls, total, sat_width, sat_lanes
+            )[0]
+            bpc = stream_bytes / max(1, cycles)
+            if declared_bpc > 0 and bpc > declared_bpc:
+                # STRUCK OUT, NOT COMPARED. The law's own precondition fails
+                # here, so this rung is not a slower answer — it is an answer
+                # the law cannot make.
+                struck.append(total)
+                continue
+            priced.append((total, cycles, bpc))
+        if not priced:
+            # Every rung is infeasible: fall back to the narrowest one and let
+            # the floor say why, rather than returning nothing.
+            total = totals[0] if totals else 2
+            cycles = self._stage_attention_cycles(
+                calls, total, sat_width, sat_lanes
+            )[0]
+            priced = [(total, cycles, stream_bytes / max(1, cycles))]
+
+        met = [row for row in priced if row[1] <= budget]
+        if met:
+            arrays, cycles, bpc = min(met, key=lambda row: row[0])
+            floor_kind = FABRIC_FLOOR_ANALOG_PACE
+        else:
+            arrays, cycles, bpc = min(priced, key=lambda row: (row[1], row[0]))
+            if struck:
+                floor_kind = FABRIC_FLOOR_OPERAND_BANDWIDTH
+            elif deepest_split <= 1 or not self.context_split_enabled:
+                floor_kind = FABRIC_FLOOR_SATURATED_GEOMETRY
+            elif priced[-1][1] > cycles:
+                # THE SUM TURNED. Widening past the chosen rung made the stage
+                # STRICTLY LONGER, which only the combine can do: its log2(S)
+                # fill and its results pass grow while ceil(n / S) shrinks.
+                # A PLATEAU IS NOT THIS. Rungs that cost the SAME as the chosen
+                # one mean the split simply ran out of context to deal, and
+                # calling that combine-dominated would blame the reduce for a
+                # geometry that had nothing left to give.
+                floor_kind = FABRIC_FLOOR_COMBINE_DOMINATED
+            else:
+                floor_kind = FABRIC_FLOOR_SATURATED_GEOMETRY
+
+        # --- narrow the softmax copies, then the reduce lanes (D28) --------
+        width = sat_width
+        for candidate in range(1, sat_width + 1):
+            if (
+                self._stage_attention_cycles(calls, arrays, candidate, sat_lanes)[0]
+                <= budget
+            ):
+                width = candidate
+                break
+        lanes = sat_lanes
+        if (
+            self._stage_attention_cycles(calls, arrays, width, sat_lanes)[0] <= budget
+        ):
+            # BINARY SEARCH, because the cycle count is monotone non-increasing
+            # in lanes and a doubling ladder would overshoot by up to 2x — that
+            # overshoot is margin, and margin is what D28 forbids.
+            lo, hi = 1, sat_lanes
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if (
+                    self._stage_attention_cycles(calls, arrays, width, mid)[0]
+                    <= budget
+                ):
+                    hi = mid
+                else:
+                    lo = mid + 1
+            lanes = lo
+        detail = self._stage_attention_detail(calls, arrays, width, lanes)
+        final_bpc = stream_bytes / max(1, int(detail["total"]))
+        return OrderedDict(
+            (
+                ("arrays", int(arrays)),
+                ("width", int(width)),
+                ("lanes", int(lanes)),
+                ("floor_kind", floor_kind),
+                ("rungs_priced", len(priced)),
+                ("rungs_struck", len(struck)),
+                ("deepest_split_available", int(deepest_split)),
+                ("operand_bytes_per_cycle", float(final_bpc)),
+                ("operand_bytes_per_cycle_declared", float(declared_bpc)),
+                ("detail", detail),
+            )
+        )
+
+    def derive_sa_geometry(
+        self, demand: Sequence["FabricDemand"]
+    ) -> Optional["DerivedSAGeometry"]:
+        """THE SA GEOMETRY RULE, or None when the card declares its geometry.
+
+        R = ``next_pow2(m)`` clamped to [1, 32], where ``m`` is the decode
+        attention call's own row count — the ``shared_heads`` the pricing law
+        already computes and the demand already carries. ONE R FOR BOTH GROUPS:
+        the study read R off the call's rows, and the call's rows are the same
+        rows on both runs of the pair.
+
+        C IS PER ENGINE GROUP. The QK group and the PV group sit on disjoint
+        arrays (``fold_group_split``) and the study found SPLIT beats MERGED on
+        all 72 decode rows it measured, so each group gets its own column
+        count: the power of two in [32, 1024] that MINIMISES that group's own
+        exact ``sa_cycles`` bill. The two are separable at fixed array counts
+        because the lowering runs the pair SERIALLY (ADJ-8) — the stage cost is
+        ``qk + fill/drain + softmax + pv``, a SUM, so minimising the sum
+        minimises each term, and the fill/drain and softmax terms do not move
+        with C (the fill is 3 x R and the softmax pipeline keeps the card's own
+        declared element width, which this rule does not touch).
+
+        THE ARGMIN IS TAKEN AT EACH C'S OWN BEST RUNG (CTX-SPLIT). It used to
+        be taken once at the minimum array count, where no fold's context is
+        split, and THAT WAS WRONG THE MOMENT THE SPLIT EXISTED — it is worth
+        stating why, because the failure was silent and cost an order of
+        magnitude. A column count C covers a chunk of ``ceil(chunk / C)``
+        passes, so at S = 1 the argmin buys the WIDEST C it can: on
+        Granite-4.0-H-1B it took C(qk) = 2048, which covers the whole 2048-key
+        context in ONE pass. But a one-pass array cannot be helped by splitting
+        the context — ``ceil(n / S)`` divided by 2048 is 1 for every S — so the
+        geometry chosen without the split STARVED the split, and the QK run sat
+        at 2177 cycles of which 2046 were the array's own ``C - 2`` pipeline
+        fill. The same call at C = 32 with the context dealt across 64 arrays
+        costs 161 cycles for the SAME MAC count. C and S are one degree of
+        freedom on the context and they have to be chosen together.
+
+        So each candidate C is now priced at the BEST RUNG OF THE SPLIT LADDER
+        it can use — the same ladder, the same exact law, the PV side carrying
+        its own combine so a C that only looks good because its reduce was left
+        out cannot win — and the C with the smallest best is taken. The
+        geometry is then FIXED and the existing ADJ-10 array-count widening
+        runs on top of it, so this is still a search over COUNT at a derived
+        SHAPE rather than a joint walk.
+
+        Ties break to the SMALLEST C: two shapes that cost the same cycles are
+        not the same silicon, and buying the wider one would be margin (D28).
+        """
+        if self.fabric_geometry_mode != FABRIC_GEOMETRY_DERIVED:
+            return None
+        calls = [call for entry in demand for call in entry.calls]
+        if not calls:
+            raise FabricSizingError(
+                "cim.fabric.geometry: derived was asked for and there is no attention "
+                "call in the beat to read the rule off. R = next_pow2(decode m) needs "
+                "an m, and inventing one would be inventing the array (ADJ-4)."
+            )
+        call_m = max(int(call.m) for call in calls)
+        rows = sa_geometry_rows(call_m)
+        folds = max((max(1, int(call.folds)) for call in calls), default=1)
+        context = max((max(1, int(call.n)) for call in calls), default=1)
+        # THE OPERATING POINT IS THE LADDER, not one array count. Every rung is
+        # priced with the exact law; a rung the count search later cannot
+        # afford simply is not the rung that wins.
+        #
+        # WITH CTX-SPLIT OFF THE ONLY RUNG IS ONE ARRAY PER GROUP, which is the
+        # pre-split operating point exactly: sa_context_split(folds, 1) returns
+        # (folds, 1), so `_qk_cycles`/`_pv_cycles` collapse to the expressions
+        # the argmin used before the ladder existed and the combine is zero.
+        # The geometry rule must be taken at the law the run will be PRICED
+        # with, or the shape is chosen for a machine that is not built (D21).
+        rungs = sa_split_ladder(folds, context) if self.context_split_enabled else (1,)
+        lanes = max(
+            (
+                max(1, int(call.folds)) * max(1, int(call.m)) * max(1, int(call.k))
+                for call in calls
+            ),
+            default=1,
+        )
+
+        def _qk_cycles(cols: int, arrays: int) -> int:
+            fpa, split = sa_context_split(folds, arrays)
+            return sum(
+                sa_cycles_at(
+                    call.m,
+                    _ceil_div(int(call.n), split),
+                    int(call.k) * fpa,
+                    rows,
+                    cols,
+                )
+                for call in calls
+            )
+
+        def _pv_cycles(cols: int, arrays: int) -> int:
+            fpa, split = sa_context_split(folds, arrays)
+            return sum(
+                sa_cycles_at(
+                    call.m,
+                    call.k,
+                    _ceil_div(int(call.n), split) * fpa,
+                    rows,
+                    cols,
+                )
+                # THE REDUCE IS PART OF THE PV SIDE'S PRICE. A column count that
+                # only wins because its combine was left out of the comparison
+                # would be chosen against one number and judged against another.
+                + sa_split_combine(
+                    call.m, call.k, call.n, max(1, int(call.folds)), split, lanes
+                ).cycles
+                for call in calls
+            )
+
+        qk_search: List[Tuple[int, int]] = []
+        pv_search: List[Tuple[int, int]] = []
+        qk_rungs: List[Tuple[int, int]] = []
+        pv_rungs: List[Tuple[int, int]] = []
+        for cols in SA_GEOMETRY_COLS_CANDIDATES:
+            best_qk = min(((_qk_cycles(cols, a), a) for a in rungs))
+            best_pv = min(((_pv_cycles(cols, a), a) for a in rungs))
+            qk_search.append((int(cols), int(best_qk[0])))
+            pv_search.append((int(cols), int(best_pv[0])))
+            qk_rungs.append((int(cols), int(best_qk[1])))
+            pv_rungs.append((int(cols), int(best_pv[1])))
+        cols_qk = min(qk_search, key=lambda row: (row[1], row[0]))[0]
+        cols_pv = min(pv_search, key=lambda row: (row[1], row[0]))[0]
+        arrays = dict(qk_rungs)[cols_qk] + dict(pv_rungs)[cols_pv]
+        # NAME THE RESIDUE (D28). An argmin that lands on the LAST candidate is
+        # an argmin the range stopped, not one the law turned: the cycles were
+        # still falling when the search ran out of measured shapes. That is a
+        # provisioning finding and it is said out loud rather than left for a
+        # reader to spot by reading the search table.
+        at_ceiling = [
+            label
+            for label, cols in (("qk", cols_qk), ("pv", cols_pv))
+            if int(cols) == int(SA_GEOMETRY_COLS_CANDIDATES[-1])
+        ]
+        ceiling_note = (
+            ""
+            if not at_ceiling
+            else (
+                f" THE {'/'.join(name.upper() for name in at_ceiling)} ARGMIN IS AT "
+                f"THE SEARCH CEILING ({SA_GEOMETRY_COLS_CANDIDATES[-1]} columns): the "
+                "cycles were still falling when the candidate list ran out, so this is "
+                "the best shape IN THE MEASURED RANGE and not a turning point of the "
+                "law. The range is not widened here — beyond it there is no measured "
+                "shape to stand on (ADJ-4) — and the residue is named instead."
+            )
+        )
+        return DerivedSAGeometry(
+            rows=int(rows),
+            cols_qk=int(cols_qk),
+            cols_pv=int(cols_pv),
+            declared_rows=int(self.fabric.rows),
+            declared_cols=int(self.fabric.cols),
+            call_m=int(call_m),
+            searched_at_arrays=int(arrays),
+            qk_search=tuple(qk_search),
+            pv_search=tuple(pv_search),
+            basis=(
+                f"R = next_pow2({call_m}) clamped to "
+                f"[{SA_GEOMETRY_MIN_ROWS}, {SA_GEOMETRY_MAX_ROWS}] = {int(rows)}; "
+                f"C(qk) = {int(cols_qk)} and C(pv) = {int(cols_pv)}, each the smallest "
+                "power of two in "
+                f"[{SA_GEOMETRY_COLS_CANDIDATES[0]}, {SA_GEOMETRY_COLS_CANDIDATES[-1]}] "
+                "minimising that group's own exact sa_cycles bill over the beat's "
+                f"{len(calls)} attention call(s), each candidate priced AT ITS OWN BEST "
+                f"SPLIT RUNG (CTX-SPLIT; the pair lands at {arrays} array(s) total, PV "
+                "carrying its add-reduce); "
+                f"declared geometry was {int(self.fabric.rows)} x "
+                f"{int(self.fabric.cols)} ({SA_GEOMETRY_STUDY})." + ceiling_note
+            ),
+        )
 
     def derive_fabric_sizing(
         self,
@@ -4528,6 +6957,54 @@ class CimDeviceModel:
         *,
         compose: Optional[bool] = None,
         stage_groups: Optional[Sequence[Sequence[int]]] = None,
+    ) -> "DerivedFabricSizing":
+        """ADJ-10's fabric derivation, on the array shape this card asks for.
+
+        Under ``cim.fabric.geometry: declared`` — the DEFAULT and every shipped
+        card — this is :meth:`_derive_fabric_sizing` verbatim and no number
+        moves. Under ``geometry: derived`` the SA GEOMETRY RULE
+        (:meth:`derive_sa_geometry`) is taken FIRST, INSTALLED, and the whole
+        ADJ-10 widening then runs unchanged on top of it, so every cycle count
+        in the sizing is priced on the shape the run will be priced on.
+
+        The install is scoped to this call: a derivation that is never
+        installed leaves the device exactly as it found it, and
+        :meth:`install_derived_fabric` is what makes the shape stick.
+        """
+        geometry = None
+        if self.fabric_geometry_mode == FABRIC_GEOMETRY_DERIVED:
+            geometry = self.derive_sa_geometry(
+                [entry for entry in demand if entry.calls]
+            )
+        if geometry is None:
+            return self._derive_fabric_sizing(
+                analog_beat_s,
+                demand,
+                compose=compose,
+                stage_groups=stage_groups,
+                geometry=None,
+            )
+        previous = self._derived_geometry
+        self._derived_geometry = geometry
+        try:
+            return self._derive_fabric_sizing(
+                analog_beat_s,
+                demand,
+                compose=compose,
+                stage_groups=stage_groups,
+                geometry=geometry,
+            )
+        finally:
+            self._derived_geometry = previous
+
+    def _derive_fabric_sizing(
+        self,
+        analog_beat_s: float,
+        demand: Sequence["FabricDemand"],
+        *,
+        compose: Optional[bool] = None,
+        stage_groups: Optional[Sequence[Sequence[int]]] = None,
+        geometry: Optional["DerivedSAGeometry"] = None,
     ) -> "DerivedFabricSizing":
         """Size the ATTENTION FABRIC up until the ANALOG m-pass binds (ADJ-10).
 
@@ -4589,33 +7066,64 @@ class CimDeviceModel:
             if analog_s <= 0:
                 target_s, target_kind = beat_s, TARGET_FABRIC_NO_ANALOG_WORK
             sat_arrays = max(2, int(entry.saturation_arrays))
-            sat_width = max(1, int(entry.saturation_softmax_width))
+            # THE BOUND IS IN COPIES, the quantity the search spends. Reading
+            # it in keys provisioned 1359 excess pipelines on Qwen that shorten
+            # nothing (M2/M8).
+            sat_width = max(1, int(entry.saturation_softmax_copies(self.softmax_width)))
             budget = int(math.floor(max(0.0, target_s) * clock))
-            floor_cycles = self._stage_attention_cycles(
-                entry.calls, sat_arrays, sat_width
-            )[0]
-            if floor_cycles > budget:
-                arrays, width = sat_arrays, sat_width
-                target_kind = TARGET_FABRIC_SATURATED
+            combine_lanes = 0
+            floor_kind = ""
+            operand_bpc = declared_bpc = 0.0
+            if geometry is None:
+                # THE DECLARED PATH, VERBATIM. No ladder, no combine, no floor
+                # census: the fold-granular search ADJ-10 shipped, on the
+                # candidates it shipped with, so a declared-geometry machine
+                # cannot move by one cycle.
+                floor_cycles = self._stage_attention_cycles(
+                    entry.calls, sat_arrays, sat_width
+                )[0]
+                if floor_cycles > budget:
+                    arrays, width = sat_arrays, sat_width
+                    target_kind = TARGET_FABRIC_SATURATED
+                else:
+                    arrays = next(
+                        candidate
+                        for candidate in range(2, sat_arrays + 1)
+                        if self._stage_attention_cycles(
+                            entry.calls, candidate, sat_width
+                        )[0]
+                        <= budget
+                    )
+                    width = next(
+                        candidate
+                        for candidate in range(1, sat_width + 1)
+                        if self._stage_attention_cycles(entry.calls, arrays, candidate)[0]
+                        <= budget
+                    )
             else:
-                arrays = next(
-                    candidate
-                    for candidate in range(2, sat_arrays + 1)
-                    if self._stage_attention_cycles(
-                        entry.calls, candidate, sat_width
-                    )[0]
-                    <= budget
-                )
-                width = next(
-                    candidate
-                    for candidate in range(1, sat_width + 1)
-                    if self._stage_attention_cycles(entry.calls, arrays, candidate)[0]
-                    <= budget
-                )
-            total, qk, pv, softmax, a_qk, a_pv = self._stage_attention_cycles(
-                entry.calls, arrays, width
+                # CTX-SPLIT: the widening does not stop at fold saturation any
+                # more. It climbs the split ladder until a REAL floor binds and
+                # the row below NAMES which one.
+                found = self._stage_split_search(entry, budget, sat_width)
+                arrays = int(found["arrays"])
+                width = int(found["width"])
+                combine_lanes = int(found["lanes"])
+                floor_kind = str(found["floor_kind"])
+                operand_bpc = float(found["operand_bytes_per_cycle"])
+                declared_bpc = float(found["operand_bytes_per_cycle_declared"])
+                floor_cycles = int(found["detail"]["total"])
+                if floor_kind != FABRIC_FLOOR_ANALOG_PACE:
+                    target_kind = TARGET_FABRIC_SATURATED
+            split_detail = self._stage_attention_detail(
+                entry.calls, arrays, width, combine_lanes
             )
-            fill = sum(int(call.fill_drain_cycles) for call in entry.calls)
+            total = int(split_detail["total"])
+            qk = int(split_detail["qk"])
+            pv = int(split_detail["pv"])
+            softmax = int(split_detail["softmax"])
+            a_qk = int(split_detail["a_qk"])
+            a_pv = int(split_detail["a_pv"])
+            fill = sum(self.call_fill_drain(call) for call in entry.calls)
             rows.append(
                 StageFabricSizing(
                     stage=int(entry.stage),
@@ -4636,12 +7144,29 @@ class CimDeviceModel:
                     target_s=target_s,
                     target_kind=target_kind,
                     floor_time_s=floor_cycles / clock,
+                    qk_split=int(split_detail["qk_split"]),
+                    pv_split=int(split_detail["pv_split"]),
+                    combine_cycles=int(split_detail["combine_cycles"]),
+                    combine_lanes=int(split_detail["combine_lanes"]),
+                    combine_adds=int(split_detail["combine_adds"]),
+                    gather_bytes=float(split_detail["gather_bytes"]),
+                    floor_kind=floor_kind,
+                    operand_bytes_per_cycle=operand_bpc,
+                    operand_bytes_per_cycle_declared=declared_bpc,
                 )
             )
         replicas = max(1, int(self.fabric.replicas))
         provisioned = max(int(row.num_arrays) for row in rows)
         width = max(int(row.softmax_width) for row in rows)
         lanes = _ceil_div(width, replicas)
+        # ONE CARD, ONE COMBINE. The reduce is one engine on the chiplet, so it
+        # is provisioned for the stage that asks most, exactly as the arrays
+        # and the softmax copies are. 0 on a run that never split — there is no
+        # reduce to size and a lane count would be silicon nobody asked for.
+        provisioned_combine = max(
+            (int(row.combine_lanes) for row in rows if int(row.pv_split) > 1),
+            default=0,
+        )
         # ADJ-14: a chiplet shared across stages runs their attention one after
         # another inside one beat, so the fabric is sized for the SUM. With one
         # stage per chiplet this leaves ADJ-10's answer untouched.
@@ -4668,7 +7193,7 @@ class CimDeviceModel:
                     if entry is None:
                         continue
                     total += self._stage_attention_cycles(
-                        entry.calls, arrays, lanes * replicas
+                        entry.calls, arrays, lanes * replicas, provisioned_combine
                     )[0] / clock
                 return total
 
@@ -4681,10 +7206,17 @@ class CimDeviceModel:
                 """Smallest width that meets the target, or the SATURATION width.
 
                 Widening buys less and less: once doubling the width stops
-                lowering the busiest chiplet's time, more silicon is not buying
-                speed and the derivation stops there rather than charging for
-                width that does nothing. That is the same saturation ADJ-10
+                lowering the time of THE GROUP THAT IS STILL SHORT, more silicon
+                is not buying speed and the derivation stops rather than charging
+                for width that does nothing. That is the same saturation ADJ-10
                 already names for a single stage, read over a shared chiplet.
+
+                THE PROGRESS MEASURE IS THE FAILING GROUP, not the slowest one.
+                Measuring the slowest froze the search whenever the slowest group
+                already MET its own target: a different group could still be
+                twice over its pace and reachable at twice the width, and the
+                derivation declared it unreachable while quoting the numbers of
+                the group that was fine.
                 """
                 lo = hi = int(start)
                 best = measure(hi)
@@ -4706,19 +7238,29 @@ class CimDeviceModel:
 
             live = [g for g in groups if _group_target(g) > 0]
             if live and _worst_over(provisioned) > 0:
+                def _failing(arrays):
+                    return max(
+                        groups,
+                        key=lambda g: _group_attention_time(arrays, g) - _group_target(g),
+                    )
+
                 width, reached, saturated = _grow(
                     _worst_over,
-                    lambda a: max(_group_attention_time(a, g) for g in groups),
+                    lambda a: _group_attention_time(a, _failing(a)),
                     provisioned,
                     provisioned * (1 << 10),
                 )
                 hi = width
+                worst = _failing(hi)
                 fabric_shared_widened = {
                     "saturated": bool(saturated),
                     "from_arrays": int(provisioned),
                     "to_arrays": int(hi),
                     "stages_per_chiplet_max": max(len(g) for g in groups),
                     "target_reached": bool(reached),
+                    "worst_group": tuple(int(x) for x in worst),
+                    "worst_group_time_s": _group_attention_time(hi, worst),
+                    "worst_group_target_s": _group_target(worst),
                 }
                 provisioned = int(hi)
         binding = max(
@@ -4730,22 +7272,23 @@ class CimDeviceModel:
         # machine that gets built.
         repriced: List[StageFabricSizing] = []
         for row, entry in zip(rows, ordered):
-            total, qk, pv, softmax, a_qk, a_pv = self._stage_attention_cycles(
-                entry.calls, provisioned, lanes * replicas
+            detail = self._stage_attention_detail(
+                entry.calls, provisioned, lanes * replicas, provisioned_combine
             )
+            total = int(detail["total"])
             repriced.append(
                 StageFabricSizing(
                     stage=row.stage,
                     calls=row.calls,
                     num_arrays=provisioned,
-                    qk_arrays=int(a_qk),
-                    pv_arrays=int(a_pv),
+                    qk_arrays=int(detail["a_qk"]),
+                    pv_arrays=int(detail["a_pv"]),
                     softmax_width=lanes * replicas,
-                    qk_cycles=int(qk),
-                    pv_cycles=int(pv),
-                    softmax_cycles=int(softmax),
+                    qk_cycles=int(detail["qk"]),
+                    pv_cycles=int(detail["pv"]),
+                    softmax_cycles=int(detail["softmax"]),
                     fill_drain_cycles=row.fill_drain_cycles,
-                    used_cycles=int(total),
+                    used_cycles=total,
                     budget_cycles=row.budget_cycles,
                     time_s=total / clock,
                     slack_s=row.target_s - total / clock,
@@ -4753,12 +7296,39 @@ class CimDeviceModel:
                     target_s=row.target_s,
                     target_kind=row.target_kind,
                     floor_time_s=row.floor_time_s,
+                    qk_split=int(detail["qk_split"]),
+                    pv_split=int(detail["pv_split"]),
+                    combine_cycles=int(detail["combine_cycles"]),
+                    combine_lanes=int(detail["combine_lanes"]),
+                    combine_adds=int(detail["combine_adds"]),
+                    gather_bytes=float(detail["gather_bytes"]),
+                    floor_kind=row.floor_kind,
+                    operand_bytes_per_cycle=(
+                        self._operand_stream_bytes(entry.calls) / max(1, total)
+                    ),
+                    operand_bytes_per_cycle_declared=row.operand_bytes_per_cycle_declared,
                 )
             )
         rows = repriced
         composition = softmax_composition = None
         want = self.has_synthesis_library() if compose is None else bool(compose)
-        if want:
+        binding_row = next((row for row in rows if row.stage == binding), rows[0])
+        if want and geometry is not None:
+            # SA-GEOM: a derived R x C array is not a tiling of the measured
+            # 32 x 32 block, so its silicon is that block scaled by MAC count,
+            # per GROUP, at the split the provisioned width actually runs.
+            composition = compose_sa_fabric_derived(
+                self.synthesis_library(),
+                geometry,
+                (
+                    ("qk", int(binding_row.qk_arrays)),
+                    ("pv", int(binding_row.pv_arrays)),
+                ),
+                replicas,
+                combine_lanes=int(provisioned_combine),
+                count_provenance=PROVENANCE_DERIVED_COUNT,
+            )
+        elif want:
             composition = compose_sa_fabric(
                 self.synthesis_library(),
                 int(self.fabric.rows),
@@ -4767,6 +7337,7 @@ class CimDeviceModel:
                 replicas,
                 count_provenance=PROVENANCE_DERIVED_COUNT,
             )
+        if want:
             softmax_composition = compose_softmax_engine(
                 self.synthesis_library(),
                 lanes,
@@ -4777,16 +7348,147 @@ class CimDeviceModel:
         saturated = [row for row in rows if row.target_kind == TARGET_FABRIC_SATURATED]
         declared_arrays = int(self.fabric.num_arrays)
         declared_lanes = int(self.fabric.softmax_lanes)
-        disclosures = [
+        disclosures = []
+        if geometry is not None:
+            split_depth = max(
+                (max(int(r.qk_split), int(r.pv_split)) for r in rows), default=1
+            )
+            floors_seen = OrderedDict()
+            for row in rows:
+                if row.floor_kind:
+                    floors_seen.setdefault(row.floor_kind, []).append(int(row.stage))
+            disclosures += [
+                "CTX-SPLIT: ADJ-10's widening NO LONGER STOPS AT FOLD SATURATION on this "
+                "run. Past 2 x folds arrays a fold's CONTEXT is dealt across S arrays: "
+                "each runs THE SAME sa_cycles law on an n/S chunk for QK, and on an n/S "
+                "slice of its own contraction for PV. NO NEW TIMING LAW IS INTRODUCED — "
+                "sa_cycles is bit-exact against ScaleSim's output-stationary schedule at "
+                "ANY geometry and ANY n, so a chunk of n/S columns is a shape the same "
+                "validated law already covers, and the per-chunk price needs no "
+                "validation this repo does not already have. WHAT IS NEW IS THE COMBINE, "
+                "and it is PRICED: the QK chunks concatenate with no arithmetic but must "
+                "meet before the softmax normalises the row, and those bytes are "
+                "reported and charged 0 s under this repo's existing intra-chip "
+                "convention (D17 declares one network law and it is the p2p fabric "
+                "BETWEEN chips; no on-chip interconnect law is declared anywhere and "
+                "inventing one would be a number no card supports). The PV partials are "
+                "arithmetic and are ADD-REDUCED on FP_ADD lanes composed from the "
+                "measured 22nm library (D32), timed with the same pipelined-tree "
+                "expression every other reduction in this module uses. "
+                + (
+                    f"This run splits {split_depth}-ways at its deepest and provisions "
+                    f"{int(provisioned_combine)} reduce lane(s)."
+                    if split_depth > 1
+                    else "This run never splits: every stage met its target at or below "
+                    "fold granularity, so no combine is charged and no reduce lane is "
+                    "built."
+                ),
+                "CTX-SPLIT, WHAT STOPPED THE WIDENING. Every stage names ONE of "
+                + ", ".join(FABRIC_FLOORS)
+                + ". "
+                + " ".join(
+                    f"Stage(s) {stages}: " + FABRIC_FLOOR_REASONS[name]
+                    for name, stages in floors_seen.items()
+                ),
+                "CTX-SPLIT, THE OPERAND-BANDWIDTH CHECK, AND WHAT IT RESTS ON. The "
+                "split does not change how many K/V bytes a stage streams — S arrays "
+                "each read 1/S of the context, so together they read it exactly once — "
+                "it changes the TIME they are read in, so the bytes-per-cycle the card "
+                "must deliver rises with the split. That rate is CHECKED against "
+                "cim.cards.<card>.state_bytes_per_cycle: rungs asking for more are "
+                "STRUCK OUT before they are compared, because the systolic law assumes a "
+                "stall-free feed and a rung that breaks the law's own precondition is "
+                "not a rung this module may quote. "
+                + (
+                    "THIS CARD DECLARES ONE: "
+                    f"{max((r.operand_bytes_per_cycle_declared for r in rows), default=0.0):.6g} "
+                    "bytes/cycle, and the binding stage's derived rate is "
+                    f"{max((r.operand_bytes_per_cycle for r in rows), default=0.0):.6g}."
+                    if max(
+                        (r.operand_bytes_per_cycle_declared for r in rows), default=0.0
+                    )
+                    > 0
+                    else "THIS CARD DECLARES NO state_bytes_per_cycle, so THE CHECK IS "
+                    "AN ASSUMPTION AND NOT A BOUND: no rung was struck out, "
+                    "operand_bandwidth cannot be the named floor on this run, and the "
+                    "derived rate is REPORTED per stage "
+                    f"(binding stage: "
+                    f"{max((r.operand_bytes_per_cycle for r in rows), default=0.0):.6g} "
+                    "bytes/cycle) so a reader can compare it against a real store "
+                    "themselves. Inventing a bandwidth to bound it with would be an "
+                    "invented number (ADJ-4), and a rate reported is a provisioning "
+                    "finding while a rate bounded by a guess is not."
+                ),
+                SA_GEOMETRY_RULE_DISCLOSURE,
+                SA_GEOMETRY_DATAFLOW_DISCLOSURE,
+                SA_GEOMETRY_BANDWIDTH_DISCLOSURE,
+                f"SA-GEOM, THIS RUN: {geometry.basis}. The column argmin was taken "
+                "ONCE at the minimum 2-array width and the geometry was then FIXED "
+                "while ADJ-10's array-count widening ran unchanged on top of it — a "
+                "search over COUNT at a derived SHAPE, not a joint search, which is "
+                "stated here rather than left for a reader to infer from the numbers.",
+            ]
+        if fabric_shared_widened is not None:
+            # ADJ-14, on the fabric. This used to be computed and dropped on the
+            # floor: the width moved and the run said nothing, while the ADJ-10
+            # sentence below went on claiming the count was the smallest that
+            # fits ONE stage's analog m-pass, which is false of a shared chiplet.
+            w = fabric_shared_widened
+            disclosures.append(
+                "ADJ-14: this machine SHARES a digital chiplet across up to "
+                f"{w['stages_per_chiplet_max']} pipeline stages, so the attention fabric "
+                "is sized for the work of every stage its chiplet carries, not for one. "
+                f"The count went from {w['from_arrays']} array(s) to {w['to_arrays']}. The "
+                f"busiest chiplet is stages {list(w['worst_group'])} at "
+                f"{w['worst_group_time_s']:.6g} s against an analog pace of "
+                f"{w['worst_group_target_s']:.6g} s"
+                + (
+                    ", which it meets."
+                    if w["target_reached"]
+                    else (
+                        " - and NO width reaches it: widening stopped buying time "
+                        "(the folds a wider fabric could run in parallel ran out), so "
+                        "this chiplet is the binding term and the machine is "
+                        "digital-bound by its own sharing."
+                        if w.get("saturated")
+                        else " - UNREACHED at the width cap."
+                    )
+                )
+            )
+        disclosures += [
             "ADJ-10: cim.fabric.num_arrays and cim.fabric.softmax_lanes are no longer "
             "declared design points on a mapped run. Both are DERIVED here as the "
             "smallest integer counts of MEASURED blocks for which every stage's "
-            "attention time fits that stage's own ANALOG m-pass time, and both are "
+            "attention time fits that stage's own ANALOG m-pass time"
+            + (
+                " - EXCEPT that this machine shares chiplets, so the criterion above is "
+                "read over the stages a chiplet carries and the ADJ-14 row states what "
+                "the width actually is"
+                if fabric_shared_widened is not None
+                else ""
+            )
+            + ", and both are "
             f"reported ({declared_arrays} -> {provisioned} array(s), "
-            f"{declared_lanes} -> {lanes} softmax lane(s) per replica). Only the COUNT "
-            f"is derived: the array stays the measured {int(self.fabric.rows)} x "
-            f"{int(self.fabric.cols)} geometry, because inventing array geometry is "
-            "refused (ADJ-4).",
+            f"{declared_lanes} -> {lanes} softmax lane(s) per replica). "
+            + (
+                "Only the COUNT is derived: the array stays the measured "
+                f"{int(self.fabric.rows)} x {int(self.fabric.cols)} geometry, because "
+                "inventing array geometry is refused (ADJ-4)."
+                if geometry is None
+                else (
+                    "THE GEOMETRY IS DERIVED TOO ON THIS RUN, because this card asked "
+                    "for it by name (cim.fabric.geometry: derived): the array is "
+                    f"{int(geometry.rows)} x {int(geometry.cols_qk)} on the QK group "
+                    f"and {int(geometry.rows)} x {int(geometry.cols_pv)} on the PV "
+                    f"group, against the declared {int(geometry.declared_rows)} x "
+                    f"{int(geometry.declared_cols)}. The count search above then ran "
+                    "unchanged ON THAT SHAPE, so every cycle in this sizing is priced "
+                    "on the array the run is priced on. See the sa_geometry_rule, "
+                    "sa_geometry_dataflow_validity and sa_geometry_bandwidth_assumption "
+                    "disclosures for the rule, the dataflow condition it is exact under, "
+                    "and the assumption it rests on."
+                )
+            ),
             "FOLD SEMANTICS (the law ADJ-10 extends). The arrays are partitioned into a "
             "QK group and a PV group and the call's folds — heads_per_replica x streams "
             "— are dealt across the group, so an array in a group of a carries "
@@ -4838,8 +7540,12 @@ class CimDeviceModel:
         return DerivedFabricSizing(
             analog_beat_s=beat_s,
             clock_hz=clock,
-            rows=int(self.fabric.rows),
-            cols=int(self.fabric.cols),
+            rows=int(geometry.rows) if geometry is not None else int(self.fabric.rows),
+            cols=(
+                int(geometry.cols_qk) if geometry is not None else int(self.fabric.cols)
+            ),
+            geometry=geometry,
+            combine_lanes=int(provisioned_combine),
             replicas=replicas,
             num_arrays=provisioned,
             softmax_lanes=lanes,
@@ -4854,7 +7560,16 @@ class CimDeviceModel:
                 "attention time — qk + fill/drain + softmax + pv, the three ops the "
                 "lowering serializes — fits the stage's own measured ANALOG m-pass "
                 f"time (ADJ-10); binding stage {int(binding)}, "
-                f"{int(self.fabric.rows)}x{int(self.fabric.cols)} arrays at "
+                + (
+                    f"{int(self.fabric.rows)}x{int(self.fabric.cols)} arrays"
+                    if geometry is None
+                    else (
+                        f"SA-GEOM-derived {int(geometry.rows)}x"
+                        f"{int(geometry.cols_qk)} (QK) / {int(geometry.rows)}x"
+                        f"{int(geometry.cols_pv)} (PV) arrays"
+                    )
+                )
+                + f" at "
                 f"{clock / 1e9:.4g} GHz over {len(rows)} stage(s), "
                 f"{len(analog_bound)} of them analog-bound"
                 + (
@@ -5029,10 +7744,17 @@ class CimDeviceModel:
                 """Smallest width that meets the target, or the SATURATION width.
 
                 Widening buys less and less: once doubling the width stops
-                lowering the busiest chiplet's time, more silicon is not buying
-                speed and the derivation stops there rather than charging for
-                width that does nothing. That is the same saturation ADJ-10
+                lowering the time of THE GROUP THAT IS STILL SHORT, more silicon
+                is not buying speed and the derivation stops rather than charging
+                for width that does nothing. That is the same saturation ADJ-10
                 already names for a single stage, read over a shared chiplet.
+
+                THE PROGRESS MEASURE IS THE FAILING GROUP, not the slowest one.
+                Measuring the slowest froze the search whenever the slowest group
+                already MET its own target: a different group could still be
+                twice over its pace and reachable at twice the width, and the
+                derivation declared it unreachable while quoting the numbers of
+                the group that was fine.
                 """
                 lo = hi = int(start)
                 best = measure(hi)
@@ -5054,21 +7776,30 @@ class CimDeviceModel:
 
             live = [g for g in groups if _group_target(g) > 0]
             if live and _worst_over(provisioned) > 0:
+                def _failing(width):
+                    """The group furthest OVER its own target at this width."""
+                    return max(groups, key=lambda g: _group_time(width, g) - _group_target(g))
+
                 width, reached, saturated = _grow(
                     _worst_over,
-                    lambda w: max(_group_time(w, g) for g in groups),
+                    lambda w: _group_time(w, _failing(w)),
                     provisioned,
                     provisioned * (1 << 12),
                 )
                 hi = width
+                worst = _failing(hi)
                 shared_widened = {
                     "saturated": bool(saturated),
                     "from_lanes": int(provisioned),
                     "to_lanes": int(hi),
                     "stages_per_chiplet_max": max(len(g) for g in groups),
                     "target_reached": bool(reached),
-                    "worst_group_time_s": max(_group_time(hi, g) for g in groups),
-                    "worst_group_target_s": max(_group_target(g) for g in groups),
+                    # BOTH numbers come from the SAME group - the one that
+                    # decides the verdict - so a reader is never shown a time
+                    # and a target that belong to two different chiplets.
+                    "worst_group": tuple(int(x) for x in worst),
+                    "worst_group_time_s": _group_time(hi, worst),
+                    "worst_group_target_s": _group_target(worst),
                 }
                 provisioned = int(hi)
         binding = max(rows, key=lambda row: (int(row.lanes), row.total_ops)).stage
@@ -5199,6 +7930,7 @@ class CimDeviceModel:
             clock_hz=clock,
             pipeline_depth=depth,
             vector_lanes=provisioned,
+            shared_widened=shared_widened,
             binding_stage=int(binding),
             per_stage=tuple(rows),
             composition=composition,
@@ -5504,6 +8236,98 @@ class CimDeviceModel:
         energy.
         """
         return float(self.analog.area_mm2_per_array) / int(self.card.stack_3d_height)
+
+    # ------------------------------------------------------------------
+    # THE MAPPED PATH'S PLATFORM GLUE (D35-REVISED / D36 / D38)
+    #
+    # Four accessors, and nothing more. Each one reads THIS device's own
+    # numbers and hands them to the module-level law that owns the arithmetic,
+    # so the platform's constants are still declared exactly once and this
+    # class holds none of them. Nothing on the DECLARED or LEGACY path calls
+    # any of these: they exist for the mapper and the sweep, which ask by name.
+    # ------------------------------------------------------------------
+
+    def macro_label(self) -> str:
+        """This device's macro as ``X x Y : Z`` (D35-REVISED's one notation).
+
+        Delegated to the card's own ``params.label`` rather than re-formatted
+        here, so the notation is built in exactly one place and a device and a
+        config can never print the same macro two ways (D21).
+        """
+        return str(self.card.params.label)
+
+    def analog_chip_slots(self) -> int:
+        """Macro slots ONE analog chip offers this device's macro.
+
+        ``C = floor(400.0 mm2 / macro_footprint_mm2)``, evaluated on the
+        FOOTPRINT (silicon / stack height) because a chip runs out of floor
+        plan. This is what retires ADJ-13's capacity probe on the mapped path:
+        the packer asks the chip what it holds instead of the sweep building
+        the machine twice to find out.
+        """
+        return analog_chip_capacity(
+            self.macro_footprint_mm2(), context=f"card '{self.card.name}'"
+        )
+
+    def analog_chip_capacity_disclosures(self) -> Tuple[str, ...]:
+        """The capacity, its arithmetic, its leftover die and its named gap."""
+        return analog_chip_capacity_disclosures(self.macro_footprint_mm2())
+
+    def mapped_bank_depth(self) -> int:
+        """The mapped path's frozen bank depth, or D38's refusal by name."""
+        return check_mapped_bank_depth(
+            int(getattr(self.card, "bank_depth", 0) or 0),
+            context=f"card '{self.card.name}'",
+        )
+
+    def layer_group_plan(self) -> LayerGroupPlan:
+        """The D36 GROUP this model implies, read off its own layer plan.
+
+        The mixers come from the SOURCE model params (``model_param.layer_plan``
+        via ``layer_mixers``). A model that declares no layer plan is
+        homogeneous by construction — every layer runs the same block — so its
+        motif is one layer, which is D36's own answer for the homogeneous case
+        rather than a fallback invented here.
+        """
+        mixers = getattr(self.model, "layer_mixers", None)
+        if not mixers:
+            depth = int(self.params.num_layers)
+            if depth <= 0:
+                raise LayerGroupError(
+                    f"card '{self.card.name}': the group derivation needs a layer "
+                    f"stack and this model declares num_layers = {depth}. "
+                    f"{DIGITAL_GROUP_DECISION} reads the GROUP off the layer plan; "
+                    "with no layers there is no motif."
+                )
+            mixers = tuple(("dense",) for _ in range(depth))
+        return derive_layer_groups(mixers)
+
+    def derive_group_engine_sizing(
+        self,
+        analog_beat_s: float,
+        demand: Sequence[EngineDemand],
+        *,
+        compose: Optional[bool] = None,
+        groups: Optional[LayerGroupPlan] = None,
+    ) -> DerivedEngineSizing:
+        """One derived chiplet design PER GROUP, on the existing machinery (D36).
+
+        This adds no sizing law. It reads the group off the layer plan and
+        hands that group's stage sets to :meth:`derive_engine_sizing` as its
+        ``stage_groups`` — the ADJ-14 argument that already means "these stages
+        share one chiplet, so the SUM of their per-beat times has to fit the
+        analog pace". D36's group is exactly that set, so the group-scope
+        derivation IS ADJ-9/10/14 called at group scope, and a reader comparing
+        the two never has to ask which of two width laws produced a number.
+
+        With a homogeneous model the group is one layer, every stage group has
+        one member, ADJ-14's widening loop skips it, and the answer is ADJ-9's
+        unchanged.
+        """
+        plan = self.layer_group_plan() if groups is None else groups
+        return self.derive_engine_sizing(
+            analog_beat_s, demand, compose=compose, stage_groups=plan.stage_groups
+        )
 
     # ------------------------------------------------------------------
     # Tiles: the allocation unit (P2.2, A3 / D10)
@@ -5972,6 +8796,7 @@ class CimDeviceModel:
 
         tiles: List[Tile] = []
         stacks: List[KStack] = []
+        segments: List[KStack] = []
         fills: "OrderedDict[int, List[object]]" = OrderedDict()
         real_cells = 0
         index = 0
@@ -6019,6 +8844,25 @@ class CimDeviceModel:
                         sink_macro_id=macro_ids[0],
                     )
                 )
+                # THE IN-MACRO RUNS. The K-inner walk is contiguous, so a
+                # stack's blocks occupy one macro, then the next; a run of
+                # length > 1 is an accumulation that happens INSIDE a macro
+                # and is priced by the same P7.2 law whether or not the rest
+                # of the stack stayed with it. A wholly local stack has one
+                # run equal to itself, so this describes it exactly as before
+                # and no local number moves.
+                for macro_id, run in _contiguous_runs(macro_ids):
+                    if run > 1:
+                        segments.append(
+                            KStack(
+                                owner=request.owner,
+                                n_start=n_start,
+                                n_end=n_end,
+                                depth=run,
+                                macro_ids=(macro_id,) * run,
+                                sink_macro_id=macro_id,
+                            )
+                        )
         banks_used = index
         macro_count = _ceil_div(banks_used, banks_per_macro)
         block_cells = banks_used * cells_per_bank
@@ -6069,6 +8913,7 @@ class CimDeviceModel:
             tail_cells=committed_cells - block_cells,
             cell_floor_macros=_ceil_div(real_cells, cells_per_macro),
             disclosures=tuple(disclosures),
+            local_k_segments=tuple(segments),
         )
 
     # ------------------------------------------------------------------
@@ -6326,7 +9171,18 @@ class CimDeviceModel:
         )
         rate = self.macro_result_rate_per_s()
         lanes = max(1, math.ceil(rate / pool_clock_hz))
-        adders = lanes * (n_s - 1)
+        # THE TIMING LAW AND THE SILICON CENSUS MUST DESCRIBE ONE MACHINE (M9).
+        # `drain_cycles = ceil(results / lanes)` retires ONE result per lane per
+        # cycle, which takes `lanes` adders working in parallel. The old law
+        # counted only the BIT-SLICE reduction, `lanes * (n_s - 1)`, which is
+        # ZERO on every shipped card (n_slices = 1) - so the composed pool held
+        # no arithmetic at all while the timeline ran 39,003,136 adds through
+        # it. The repo's own price_packing_accumulation already derives the
+        # floor: at 20 lanes the drain stalls, at 21 it fits exactly.
+        #
+        # `lanes` is the floor the timing law requires; the bit-slice tree is an
+        # ADDITIONAL contributor on a multi-slice card.
+        adders = lanes + lanes * (n_s - 1)
         conv_kernel = int(conv_kernel)
         conv_channels = int(conv_channels)
         conv_ops_per_result = 0
@@ -6749,6 +9605,41 @@ class CimDeviceModel:
         )
 
     # --- Delta rule / RG-LRU (P2.6 3) -----------------------------------
+
+    def short_conv_work(self, tokens: float) -> VectorWork:
+        """Scalar ops the short depthwise conv costs on the shared chiplet.
+
+        ``channels * (2k - 1)`` per token: k multiplies and k-1 adds per
+        channel, with no channel mixing to amortize (that is what DEPTHWISE
+        means, and it is why the operator maps so badly onto a crossbar). The
+        SAME per-result law the per-macro pool sizing uses, read as chiplet
+        work instead of as pool width - one law, two placements (D21).
+        """
+        dims = self._conv_dims_declared()
+        channels = int(dims.get("conv_channels", 0) or 0)
+        kernel = int(dims.get("conv_kernel", 0) or 0)
+        tp = max(1, int(getattr(self.params, "tp", 1) or 1))
+        if channels <= 0 or kernel <= 0:
+            return VectorWork(
+                law="short_conv", validated=LAW_UNVALIDATED, terms=(), state_bytes=0.0
+            )
+        width = float(tokens) * float(channels) / tp
+        # k multiplies and (k-1) adds per channel per token, itemized so each
+        # charged operation has one named source (D21).
+        return VectorWork(
+            law="short_conv",
+            validated=LAW_UNVALIDATED,
+            terms=(
+                ("conv_taps", width * float(kernel), 0.0),
+                ("conv_accumulate", 0.0, width * float(kernel - 1)),
+            ),
+            state_bytes=0.0,
+            detail=(("channels", float(channels)), ("kernel", float(kernel))),
+        )
+
+    def price_short_conv(self, tokens: float) -> DigitalOpCost:
+        """The conv as a TIMED vector op (cim.allocation.conv_placement)."""
+        return self.price_vector_work(self.short_conv_work(tokens))
 
     def price_delta_rule(self, tokens: float, **kwargs) -> DigitalOpCost:
         """Price one gated-delta-rule call. UNVALIDATED law — see the docstring

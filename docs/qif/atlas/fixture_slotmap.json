@@ -1,0 +1,4155 @@
+{
+ "schema": "fws_atlas/1",
+ "title": "Toy slot map - one block on 512x512:64",
+ "provenance": {
+  "authored": "2026-09-01",
+  "author": "fws_toy_slotmap.build_fixture, from fws_slot_mapper.map_chain",
+  "reference_run": {
+   "command": "python tools/fws_toy_slotmap.py --fixture",
+   "report": "dse_report.json of this run",
+   "parallelism": "tp = 1, ep = 1, pp = 1"
+  },
+  "grounded": [
+   "chips[], macros[] and tiles[] are the enumerated placement the slot mapper produced: one tile per OCCUPIED slot",
+   "slots.macros[].slots carry the firing tick of token 0, and slot index equals tick modulo mux on every one of them",
+   "slots.ledgers are re-derived from those tables by an independent checker before this document is written",
+   "cards[].area_mm2 is the analog sheet port evaluated at this macro geometry"
+  ],
+  "invented_fields": [],
+  "note": "THE ATLAS'S SLOT FIXTURE. One block of the toy debug chain, emitted by the same mapper the sweep uses, so the loader's slot rules are proved against a document that obeys the contract. It is not a result: read relaxations[] before quoting anything."
+ },
+ "cards": {
+  "analog_512x512x64": {
+   "label": "analog macro, 512 rows x 512 columns : 64 ADCs",
+   "kind": "analog_macro",
+   "capacity": {
+    "rows": 512,
+    "cols_adc": 64,
+    "mux": 8,
+    "stored_cols": 512
+   },
+   "area_mm2": 0.31969991475199994,
+   "bits_per_cell": 8,
+   "weight_bits": 8,
+   "slicing": false,
+   "basis": "area_mm2 is the analog sheet port evaluated at 512 rows x 512 columns behind 64 ADCs, so mux = 8 is derived. One cell stores one 8-bit weight, so the card does not slice."
+  }
+ },
+ "systems": [
+  {
+   "id": "sys.toy",
+   "role": "unified",
+   "phase": "decode",
+   "label": "Toy slot map - one block on 512x512:64",
+   "parallelism": {
+    "tp": 1,
+    "ep": 1,
+    "pp": 1
+   },
+   "models": [
+    {
+     "id": "Toy slot-map",
+     "label": "Toy slot map (atlas fixture)",
+     "layers": 1,
+     "hidden_dim": 512,
+     "blocks": [
+      "ffn1",
+      "ffn2",
+      "out",
+      "qkv"
+     ],
+     "endpoint_blocks": [],
+     "intermediate_size": 2048
+    }
+   ]
+  }
+ ],
+ "chips": [
+  {
+   "id": "chip.00",
+   "system": "sys.toy",
+   "pool": "analog",
+   "label": "analog chiplet 0 - 6 macros of 512x512:64",
+   "capacity": {
+    "macro_slots": 6
+   },
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "occupancy": 1.0,
+   "macros": [
+    "mac.000",
+    "mac.001",
+    "mac.002",
+    "mac.003",
+    "mac.004",
+    "mac.005"
+   ]
+  },
+  {
+   "id": "chip.01",
+   "system": "sys.toy",
+   "pool": "analog",
+   "label": "analog chiplet 1 - 6 macros of 512x512:64",
+   "capacity": {
+    "macro_slots": 6
+   },
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "occupancy": 1.0,
+   "macros": [
+    "mac.006",
+    "mac.007",
+    "mac.008",
+    "mac.009",
+    "mac.010",
+    "mac.011"
+   ]
+  },
+  {
+   "id": "chip.02",
+   "system": "sys.toy",
+   "pool": "analog",
+   "label": "analog chiplet 2 - 6 macros of 512x512:64",
+   "capacity": {
+    "macro_slots": 6
+   },
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "occupancy": 1.0,
+   "macros": [
+    "mac.012",
+    "mac.013",
+    "mac.014",
+    "mac.015",
+    "mac.016",
+    "mac.017"
+   ]
+  }
+ ],
+ "macros": [
+  {
+   "id": "mac.000",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0000",
+    "tile.0001",
+    "tile.0002",
+    "tile.0003"
+   ],
+   "occupancy": 0.5,
+   "duty_cycle": 0.5,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.001",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0004",
+    "tile.0005",
+    "tile.0006",
+    "tile.0007"
+   ],
+   "occupancy": 0.5,
+   "duty_cycle": 0.5,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.002",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0008",
+    "tile.0009",
+    "tile.0010"
+   ],
+   "occupancy": 0.375,
+   "duty_cycle": 0.375,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.003",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0011",
+    "tile.0012",
+    "tile.0013"
+   ],
+   "occupancy": 0.375,
+   "duty_cycle": 0.375,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.004",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0014",
+    "tile.0015",
+    "tile.0016"
+   ],
+   "occupancy": 0.375,
+   "duty_cycle": 0.375,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.005",
+   "chip": "chip.00",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0017",
+    "tile.0018",
+    "tile.0019"
+   ],
+   "occupancy": 0.375,
+   "duty_cycle": 0.375,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.006",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0020",
+    "tile.0021",
+    "tile.0022",
+    "tile.0023",
+    "tile.0024",
+    "tile.0025"
+   ],
+   "occupancy": 0.75,
+   "duty_cycle": 0.75,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.007",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0026",
+    "tile.0027",
+    "tile.0028",
+    "tile.0029",
+    "tile.0030",
+    "tile.0031"
+   ],
+   "occupancy": 0.75,
+   "duty_cycle": 0.75,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.008",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0032",
+    "tile.0033",
+    "tile.0034",
+    "tile.0035",
+    "tile.0036"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.009",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0037",
+    "tile.0038",
+    "tile.0039",
+    "tile.0040",
+    "tile.0041"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.010",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0042",
+    "tile.0043",
+    "tile.0044",
+    "tile.0045",
+    "tile.0046"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.011",
+   "chip": "chip.01",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0047",
+    "tile.0048",
+    "tile.0049",
+    "tile.0050",
+    "tile.0051"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.012",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0052",
+    "tile.0053",
+    "tile.0054",
+    "tile.0055",
+    "tile.0056",
+    "tile.0057"
+   ],
+   "occupancy": 0.75,
+   "duty_cycle": 0.75,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.013",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0058",
+    "tile.0059",
+    "tile.0060",
+    "tile.0061",
+    "tile.0062",
+    "tile.0063"
+   ],
+   "occupancy": 0.75,
+   "duty_cycle": 0.75,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.014",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0064",
+    "tile.0065",
+    "tile.0066",
+    "tile.0067",
+    "tile.0068"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.015",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0069",
+    "tile.0070",
+    "tile.0071",
+    "tile.0072",
+    "tile.0073"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.016",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0074",
+    "tile.0075",
+    "tile.0076",
+    "tile.0077",
+    "tile.0078"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  },
+  {
+   "id": "mac.017",
+   "chip": "chip.02",
+   "card": "analog_512x512x64",
+   "tiles": [
+    "tile.0079",
+    "tile.0080",
+    "tile.0081",
+    "tile.0082",
+    "tile.0083"
+   ],
+   "occupancy": 0.625,
+   "duty_cycle": 0.625,
+   "digital_pool": null,
+   "reserved": null
+  }
+ ],
+ "tiles": [
+  {
+   "id": "tile.0000",
+   "macro": "mac.000",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0001",
+   "macro": "mac.000",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0002",
+   "macro": "mac.000",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0003",
+   "macro": "mac.000",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0004",
+   "macro": "mac.001",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0005",
+   "macro": "mac.001",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0006",
+   "macro": "mac.001",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0007",
+   "macro": "mac.001",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0008",
+   "macro": "mac.002",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0009",
+   "macro": "mac.002",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0010",
+   "macro": "mac.002",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0011",
+   "macro": "mac.003",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0012",
+   "macro": "mac.003",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0013",
+   "macro": "mac.003",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0014",
+   "macro": "mac.004",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0015",
+   "macro": "mac.004",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0016",
+   "macro": "mac.004",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0017",
+   "macro": "mac.005",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0018",
+   "macro": "mac.005",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "qkv",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0019",
+   "macro": "mac.005",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "out",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0020",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0021",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0022",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0023",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0024",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0025",
+   "macro": "mac.006",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0026",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0027",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0028",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0029",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0030",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0031",
+   "macro": "mac.007",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0032",
+   "macro": "mac.008",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0033",
+   "macro": "mac.008",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0034",
+   "macro": "mac.008",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0035",
+   "macro": "mac.008",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0036",
+   "macro": "mac.008",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0037",
+   "macro": "mac.009",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0038",
+   "macro": "mac.009",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0039",
+   "macro": "mac.009",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0040",
+   "macro": "mac.009",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0041",
+   "macro": "mac.009",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0042",
+   "macro": "mac.010",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0043",
+   "macro": "mac.010",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0044",
+   "macro": "mac.010",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0045",
+   "macro": "mac.010",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0046",
+   "macro": "mac.010",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0047",
+   "macro": "mac.011",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0048",
+   "macro": "mac.011",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0049",
+   "macro": "mac.011",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0050",
+   "macro": "mac.011",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0051",
+   "macro": "mac.011",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn1",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0052",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0053",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0054",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0055",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0056",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0057",
+   "macro": "mac.012",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0058",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0059",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0060",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0061",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0062",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 256,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0063",
+   "macro": "mac.013",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0064",
+   "macro": "mac.014",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0065",
+   "macro": "mac.014",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0066",
+   "macro": "mac.014",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0067",
+   "macro": "mac.014",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0068",
+   "macro": "mac.014",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0069",
+   "macro": "mac.015",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0070",
+   "macro": "mac.015",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0071",
+   "macro": "mac.015",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0072",
+   "macro": "mac.015",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0073",
+   "macro": "mac.015",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0074",
+   "macro": "mac.016",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0075",
+   "macro": "mac.016",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0076",
+   "macro": "mac.016",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0077",
+   "macro": "mac.016",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0078",
+   "macro": "mac.016",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0079",
+   "macro": "mac.017",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 0,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0080",
+   "macro": "mac.017",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 64,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0081",
+   "macro": "mac.017",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 128,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0082",
+   "macro": "mac.017",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 192,
+    "count": 64
+   }
+  },
+  {
+   "id": "tile.0083",
+   "macro": "mac.017",
+   "owner": {
+    "model": "Toy slot-map",
+    "layer": 0,
+    "block": "ffn2",
+    "expert": null
+   },
+   "shape": {
+    "K": 512,
+    "N": 64
+   },
+   "slice": null,
+   "groups": {
+    "tp": 0,
+    "ep": 0,
+    "pp": 0
+   },
+   "primary_group": "tp",
+   "columns": {
+    "start": 448,
+    "count": 64
+   }
+  }
+ ],
+ "links": [],
+ "metrics": [
+  {
+   "key": "toy.beat",
+   "label": "beat, one token exits per beat",
+   "value": 160.0,
+   "unit": "ns",
+   "basis": "beat = mux 8 x tick 20 ns; the macro geometry fixes it"
+  },
+  {
+   "key": "toy.tokens_per_s",
+   "label": "steady throughput (HEADLINE)",
+   "value": 6250000.0,
+   "unit": "tokens/s",
+   "basis": "1 / beat. beat = mux 8 x tick 20 ns; the macro geometry fixes it"
+  },
+  {
+   "key": "toy.per_user_tokens_per_s",
+   "label": "one user's token rate",
+   "value": 694444.4444444445,
+   "unit": "tokens/s",
+   "basis": "1 / (D 9 x beat 160 ns): a user's next token re-enters on the first bundle's phase, and that phase comes round once per beat, so D users share the throughput and D x this rate is the throughput, read off the emitted tick schedule, which an independent checker verified"
+  },
+  {
+   "key": "toy.per_user_ceiling_tokens_per_s",
+   "label": "ceiling on one user's token rate",
+   "value": 724637.6811594202,
+   "unit": "tokens/s",
+   "basis": "1 / (L 69 ticks x 20 ns): the rate a user would get if the next token could start the instant the last one left, and only a beat that divides L reaches it, read off the emitted tick schedule, which an independent checker verified"
+  },
+  {
+   "key": "toy.chain_latency_ticks",
+   "label": "chain latency L",
+   "value": 69.0,
+   "unit": "ticks",
+   "basis": "last firing tick of the last bundle plus one, from tick 0 of the first; read off the emitted tick schedule, which an independent checker verified"
+  },
+  {
+   "key": "toy.chain_latency_ticks",
+   "label": "chain latency lower bound",
+   "value": 32.0,
+   "unit": "ticks",
+   "basis": "two ticks per bundle plus one seam per unavoidable chip crossing, relaxing the chip capacity to a bin-packing bound"
+  },
+  {
+   "key": "toy.resident_sequences",
+   "label": "sequences in flight D",
+   "value": 9.0,
+   "unit": "sequences",
+   "basis": "ceil(L / beat ticks): latency does not set the beat, it sets how many sequences are in flight"
+  },
+  {
+   "key": "toy.resident_sequences",
+   "label": "sequences in flight at the latency bound",
+   "value": 4.0,
+   "unit": "sequences",
+   "basis": "ceil(L lower bound / beat ticks)"
+  },
+  {
+   "key": "toy.cells_wasted",
+   "label": "cells committed that hold no weight",
+   "value": 1441792.0,
+   "unit": "cells",
+   "basis": "ragged remainder of each bundle against Z, plus every slot stranded when a bundle moved whole to a fresh chip"
+  },
+  {
+   "key": "toy.waste_frac",
+   "label": "share of committed cells that are waste",
+   "value": 0.3055555555555556,
+   "unit": "fraction",
+   "basis": "wasted cells over every cell the mapping commits; the bound is zero"
+  },
+  {
+   "key": "toy.seams",
+   "label": "chip crossings on the chain",
+   "value": 2.0,
+   "unit": "seams",
+   "basis": "bundles whose chip differs from the previous bundle's; each costs 25 ticks of latency and nothing of the beat"
+  },
+  {
+   "key": "toy.seams",
+   "label": "chip crossings at the capacity bound",
+   "value": 1.0,
+   "unit": "seams",
+   "basis": "one fewer than the fewest chips these slot-layers could fit in"
+  },
+  {
+   "key": "toy.analog_chips",
+   "label": "enumerated analog chiplets",
+   "value": 3.0,
+   "unit": "chips",
+   "basis": "the mapper opened them one by one; a chip count here is never a division"
+  },
+  {
+   "key": "toy.macros_owned",
+   "label": "macros holding at least one slot-layer",
+   "value": 18.0,
+   "unit": "macros",
+   "basis": "occupied slots grouped by macro"
+  },
+  {
+   "key": "toy.slots_used",
+   "label": "occupied slots",
+   "value": 84.0,
+   "unit": "slots",
+   "basis": "one per slot-layer, one tile each"
+  },
+  {
+   "key": "toy.slots_used",
+   "label": "slots stranded behind a moved bundle",
+   "value": 44.0,
+   "unit": "slots",
+   "basis": "free slots left on a chip when the next bundle did not fit whole"
+  },
+  {
+   "key": "toy.analog_silicon",
+   "label": "silicon of the macros the mapping occupies",
+   "value": 5.754598465535999,
+   "unit": "mm2",
+   "basis": "18 macros x 0.3197 mm2 from the analog sheet port"
+  },
+  {
+   "key": "toy.stall_ticks",
+   "label": "ticks a bundle waited for its phase",
+   "value": 0.0,
+   "unit": "ticks",
+   "basis": "summed start_tick minus earliest legal tick over the chain"
+  }
+ ],
+ "relaxations": [
+  {
+   "constraint": "toy_model",
+   "value": "a mapper debug chain, not a machine",
+   "reason": "This sweep exists to exercise the slot mapper and its independent checker. Its twelve bundles are three blocks of qkv, out, ffn1 and ffn2 at a hidden size chosen to equal the macro height, so every bundle's K fits one macro exactly. No number here describes any real model, and none of it should be quoted as a result."
+  },
+  {
+   "constraint": "chip_capacity",
+   "value": "6 macros per chip, a debug override",
+   "reason": "The chip capacity is passed to the mapper directly by the toy so that seams and stranded slots happen on a short chain. It is not the die area budget the real platform work derives, and it must not be read as one."
+  },
+  {
+   "constraint": "bandwidth_provisioned",
+   "value": "assumed sufficient, not derived",
+   "reason": "Wire hops, reduce trees and chip seams add latency only; they never bound the beat. The mapping assumes the fabric carries every handoff inside the two-tick hop and the twenty-five-tick seam it is charged. No bandwidth number is derived anywhere here, and the assumption is recorded rather than hidden."
+  },
+  {
+   "constraint": "unpriced_terms",
+   "value": "no digital chiplet, no state store, no energy, no bytes",
+   "reason": "The toy places analog weight macros and schedules their firings. It composes no digital engine, sizes no state store, prices no energy and counts no bytes across the seams it reports. Those panels are empty because the quantity is absent, not because it measured zero."
+  },
+  {
+   "constraint": "silicon_counted",
+   "value": "the macros the mapping occupies",
+   "reason": "Silicon is the count of macros holding at least one slot-layer times the macro area the analog sheet port derives at that geometry. Empty macro slots on the chips the mapper opened are enumerated and reported, and they are not charged."
+  }
+ ],
+ "slots": {
+  "schema": "fws_slot/1",
+  "platform": {
+   "rows": 512,
+   "z": 64,
+   "y": 512,
+   "mux": 8,
+   "tick_ns": 20.0,
+   "beat_ticks": 8,
+   "beat_ns": 160.0,
+   "hop_gap_ticks": 2,
+   "seam_ticks": 25,
+   "seam_ns": 500.0,
+   "chip_macros": 6,
+   "macro_area_mm2": 0.31969991475199994,
+   "label": "512x512:64"
+  },
+  "chips": [
+   {
+    "id": "chip.00",
+    "index": 0,
+    "macros": [
+     "mac.000",
+     "mac.001",
+     "mac.002",
+     "mac.003",
+     "mac.004",
+     "mac.005"
+    ],
+    "capacity_macros": 6
+   },
+   {
+    "id": "chip.01",
+    "index": 1,
+    "macros": [
+     "mac.006",
+     "mac.007",
+     "mac.008",
+     "mac.009",
+     "mac.010",
+     "mac.011"
+    ],
+    "capacity_macros": 6
+   },
+   {
+    "id": "chip.02",
+    "index": 2,
+    "macros": [
+     "mac.012",
+     "mac.013",
+     "mac.014",
+     "mac.015",
+     "mac.016",
+     "mac.017"
+    ],
+    "capacity_macros": 6
+   }
+  ],
+  "macros": [
+   {
+    "id": "mac.000",
+    "chip": "chip.00",
+    "index": 0,
+    "index_on_chip": 0,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 0,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 384,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 0,
+       "count": 64
+      },
+      "tick": 3
+     },
+     {
+      "slot": 4,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 384,
+       "count": 64
+      },
+      "tick": 4
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.001",
+    "chip": "chip.00",
+    "index": 1,
+    "index_on_chip": 1,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 64,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 448,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 64,
+       "count": 64
+      },
+      "tick": 3
+     },
+     {
+      "slot": 4,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 448,
+       "count": 64
+      },
+      "tick": 4
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.002",
+    "chip": "chip.00",
+    "index": 2,
+    "index_on_chip": 2,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 128,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 512,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 128,
+       "count": 64
+      },
+      "tick": 3
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     4,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.003",
+    "chip": "chip.00",
+    "index": 3,
+    "index_on_chip": 3,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 192,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 576,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 192,
+       "count": 64
+      },
+      "tick": 3
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     4,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.004",
+    "chip": "chip.00",
+    "index": 4,
+    "index_on_chip": 4,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 256,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 640,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 256,
+       "count": 64
+      },
+      "tick": 3
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     4,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.005",
+    "chip": "chip.00",
+    "index": 5,
+    "index_on_chip": 5,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 320,
+       "count": 64
+      },
+      "tick": 0
+     },
+     {
+      "slot": 1,
+      "bundle": "b.000",
+      "layer": 0,
+      "block": "qkv",
+      "kblock": 0,
+      "columns": {
+       "start": 704,
+       "count": 64
+      },
+      "tick": 1
+     },
+     {
+      "slot": 3,
+      "bundle": "b.001",
+      "layer": 0,
+      "block": "out",
+      "kblock": 0,
+      "columns": {
+       "start": 320,
+       "count": 64
+      },
+      "tick": 3
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     2,
+     4,
+     5,
+     6,
+     7
+    ]
+   },
+   {
+    "id": "mac.006",
+    "chip": "chip.01",
+    "index": 6,
+    "index_on_chip": 0,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 384,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 768,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1152,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1536,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 4,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1920,
+       "count": 64
+      },
+      "tick": 36
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 0,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.007",
+    "chip": "chip.01",
+    "index": 7,
+    "index_on_chip": 1,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 448,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 832,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1216,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1600,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 4,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1984,
+       "count": 64
+      },
+      "tick": 36
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 64,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.008",
+    "chip": "chip.01",
+    "index": 8,
+    "index_on_chip": 2,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 512,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 896,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1280,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1664,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 128,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     4,
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.009",
+    "chip": "chip.01",
+    "index": 9,
+    "index_on_chip": 3,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 576,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 960,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1344,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1728,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 192,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     4,
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.010",
+    "chip": "chip.01",
+    "index": 10,
+    "index_on_chip": 4,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 640,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1024,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1408,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1792,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 256,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     4,
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.011",
+    "chip": "chip.01",
+    "index": 11,
+    "index_on_chip": 5,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 704,
+       "count": 64
+      },
+      "tick": 32
+     },
+     {
+      "slot": 1,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1088,
+       "count": 64
+      },
+      "tick": 33
+     },
+     {
+      "slot": 2,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1472,
+       "count": 64
+      },
+      "tick": 34
+     },
+     {
+      "slot": 3,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 1856,
+       "count": 64
+      },
+      "tick": 35
+     },
+     {
+      "slot": 7,
+      "bundle": "b.002",
+      "layer": 0,
+      "block": "ffn1",
+      "kblock": 0,
+      "columns": {
+       "start": 320,
+       "count": 64
+      },
+      "tick": 31
+     }
+    ],
+    "free_slots": [],
+    "stranded_slots": [
+     4,
+     5,
+     6
+    ]
+   },
+   {
+    "id": "mac.012",
+    "chip": "chip.02",
+    "index": 12,
+    "index_on_chip": 0,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 384,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 768,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1152,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1536,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 4,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1920,
+       "count": 64
+      },
+      "tick": 68
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 0,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     5,
+     6
+    ],
+    "stranded_slots": []
+   },
+   {
+    "id": "mac.013",
+    "chip": "chip.02",
+    "index": 13,
+    "index_on_chip": 1,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 448,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 832,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1216,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1600,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 4,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1984,
+       "count": 64
+      },
+      "tick": 68
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 64,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     5,
+     6
+    ],
+    "stranded_slots": []
+   },
+   {
+    "id": "mac.014",
+    "chip": "chip.02",
+    "index": 14,
+    "index_on_chip": 2,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 512,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 896,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1280,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1664,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 128,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     4,
+     5,
+     6
+    ],
+    "stranded_slots": []
+   },
+   {
+    "id": "mac.015",
+    "chip": "chip.02",
+    "index": 15,
+    "index_on_chip": 3,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 576,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 960,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1344,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1728,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 192,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     4,
+     5,
+     6
+    ],
+    "stranded_slots": []
+   },
+   {
+    "id": "mac.016",
+    "chip": "chip.02",
+    "index": 16,
+    "index_on_chip": 4,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 640,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1024,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1408,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1792,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 256,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     4,
+     5,
+     6
+    ],
+    "stranded_slots": []
+   },
+   {
+    "id": "mac.017",
+    "chip": "chip.02",
+    "index": 17,
+    "index_on_chip": 5,
+    "slots": [
+     {
+      "slot": 0,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 1,
+      "columns": {
+       "start": 704,
+       "count": 64
+      },
+      "tick": 64
+     },
+     {
+      "slot": 1,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1088,
+       "count": 64
+      },
+      "tick": 65
+     },
+     {
+      "slot": 2,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 2,
+      "columns": {
+       "start": 1472,
+       "count": 64
+      },
+      "tick": 66
+     },
+     {
+      "slot": 3,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 3,
+      "columns": {
+       "start": 1856,
+       "count": 64
+      },
+      "tick": 67
+     },
+     {
+      "slot": 7,
+      "bundle": "b.003",
+      "layer": 0,
+      "block": "ffn2",
+      "kblock": 0,
+      "columns": {
+       "start": 320,
+       "count": 64
+      },
+      "tick": 63
+     }
+    ],
+    "free_slots": [
+     4,
+     5,
+     6
+    ],
+    "stranded_slots": []
+   }
+  ],
+  "bundles": [
+   {
+    "id": "b.000",
+    "order": 0,
+    "layer": 0,
+    "block": "qkv",
+    "columns": 768,
+    "k_blocks": 1,
+    "reduce": false,
+    "slot_layers": 12,
+    "ragged_columns": 0,
+    "chip": "chip.00",
+    "macros": [
+     "mac.000",
+     "mac.001",
+     "mac.002",
+     "mac.003",
+     "mac.004",
+     "mac.005"
+    ],
+    "start_tick": 0,
+    "end_tick": 1,
+    "serial_ticks": 2,
+    "stall_ticks": 0,
+    "seam_before": false
+   },
+   {
+    "id": "b.001",
+    "order": 1,
+    "layer": 0,
+    "block": "out",
+    "columns": 512,
+    "k_blocks": 1,
+    "reduce": false,
+    "slot_layers": 8,
+    "ragged_columns": 0,
+    "chip": "chip.00",
+    "macros": [
+     "mac.000",
+     "mac.001",
+     "mac.002",
+     "mac.003",
+     "mac.004",
+     "mac.005"
+    ],
+    "start_tick": 3,
+    "end_tick": 4,
+    "serial_ticks": 2,
+    "stall_ticks": 0,
+    "seam_before": false
+   },
+   {
+    "id": "b.002",
+    "order": 2,
+    "layer": 0,
+    "block": "ffn1",
+    "columns": 2048,
+    "k_blocks": 1,
+    "reduce": false,
+    "slot_layers": 32,
+    "ragged_columns": 0,
+    "chip": "chip.01",
+    "macros": [
+     "mac.006",
+     "mac.007",
+     "mac.008",
+     "mac.009",
+     "mac.010",
+     "mac.011"
+    ],
+    "start_tick": 31,
+    "end_tick": 36,
+    "serial_ticks": 6,
+    "stall_ticks": 0,
+    "seam_before": true
+   },
+   {
+    "id": "b.003",
+    "order": 3,
+    "layer": 0,
+    "block": "ffn2",
+    "columns": 2048,
+    "k_blocks": 4,
+    "reduce": true,
+    "slot_layers": 32,
+    "ragged_columns": 0,
+    "chip": "chip.02",
+    "macros": [
+     "mac.012",
+     "mac.013",
+     "mac.014",
+     "mac.015",
+     "mac.016",
+     "mac.017"
+    ],
+    "start_tick": 63,
+    "end_tick": 68,
+    "serial_ticks": 6,
+    "stall_ticks": 0,
+    "seam_before": true
+   }
+  ],
+  "ledgers": {
+   "beat_ns": 160.0,
+   "beat_ticks": 8,
+   "L_ticks": 69,
+   "L_ns": 1380.0,
+   "D": 9,
+   "D_min": 4,
+   "L_min_ticks": 32,
+   "macros_used": 18,
+   "chips_used": 3,
+   "slots_total": 144,
+   "slots_used": 84,
+   "slots_stranded": 44,
+   "cells_total": 4718592,
+   "cells_used": 2752512,
+   "cells_ragged": 0,
+   "cells_stranded": 1441792,
+   "cells_wasted": 1441792,
+   "waste_frac": 0.3055555555555556,
+   "waste_min": 0,
+   "seams": 2,
+   "seams_min": 1,
+   "stall_ticks": 0,
+   "throughput_tokens_per_s": 6250000.0,
+   "per_user_tokens_per_s": 694444.4444444445,
+   "per_user_ceiling_tokens_per_s": 724637.6811594202,
+   "macro_duty_mean": 0.5833333333333334,
+   "macro_duty_max": 0.75,
+   "analog_area_mm2": 5.754598465535999
+  },
+  "check": {
+   "ok": true,
+   "violations": []
+  }
+ },
+ "subtitle": "One block of the toy debug chain - qkv 768 columns, out 512, ffn1 2048 and ffn2 as four K-blocks of 512 whose partials reduce - placed slot by slot on macros of 512 rows x 512 columns behind 64 ADCs. mux = 8, so the beat is 160 ns. ffn1 does not fit the slots the first chiplet has left, so it moves whole and pays a crossing, and ffn2 does the same: 3 chiplets, 2 crossings, 44 stranded slots.",
+ "run": {
+  "run_id": "fixture_slotmap_1",
+  "tool": "fws_toy_slotmap.build_fixture",
+  "tool_version": "the slot fixture the atlas loader is proved on",
+  "generated_at": "2026-09-01T09:00:00Z",
+  "basis": "one mapping of one block, rebuilt whenever the slot contract moves so the fixture and the sweep cannot disagree"
+ },
+ "run_id": "fixture_slotmap_1"
+}

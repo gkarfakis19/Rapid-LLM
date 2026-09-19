@@ -1,129 +1,54 @@
-# FWS-CIM MAPPED run for Qwen3.5-4B — the QIF P1 SECOND P0 model (ADJ-1).
-# Pair with configs/model-config/qwen3_5_4b_inf.yaml at tp=1, pp=1.
-#
-# SECOND READER (Wave C audit): tests/test_qif_carrier_rows.py also runs
-# Gemma-3-4B on this card, because its 2560-row analog point is the one Gemma
-# needs and inventing a second design point is the ADJ-4 failure. The two
-# sizing knobs below ARE derived from Qwen, so Gemma's own arithmetic is
-# recorded here and pinned by that file: 34 layers at layers_per_chip 4 = 9
-# analog chips, and the busiest chip (the last, carrying the 262208-wide
-# lm_head) holds 133 macros against arrays_per_chip 180. An edit to the Qwen
-# sizing that breaks the Gemma fit fails that test instead of moving a row
-# silently. Gemma ships no artifact from this card; it is a test row only.
-#
-# This is the FIRST consumer of the delta-rule law (P2.6 3), which is
-# LAW_UNVALIDATED by design: no reference implementation exists to check it
-# against, so every delta_rule op in this run carries the `unvalidated` label
-# in its basis string and the run's report and atlas say so. Read that label
-# before quoting a number from this point.
-#
-# It is also the first GATED-ATTENTION point. Qwen3.5 declares
-# attn_output_gate, and the QIF C1 adjudication treats it as an ordinary
-# weight matrix: W_g is placed as an analog tile of shape
-# (hidden, num_heads * head_dim) = 2560 x 4096 beside qkv and o_proj, and the
-# sigmoid + elementwise multiply is per-macro pool work (ADJ-3 / D12).
-#
-# It runs ONLY on the mapped path — the `mapping:` block at the bottom is what
-# makes P3 place the model and P4 price it op by op (ADJ-6 / A1). Drop that
-# block and validate_model_config refuses the run by name: the closed form has
-# no stage for a linear-attention recurrence and none for the gate matrix
-# (P1.4, narrowed by P1.5 and by C1).
-#
-# Analog point: rows = 2560 (K per array tile matches hidden_dim), stored
-# cols = cols_adc * adc_mux = 2560. Per-layer analog macros for Qwen3.5-4B
-# (H=2560, dense SwiGLU FFN I=9216, GQA q16/kv4 head_dim=256, gated-DeltaNet
-# 16 key heads x 128 and 32 value heads x 128, conv k=4):
-#   dense FFN, every layer: ffn1 ceil(2*9216/2560)=8 + ffn2 ceil(9216/2560)=4
-#     = 12
-#   linear-attention mixer (24 layers): la_qkv_proj ceil(12288/2560)=5,
-#     la_gate_proj 1, la_out_proj ceil(4096/2560)=2 -> 8, so 20 macros/layer
-#   gated-attention mixer (8 layers): qkv ceil((16+2*4)*256/2560)=3,
-#     attn_gate_proj ceil(4096/2560)=2, o_proj ceil(4096/2560)=2 -> 7,
-#     so 19 macros/layer
-#   lm_head adds ceil(248320/2560) = 97 macros on the last chip.
-# layers_per_chip 4 (the layer_plan period: 3 linear + 1 attention) -> 8
-# chips; worst chip = 3*20 + 19 + 97 = 176.
-#
-# Energy/area per array are the T1 OPTIMA point scaled by cell count
-# (2560*2560 / 1280*1280 = 4.0), the same convention fws_cim_llama7b.yaml,
-# fws_cim_moe.yaml and fws_cim_granite_tiny.yaml use. They are NOT measured
-# Qwen silicon.
-
 device_class: fws_cim
-
-# All values inside cim must be plain numbers: unit strings like "100 MB"
-# would be rewritten into byte counts by the YAML preprocessor.
 cim:
+  allocation:
+    conv_placement: macro_pool
   analog:
-    rows: 2560               # array rows (K per array tile) = hidden_dim
-    cols_adc: 640            # ADC columns per array
-    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
-    slice_cycles: 2          # analog cycles per ADC evaluation
+    # D35 OVERRIDE. This card predates D35 (2026-08-29), which fixes the analog
+    # macro at 1024 x 1024 stored cells as a PLATFORM CONSTANT. Its geometry is
+    # NOT moved: the OPTIMA validator and the pre-D35 gates read these numbers
+    # and moving them would silently rewrite what they check. The key below is
+    # the only exemption D35 admits, and it buys the exemption by stating the
+    # reason, which rides a named disclosure into every artifact this config
+    # produces. A point carrying it is NOT comparable with a platform point.
+    nonstandard_macro: 'predates D35; kept for validator/OPTIMA parity'
+    rows: 2560
+    cols: 2560
+    adcs: 640
+    slice_cycles: 2
     analog_clock_mhz: 100
-    energy_per_vec_pj: 38139.7556   # T1 point scaled by cell count (x4.0)
-    shots_per_output: 2      # energy only, never time
-    area_mm2_per_array: 5.61226     # T1 point scaled by cell count (x4.0)
+    energy_per_vec_pj: 38139.7556
+    shots_per_output: 2
+    area_mm2_per_array: 5.61226
   fabric:
-    model: sa                # sa | gpu_native
+    model: sa
     rows: 32
     cols: 64
-    num_arrays: 2            # QK and PV run concurrently on these
-    replicas: 1              # attention array replicas
+    num_arrays: 2
+    replicas: 1
     clock_ghz: 0.95
-    # fill_drain_penalty_cycles: absent -> default 3*rows = 96
     softmax_lanes: 1
     softmax_pipeline_depth: 20
+    geometry: derived
   chip:
-    arrays_per_chip: 73     # worst chip: 3*20 + 19 = 79 under D30 (which DROPS
-                             # the lm_head; the +97 that used to sit here is
-                             # gone). 180 is deliberately held at the pre-D30
-                             # value, so 808 of the 1440 enumerated slots hold
-                             # no tensor - read the D32 pool total as the
-                             # machine's SLOTS, never as demand.
-    layers_per_chip: 4       # 32 layers -> 8 chips; endpoints on first/last chips
-    moe_expert_parallel: 1   # dense FFN on every layer; no expert spreading
-
-  # Device cards (P2.1, D14). The analog card is the shipped CTT point above.
-  # The shared digital chiplet card is what makes the DELTA RULE timeable, and
-  # under D31 it no longer DECLARES the engine: it names the measured synthesis
-  # library its silicon is composed from, and the width is derived from the
-  # beat (ADJ-4 still forbids deriving the state-update lanes from the systolic
-  # array or the softmax pipeline, which is why the beat is the only honest
-  # source).
+    layers_per_chip: 4
+    moe_expert_parallel: 1
   cards:
-    ctt:
-      bank_depth: 1
-      kind: analog_macro
-      device: ctt
     sa:
       kind: digital_chiplet
-      # D32: this chiplet's AREA and POWER are COMPOSED from the measured
-      # synthesis library checked in beside this file — the SA fabric from
-      # GEMMINI_SYS_ARRAY blocks, the softmax pipeline from
-      # FP_COMP/FP_ADD/FP_MULT/BF16_EXP/BF16_RECIP, the scan engine from
-      # FP_MULT/FP_ADD/M_REG. Nothing is declared and nothing is estimated;
-      # digital_components_22nm.yaml names the synthesis run every number
-      # came from.
       synthesis_library: 22nm
-      # D31: vector_lanes is GONE as an input. The engine's width is DERIVED
-      # from the beat this run's ANALOG stages set — the smallest integer lane
-      # count whose own priced time fits that beat, with no margin (D28) — and
-      # it is REPORTED (evaluation.digital_silicon.derived_engine_sizing, plus
-      # a derived_engine_sizing disclosure). The 1024-lane "declared design
-      # point" this card used to carry was a number nobody measured; declaring
-      # one again is still possible and rides a disclosure naming it an
-      # OVERRIDE of a retired input. (P7.9 correction: that disclosure does not
-      # print what the beat would have derived. A declared width skips the
-      # probe pass entirely, so no derivation exists to compare it with, and
-      # claiming otherwise described a sentence no run can emit.)
-      # vector_clock_ghz / vector_pipeline_depth / state_bytes_per_cycle stay
-      # undeclared on purpose: the first two inherit the chiplet's own clock
-      # and softmax depth (disclosed per priced op), and an undeclared state
-      # bandwidth REPORTS recurrent-state traffic without bounding it.
-
+    ctt_sheet:
+      kind: analog_macro
+      device: ctt
+      calc_profile: george_cima_mux1
+      params:
+        rows: 2560
+        cols: 2560
+        adcs: 640
+        shots_per_output: 2
+      bank_depth: 2
 sw_param:
   full_recomputation: false
-  kernel_launch_overhead: 0   # (s) deterministic fabric; no per-kernel launch cost
+  kernel_launch_overhead: 0
   dp_zero_stage: 0
   precision:
     tensor_format: bf16
@@ -134,65 +59,61 @@ sw_param:
     optimizer_states: as_tensor_format
     stats: as_tensor_format
     master_parameters: 0.0
-  h2d_bandwidth: -1  # Bytes/s; -1 disables H2D timing
+  h2d_bandwidth: -1
   const_mem_offset: 0 GB
-
-# Stub calibrated to the digital fabric (2 arrays x 32x64 MACs @ 0.95 GHz).
 tech_param:
   core:
-    operating_frequency: 0.95e9     # (Hz) fabric clock
-    num_bundles: 2                  # = cim.fabric.num_arrays
-    nominal_flop_rate_per_mcu: 4096 # = rows*cols*2 = 32*64*2
-    nominal_energy_per_flop: 1e-13  # (J) placeholder; CIM energy is reported separately
+    operating_frequency: 0.95e9
+    num_bundles: 2
+    nominal_flop_rate_per_mcu: 4096
+    nominal_energy_per_flop: 1e-13
     num_mcu_per_bundle: 1
     FMA_d1: 8
     FMA_d2: 4
     dataflow: best
     util: 1
-  DRAM:                    # stands in for the chips' aggregate activation + KV SRAM (cim_sram story)
+  DRAM:
     size: 8 GB
-    bandwidth: 4 TB        # (/s)
-    dynamic_energy_per_bit: 1e-13   # (J)
-    latency: 0             # (s) on-chip SRAM
+    bandwidth: 4 TB
+    dynamic_energy_per_bit: 1e-13
+    latency: 0
     util: 1.0
   SRAM-L2:
     size: 64 MB
     bandwidth: 8 TB
-    dynamic_energy_per_bit: 1e-13   # (J)
+    dynamic_energy_per_bit: 1e-13
     latency: 0
     util: 1
   SRAM-L1:
     size: 8 MB
     bandwidth: 16 TB
-    dynamic_energy_per_bit: 1e-13   # (J)
+    dynamic_energy_per_bit: 1e-13
     latency: 0
     util: 1
   SRAM-R:
     size: 4 MB
-    bandwidth: 128 TB      # level-0 bandwidth feeds analytical collectives; keep it high
-    dynamic_energy_per_bit: 1e-13   # (J)
+    bandwidth: 128 TB
+    dynamic_energy_per_bit: 1e-13
     latency: 0
     util: 1
-
 memory_hierarchy:
-  l0:   # Register memory
+  l0:
     type: SRAM-R
     scope: mcu
-  l1:   # Shared memory
+  l1:
     type: SRAM-L1
     scope: mcu-bundle
-  l2:   # L2
+  l2:
     type: SRAM-L2
     scope: global
-  l3:   # Activation buffer (DRAM stub)
+  l3:
     type: DRAM
     scope: global
-
 parallelism:
   tp: 1
   tp_sp: false
   cp: 1
-  pp: 1     # fws_cim requires pp=1; chip placement comes from cim.chip.layers_per_chip
+  pp: 1
   mb: 1
   train:
     dp: 1
@@ -201,107 +122,85 @@ parallelism:
   inference:
     replica_count: 1
     moe_dp: 1
-
 network:
   overlap:
     tp_overlap: 0.0
     tp_sp_overlap: 0.0
     cp_overlap: 0.0
   dimensions:
-    - id: dim0
-      label: chip_ring_ep_tp   # ep dispatch/combine and tp boundary links
-      size: auto
-      topology:
-        type: Ring       # analytical mode requires ring topologies
-        bandwidth: 100 GB
-        latency: 1e-6
-        energy_per_bit: 1e-12 # (J/bit)
-        util: 1.0
-      collective_override: {}
-      parallelisms: [tp, cp, ep]
-    - id: dim1
-      label: chip_ring_pp      # chip-to-chip boundary (p2p) links
-      size: auto
-      topology:
-        type: Ring
-        bandwidth: 100 GB
-        latency: 1e-6
-        energy_per_bit: 1e-12 # (J/bit)
-        util: 1.0
-      collective_override: {}
-      parallelisms: [pp, dp]
-
+  - id: dim0
+    label: chip_ring_ep_tp
+    size: auto
+    topology:
+      type: Ring
+      bandwidth: 100 GB
+      latency: 1e-6
+      energy_per_bit: 1e-12
+      util: 1.0
+    collective_override: {}
+    parallelisms:
+    - tp
+    - cp
+    - ep
+  - id: dim1
+    label: chip_ring_pp
+    size: auto
+    topology:
+      type: Ring
+      bandwidth: 100 GB
+      latency: 1e-6
+      energy_per_bit: 1e-12
+      util: 1.0
+    collective_override: {}
+    parallelisms:
+    - pp
+    - dp
 execution_backend:
-  model: analytical   # fws_cim supports only the analytical backend
-
+  model: analytical
 inference:
-  kvcache_type: cim_sram   # KV lives in the fabric activation SRAM (the device has no HBM)
-
-# --- the mapping block (P3, ADJ-5). Its presence is what makes this a
-# --- MAPPED run: the DAG report replaces the closed-form section (ADJ-6).
+  kvcache_type: cim_sram
 mapping:
-  # SELECTED BY THE SWEEP (ADJ-13/ADJ-14): this machine is the point
-  # tools/fws_qif_dse.py chose on its own frontier, not a hand-declared one.
-  shared_chiplets: 4
-  layers_per_chip: 4
+  shared_chiplets: 8
+  layers_per_chip: 1
   parallelism:
     tp: 1
-  # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer
-  # is the law this machine is placed under. On this card dense and dedicated
-  # coincide tile for tile (the degenerate identity of P7.2) — 632 macros either
-  # way — so declaring it moves no number here. What it adds is the CENSUS:
-  # committed cells, remainder waste and the global cell floor (545 macros,
-  # 13.83% waste), which is the quantity D27 is written about.
   packing: dense
-  # ADJ-6: the decode series is a bounded window plus a disclosed
-  # extrapolation. Three steps give a first / median / last that are three
-  # different readings rather than one repeated.
   decode_window: 3
-
-# WHAT THIS SWEEP IS FREE TO CHOOSE, AND WHAT IT DERIVES.
-#
-# Free (the axes below):
-#   layers_per_chip  - how the model is PARTITIONED into pipeline stages. This is
-#     the real design choice: a finer partition raises the resident stream count
-#     D and the throughput with it, and makes every stage hold more state.
-#   bank_depth       - how the weights are FOLDED into a macro's banks.
-#
-# Derived, never declared and never swept (ADJ-13):
-#   arrays_per_chip  - the chip offers exactly the macro slots the layers it
-#     holds need. The sweep places the layers once against a capacity that
-#     cannot bind, reads the requirement, and builds the chip to it. Declaring
-#     it produced garbage at both ends: under the requirement the assembly
-#     check refuses the point, and over it the machine enumerates empty slots
-#     and is charged silicon for them.
-#   shared_chiplets  - as few digital chiplets as the beat admits. A chiplet
-#     carries the measured digital work of every stage it serves and may not run
-#     past one beat, so the stages are packed onto chiplets and the count is
-#     what falls out. This is what makes the pipeline BALANCED.
-#   the digital engine widths (scan lanes, fabric arrays, softmax lanes) - sized
-#     up to each stage's own analog pass (D31 / ADJ-9 / ADJ-10).
-#   the on-chip state store - sized to the state the mapping holds, and charged
-#     as silicon (ADJ-11). A machine is never refused for needing memory.
-#
-# THE ONE FEASIBILITY BUDGET: max_silicon_mm2, an appliance-level statement
-# about the box this system ships in. It is the same number for every model
-# because it describes the box and not the workload. With the sizing above it
-# rarely binds - a point that does not fit is a model too big for the box, not
-# an over-provisioned chip.
 mapping_dse:
-  label: "Qwen3.5-4B: stage granularity x bank depth, everything else derived"
+  label: 'Qwen3.5-4B: stage granularity x bank depth, everything else derived'
   objective: throughput
   max_silicon_mm2: 20000
   search: ladder
   initializer:
     layers_per_chip: 4
     bank_depth: 1
-    shared_chiplets: 8  # one per stage at the initializer: the balanced machine
-  # ADJ-14: `shared_chiplets` is an axis. An engine is sized for the stages its
-  # chiplet actually serves, so sharing is priced honestly: it widens the scan
-  # engine, and where the attention fabric saturates instead the beat grows and
-  # the point pays in throughput. Many thin chiplets or few fat ones is a real
-  # design choice, so the frontier explores it.
+    shared_chiplets: 8
+    conv_placement: macro_pool
   axes:
-    layers_per_chip: [32, 16, 8, 4, 2, 1]
-    bank_depth: [1, 2, 4]
-    shared_chiplets: [32, 16, 8, 4, 2]
+    layers_per_chip:
+    - 32
+    - 16
+    - 8
+    - 4
+    - 2
+    - 1
+    bank_depth:
+    - 1
+    - 2
+    - 4
+    shared_chiplets:
+    - 32
+    - 16
+    - 8
+    - 4
+    - 2
+    conv_placement:
+    - macro_pool
+    - shared_digital
+    # RETIRED AXIS (D35-REVISED, 2026-08-29). This sweep declared
+    # adc_capacity_mux. The fold is now DERIVED (mux = Y/Z) and is refused as an
+    # axis by name; the platform axes are macro_z and macro_y. This config's
+    # macro is off-platform (it predates D35), so it is NOT given the new axes:
+    # sweeping them here would build platform macros under a nonstandard card.
+    # What remains is the within-tape-out mapping sweep, which is what
+    # D35-REVISED says it is.

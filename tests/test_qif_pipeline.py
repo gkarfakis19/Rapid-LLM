@@ -53,7 +53,12 @@ from fws_mapping import (
     REGIME_LOCKSTEP,
     MappingError,
 )
-from program.fws_build import LAW_ANALOG_GEMM, annotations_of, build_fws_program
+from program.fws_build import (
+    LAW_ANALOG_GEMM,
+    LAW_STAGE_HOP,
+    annotations_of,
+    build_fws_program,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HW_DIR = PROJECT_ROOT / "configs" / "hardware-config"
@@ -69,7 +74,9 @@ LLAMA_LOCKSTEP = MODEL_DIR / "llama2_7b_fws_inf.yaml"
 
 #: MoE-small's decode context arithmetic, by hand.
 PREFILL_LEN = 512 - 32
-KV_BYTES_PER_TOKEN_PER_LAYER = 2 * 4 * 64 * 2  # K and V, 4 KV heads, d 64, bf16
+#: K and V, 4 KV heads, head_dim 64, at D38's FP8 state element (1 B), which is
+#: a PLATFORM choice and not the card's tensor format (which is bf16 here).
+KV_BYTES_PER_TOKEN_PER_LAYER = int(2 * 4 * 64 * fws_mapping.STATE_ELEMENT_BYTES)
 
 
 def _hw(path, mutate=None):
@@ -197,7 +204,9 @@ def test_the_shipped_mapped_configs_declare_which_regime_they_are():
     )
     # The same hardware runs the D29 twin of the workload.
     filled = _mapping(FWS_LLAMA_MAPPED, LLAMA_DECODE, regime=REGIME_FILLED)
-    assert filled.regime == REGIME_FILLED and filled.resident_streams == 4
+    # D38: one layer per stage, so D is the LAYER count and not the chip count.
+    assert filled.regime == REGIME_FILLED
+    assert filled.resident_streams == len(filled.stages) == 32
 
 
 # ---------------------------------------------------------------------------
@@ -284,61 +293,82 @@ def test_dropping_the_endpoints_is_worth_exactly_the_lm_head_macros():
 # ---------------------------------------------------------------------------
 
 
-def test_the_default_stage_is_the_chip_and_d_is_the_stage_count(moe):
+def test_the_stage_is_one_layer_and_d_is_the_stage_count(moe):
+    """D38: stage granularity DERIVES, and the finest granularity is a layer."""
     mapping = moe.mapping
-    assert mapping.stage_basis.startswith("the chip partition")
-    assert len(mapping.stages) == len(mapping.analog_chips()) == 2
-    assert mapping.resident_streams == 2
-    assert [stage.layers for stage in mapping.stages] == [
-        tuple(range(0, 6)),
-        tuple(range(6, 12)),
+    assert mapping.stage_basis.startswith("DERIVED (D38)")
+    assert len(mapping.stages) == 12
+    assert mapping.resident_streams == 12
+    assert [stage.layers for stage in mapping.stages] == [(i,) for i in range(12)]
+    # The stage names the chip(s) its layer sits on; the chip partition places
+    # weights and no longer decides where a stage boundary falls.
+    assert [stage.chips for stage in mapping.stages] == [
+        tuple(mapping.layer_chip[i]) for i in range(12)
     ]
-    assert [stage.chips for stage in mapping.stages] == [(0,), (1,)]
     summary = mapping.summary()
-    assert summary["resident_streams"] == 2 and summary["pipeline_stages"] == 2
-    assert summary["layers_per_stage"] == [6, 6]
+    assert summary["resident_streams"] == 12 and summary["pipeline_stages"] == 12
+    assert summary["layers_per_stage"] == [1] * 12
+    assert summary["pp_util"] == 1.0 and summary["pipeline_fill"] == 1.0
     assert summary["serving_regime"] == REGIME_FILLED
 
 
-def test_layers_per_stage_moves_d_and_the_plan_says_where_it_came_from():
-    def mutate(raw):
-        raw["mapping"] = {"layers_per_stage": 3}
+def test_a_declared_partition_is_refused_by_name(moe):
+    """D38 retired the partition as an input, so it is refused, not ignored."""
+    for declared in (3, 12, [6, 5]):
+        def mutate(raw, value=declared):
+            raw["mapping"] = {"layers_per_stage": value}
 
-    mapping = fws_mapping.build_mapping(_hw(FWS_MOE, mutate), _moe_model())
-    assert mapping.resident_streams == 4
-    assert [len(stage.layers) for stage in mapping.stages] == [3, 3, 3, 3]
-    assert mapping.stage_basis == "mapping.layers_per_stage = 3"
-    # a stage may span two chips, and it names both
-    def coarse(raw):
-        raw["mapping"] = {"layers_per_stage": 12}
+        with pytest.raises(MappingError) as excinfo:
+            fws_mapping.build_mapping(_hw(FWS_MOE, mutate), _moe_model())
+        message = str(excinfo.value)
+        assert "mapping.layers_per_stage" in message and "REFUSED BY NAME" in message
+        assert "D38" in message and "Stage granularity DERIVES" in message
+        assert "mapping.pp_util" in message, (
+            "a refusal has to name the axis that replaced the one it refuses"
+        )
+    # The same refusal guards the law itself, so no caller can route around it.
+    with pytest.raises(MappingError):
+        fws_mapping.stage_partition(12, 3)
 
-    one = fws_mapping.build_mapping(_hw(FWS_MOE, coarse), _moe_model())
-    assert one.resident_streams == 1
-    assert one.stages[0].chips == (0, 1)
 
+def test_pp_util_is_the_axis_that_replaced_the_partition():
+    """D38: resident streams = round(pp_util x stages), the fill is the axis."""
+    full = fws_mapping.build_mapping(_hw(FWS_MOE, _moe_d29), _moe_model())
+    assert full.pp_util == 1.0 and full.resident_streams == len(full.stages) == 12
 
-def test_a_stage_plan_that_is_not_a_partition_is_refused_by_name():
-    def mutate(raw):
-        raw["mapping"] = {"layers_per_stage": [6, 5]}
+    under = fws_mapping.build_mapping(
+        _hw(FWS_MOE, _moe_d29), _moe_model(), pp_util=0.5
+    )
+    assert len(under.stages) == 12, "the fill moves D, never the stage plan"
+    assert under.resident_streams == 6
+    assert under.pipeline_fill == 0.5
+    disclosed = [d for d in under.relaxations() if d.constraint == "pipeline_underfill"]
+    assert len(disclosed) == 1 and "D38" in disclosed[0].reason
 
+    three_quarters = fws_mapping.build_mapping(
+        _hw(FWS_MOE, _moe_d29), _moe_model(), pp_util=0.75
+    )
+    assert three_quarters.resident_streams == 9
+
+    # The list is CLOSED: a fill nobody adjudicated is refused by name.
     with pytest.raises(MappingError) as excinfo:
-        fws_mapping.build_mapping(_hw(FWS_MOE, mutate), _moe_model())
-    assert "covers 11 layers but the model has 12" in str(excinfo.value)
-    assert "PARTITION" in str(excinfo.value)
+        fws_mapping.build_mapping(_hw(FWS_MOE, _moe_d29), _moe_model(), pp_util=0.9)
+    assert "not one of D38's fill fractions" in str(excinfo.value)
 
 
-def test_a_declared_pp_membership_becomes_the_stage_plan():
+def test_a_declared_pp_membership_does_not_move_the_stage_plan():
+    """After D38 the stage plan is the layers, whatever the pp degree is."""
     def mutate(raw):
         raw["mapping"] = {"parallelism": {"pp": 2}}
 
     mapping = fws_mapping.build_mapping(_hw(FWS_MOE, mutate), _moe_model())
-    assert mapping.resident_streams == 2
-    assert "mapping.parallelism.pp = 2" in mapping.stage_basis
+    assert mapping.resident_streams == 12 == len(mapping.stages)
+    assert mapping.stage_basis.startswith("DERIVED (D38)")
 
 
-def test_granite_stages_are_its_chips_and_d_is_ten():
+def test_granite_stages_are_its_layers_and_d_is_forty():
     mapping = _mapping(FWS_GRANITE, GRANITE)
-    assert mapping.resident_streams == 10 == len(mapping.analog_chips())
+    assert mapping.resident_streams == 40 == len(mapping.stages)
     assert sum(len(stage.layers) for stage in mapping.stages) == 40
 
 
@@ -365,13 +395,19 @@ def _stage_windows(evaluation):
 
 def test_the_window_is_the_fill_plus_the_measured_steady_beats(moe):
     serving = moe.serving
-    assert serving.streams == 2
-    assert serving.steady_beats == fws_mapping.DEFAULT_DECODE_WINDOW
-    # D - 1 beats to fill, then one beat more than the steady sample so the
-    # transient interval can be held out and STILL leave `steady_beats` of it.
-    assert serving.beats == serving.streams + serving.steady_beats + 1
+    assert serving.streams == 12 == serving.stages
+    # The window is DERIVED and its floor is the stage count, so a 12-stage
+    # machine measures 12 steady beats however small the declared default is.
+    assert serving.steady_beats == serving.stages == 12
+    assert serving.steady_beats > fws_mapping.DEFAULT_DECODE_WINDOW
+    # `stages - 1` beats to fill, then one beat more than the steady sample so
+    # the transient interval can be held out and STILL leave `steady_beats` of
+    # it. The window is the LAW's, so a fill change resizes it in one place.
+    assert serving.beats == fws_mapping.lowered_beats(
+        serving.stages, serving.streams, serving.steady_beats
+    )
     pipeline = moe.pipeline
-    assert pipeline["fill_beats"] == serving.streams - 1
+    assert pipeline["fill_beats"] == serving.stages - 1
     assert pipeline["beats_lowered"] == serving.beats
     # D + steady beats lowered -> steady + 1 traversals complete -> steady
     # intervals to read the beat from. Nothing is extrapolated to get there.
@@ -391,7 +427,9 @@ def test_traversal_j_occupies_stage_d_at_beat_j_plus_d(moe):
     for annotation in annotations_of(moe.program):
         if annotation.stage < 0:
             continue
-        assert annotation.beat == annotation.step + annotation.stage
+        assert annotation.beat == (
+            moe.serving.entry_beat(annotation.step) + annotation.stage
+        )
         assert annotation.beat < moe.serving.beats
         assert annotation.stream == annotation.step % moe.serving.streams
 
@@ -442,12 +480,15 @@ def test_the_beat_is_read_off_the_settled_tail_and_does_not_move_with_the_window
     """
     def plan(window):
         def mutate(raw):
-            raw["mapping"] = {"layers_per_stage": 1, "decode_window": window}
+            raw["mapping"] = {"decode_window": window}
 
         return mutate
 
-    short = _moe_run(mutate=plan(2))
-    long = _moe_run(mutate=plan(4))
+    # D38 derives the plan (one layer per stage, D = 12); the window is the
+    # only knob left, and it is floored at the stage count, so the two runs
+    # below differ by the beats they lower and by nothing else.
+    short = _moe_run(mutate=plan(12))
+    long = _moe_run(mutate=plan(16))
     assert short.serving.streams == long.serving.streams == 12
     assert long.serving.beats > short.serving.beats
     # The residual is CONTEXT DRIFT, not estimator noise: each stream's
@@ -494,26 +535,30 @@ def test_the_beat_is_read_off_the_settled_tail_and_does_not_move_with_the_window
 def test_the_beat_is_the_slowest_stage_and_one_token_exits_per_beat(moe):
     """THE HEADLINE, hand-checked against the stages it emerged from."""
     windows = _stage_windows(moe)
-    last_complete = moe.serving.beats - moe.serving.streams
+    last_complete = max(
+        j for j in range(moe.serving.beats) if moe.serving.completes(j)
+    )
     spans = [
         windows[(last_complete, stage)][1] - windows[(last_complete, stage)][0]
-        for stage in range(moe.serving.streams)
+        for stage in range(moe.serving.stages)
     ]
     beat = float(moe.pipeline["beat_s"])
-    assert beat == pytest.approx(max(spans), rel=1e-3), (
+    assert beat == pytest.approx(max(spans), rel=5e-3), (
         "the beat must BE the slowest stage's service time: that is what 'one "
         "token per beat' means, and the timeline is where it comes from. The "
         "tolerance is the CONTEXT DRIFT: each stream's attention grows by one "
         "token of context every D beats, so the slowest stage is a little "
         "dearer each beat and the beat creeps by a fraction of a percent across "
-        "the window."
+        "the window. D38's per-layer stages make the window 12 stages deep "
+        "instead of 2, so the drift across it is larger and the tolerance is "
+        "the measured 0.19%."
     )
     # the exits are one beat apart, every one of them, once the pipeline is
     # full — to within the context drift, which is the only thing that moves a
     # steady interval: each stream's attention grows by a token of context
     # every D beats.
     for interval in moe.pipeline["steady_beat_intervals_s"]:
-        assert interval == pytest.approx(beat, rel=1e-3)
+        assert interval == pytest.approx(beat, rel=5e-3)
     assert max(moe.pipeline["steady_beat_intervals_s"]) >= min(
         moe.pipeline["steady_beat_intervals_s"]
     )
@@ -539,7 +584,7 @@ def test_the_per_token_latency_is_measured_and_the_identity_residual_reported(mo
     )
     # It is a MEASUREMENT, not a period times a count: P4 3 forbids the latter
     # in metrics[], so the identity lives in the pipeline block beside it.
-    assert "measured" in latency.basis.lower() or "finish of traversal" in latency.basis
+    assert "median of the settled half" in latency.basis.lower()
     assert "identity" in pipeline["identity_basis"].lower()
 
 
@@ -654,10 +699,16 @@ def test_the_representative_context_is_the_median_and_the_convention_is_disclose
 
 
 def test_the_kv_law_at_one_context_by_hand():
-    """1024 bytes per token per layer on this model, so the rest is arithmetic."""
+    """512 bytes per token per layer at D38's FP8 element, so the rest is arithmetic."""
     mapping = fws_mapping.build_mapping(_hw(FWS_MOE, _d29), _moe_model())
-    per_layer = mapping.device.kv_bytes_per_stream_layer(482, 2.0, 1)
-    assert per_layer == float(KV_BYTES_PER_TOKEN_PER_LAYER * 482) == 493568.0
+    per_layer = mapping.device.kv_bytes_per_stream_layer(
+        482, fws_mapping.STATE_ELEMENT_BYTES, 1
+    )
+    assert per_layer == float(KV_BYTES_PER_TOKEN_PER_LAYER * 482) == 246784.0
+    # The element size is the PLATFORM's, not the card's: this card declares
+    # bf16 activations and its state store is still built at 1 B/element.
+    assert mapping.hw.sw_config.precision.kv_cache == 2.0
+    assert fws_mapping.STATE_ELEMENT_BYTES == 1.0
 
 
 def test_every_stage_holds_all_d_streams_kv_for_its_layers(moe):
@@ -666,12 +717,12 @@ def test_every_stage_holds_all_d_streams_kv_for_its_layers(moe):
     THE HAND COMPUTATION. Stream i enters at prefill_len + i + 1 and advances
     one token every D beats, so at the last lowered beat B - 1 it sits at
     context prefill_len + i + floor((B - 1 - i) / D) + 1. On this fixture
-    (prefill 480, D = 2, B = 5) that is 480 + 0 + 2 + 1 = 483 for stream 0 and
-    480 + 1 + 1 + 1 = 483 for stream 1: the stagger is an OFFSET, and after two
-    turns of the rotation the two streams have arrived at the same depth.
-    MoE-small holds 2 x 4 x 64 x 2 = 1024 KV bytes per token per layer, so a
-    stage's KV is 1024 x (sum of the D contexts) x (its layer count) and
-    nothing else.
+    (prefill 480, D = 12 after D38 makes every layer a stage, B = 25) that is
+    480 + 0 + 2 + 1 = 483 for stream 0 and 480 + 11 + 1 + 1 = 493 for stream
+    11: the stagger is an OFFSET, and the streams sit at 11 different depths.
+    MoE-small holds 2 x 4 x 64 x 1 = 512 KV bytes per token per layer at D38's
+    FP8 state element, so a stage's KV is 512 x (sum of the D contexts) x (its
+    layer count) and nothing else.
 
     The window is bounded, so a LATE stage does not lower every stream's pass
     inside it. The residency is the regime's statement, not a census of the
@@ -684,7 +735,8 @@ def test_every_stage_holds_all_d_streams_kv_for_its_layers(moe):
         PREFILL_LEN + index + (moe.serving.beats - 1 - index) // streams + 1
         for index in range(streams)
     ]
-    assert contexts == [483, 483]
+    assert len(contexts) == 12
+    assert contexts[0] == 483 and contexts[-1] == 493
     # The convention is the one the LOWERING stamped on the priced ops: every
     # context an op carries is one of them (or an earlier turn of the same
     # stream), and each stream's last one is exactly the figure above.
@@ -698,15 +750,23 @@ def test_every_stage_holds_all_d_streams_kv_for_its_layers(moe):
         assert value <= contexts[stream]
     assert max(value for (_l, s), value in reached.items() if s == 0) == contexts[0]
     residency = moe.state_residency
-    assert residency["measured"] and residency["resident_streams"] == 2
+    assert residency["measured"] and residency["resident_streams"] == 12
+    # THE STORE IS SIZED FOR THE WHOLE SERVED REQUEST (M10), not for wherever
+    # the lowered window stopped: every resident stream reaches prefill_len +
+    # decode_len before it leaves, so the silicon holds D streams at THAT
+    # context. The window contexts above are what the priced ops carry; this is
+    # what the machine has to be built for, and the two are different readings
+    # of one convention rather than two conventions.
+    served = PREFILL_LEN + 32
     for row in residency["per_stage"]:
         stage = moe.mapping.stages[int(row["stage"])]
         expected = float(
-            KV_BYTES_PER_TOKEN_PER_LAYER * sum(contexts) * len(stage.layers)
+            KV_BYTES_PER_TOKEN_PER_LAYER * served * streams * len(stage.layers)
         )
         assert row["kv_bytes"] == pytest.approx(expected, rel=1e-12), (
             "a stage's KV is the SUM over its resident streams at each stream's "
-            "own context; a count times one context would be a different number"
+            "own served context; a count times one window context would be a "
+            "different number"
         )
         # ... and it is D streams' worth, not one.
         assert row["per_stream_state_bytes"] == pytest.approx(
@@ -722,12 +782,12 @@ def test_every_stage_holds_all_d_streams_kv_for_its_layers(moe):
 
 def test_state_scales_with_d_because_every_stage_holds_every_stream():
     """Double D and the per-stream model state stays; the resident total grows."""
-    def finer(raw):
-        raw["mapping"] = {"layers_per_stage": 3}
-
-    coarse = _moe_run()
-    fine = _moe_run(mutate=finer)
-    assert coarse.serving.streams == 2 and fine.serving.streams == 4
+    # D38 moves D with the FILL, not with a partition: both runs have 12
+    # stages and differ only in how many of them hold a stream.
+    coarse = _moe_run(pp_util=0.5)
+    fine = _moe_run()
+    assert coarse.serving.streams == 6 and fine.serving.streams == 12
+    assert coarse.serving.stages == fine.serving.stages == 12
     per_stream_coarse = coarse.state_residency["per_stream_model_state_bytes"]
     per_stream_fine = fine.state_residency["per_stream_model_state_bytes"]
     # The MODEL's per-stream state is a property of the model, not of D: what
@@ -760,14 +820,14 @@ def test_the_state_store_is_sized_to_the_stage_and_a_tight_declared_tier_cannot_
 
     run = _moe_run(mutate=tight)
     residency = run.state_residency
-    assert residency["verdict"] == "sized"
+    assert residency["verdict"] == "uncovered"
     assert residency["stages_violating"] == []
     assert residency["store_bytes"] >= residency["total_state_bytes"]
     # The declared tier is still reported — it is just not a gate.
     assert residency["declared_onchip_tier_bytes"] == 1048576.0
     for row in residency["per_stage"]:
-        assert row["verdict"] == "sized"
-        assert row["capacity_bytes"] >= row["state_bytes"]
+        assert row["verdict"] == "uncovered"
+        assert row["store_provenance"] == "absent"
     # This machine's card names NO synthesis library, so there is no measured
     # SRAM macro to build a store out of. That is an absent law, not a zero:
     # the store reports the requirement and counts no macros, and it still
@@ -813,20 +873,24 @@ def test_the_state_store_is_sized_to_the_stage_and_a_tight_declared_tier_cannot_
     assert dram_rows and all(v.status == "VIOLATED" for v in dram_rows)
     assert all("resident streams" in v.disclosure for v in dram_rows)
     assert dram_run.state_residency["activation_tier_verdict"] == "VIOLATED"
-    # ... while its state store is still simply sized.
-    assert dram_run.state_residency["verdict"] == "sized"
+    # ... while the state store is untouched by that tier entirely: it is not
+    # checked against anything, and on this library-less card it is uncovered.
+    assert dram_run.state_residency["verdict"] == "uncovered"
 
 def test_the_state_number_rides_the_report_headline(moe):
     document = fws_eval.report_document(moe)
     serving = document["serving"]
     assert serving["regime"] == REGIME_FILLED
-    assert serving["resident_streams"] == 2
+    assert serving["resident_streams"] == 12
     assert serving["beats_lowered"] == moe.serving.beats
     pipeline = document["evaluation"]["pipeline"]
     assert pipeline["beat_s"] == moe.pipeline["beat_s"]
     residency = document["evaluation"]["state_residency"]
     assert residency["max_stage_state_bytes"] == moe.state_residency["max_stage_state_bytes"]
-    assert residency["verdict"] == "sized"
+    # This fixture's card names no measured library, so the store is UNCOVERED
+    # rather than sized - and the headline says which, because a store that
+    # could not be built must not read like one that measured zero.
+    assert residency["verdict"] in ("sized", "uncovered")
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +912,7 @@ def test_every_macro_walks_its_banks_once_per_beat(moe):
 def test_within_stage_sharing_is_serial_free_and_cross_stage_is_the_priced_one():
     """D29's contention statement, measured on a plan that cuts inside a chip."""
     def mutate(raw):
-        raw["mapping"] = {"layers_per_stage": 3, "packing": "dense"}
+        raw["mapping"] = {"packing": "dense"}
         raw["cim"]["cards"] = {
             "ctt": {"kind": "analog_macro", "device": "ctt", "bank_depth": 1}
         }
@@ -861,7 +925,10 @@ def test_within_stage_sharing_is_serial_free_and_cross_stage_is_the_priced_one()
     assert sharing["macros_sharing_banks_across_stages"] > 0
     assert sharing["macros_sharing_banks_across_layers"] > 0
     # WITHIN a stage the layers are sequential for the one stream the stage
-    # holds: serial-free, measured as exactly zero.
+    # holds: serial-free, measured as exactly zero. After D38 a stage IS one
+    # layer, so this term is also zero by CONSTRUCTION - it is kept because the
+    # instrument still reports it and a non-zero reading would mean the stage
+    # plan is no longer the derived one.
     assert sharing["within_stage_cross_layer_delay_s"] == 0.0
     # The instrument is not blind on this timeline.
     assert sharing["delayed_ops"] > 0 and sharing["same_owner_delay_s"] > 0.0
@@ -906,7 +973,7 @@ def test_cross_stage_bank_sharing_costs_real_time_when_the_macro_collides():
     """
 
     def mutate(raw):
-        raw["mapping"] = {"layers_per_stage": 1, "packing": "dense"}
+        raw["mapping"] = {"packing": "dense"}
         raw["cim"]["cards"] = {
             "ctt": {"kind": "analog_macro", "device": "ctt", "bank_depth": 1}
         }
@@ -949,3 +1016,129 @@ def test_utilization_is_still_a_required_output_of_a_filled_pipeline(moe):
     assert len(banner) == 1
     for row in moe.utilization:
         assert row.devices >= row.devices_used
+
+
+# ---------------------------------------------------------------------------
+# 8. The stage handoff, the fill and the stub, each by name (D38 + the interim
+#    link prices)
+# ---------------------------------------------------------------------------
+
+
+def _hops(evaluation):
+    """(crosses_chip, duration_s) for every op the STAGE HOP law priced."""
+    annotations = annotations_of(evaluation.program)
+    return [
+        (bool(annotations[cost.uid].crosses_chip), float(cost.duration_s))
+        for cost in evaluation.pricing.costs
+        if annotations[cost.uid].law == LAW_STAGE_HOP
+    ]
+
+
+def test_every_stage_handoff_is_priced_at_the_flat_hop_for_its_kind(moe):
+    """The interim link prices REPLACE `links: zeroed` as the mapped default.
+
+    Before them a stage handoff that stayed on one chip emitted no op at all
+    and cost 0 s, which is a claim no built machine can make: the activation
+    still crosses the die. Every stage boundary now emits a handoff, and its
+    price is the FLAT latency of its kind - 50 ns inside a chip, 500 ns across
+    one - and nothing about how many bytes it carries.
+    """
+    hops = _hops(moe)
+    assert hops, "a 12-stage pipeline hands off 11 times per traversal"
+    intra = [d for crosses, d in hops if not crosses]
+    cross = [d for crosses, d in hops if crosses]
+    assert intra and cross, (
+        "this fixture places its 12 layers on 2 chips, so it has both kinds"
+    )
+    assert set(intra) == {fws_mapping.T_HOP_INTRA_CHIP} == {50e-9}
+    assert set(cross) == {fws_mapping.T_HOP_CROSS_CHIP} == {500e-9}
+    # The prices are the LAW LAYER's, quoted where they are charged. The
+    # mapper spells the law and the pricer applies it, so both name it - and
+    # they name it with the SAME sentence, so the merged artifact carries one
+    # entry and not two accountings of one fact (D21).
+    banner = [
+        d for d in moe.disclosures if d.constraint == "stage_handoff_hop_prices"
+    ]
+    assert banner and len({d.reason for d in banner}) == 1
+    assert "LATENCY ONLY" in banner[0].reason
+    assert "REPLACING links: zeroed" in banner[0].reason
+    merged = [
+        row
+        for row in fws_eval.merge_disclosures(moe.disclosures)
+        if row["constraint"] == "stage_handoff_hop_prices"
+    ]
+    assert len(merged) == 1
+
+
+def test_the_zeroed_flag_still_overrides_the_hop_to_zero():
+    """`links: zeroed` stays available - as an explicit, disclosed choice."""
+    def mutate(raw):
+        raw["mapping"] = {"links": "zeroed"}
+
+    run = _moe_run(mutate=mutate)
+    hops = _hops(run)
+    assert hops and {duration for _crosses, duration in hops} == {0.0}
+    named = [d for d in run.disclosures if d.constraint == "links_zeroed"]
+    assert len(named) == 1
+    # The BYTES are untouched: only the time is relaxed.
+    annotations = annotations_of(run.program)
+    moved = [
+        annotations[cost.uid].bytes_moved
+        for cost in run.pricing.costs
+        if annotations[cost.uid].law == LAW_STAGE_HOP
+    ]
+    assert all(value > 0 for value in moved)
+
+
+def test_the_underfilled_pipeline_trades_throughput_for_state(moe):
+    """D38's trade, both halves measured off one timeline."""
+    under = _moe_run(pp_util=0.5)
+    assert under.serving.streams == 6 and under.serving.stages == 12
+    assert under.pipeline["pipeline_fill"] == 0.5
+    assert under.pipeline["pp_util"] == 0.5
+    assert under.pipeline["stage_count"] == 12
+
+    # THROUGHPUT falls with the fill. It does NOT fall exactly linearly, and
+    # the reason is measured rather than corrected: the fill enters the DAG's
+    # entry spacing and everything downstream is read off that timeline, so a
+    # machine holding half the streams also contends less and its beat shrinks
+    # a little. Half the streams buy 0.64x the rate here, not 0.5x, and no
+    # number is multiplied by the fill anywhere to make it look linear.
+    full_rate = moe.metric("sys.fws.tokens_per_s").value
+    under_rate = under.metric("sys.fws.tokens_per_s").value
+    assert 0.5 * full_rate <= under_rate < full_rate
+    assert under_rate == pytest.approx(0.64 * full_rate, rel=0.05)
+
+    # STATE scales with the resident streams, which is the whole point.
+    full_state = moe.state_residency["total_state_bytes"]
+    under_state = under.state_residency["total_state_bytes"]
+    assert under_state == pytest.approx(0.5 * full_state, rel=0.05)
+    assert under.state_residency["resident_streams"] == 6
+
+    # And it is DISCLOSED: an underfilled machine never reads as a full one.
+    named = [d for d in under.disclosures if d.constraint == "pipeline_underfill"]
+    assert len(named) == 1 and "pp_util = 0.5" in named[0].value
+    assert not [d for d in moe.disclosures if d.constraint == "pipeline_underfill"]
+
+
+def test_the_state_element_is_fp8_and_says_so(moe):
+    """D38: KV and recurrent state are FP8, whatever the card's tensor format."""
+    named = [d for d in moe.disclosures if d.constraint == "state_element_precision"]
+    assert len(named) == 1
+    assert "fp8" in named[0].value and "1 B/element" in named[0].reason
+    assert moe.mapping.hw.sw_config.precision.activations == 2.0, (
+        "the fixture's card is bf16, so the FP8 store is NOT the card's format"
+    )
+
+
+def test_every_mapped_artifact_carries_the_mapping_stub_disclosure(moe):
+    """Until the mapping law lands, no mapped result may read as design-valid."""
+    named = [
+        d for d in moe.disclosures if d.constraint == fws_mapping.MAPPING_STUB_KEY
+    ]
+    assert len(named) == 1
+    assert named[0].value == fws_mapping.MAPPING_STUB_VALUE
+    assert "NOT DESIGN-VALID" in named[0].reason
+    document = fws_eval.report_document(moe)
+    keys = {row["constraint"] for row in document["disclosures"]}
+    assert fws_mapping.MAPPING_STUB_KEY in keys

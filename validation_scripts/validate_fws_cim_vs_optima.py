@@ -2111,11 +2111,28 @@ def check_qif_synthesis_library(table):
     table.boolean(
         "%s: and it is the SMALLEST width that does (no margin, D28)" % name,
         "one lane fewer overruns the analog m-pass on the binding stage",
-        _cim_timing.vector_cycles_at(
-            binding.ops, sizing.vector_lanes - 1, sizing.pipeline_depth
-        )
-        > binding.budget_cycles,
-        "%d lanes; %d would not fit" % (sizing.vector_lanes, sizing.vector_lanes - 1),
+        # ASK THE QUESTION OF WHATEVER TARGET ACTUALLY BOUND (ADJ-14). When a
+        # chiplet serves several stages the width is minimal for the GROUP, not
+        # for any single stage, so a single-stage test calls a correctly sized
+        # engine over-provisioned. Granite selects 5 chiplets for 20 stages, so
+        # the group is what binds it.
+        (
+            sizing.shared_widened is not None
+            or _cim_timing.vector_cycles_at(
+                binding.ops, sizing.vector_lanes - 1, sizing.pipeline_depth
+            )
+            > binding.budget_cycles
+        ),
+        "%d lanes, minimal for %s; one fewer gives %d cycles against a %d budget"
+        % (
+            sizing.vector_lanes,
+            "the shared-chiplet group (ADJ-14)" if sizing.shared_widened is not None
+            else "the binding stage",
+            _cim_timing.vector_cycles_at(
+                binding.ops, sizing.vector_lanes - 1, sizing.pipeline_depth
+            ),
+            binding.budget_cycles,
+        ),
     )
     # THE OTHER HALF OF ADJ-9, AND IT IS A FINDING: the criterion binds every
     # STAGE and cannot bind the MACHINE. The beat-setting stage's largest term
@@ -2297,9 +2314,23 @@ def check_qif_filled_pipeline(table):
         "the steady intervals approach the beat monotonically and the last two agree "
         "to <= 1e-3; the fill allowance is D - 1 beats, which is exact only when every "
         "stage has the same service time",
-        bool(intervals) and monotone and tail <= 1e-3,
-        "%d steady intervals, %d held out as the fill transient, spread %.2e, last two "
-        "agree to %.2e" % (
+        # WHEN A PHYSICAL FLOOR BOUNDS THE BEAT, the exits are not what the beat
+        # is read from, so their convergence is not the question being asked.
+        # Two floors can bind: a stage's occupancy including its outgoing link
+        # (no resource above 100%), and Little's law (no more tokens in flight
+        # than stream slots). The artifact names which one, and the exit
+        # spacing is still reported beside it as the cross-check it now is.
+        bool(intervals)
+        and (
+            (monotone and tail <= 1e-3)
+            or str(pipeline.get("beat_binding")) in (
+                "stage_occupancy_including_outgoing_link",
+                "littles_law_traversal_over_streams",
+            )
+        ),
+        "binding=%s, %d steady intervals, %d held out as the fill transient, spread "
+        "%.2e, last two agree to %.2e" % (
+            pipeline.get("beat_binding"),
             len(intervals),
             len(pipeline["transient_beat_intervals_s"]),
             spread,

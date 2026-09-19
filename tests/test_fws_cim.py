@@ -1218,17 +1218,42 @@ def test_decode_attention_closed_form_and_monotone_growth(cim_llama):
         att = cim_llama.decode_attention_timing(ctx, batch_size=1)
         assert (att.qk_cycles, att.pv_cycles, att.total_cycles) == (qk, pv, total)
         assert att.sa_time_s == pytest.approx(total / 0.95e9, rel=1e-12)
-        # decode softmax is B-scaled: tokens_q = B*sh = 1;
-        # cycles = 20 + ceil(1*32/1) - 1 = 51.
-        assert att.softmax_cycles == 51
+        # ADJ-16: the softmax pays for the ROW WIDTH. tokens_q = B*sh = 1, so
+        # rows = 32, and each row is `ctx` keys wide against a `softmax_width`
+        # pipeline. The old law read 51 for every context, which said a 4096-key
+        # row costs the same as a 129-key one.
+        rows = 32
+        chunks = rows * math.ceil(ctx / cim_llama.softmax_width)
+        assert att.softmax_cycles == (
+            20 + math.ceil(chunks / cim_llama.softmax_copies) - 1
+        )
         totals.append(att.total_cycles)
     assert totals[0] < totals[1] < totals[2]  # monotone in context
 
 
 def test_decode_softmax_is_b_scaled(cim_llama):
-    # tokens_q = B*shared_heads = 8*1; cycles = 20 + ceil(8*32/1) - 1 = 275.
-    att = cim_llama.decode_attention_timing(512, batch_size=8)
-    assert att.softmax_cycles == 20 + math.ceil(8 * 32 / 1) - 1 == 275
+    """ADJ-16: the softmax spends its width on a ROW, and pays for the row's width.
+
+    One pipeline is `softmax_width` elements wide - the SA's own output width,
+    which is what OPTIMA builds - and it finishes ONE ROW per pass because the
+    running-max and sum trees are per-row structures. So a call of `rows` rows
+    each `keys` wide takes `rows * ceil(keys / width)` passes, shared over
+    `copies` pipelines.
+
+    The old law spent the width on ROWS and never read `keys` at all, so a
+    512-key row counted as one pass no matter how narrow the engine was.
+    """
+    ctx = 512
+    att = cim_llama.decode_attention_timing(ctx, batch_size=8)
+    rows = 8 * 32
+    width = cim_llama.softmax_width
+    copies = cim_llama.softmax_copies
+    chunks = rows * math.ceil(ctx / width)
+    expected = 20 + math.ceil(chunks / copies) - 1
+    assert att.softmax_cycles == expected
+    # The row width is now IN the answer: a wider context costs more softmax.
+    wider = cim_llama.decode_attention_timing(ctx * 2, batch_size=8)
+    assert wider.softmax_cycles > att.softmax_cycles
 
 
 def test_decode_attention_sa_is_b_folded(cim_llama):
@@ -1252,13 +1277,18 @@ def test_prefill_attention_sa_is_b_folded(cim_llama):
     # whose tokens S1/S3/S4/S5 price (tokens = B*S). S=1792, B=4, MHA:
     #   qk = 56*28*(128*32*4+94)-1 = 1568*16478-1 = 25837503
     #   pv = 56*2*(1792*32*4+94)-1 = 112*229470-1 = 25700639
-    # softmax defaults to the B-scaled query rows: tokens_q = B*S = 7168,
-    # cycles = 20 + ceil(7168*32/1) - 1 = 229395.
+    # ADJ-16: softmax rows are the B-scaled query rows (tokens_q = B*S = 7168,
+    # times 32 heads), and EACH ROW IS `seq_len` KEYS WIDE. The old law dropped
+    # the row width, so a 1792-key prefill row counted as one pass.
     att = cim_llama.prefill_attention_timing(seq_len=1792, streams=4)
     assert att.qk_cycles == 25837503
     assert att.pv_cycles == 25700639
     assert att.total_cycles == 25837503 + 96
-    assert att.softmax_cycles == 229395
+    _rows = 7168 * 32
+    _chunks = _rows * math.ceil(1792 / cim_llama.softmax_width)
+    assert att.softmax_cycles == (
+        20 + math.ceil(_chunks / cim_llama.softmax_copies) - 1
+    )
     # streams=1 reproduces the pass-1 law bit-exactly.
     att1 = cim_llama.prefill_attention_timing(seq_len=1792, streams=1)
     assert att1.qk_cycles == 6569919
@@ -2163,7 +2193,10 @@ def test_dse_t1_pinned_selection(tmp_path):
     assert (out_dir / "dse_report.md").exists()
     emitted_dict = _load_yaml(emitted)
     assert emitted_dict["cim"]["chip"]["layers_per_chip"] == [32]
-    assert emitted_dict["cim"]["analog"]["adc_mux"] == 4
+    # The emitted card is written in the CARD schema (D35-REVISED): the point's
+    # mux 4 is the DERIVED Y/Z, not a key.
+    assert emitted_dict["cim"]["analog"]["adcs"] == 320
+    assert emitted_dict["cim"]["analog"]["cols"] == 1280
     assert emitted_dict["parallelism"]["tp"] == 1
     # The emitted config parses as a valid fws_cim hardware config.
     emitted_hw = _hw_from_dict(emitted_dict)
@@ -2644,9 +2677,10 @@ def test_empty_device_slots_ship_no_numbers(device):
     # With a complete params block of its own it parses — the schema is
     # genuinely device-generic, and every number came from the user.
     hw_dict["cim"]["cards"]["second"]["params"] = {
+        # D35-REVISED names a macro X x Y : Z; mux = Y/Z = 2 is DERIVED.
         "rows": 512,
-        "cols_adc": 128,
-        "adc_mux": 2,
+        "cols": 256,
+        "adcs": 128,
         "slice_cycles": 1,
         "analog_clock_mhz": 200,
         "energy_per_vec_pj": 1.0,
@@ -2655,7 +2689,8 @@ def test_empty_device_slots_ship_no_numbers(device):
     cim = _hw_from_dict(hw_dict).cim_config
     card = cim.analog_card
     assert card.device == device
-    assert card.params.rows == 512 and card.params.adc_mux == 2
+    assert card.params.rows == 512 and card.params.mux == 2
+    assert card.params.label == "512 x 256 : 128"
     assert card.params is not cim.analog  # its own parameter set, nothing inherited
 
 
@@ -2669,9 +2704,10 @@ def test_custom_device_family_is_admitted_and_inherits_nothing():
         _hw_from_dict(hw_dict)
 
     hw_dict["cim"]["cards"]["second"]["params"] = {
+        # D35-REVISED names a macro X x Y : Z; mux = Y/Z = 4 is DERIVED.
         "rows": 256,
-        "cols_adc": 64,
-        "adc_mux": 4,
+        "cols": 256,
+        "adcs": 64,
         "slice_cycles": 2,
         "analog_clock_mhz": 150,
         "energy_per_vec_pj": 2.0,
@@ -2680,7 +2716,8 @@ def test_custom_device_family_is_admitted_and_inherits_nothing():
     cim = _hw_from_dict(hw_dict).cim_config
     card = cim.analog_card
     assert card.device == "custom"
-    assert card.params.rows == 256 and card.params.adc_mux == 4
+    assert card.params.rows == 256 and card.params.mux == 4
+    assert card.params.label == "256 x 256 : 64"
     assert card.params is not cim.analog  # nothing inherited under another name
 
 
@@ -2846,7 +2883,8 @@ def test_allocation_block_parses_and_capacity_checks(cim_t1):
 
 def test_allocation_out_of_range_column_set_is_refused_at_parse_time():
     hw_dict = _load_yaml(FWS_T1)
-    mux = int(hw_dict["cim"]["analog"]["adc_mux"])
+    # D35-REVISED: the file states Y and Z; the fold is Y/Z and is DERIVED.
+    mux = int(hw_dict["cim"]["analog"]["cols"]) // int(hw_dict["cim"]["analog"]["adcs"])
     hw_dict["cim"]["allocation"] = {
         "column_sets_per_tile": 1,
         "assignments": [
@@ -3190,8 +3228,11 @@ def test_digital_pool_lanes_come_from_the_peak_result_rate(cim_t1):
     assert sizing.result_rate_per_s == pytest.approx(expected_rate, rel=1e-12)
     assert sizing.pool_clock_hz == cim_t1.f_fabric_hz  # inherits the digital card's clock
     assert sizing.lanes == math.ceil(expected_rate / sizing.pool_clock_hz)
-    # No slicing => no shift-add tree to hold.
-    assert sizing.adders == 0 and sizing.area_mm2 == 0.0
+    # No slicing => no shift-add TREE, but the drain still retires one result
+    # per lane per cycle and that needs `lanes` adders (ADJ-16). A pool with
+    # zero arithmetic could not run the adds the timeline puts through it.
+    assert sizing.adders == sizing.lanes
+    assert sizing.area_mm2 == pytest.approx(sizing.adders * cim_t1.card.pool_area_mm2_per_adder)
     assert not sizing.disclose and sizing.note is None
 
 
@@ -3200,7 +3241,13 @@ def test_digital_pool_adders_scale_with_the_slice_count():
     sizing = dev.digital_pool_sizing()
     assert sizing.pool_clock_hz == pytest.approx(2.0e9)
     assert sizing.lanes == math.ceil(sizing.result_rate_per_s / 2.0e9)
-    assert sizing.adders == sizing.lanes * (dev.n_slices - 1)
+    # ADJ-16 (M9): the drain law retires ONE result per lane per cycle, so it
+    # needs `lanes` adders working in parallel. The bit-slice tree is an
+    # ADDITIONAL contributor on a multi-slice card. The old law counted only the
+    # tree, which is ZERO on every single-slice card - so the composed pool held
+    # no arithmetic while the timeline ran millions of adds through it.
+    assert sizing.adders == sizing.lanes + sizing.lanes * (dev.n_slices - 1)
+    assert sizing.adders >= sizing.lanes
     assert sizing.area_mm2 == pytest.approx(sizing.adders * 0.001, rel=1e-12)
 
 
@@ -3253,7 +3300,8 @@ def _inert_p2_blocks(hw_dict):
     (bank = the whole mux depth), and an allocation block that names the same
     granularity the absent block implies.
     """
-    mux = int(hw_dict["cim"]["analog"]["adc_mux"])
+    # D35-REVISED: the file states Y and Z; the fold is Y/Z and is DERIVED.
+    mux = int(hw_dict["cim"]["analog"]["cols"]) // int(hw_dict["cim"]["analog"]["adcs"])
     hw_dict["cim"]["cards"] = {
         "ctt_explicit": {"kind": "analog_macro", "device": "ctt", "bank_depth": mux},
         "shared_digital": {"kind": "digital_chiplet"},
@@ -3434,7 +3482,13 @@ def test_a_card_that_pins_the_fabric_rides_a_disclosure_and_skips_the_derivation
     assert len(notes) == 1 and "OVERRIDE" in notes[0]
     assert "REFUSED_AXES" in notes[0]
     assert pinned_device.fabric_num_arrays == 6
-    assert pinned_device.softmax_width == 3
+    # ADJ-16 separated the two numbers OPTIMA carries. `softmax_lanes` is the
+    # COPY count (OPTIMA's DIGITAL_SOFTMAX_LANES), and `softmax_width` is the
+    # ELEMENT width of one pipeline - the SA's own output width, which is what
+    # `create_softmax_collection(softmax_width=cfg.digital.cols)` builds. The
+    # pin moves the copies; the width follows the array geometry.
+    assert pinned_device.softmax_copies == 3
+    assert pinned_device.softmax_width == pinned_device.fabric.cols
     # The pin WINS over a derivation, which is what makes it an override.
     fake = cim_timing.DerivedFabricSizing(
         analog_beat_s=1e-5, clock_hz=1e9, rows=32, cols=64, replicas=1,
@@ -3496,3 +3550,410 @@ def test_the_fabric_derivation_stops_at_the_smallest_width_that_meets_the_target
     assert narrower > row.budget_cycles
     # ONLY THE COUNT MOVED: the array geometry is the declared one.
     assert (sizing.rows, sizing.cols) == (cim_t1.fabric.rows, cim_t1.fabric.cols)
+
+
+# ---------------------------------------------------------------------------
+# THE PLATFORM LAW LAYER (D35-REVISED / D36 / D38 + the interim link prices)
+#
+# The stub round's law layer: the platform's rows, the interim link prices, the
+# analog chip's derived capacity, D36's group function and D38's parked bank
+# depth. Every one of them is a closed form over numbers the caller measured,
+# and the LAST test in this section is the hard gate: none of them can move a
+# declared/legacy number, proved by breaking every constant and re-reading the
+# OPTIMA validator's own figures.
+# ---------------------------------------------------------------------------
+
+
+def test_the_platform_rows_constant_is_the_sheet_modules_number_and_not_a_copy():
+    """X is declared ONCE (D21: one accounting per number).
+
+    ``cim_timing.PLATFORM_ROWS`` is an alias so a law-layer caller need not
+    reach into the sheet module; it must never become a second 512 that can
+    drift from the (Z, Y) lists it has to stay consistent with.
+    """
+    import cim_analog_calc
+
+    assert cim_timing.PLATFORM_ROWS is cim_analog_calc.PLATFORM_MACRO_ROWS
+    assert cim_timing.PLATFORM_ROWS == 512
+    # The lists are the platform's, and X is their hinge: Z never exceeds X and
+    # Y starts at X. If the alias ever stopped being the same object, these two
+    # would be the first things to disagree.
+    assert max(cim_analog_calc.MACRO_Z_VALUES) == cim_timing.PLATFORM_ROWS
+    assert min(cim_analog_calc.MACRO_Y_VALUES) == cim_timing.PLATFORM_ROWS
+
+
+def test_the_device_names_its_macro_as_X_by_Y_colon_Z_with_the_mux_derived(cim_t1):
+    """The one notation, and the fold is READ, never declared (D35-REVISED).
+
+    SCHEMA NOTE. The fold is exposed on the card's PARAMS (``card.params.mux``)
+    and the label on ``card.params.label``; there is no ``card.mux``. That is
+    where the schema put them, and the device delegates to the same properties
+    rather than re-deriving either — which is the property that matters here.
+    """
+    card = cim_t1.card
+    params = card.params
+    assert cim_t1.macro_label() == params.label
+    assert cim_t1.macro_label() == f"{params.rows} x {params.cols} : {params.adcs}"
+    # mux is Y/Z, derived — read from the two counts, never stored as a third.
+    assert params.mux == params.cols // params.adcs
+    assert params.cols == params.adcs * params.mux
+    # The pricing laws' older names are read-only VIEWS of the same two numbers.
+    assert params.adc_mux == params.mux
+    assert params.cols_adc == params.adcs
+
+
+# --- the interim link prices ------------------------------------------------
+
+
+def test_the_two_link_prices_are_the_declared_interim_numbers_with_a_basis():
+    """50 ns intra-chip, 500 ns cross-chip, and a basis that says they are interim."""
+    assert cim_timing.T_HOP_INTRA_CHIP == 50e-9
+    assert cim_timing.T_HOP_CROSS_CHIP == 500e-9
+    basis = cim_timing.LINK_PRICE_BASIS
+    assert "2026-08-29" in basis
+    assert "50 ns" in basis and "500 ns" in basis
+    # The basis has to say what it REPLACES, or a reader cannot tell that the
+    # default moved off `links: zeroed`.
+    assert "zeroed" in basis
+
+
+@pytest.mark.parametrize(
+    "args, kind, seconds",
+    [
+        (((0, 0), {}), "intra_chip", 50e-9),
+        (((0, 1), {}), "cross_chip", 500e-9),
+        (((3, 3), {"from_macro": 7, "to_macro": 7}), "intra_macro", 0.0),
+        (((3, 3), {"from_macro": 7, "to_macro": 8}), "intra_chip", 50e-9),
+        (((3, 4), {"from_macro": 7, "to_macro": 7}), "cross_chip", 500e-9),
+    ],
+)
+def test_a_stage_handoff_charges_the_applicable_hop_and_intra_macro_is_free(
+    args, kind, seconds
+):
+    """Classify, then charge. Intra-macro is 0 s as a LAW, not as an omission."""
+    positional, keywords = args
+    assert cim_timing.hop_kind(*positional, **keywords) == kind
+    assert cim_timing.stage_handoff_time_s(*positional, **keywords) == seconds
+
+
+def test_an_unpriced_hop_name_is_refused_and_points_at_the_register():
+    with pytest.raises(cim_timing.LinkPriceError, match="intra_rack"):
+        cim_timing.hop_time_s("intra_rack")
+
+
+def test_the_link_disclosures_name_the_gap_they_do_not_close():
+    """Latency only. The missing per-byte term is NAMED, never zeroed quietly."""
+    notes = " ".join(cim_timing.link_price_disclosures())
+    assert "LATENCY ONLY" in notes
+    assert "bandwidth" in notes
+    assert "intra-macro 0 s" in notes
+
+
+# --- the analog chip's capacity ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "footprint, slots",
+    [
+        (400.0, 1),      # exactly one chip's worth
+        (400.1, None),   # larger than the chip: refused, never 0
+        (200.0, 2),
+        (266.0, 1),      # floor, not round: 1.503 -> 1
+        (2.0204136, 197),
+        (0.5, 800),
+    ],
+)
+def test_the_chip_capacity_is_a_floor_over_the_package_area(footprint, slots):
+    """``C = floor(400.0 / macro_footprint_mm2)``, with no rounding either way."""
+    if slots is None:
+        with pytest.raises(cim_timing.AnalogChipCapacityError, match="ZERO macros"):
+            cim_timing.analog_chip_capacity(footprint)
+        return
+    assert cim_timing.analog_chip_capacity(footprint) == slots
+    assert slots * footprint <= cim_timing.ANALOG_CHIP_AREA_MM2
+    assert (slots + 1) * footprint > cim_timing.ANALOG_CHIP_AREA_MM2
+
+
+def test_a_nonpositive_footprint_is_refused_rather_than_divided_by():
+    with pytest.raises(cim_timing.AnalogChipCapacityError, match="positive macro footprint"):
+        cim_timing.analog_chip_capacity(0.0)
+
+
+def test_the_capacity_reads_the_footprint_so_stacking_buys_slots(cim_t1):
+    """The divisor is silicon / stack height, which is what a chip runs out of."""
+    assert cim_t1.analog_chip_slots() == cim_timing.analog_chip_capacity(
+        cim_t1.macro_footprint_mm2()
+    )
+    assert cim_t1.macro_footprint_mm2() == float(
+        cim_t1.analog.area_mm2_per_array
+    ) / int(cim_t1.card.stack_3d_height)
+
+
+def test_the_capacity_disclosures_retire_the_ADJ_13_probe_by_name(cim_t1):
+    """A derived capacity has nothing to discover, and the artifact says so."""
+    notes = " ".join(cim_t1.analog_chip_capacity_disclosures())
+    assert "ADJ-13" in notes and "probe" in notes
+    assert "UPPER bound" in notes          # interconnect/IO/control not subtracted
+    assert "400.0 mm2" in notes
+
+
+def test_the_chip_area_is_one_constant_shared_with_the_digital_band_ceiling():
+    """One package statement, one number (D21) — no second 400 to drift."""
+    assert cim_timing.DIGITAL_CHIPLET_AREA_MAX_MM2 == cim_timing.ANALOG_CHIP_AREA_MM2
+    # D37 reached the register late (recorded 2026-08-29 after an audit caught
+    # code citing it); it deliberately shares D36's hard-set 400. The basis may
+    # quote either decision, but the CONSTANT stays one number.
+    assert "D36" in cim_timing.ANALOG_CHIP_AREA_BASIS or "D37" in cim_timing.ANALOG_CHIP_AREA_BASIS
+
+
+# --- D36: the group is a function of the layer plan -------------------------
+
+
+@pytest.mark.parametrize(
+    "mixers, motif, instances",
+    [
+        # Homogeneous -> the group is ONE layer (D36's stated answer).
+        ([("attention",)] * 8, (("attention",),), 8),
+        # Granite's 10-layer motif: 5 ssm, 1 attention, 4 ssm.
+        (
+            [("ssm",)] * 5 + [("attention",)] + [("ssm",)] * 4,
+            tuple([("ssm",)] * 5 + [("attention",)] + [("ssm",)] * 4),
+            1,
+        ),
+        # A 2-layer alternation over 6 layers.
+        ([("attention",), ("ssm",)] * 3, (("attention",), ("ssm",)), 3),
+        # Parallel branches: the motif compares the whole per-layer mixer set.
+        ([("attention", "ssm")] * 4, (("attention", "ssm"),), 4),
+        # A period that repeats but does NOT divide the depth is not a motif:
+        # a b a b a -> no proper divisor works, so the stack is one group.
+        (
+            [("a",), ("b",), ("a",), ("b",), ("a",)],
+            (("a",), ("b",), ("a",), ("b",), ("a",)),
+            1,
+        ),
+    ],
+)
+def test_the_group_is_the_minimal_motif_that_tiles_the_stack(mixers, motif, instances):
+    assert cim_timing.minimal_motif(mixers) == motif
+    plan = cim_timing.derive_layer_groups(mixers)
+    assert plan.motif == motif
+    assert plan.period == len(motif)
+    assert plan.instances == instances
+    assert plan.layers == len(mixers)
+
+
+def test_the_stage_groups_partition_every_stage_exactly_once():
+    """The sets handed to the sizer are a PARTITION: no stage twice, none lost."""
+    plan = cim_timing.derive_layer_groups([("attention",), ("ssm",)] * 5)
+    flat = [stage for group in plan.stage_groups for stage in group]
+    assert flat == list(range(10))
+    assert all(len(group) == plan.period for group in plan.stage_groups)
+    assert len(plan.stage_groups) == plan.instances
+
+
+def test_a_homogeneous_stack_has_period_one_and_says_so():
+    plan = cim_timing.derive_layer_groups([("attention",)] * 4)
+    assert plan.homogeneous is True
+    assert plan.stage_groups == ((0,), (1,), (2,), (3,))
+    assert "period 1" in " ".join(plan.disclosures)
+
+
+def test_an_untileable_stack_names_the_whole_stack_as_one_group():
+    plan = cim_timing.derive_layer_groups([("a",), ("b",), ("a",)])
+    assert plan.instances == 1
+    assert "NO PROPER MOTIF TILES THIS STACK" in " ".join(plan.disclosures)
+
+
+def test_the_group_derivation_refuses_an_empty_plan_and_a_stage_mismatch():
+    with pytest.raises(cim_timing.LayerGroupError, match="empty layer plan"):
+        cim_timing.minimal_motif([])
+    with pytest.raises(cim_timing.LayerGroupError, match="stage id"):
+        cim_timing.derive_layer_groups([("a",), ("a",)], stages=(0, 1, 2))
+
+
+def test_the_group_disclosures_say_execution_is_untouched():
+    """D36's own words: grouping is chiplet ATTACHMENT, never execution."""
+    notes = " ".join(cim_timing.derive_layer_groups([("a",), ("b",)] * 2).disclosures)
+    assert "CHIPLET ATTACHMENT, NEVER EXECUTION" in notes
+    assert "per-layer staggered" in notes
+    assert "D29" in notes
+
+
+# --- D36: the chiplet's area and the band arithmetic ------------------------
+
+
+def test_the_state_store_lives_inside_the_chiplet_area_and_is_not_double_counted():
+    packaging = cim_timing.derive_digital_chiplet_packaging(80.0, 20.0)
+    assert packaging.area_mm2 == 100.0
+    assert packaging.engines_mm2 == 80.0 and packaging.state_mm2 == 20.0
+    assert packaging.state_share == pytest.approx(0.2)
+    assert packaging.in_band is True
+    assert (packaging.chips_per_group, packaging.groups_per_chiplet) == (1, 1)
+    notes = " ".join(packaging.disclosures)
+    assert "INSIDE THE CHIPLET" in notes
+    assert "a second time" in notes          # the D21 warning against re-adding it
+
+
+@pytest.mark.parametrize(
+    "engines, state, chips_per_group, groups_per_chiplet",
+    [
+        (300.0, 50.0, 1, 1),     # 350 mm2: inside the band, both 1
+        (50.0, 0.0, 1, 1),       # exactly the floor: inside
+        (400.0, 0.0, 1, 1),      # exactly the ceiling: inside
+        (400.0, 0.1, 2, 1),      # 400.1 -> ceil(400.1/400) = 2 chips
+        (900.0, 100.0, 3, 1),    # 1000 -> ceil(1000/400) = 3
+        (20.0, 0.0, 1, 3),       # 20 -> ceil(50/20) = 3 groups merge
+        (49.0, 0.0, 1, 2),       # just under the floor -> ceil(50/49) = 2
+    ],
+)
+def test_the_band_arithmetic_is_ceil_on_whichever_edge_binds(
+    engines, state, chips_per_group, groups_per_chiplet
+):
+    """[50, 400] mm2. Over the ceiling cuts chips, under the floor merges groups."""
+    packaging = cim_timing.derive_digital_chiplet_packaging(
+        engines, state, groups_available=64
+    )
+    assert packaging.chips_per_group == chips_per_group
+    assert packaging.groups_per_chiplet == groups_per_chiplet
+    # Only one edge can bind, because they are on opposite sides of the area.
+    assert min(chips_per_group, groups_per_chiplet) == 1
+
+
+def test_a_merge_the_model_cannot_supply_groups_for_is_reported_not_padded():
+    """D28: the chiplet stays under-area and the shortfall IS the report."""
+    packaging = cim_timing.derive_digital_chiplet_packaging(
+        10.0, 0.0, groups_available=2
+    )
+    assert packaging.groups_per_chiplet == 5     # ceil(50/10)
+    assert packaging.groups_merged == 2          # only two groups exist
+    assert packaging.in_band is False
+    notes = " ".join(packaging.disclosures)
+    assert "CANNOT REACH THE FLOOR" in notes
+    assert "NOT padded" in notes
+
+
+def test_the_over_ceiling_cut_names_its_own_unpriced_traffic():
+    notes = " ".join(
+        cim_timing.derive_digital_chiplet_packaging(500.0, 0.0).disclosures
+    )
+    assert "CUT ITSELF IS NOT PRICED" in notes
+
+
+def test_the_packaging_numbers_are_reported_and_never_axes():
+    packaging = cim_timing.derive_digital_chiplet_packaging(100.0, 10.0)
+    summary = packaging.summary()
+    assert summary["provenance"] == cim_timing.PROVENANCE_DERIVED_COUNT
+    assert set(("chips_per_group", "groups_per_chiplet")) <= set(summary)
+    assert "NOT A SEARCH" in " ".join(packaging.disclosures)
+    with pytest.raises(ValueError, match="non-negative"):
+        cim_timing.derive_digital_chiplet_packaging(-1.0, 0.0)
+
+
+def test_the_group_scope_sizing_is_the_ADJ_14_machinery_and_not_a_second_law(cim_t1):
+    """One width law. The group is the argument, never a new derivation.
+
+    On a HOMOGENEOUS stack the group is one layer, every stage group has one
+    member, ADJ-14's widening loop skips it, and the group-scope answer must be
+    ADJ-9's byte for byte.
+    """
+    plan = cim_timing.derive_layer_groups([("attention",)] * 3)
+    demand = [
+        cim_timing.EngineDemand(stage=i, ops=(8_000_000.0,), analog_time_s=1.6e-6)
+        for i in range(3)
+    ]
+    per_stage = cim_t1.derive_engine_sizing(43.98e-6, demand, compose=False)
+    grouped = cim_t1.derive_group_engine_sizing(
+        43.98e-6, demand, compose=False, groups=plan
+    )
+    assert grouped.summary() == per_stage.summary()
+    assert grouped.shared_widened is None
+
+    # A group of THREE stages is ADJ-14's shared chiplet: the SUM has to fit
+    # the group's analog pace, so the width can only grow — and the group-scope
+    # call must be INDISTINGUISHABLE from passing those stages as stage_groups,
+    # because it is the same machinery with the group as its argument.
+    together = cim_timing.derive_layer_groups([("a",), ("b",), ("c",)])
+    assert together.stage_groups == ((0, 1, 2),)
+    widened = cim_t1.derive_group_engine_sizing(
+        43.98e-6, demand, compose=False, groups=together
+    )
+    direct = cim_t1.derive_engine_sizing(
+        43.98e-6, demand, compose=False, stage_groups=((0, 1, 2),)
+    )
+    assert widened.summary() == direct.summary()
+    assert widened.vector_lanes > per_stage.vector_lanes
+    assert widened.shared_widened is not None
+    assert widened.shared_widened["stages_per_chiplet_max"] == 3
+    assert widened.shared_widened["worst_group"] == (0, 1, 2)
+
+
+# --- D38: bank_depth is parked ----------------------------------------------
+
+
+@pytest.mark.parametrize("declared", [0, 1])
+def test_the_mapped_bank_depth_freezes_at_one(declared):
+    """Absent (0) and an explicit 1 both give the frozen depth."""
+    assert cim_timing.check_mapped_bank_depth(declared) == 1
+    assert cim_timing.MAPPED_BANK_DEPTH == 1
+
+
+@pytest.mark.parametrize("declared", [2, 4, 16])
+def test_a_declared_bank_depth_is_refused_by_name_quoting_D38(declared):
+    """Not honoured, and not silently overwritten either."""
+    with pytest.raises(cim_timing.BankDepthParkedError) as excinfo:
+        cim_timing.check_mapped_bank_depth(declared, context="card 'x'")
+    message = str(excinfo.value)
+    assert f"bank_depth = {declared}" in message
+    assert "D38" in message
+    assert "PARKED for ground-up reformulation" in message
+    # It must point at the way out, or the refusal is a dead end.
+    assert "DECLARED path" in message
+
+
+def test_the_device_reads_its_own_card_for_the_frozen_depth(cim_t1):
+    assert cim_t1.mapped_bank_depth() == 1
+    assert "FROZEN and not selected" in " ".join(cim_timing.bank_depth_disclosures())
+
+
+# --- THE HARD GATE ----------------------------------------------------------
+
+
+def test_no_platform_law_constant_can_move_a_declared_or_legacy_number(
+    monkeypatch, cim_t1, cim_t2, cim_t3
+):
+    """Break every new constant; the OPTIMA validator's numbers must not blink.
+
+    This is the whole bit-identity argument in one test. The law layer is
+    additive: no existing method was rewired to consult it, so poisoning all
+    six constants cannot reach a declared path. If a future edit wires one in,
+    THIS test fails first and names the number that moved.
+    """
+    def _fingerprint():
+        rows = []
+        for device in (cim_t1, cim_t2, cim_t3):
+            rows.append(
+                (
+                    device.vec_cycles,
+                    device.vec_latency_s,
+                    device.analog_gemm_time(64),
+                    device.transformer_stack_arrays(),
+                    device.total_arrays(),
+                    device.stack_area_mm2(),
+                    device.total_area_mm2(),
+                    device.macro_footprint_mm2(),
+                    device.arrays(4096, 4096),
+                    device.sa_cycles(64, 64, 4096),
+                    device.block_latency(64),
+                )
+            )
+        return tuple(rows)
+
+    before = _fingerprint()
+    monkeypatch.setattr(cim_timing, "PLATFORM_ROWS", 999_999)
+    monkeypatch.setattr(cim_timing, "T_HOP_INTRA_CHIP", 1.0)
+    monkeypatch.setattr(cim_timing, "T_HOP_CROSS_CHIP", 2.0)
+    monkeypatch.setattr(cim_timing, "ANALOG_CHIP_AREA_MM2", 1.0)
+    monkeypatch.setattr(cim_timing, "DIGITAL_CHIPLET_AREA_MIN_MM2", 1.0)
+    monkeypatch.setattr(cim_timing, "DIGITAL_CHIPLET_AREA_MAX_MM2", 1.0)
+    monkeypatch.setattr(cim_timing, "MAPPED_BANK_DEPTH", 7)
+    assert _fingerprint() == before

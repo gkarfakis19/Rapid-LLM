@@ -1,0 +1,48 @@
+{
+  "schema": "fws_run_bundle/1",
+  "bundle": "subset_v1",
+  "label": "George's default test set: pure SSM, two ViT sizes, one SSM/attention hybrid",
+  "generated_at": "2026-08-29T19:05:08Z",
+  "members": [
+    {
+      "name": "mamba2_2p7b",
+      "model_id": "Mamba2-2.7B",
+      "label": "Mamba2-2.7B (pure SSM)",
+      "mode": "LLM",
+      "dir": "docs/qif/dse/mamba2_2p7b_frontier",
+      "run_id": "a84d95f9ce467bfe",
+      "selected_id": "c007",
+      "headline": "692774 tokens/s"
+    },
+    {
+      "name": "vit_large_story_64",
+      "model_id": "ViT-Large-story-64",
+      "label": "ViT-Large (encoder)",
+      "mode": "VIT",
+      "dir": "docs/qif/dse/vit_large_story_64_frontier",
+      "run_id": "1d08314be423b3b9",
+      "selected_id": "c000",
+      "headline": "2480.35 requests/s"
+    },
+    {
+      "name": "vit_huge_story_64",
+      "model_id": "ViT-Huge-story-64",
+      "label": "ViT-Huge (encoder)",
+      "mode": "VIT",
+      "dir": "docs/qif/dse/vit_huge_story_64_frontier",
+      "run_id": "112fb165e3f14fea",
+      "selected_id": "c000",
+      "headline": "1541.03 requests/s"
+    },
+    {
+      "name": "granite_4_0_h_1b",
+      "model_id": "Granite-4.0-H-1B",
+      "label": "Granite-4.0-H-1B (small hybrid SSM)",
+      "mode": "LLM",
+      "dir": "docs/qif/dse/granite_4_0_h_1b_frontier",
+      "run_id": "b54e24f64c22db13",
+      "selected_id": "c028",
+      "headline": "535093 tokens/s"
+    }
+  ]
+}

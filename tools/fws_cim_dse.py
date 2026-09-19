@@ -153,7 +153,16 @@ def derive_tp_candidates(dse_cfg, model, moe_dp=1):
 
 
 def _variant_analog_fields(variant, base_analog):
-    """Complete analog point for one variant after cim.analog inheritance."""
+    """Complete analog point for one variant after cim.analog inheritance.
+
+    THE VARIANT SCHEMA IS PASS-2B'S AND IT IS FROZEN: ``cim.dse.variants``
+    entries still spell the point as ``adc_mux`` + ``cols_adc``, because that
+    is what the checked-in pass-2B configs and their gates contain. The CARD
+    schema moved to X x Y : Z (D35-REVISED), so the translation happens HERE,
+    at the one place a variant is written into ``cim.analog``: Z is the old
+    cols_adc (it always was the ADC count) and Y is cols_adc x adc_mux (the
+    total the old schema never wrote down). One conversion, one place.
+    """
     return {
         "adc_mux": int(variant.adc_mux),
         "cols_adc": int(variant.cols_adc),
@@ -174,7 +183,22 @@ def _variant_analog_fields(variant, base_analog):
 def _candidate_hw_raw(base_raw, analog_fields, tp, moe_expert_parallel):
     """Raw (unconverted) hardware dict for one candidate / the emitted YAML."""
     raw = copy.deepcopy(base_raw)
-    raw["cim"]["analog"].update(analog_fields)
+    analog_block = raw["cim"]["analog"]
+    # THE ONE TRANSLATION. Pass 2B's variant vocabulary is FROZEN — the
+    # checked-in cim.dse blocks, this tool's knobs and its report table all
+    # spell a point as adc_mux + cols_adc — while the CARD schema moved to
+    # X x Y : Z (D35-REVISED). Z is the old cols_adc (it always was the ADC
+    # count) and Y is cols_adc x adc_mux, the total the old schema never wrote
+    # down. Converting here, at the single point where a variant becomes a
+    # config, keeps one vocabulary per layer instead of two per file.
+    fields = dict(analog_fields)
+    mux = int(fields.pop("adc_mux"))
+    adcs = int(fields.pop("cols_adc"))
+    fields["adcs"] = adcs
+    fields["cols"] = adcs * mux
+    for retired in ("cols_adc", "adc_mux", "stored_cols", "adc_capacity_mux"):
+        analog_block.pop(retired, None)
+    analog_block.update(fields)
     raw["cim"]["chip"]["layers_per_chip"] = "auto"
     raw["cim"]["chip"]["moe_expert_parallel"] = int(moe_expert_parallel)
     raw.setdefault("parallelism", {})["tp"] = int(tp)

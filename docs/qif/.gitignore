@@ -1,0 +1,14 @@
+# QIF artifacts that are GENERATED and HEAVY.
+#
+# tools/fws_qif_dse.py writes one full `fws_atlas/1` document per Pareto-front
+# point under <output_dir>/points/ (D33: the frontier is the atlas entry and the
+# clicked point binds the page, so every clickable point needs its own map).
+# Each document is a complete placed-and-priced inventory - chips, macros,
+# tiles, links, metrics - so a single front costs megabytes and a regenerated
+# sweep rewrites all of them.
+#
+# The dse_report.json/.md beside them ARE checked in: they are the curve. The
+# per-point maps are rebuilt by re-running the sweep, and every one of them
+# carries the run id of the report it belongs to, so a stale checkout cannot
+# silently mix generations.
+dse/*/points/

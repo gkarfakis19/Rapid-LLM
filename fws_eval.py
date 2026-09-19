@@ -67,11 +67,17 @@ number, and it never hides inside a blanket word.
 from __future__ import annotations
 
 import math
+import re
+
+import cim_analog_calc as _analog_calc
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from cim_timing import (
+    _delta_state_dims,
+    SynthesisLibraryError,
+    STATE_SRAM_BLOCK,
     sram_macro_bytes,
     LAW_UNVALIDATED,
     PROVENANCE_DERIVED_COUNT,
@@ -84,14 +90,40 @@ from cim_timing import (
     EngineSizingError,
     FabricDemand,
     ReductionOpDescriptor,
+    SA_GEOMETRY_BANDWIDTH_DISCLOSURE,
+    SA_GEOMETRY_DATAFLOW_DISCLOSURE,
+    SA_GEOMETRY_RULE_DISCLOSURE,
+    FABRIC_FLOORS as cim_timing_FABRIC_FLOORS,
+    FABRIC_FLOOR_REASONS,
+    derive_digital_chiplet_packaging,
+    DIGITAL_CHIPLET_AREA_MIN_MM2,
+    DIGITAL_CHIPLET_AREA_MAX_MM2,
 )
-from fws_mapping import REGIME_FILLED, FwsMapping, MappingError, Relaxation
+from fws_mapping import (
+    LINKS_PRICED,
+    LINKS_ZEROED,
+    MAPPING_STUB_KEY,
+    MAPPING_STUB_REASON,
+    MAPPING_STUB_VALUE,
+    PP_UTIL_FULL,
+    REGIME_FILLED,
+    STATE_ELEMENT_BASIS,
+    STATE_ELEMENT_BYTES,
+    STATE_ELEMENT_DTYPE,
+    FwsMapping,
+    MappingError,
+    Relaxation,
+    hop_kind,
+    link_price_disclosures,
+    stage_handoff_time_s,
+)
 from program.analytic_sim import CoarseEvalResult, DeviceResource, evaluate_detailed
 from program.fws_build import (
     LAW_ANALOG_GEMM,
     LAW_K_ACCUMULATION,
     LAW_PD_LINK,
     LAW_SLICE_REDUCTION,
+    LAW_STAGE_HOP,
     FwsOpAnnotation,
     ServingPoint,
     annotations_of,
@@ -338,6 +370,10 @@ class _Pricer:
         self.tp = max(1, int(mapping.degrees.get("tp", 1)))
         self.act_bytes = float(mapping.hw.sw_config.precision.activations)
         self.layout = mapping.hw.network_layout
+        #: The LINK PRICING MODE the mapping was built under. The mapper spells
+        #: it (``mapping.links``), this pricer applies it, and there is no
+        #: third reader (D21).
+        self.links = str(getattr(mapping, "links", LINKS_PRICED))
         self.disclosures: List[Relaxation] = []
         self._seen: set = set()
         self._link_cache: Dict[str, Tuple[float, float, float]] = {}
@@ -346,8 +382,63 @@ class _Pricer:
         self._engine_power: Dict[str, Optional[float]] = {}
         mixers = tuple(getattr(self.model, "layer_mixers", ())) or (("attention",),)
         self._mixers = mixers
+        if self.links == LINKS_ZEROED:
+            self._disclose_links_zeroed()
 
     # -- disclosures ----------------------------------------------------
+
+    def _disclose_links_zeroed(self) -> None:
+        """The TEMPORARY zero-links relaxation, named on every artifact.
+
+        It is raised in the constructor and not at the first hop, so a mapping
+        that happens to have no inter-chip boundary still says which pricing
+        mode produced its numbers. A reader who sees a throughput without this
+        line is reading a machine whose links were charged.
+        """
+        self._disclose(
+            "links_zeroed",
+            "inter-chip handoffs priced at 0 s",
+            "TEMPORARY relaxation (George, 2026-08-27): mapping.links = 'zeroed', so "
+            "every INTER-CHIP boundary transfer is priced at 0 s instead of the D17 "
+            "p2p law. Every link and boundary floor VACATES: a stage's per-beat "
+            "occupancy is its own compute alone, the beat and the binding_term read "
+            "COMPUTE ONLY, and no link can be the term that sets the pace. The BYTES "
+            "are untouched - they are annotated and reported exactly as the priced run "
+            "reports them, because bytes are a fact of the mapping and only the TIME is "
+            "relaxed. This is not this machine's throughput: it is the throughput of "
+            "the same machine with free links, and the difference is whatever the "
+            "priced run charges for its handoffs. The D16 PD pair handoff rides the "
+            "same law and is priced at 0 s with them. The ENERGY is NOT relaxed: every "
+            "moved byte is still charged the card's pJ/bit and carries the coverage a "
+            "priced run gives it. The boundary TABLE is not relaxed either - its "
+            "required_time_s is what the DECLARED link would need for those bytes, "
+            "which is the card's property and the one place a reader can still see "
+            "what this relaxation is hiding.",
+        )
+
+    def _disclose_link_energy(self, axis: str) -> None:
+        """0 pJ on a card that declares no pJ/bit — named in EITHER link mode.
+
+        The energy law does not know about the link pricing mode: a card that
+        declares ``energy_per_bit = 0`` reports zero link energy and says so by
+        name whether the TIME was charged or relaxed. Raising it from one branch
+        only would make a zeroed run print a 0 pJ link term with no named reason
+        — zero-because-free read as zero-because-uncovered. Only the closing
+        clause differs, because it states what the run did with the time, and
+        the time is the one thing the mode changes.
+        """
+        timing = (
+            "Link TIME is relaxed to 0 s in this run (mapping.links = 'zeroed', "
+            "disclosed as links_zeroed)."
+            if self.links == LINKS_ZEROED
+            else "Link TIME is fully priced."
+        )
+        self._disclose(
+            "link_energy",
+            "0 pJ: no energy_per_bit declared",
+            f"The {axis} network dimension declares energy_per_bit = 0, so link "
+            f"traffic reports zero energy rather than an invented pJ/bit. {timing}",
+        )
 
     def _disclose(self, constraint: str, value: str, reason: str) -> None:
         if constraint in self._seen:
@@ -417,12 +508,16 @@ class _Pricer:
         )
 
     def _accumulation(self, a: FwsOpAnnotation) -> OpCost:
-        """One in-macro K stack, priced by P7.2's accumulator law.
+        """One in-macro K accumulation, priced by P7.2's accumulator law.
 
         The DAG carries the PACKER's descriptor, so nothing about the stack is
         re-derived here: depth, width and sink macro are the packing's own
-        numbers. A spread stack never reaches this row — the row-block
-        partial-sum law prices that shape end to end (D21).
+        numbers. The descriptor is a LOCAL SEGMENT — a run of K blocks that sit
+        on one macro. A whole local stack is one such run. A stack that spans
+        macros contributes one run per macro that holds more than one of its
+        blocks, and only the BETWEEN-macro part of it reaches the row-block
+        partial-sum law; a descriptor whose blocks are on different macros is
+        therefore a contradiction here and is refused, not zeroed (D21).
         """
         if a.k_stack is None:
             raise MappingError(
@@ -593,7 +688,18 @@ class _Pricer:
     def _fabric(self, a: FwsOpAnnotation) -> OpCost:
         if a.block in _FABRIC_ATTENTION_BLOCKS:
             return self._attention(a)
-        if a.block == "ssm_scan":
+        if a.block == "short_conv":
+            # The conv as a TIMED chiplet op (cim.allocation.conv_placement).
+            # The pool placement never reaches here: there the conv is absorbed
+            # into the pool sizing and emits a pool op, not a fabric one.
+            cost = self.device.price_short_conv(a.tokens)
+            basis = (
+                "CimDeviceModel.price_short_conv (law short_conv): channels x (2k-1) "
+                "scalar ops per token on the vector engine - the SAME per-result law "
+                "the per-macro pool sizing uses when the card places the conv there "
+                "instead, read as chiplet work rather than pool width (D21)."
+            )
+        elif a.block == "ssm_scan":
             cost = self.device.price_ssm_block(
                 self.model.ssm,
                 int(self.params.hidden_dim),
@@ -703,8 +809,15 @@ class _Pricer:
         D32: the library reports a MEASURED power per block, so an engine's
         power is the same unit-count composition its area is. Two engines are
         distinguished because they are different silicon running different ops:
-        ``vector`` is the scan engine, ``attention`` is the systolic fabric plus
-        the softmax pipeline beside it.
+        ``vector`` is the scan engine, ``sa_fabric`` is the systolic array and
+        ``softmax`` is the pipeline beside it. THESE ARE THREE SEPARATE ENGINES
+        AND EACH OP PAYS ONLY ITS OWN (M9). They used to be folded into one
+        "attention" power - fabric + softmax summed - and that one number was
+        charged to qk, pv AND softmax, which the lowering runs one after the
+        other. So the softmax engine was billed its full 17.03 W for the 261 us
+        it sits idle during QK. That contradicted this module's own disclosure
+        that "an idle engine costs 0 pJ here", and it inflated every energy
+        conclusion by 1.74x (Granite) to 1.95x (Qwen).
         """
         if engine in self._engine_power:
             return self._engine_power[engine]
@@ -717,7 +830,14 @@ class _Pricer:
         if self.device.has_synthesis_library():
             if engine == "vector":
                 value = float(self.device.vector_engine_composition().power_w)
+            elif engine == "sa_fabric":
+                value = float(self.device.sa_fabric_composition().power_w)
+            elif engine == "softmax":
+                value = float(self.device.softmax_engine_composition().power_w)
             elif engine == "attention":
+                # KEPT ONLY AS THE UNION, for a caller that really does mean
+                # "both engines busy at once". No op on the lowered timeline
+                # does; every attention op names the engine it runs on.
                 value = float(
                     self.device.sa_fabric_composition().power_w
                     + self.device.softmax_engine_composition().power_w
@@ -768,15 +888,44 @@ class _Pricer:
     def _attention(self, a: FwsOpAnnotation) -> OpCost:
         timing = self._attention_timing(a)
         f_fabric = self.device.f_fabric_hz
-        fill_drain = int(self.device.fabric.fill_drain_penalty_cycles)
+        # SA-GEOM: `3 * R` of the QK engine, charged ONCE on QK. Identical to
+        # `fabric.fill_drain_penalty_cycles` on every declared-geometry card;
+        # it follows the DERIVED R when the geometry rule installed one.
+        fill_drain = int(self.device.fabric_fill_drain_cycles)
+        # EACH OP NAMES THE ENGINE IT RUNS ON, and pays only that engine (M9)
+        # -- and only the SHARE OF IT THAT IS ACTIVE. ADJ-10 partitions the
+        # fabric's arrays between the two calls (`fold_group_split`), so QK runs
+        # on `qk_arrays` of `fabric_num_arrays` and PV on `pv_arrays`. Charging
+        # each the WHOLE fabric billed arrays that are provably running the
+        # other call, and it contradicted this module's own disclosure that an
+        # idle engine costs 0 pJ.
+        total_arrays = max(1, int(self.device.fabric_num_arrays))
+        share = 1.0
         if a.block == "attention_qk":
             cycles = timing.qk_cycles + fill_drain
+            engine = "sa_fabric"
+            share = min(1.0, max(0, int(timing.qk_arrays)) / total_arrays)
             what = f"QK^T systolic run ({timing.qk_cycles} cycles) + the array's fill/drain ({fill_drain})"
         elif a.block == "attention_pv":
-            cycles = timing.pv_cycles
+            # CTX-SPLIT: the add-reduce that puts a context-split PV call back
+            # together lands on THIS op's tail — the reduce cannot start before
+            # the last partial arrives. It is 0 on every unsplit call, so no
+            # declared-geometry number moves; where it is not 0 the DERIVATION
+            # charged the same cycles, and the two must agree or the fabric was
+            # sized against a bill the run does not pay (M7).
+            cycles = timing.pv_cycles + int(timing.combine_cycles)
+            engine = "sa_fabric"
+            share = min(1.0, max(0, int(timing.pv_arrays)) / total_arrays)
             what = f"PV systolic run ({timing.pv_cycles} cycles)"
+            if int(timing.combine_cycles) > 0:
+                what += (
+                    f" + the {timing.pv_split}-way context-split add-reduce "
+                    f"({timing.combine_cycles} cycles on {timing.combine_lanes} "
+                    "measured FP_ADD lane(s))"
+                )
         else:
             cycles = timing.softmax_cycles
+            engine = "softmax"
             what = f"softmax lanes ({timing.softmax_cycles} cycles)"
         self._disclose(
             "attention_op_folding",
@@ -789,10 +938,17 @@ class _Pricer:
             "quantities, two names (P4 §1). On disagreement the DAG wins and the closed "
             "form is annotated (ADJ-8); this note is that annotation.",
         )
-        self._fabric_energy_disclosure("attention")
-        energy_pj, coverage = self._fabric_energy("attention", cycles / f_fabric)
+        self._fabric_energy_disclosure(engine)
+        energy_pj, coverage = self._fabric_energy(engine, cycles / f_fabric)
+        if share < 1.0:
+            # SCALE THE ENERGY, NEVER THE COVERAGE TOKEN. `coverage` is a
+            # controlled vocabulary a gate reads by name; the share belongs in
+            # the op's own detail, beside the cycles it explains.
+            energy_pj *= share
         detail = OrderedDict(
             (
+                ("engine", engine),
+                ("engine_array_share", float(share)),
                 ("cycles", float(cycles)),
                 ("heads_chip", float(timing.heads_chip)),
                 ("context", float(self._context_of(a))),
@@ -814,6 +970,33 @@ class _Pricer:
                     ("fill_drain_cycles", float(fill_drain)),
                 )
             )
+            if int(timing.qk_split) > 1:
+                # CTX-SPLIT: the QK gather. The score chunks concatenate with
+                # NO arithmetic, but the softmax normalises over the whole row
+                # so they have to meet first. The bytes are reported and the
+                # time is 0 s under the intra-chip convention (D17) — the same
+                # convention every other on-chip movement in this module gets.
+                detail.update(
+                    (
+                        ("context_split", float(timing.qk_split)),
+                        ("gather_bytes", float(timing.gather_bytes)),
+                        ("gather_cycles", 0.0),
+                    )
+                )
+                self._disclose(
+                    "context_split_gather",
+                    f"{timing.gather_bytes:.6g} bytes concatenated, priced at 0 s",
+                    "CTX-SPLIT: this QK call's context was dealt across "
+                    f"{timing.qk_split} arrays, so the score row arrives as "
+                    f"{timing.qk_split} chunks that must be CONCATENATED before the "
+                    "softmax can normalise over it. The concatenation is not "
+                    "arithmetic — it is movement — and this repo prices intra-chip "
+                    "movement as a DAG dependency with a zero duration, because D17 "
+                    "declares one network law and it is the p2p fabric BETWEEN chips "
+                    "and no on-chip interconnect law is declared anywhere. The bytes "
+                    "are on this op so the size of that optimism is visible; the DAG "
+                    "time is optimistic by exactly this movement.",
+                )
         return self._cost(
             a,
             duration_s=cycles / f_fabric,
@@ -942,7 +1125,71 @@ class _Pricer:
         self._attention_cache[key] = timing
         return timing
 
+    def _stage_hop(self, a: FwsOpAnnotation) -> OpCost:
+        """A STAGE HANDOFF, priced at the law layer's flat hop latency.
+
+        The law is ``cim_timing.stage_handoff_time_s``: 50 ns when the two
+        stages sit on one analog chip, 500 ns when the handoff leaves the chip,
+        0 s when it never leaves a macro. It is LATENCY ONLY - the cost does
+        not depend on how many bytes the handoff carries - and that gap is
+        disclosed by name rather than closed with a bandwidth this repo has
+        not measured.
+
+        ``mapping.links = 'zeroed'`` still overrides it to 0 s, exactly as it
+        overrides the D17 p2p law: the relaxation vacates link TIME wherever
+        link time is charged, and the bytes are reported under both.
+        """
+        src_chip = int(self.mapping.device_record(a.src_device).chip_id)
+        dst_chip = int(self.mapping.device_record(a.dst_device).chip_id)
+        kind = hop_kind(src_chip, dst_chip)
+        axis = self._axis_of(a)
+        _bw, _lat, epb = self._link(axis)
+        if epb <= 0:
+            self._disclose_link_energy(axis)
+        # THE ENERGY IS NOT THE TIME. A moved byte costs the card's pJ/bit
+        # whether the time is a hop latency, a p2p law or a relaxation, so the
+        # energy law is applied here unchanged and only the DURATION comes from
+        # the hop.
+        energy_pj = float(a.bytes_moved) * 8.0 * epb * 1e12
+        if self.links == LINKS_ZEROED:
+            return self._cost(
+                a,
+                duration_s=0.0,
+                basis=(
+                    f"{a.bytes_moved:.6g} B stage handoff ({kind}) priced at 0 s: "
+                    "mapping.links = 'zeroed', the TEMPORARY relaxation (disclosed as "
+                    "links_zeroed). Bytes reported, time relaxed."
+                ),
+                energy_pj=energy_pj,
+                energy_component="link_traffic",
+                coverage=COVERAGE_COVERED if epb > 0 else COVERAGE_UNCOVERED,
+                bytes_moved=a.bytes_moved,
+            )
+        self._disclose(
+            "stage_handoff_hop_prices",
+            "stage handoffs priced at a flat hop latency",
+            " ".join(link_price_disclosures()),
+        )
+        duration = float(stage_handoff_time_s(src_chip, dst_chip))
+        return self._cost(
+            a,
+            duration_s=duration,
+            basis=(
+                f"stage handoff c{src_chip} -> c{dst_chip} priced as a {kind} hop: "
+                f"{duration * 1e9:.6g} ns flat (cim_timing.stage_handoff_time_s). "
+                f"The {a.bytes_moved:.6g} B it carries are reported and do NOT enter "
+                "the time: these interim prices are latency only."
+            ),
+            energy_pj=energy_pj,
+            energy_component="link_traffic",
+            coverage=COVERAGE_COVERED if epb > 0 else COVERAGE_UNCOVERED,
+            bytes_moved=a.bytes_moved,
+            detail=OrderedDict((("hop_kind", kind), ("hop_time_s", duration))),
+        )
+
     def _transfer(self, a: FwsOpAnnotation) -> OpCost:
+        if a.law == LAW_STAGE_HOP:
+            return self._stage_hop(a)
         if not a.crosses_chip:
             self._disclose(
                 "intra_chip_activation_movement",
@@ -963,6 +1210,37 @@ class _Pricer:
                 bytes_moved=a.bytes_moved,
             )
         axis = self._axis_of(a)
+        if self.links == LINKS_ZEROED:
+            # THE RELAXATION, APPLIED WHERE THE LAW IS. The bytes stay on the
+            # cost and in the artifact; only the duration is vacated, and the
+            # basis says which mode produced it. The link ENERGY is still the
+            # bytes times the card's pJ/bit: moving bytes costs energy whether
+            # or not the model charges the time for them. The ENERGY LAW is
+            # therefore fully applied here and its coverage label is the priced
+            # path's label, computed by the same rule: this relaxation moves the
+            # TIME and nothing else, so an energy number the card supports may
+            # not be relabeled `uncovered` beside it: a component that says
+            # `uncovered` CONTRIBUTES 0 (the energy law at the top of this
+            # module), and the pJ this branch reports is not 0.
+            # The disclosure is already on this pricer (it is raised once, in
+            # the constructor, so a machine with no inter-chip hop still says
+            # which mode priced it); this branch only applies the mode.
+            _bw, _lat, epb = self._link(axis)
+            if epb <= 0:
+                self._disclose_link_energy(axis)
+            return self._cost(
+                a,
+                duration_s=0.0,
+                basis=(
+                    f"{a.bytes_moved:.6g} B across the {axis} link priced at 0 s: "
+                    "mapping.links = 'zeroed', the TEMPORARY relaxation (disclosed as "
+                    "links_zeroed). Bytes reported, time relaxed."
+                ),
+                energy_pj=float(a.bytes_moved) * 8.0 * epb * 1e12,
+                energy_component="link_traffic",
+                coverage=COVERAGE_COVERED if epb > 0 else COVERAGE_UNCOVERED,
+                bytes_moved=a.bytes_moved,
+            )
         bw, lat, epb = self._link(axis)
         if bw <= 0:
             raise MappingError(
@@ -974,13 +1252,7 @@ class _Pricer:
         time_s = CimDeviceModel.p2p_time_s(a.bytes_moved, bw, lat)
         energy_pj = float(a.bytes_moved) * 8.0 * epb * 1e12
         if epb <= 0:
-            self._disclose(
-                "link_energy",
-                "0 pJ: no energy_per_bit declared",
-                f"The {axis} network dimension declares energy_per_bit = 0, so link "
-                "traffic reports zero energy rather than an invented pJ/bit. Link TIME "
-                "is fully priced.",
-            )
+            self._disclose_link_energy(axis)
         law = "D16 PD handoff" if a.law == LAW_PD_LINK else "D17 p2p"
         return self._cost(
             a,
@@ -1999,12 +2271,22 @@ def _build_bank_passes(
 ) -> "OrderedDict[str, object]":
     """Does one decode step read every stored bank exactly once? (P7 Fact 1)
 
-    Invariant W says every bank holds real weights; decode reads every weight
-    once per token. The two together say that ONE decode step charges each
-    macro exactly its occupied column sets — no more (nothing is read twice)
-    and no less (no bank sits out the step). This block MEASURES that on the
-    priced timeline instead of asserting it: it sums the active column sets the
-    analog law charged each macro during one lowered decode step and compares
+    Invariant W says every bank holds REAL WEIGHTS. It does NOT say every bank
+    is read every beat, and on a sparse model it is not: a MoE layer routes one
+    token to `top_k` experts, so the other E - top_k hold their weights and sit
+    the beat out. `column_sets_never_read` counts exactly those, and on a MoE
+    model a large value there is the CORRECT reading, not a violation - Granite
+    occupies 19,304 column sets and fires 3,064 of them.
+
+    What Invariant W forbids is WASTE: space that holds nothing. What this block
+    measures is ACTIVITY: space that fires. Residency is not activity (M6), and
+    conflating them charged every idle expert a full analog pass - 84% of the
+    analog energy term on arrays that never switched.
+
+    On a DENSE model the two do coincide, and then this block's original
+    reading holds: nothing read twice, no bank sitting out. It MEASURES that on
+    the priced timeline instead of asserting it: it sums the active column sets
+    the analog law charged each macro during one lowered decode step and compares
     them with the column sets the placement actually claimed on that macro.
 
     A macro that comes up short is idle weight space and the block says so.
@@ -2185,11 +2467,324 @@ def _phase_window(
     return (first, last)
 
 
+_CHIP_HOP_RE = re.compile(r"^act\.c\d+->c\d+$")
+
+
+def _is_chip_hop(boundary_id: str) -> bool:
+    """Is this `act.*` op the stage's OUTGOING CHIP HOP, or work inside it?
+
+    `act.c1->c2` crosses a chip boundary and is the handoff that ends a stage.
+    `act.L5.qkv_to_fabric` moves operands to the chiplet WITHIN the stage and
+    fires several times a beat - it is the stage's own work, not its handoff.
+    Treating every `act.*` as the outgoing link put intra-stage traffic into a
+    max() that then discarded it: 2.04 us per beat on Granite's stage 2 was
+    charged as neither compute nor link.
+    """
+    return bool(_CHIP_HOP_RE.match(str(boundary_id or "")))
+
+
+#: D34: the largest stage-occupancy-to-median ratio a partition may reach
+#: before the mapper is judged to have FAILED at its own job.
+#:
+#: WHY 1.5 AND NOT 1.0. A stage plan partitions LAYERS, so a perfectly even
+#: split only exists when the layer count divides the stage count and every
+#: layer costs the same. Neither holds on a hybrid: Granite-4.0-H is 9:1
+#: mamba:attention, so one stage in ten carries an attention block the others
+#: do not, and the granularity of the remedy is one whole layer. 1.5 is half a
+#: stage of slack on a two-layer stage - the coarsest plan where a one-layer
+#: move is still meaningful - and it is a THRESHOLD FOR A WARNING, never a
+#: gate: nothing is refused for crossing it, the report says it crossed.
+#: Measured spread that forced the rule: 28.7x on Granite-4.0-H-1B at 2
+#: layers/chip, where 4 attention stages set the beat and 16 stages idle ~85%
+#: of it.
+STAGE_BALANCE_MAX_RATIO = 1.5
+
+
+def _stage_beat_floor(
+    annotations: Sequence[FwsOpAnnotation],
+    costs: Sequence[OpCost],
+    timeline: CoarseEvalResult,
+    beats: int,
+) -> Tuple[float, "OrderedDict[str, object]", "OrderedDict[str, object]"]:
+    """The slowest STAGE OCCUPANCY per beat, with each link charged to its source.
+
+    A STAGE IS NOT DONE UNTIL IT HAS HANDED OFF. The filled pipeline gives every
+    stage one beat to do its work and pass the activation on, and there is
+    nowhere to park a sequence in between - the machine has no buffer for
+    tokens in flight, only the D stream slots it is built for. So a stage's
+    per-beat occupancy is its own compute PLUS its outgoing inter-chip link, and
+    the beat cannot be shorter than the slowest such stage.
+
+    This is a RATE, measured as busy time over the beats lowered, so it does not
+    move with the measurement window. An earlier attempt used Little's law on
+    the LAST traversal's latency, which grows with the window on an
+    over-subscribed pipeline and made the beat depend on an analysis knob (M10).
+    Occupancy per beat does not have that failure mode.
+    """
+    beats = max(1, int(beats))
+    compute: Dict[int, List[Tuple[float, float]]] = {}
+    #: boundary_id -> duration, per stage. A stage may send SEVERAL distinct
+    #: hops in one beat and they are serial, so they SUM. Taking the max left
+    #: 2.04 us per beat on Granite's stage 2 charged as neither compute nor
+    #: link (M8).
+    link_by_id: Dict[int, Dict[str, float]] = {}
+    #: how many times each stage actually FIRED in the lowered window. Stage s
+    #: is lowered for traversals 0 .. beats-s-1, so it fires `beats - s` times,
+    #: NOT `beats`. Dividing every stage by the window made identical Mamba
+    #: stages show a 1.95x spread in service time that is purely the divisor.
+    fires: Dict[int, set] = {}
+    #: D34's evidence, gathered in the SAME pass and off the SAME intervals as
+    #: the occupancy above, so the balance verdict and the beat floor are one
+    #: accounting (D21). Per (stage, device_class, block) — what makes a long
+    #: stage long — and per LAYER, which is the smallest unit a stage plan can
+    #: move: a layer sits on exactly one stage, so no repartition can produce a
+    #: stage shorter than its largest layer.
+    terms: Dict[int, Dict[Tuple[str, str], List[Tuple[float, float]]]] = {}
+    layer_spans: Dict[int, List[Tuple[float, float]]] = {}
+    layer_fires: Dict[int, set] = {}
+    for cost in costs:
+        annotation = annotations[cost.uid] if cost.uid < len(annotations) else None
+        if annotation is None:
+            continue
+        stage = int(getattr(annotation, "stage", -1) or 0)
+        boundary = str(getattr(annotation, "boundary_id", "") or "")
+        duration = float(getattr(cost, "duration_s", 0.0) or 0.0)
+        fires.setdefault(stage, set()).add(int(getattr(annotation, "step", 0) or 0))
+        if _is_chip_hop(boundary):
+            # THE STAGE'S OUTGOING CHIP HOP: one token crosses it once per beat,
+            # so its duration IS its per-beat occupancy.
+            link_by_id.setdefault(stage, {})[boundary] = duration
+            continue
+        # The START comes from the TIMELINE, not the cost: an OpCost carries a
+        # duration, and reading a start off it silently gave every op start 0,
+        # which collapsed the union to one op's length.
+        start = float(timeline.start_times[cost.uid])
+        finish = float(timeline.finish_times[cost.uid])
+        if finish < start:
+            finish = start + duration
+        compute.setdefault(stage, []).append((start, finish))
+        terms.setdefault(stage, {}).setdefault(
+            (str(cost.device_class), str(cost.block)), []
+        ).append((start, finish))
+        layer = getattr(annotation, "layer", None)
+        if layer is not None:
+            layer_spans.setdefault(int(layer), []).append((start, finish))
+            layer_fires.setdefault(int(layer), set()).add(
+                int(getattr(annotation, "step", 0) or 0)
+            )
+    rows: List["OrderedDict[str, object]"] = []
+    floor = 0.0
+    binding = None
+    for stage in sorted(set(list(compute) + list(link_by_id))):
+        fired = max(1, len(fires.get(stage, ())))
+        busy = _union_busy_s(compute.get(stage, ())) / float(fired)
+        link = float(sum(link_by_id.get(stage, {}).values()))
+        total = busy + link
+        rows.append(OrderedDict((
+            ("stage", stage),
+            ("beats_fired", fired),
+            ("compute_s_per_beat", busy),
+            ("outgoing_link_s", link),
+            ("outgoing_hops", len(link_by_id.get(stage, {}))),
+            ("occupancy_s_per_beat", total),
+        )))
+        if total > floor:
+            floor, binding = total, stage
+    balance = _stage_balance(rows, terms, layer_spans, layer_fires, binding)
+    return floor, OrderedDict((
+        ("floor_s", floor),
+        ("binding_stage", binding),
+        ("per_stage", rows),
+        ("basis", (
+            "a stage holds its slot until the handoff completes, so its per-beat "
+            "occupancy is its own compute plus its outgoing inter-chip link; the "
+            "beat is the slowest of those. There is no buffer for a sequence "
+            "between stages, so a link that does not fit inside a beat is not "
+            "hidden by pipelining - it sets the pace."
+        )),
+    )), balance
+
+
+def _stage_balance(
+    rows: Sequence["OrderedDict[str, object]"],
+    terms: Mapping[int, Mapping[Tuple[str, str], Sequence[Tuple[float, float]]]],
+    layer_spans: Mapping[int, Sequence[Tuple[float, float]]],
+    layer_fires: Mapping[int, Sequence[object]],
+    binding_stage: Optional[int],
+) -> "OrderedDict[str, object]":
+    """D34: is this partition BALANCED, and if not, what would a balanced one reach?
+
+    George, on the rule this implements: "one of the stages is much longer than
+    others. this causes pipeline waste and sets the beat... The entire point of
+    the mapper is to *try* and eliminate mismatch even if it comes at an area
+    cost." So a lopsided partition is a MAPPER FAILURE that has to be said out
+    loud, not a property of the workload that gets reported as a number and
+    read past.
+
+    The measure is the per-beat stage occupancy the beat floor already uses
+    (compute union plus outgoing link), so this is the same accounting that
+    sets the beat and not a second reading of it.
+
+    ``balanced_beat_bound_s`` is what a PERFECTLY BALANCED partition of this
+    same work could reach, and it is the largest of three floors this point
+    cannot get under by repartitioning alone:
+
+    * the **unsplittable layer floor** — a layer sits on exactly one stage, so
+      no stage can be shorter than the busiest single layer;
+    * the **distributable floor** — the total compute spread evenly over the
+      stages that exist;
+    * the **link floor** — a chip hop is atomic, so the busiest outgoing link
+      is a floor whether or not the compute around it moves.
+
+    It is a BOUND, not a promise: it says what is left on the table, and D34
+    names the balance-aware partitioner as the follow-on that would collect it.
+    Nothing here repartitions anything.
+    """
+    occupancies = [float(row["occupancy_s_per_beat"]) for row in rows]
+    if not occupancies:
+        return OrderedDict(
+            (
+                ("measured", False),
+                ("reason", (
+                    "this run lowers no pipeline stage, so there is no partition to "
+                    "balance and no stage times to compare."
+                )),
+            )
+        )
+    largest = max(occupancies)
+    median = float(_median(occupancies))
+    ratio = (largest / median) if median > 0 else 0.0
+    stage_count = len(rows)
+
+    def _dominant(stage: int) -> Tuple[Optional[str], Optional[str], float]:
+        by_term = terms.get(int(stage)) or {}
+        best: Tuple[Optional[str], Optional[str], float] = (None, None, 0.0)
+        for (device_class, block), intervals in by_term.items():
+            busy = _union_busy_s(list(intervals))
+            if busy > best[2]:
+                best = (block, device_class, busy)
+        return best
+
+    # THE DIGITAL-ONLY SPREAD, beside the occupancy spread. They are different
+    # quantities and both are true: a hybrid's attention stages can run tens of
+    # times the median DIGITAL time while their whole-stage occupancy is only a
+    # few times the median, because every stage also walks its analog macros.
+    # The occupancy ratio is the one the verdict is taken on - it is what sets
+    # the beat - and this one is here so a reader holding the digital figure
+    # (28.7x on Granite-4.0-H-1B at 2 layers/chip) can see it is the same
+    # machine and not a contradiction (D21).
+    digital_busy: List[float] = []
+    for row in rows:
+        by_term = terms.get(int(row["stage"])) or {}
+        intervals: List[Tuple[float, float]] = []
+        for (device_class, _block), spans in by_term.items():
+            if device_class != "analog_macro":
+                intervals.extend(spans)
+        fired = max(1, int(row["beats_fired"]))
+        digital_busy.append(_union_busy_s(intervals) / float(fired))
+    digital_max = max(digital_busy, default=0.0)
+    digital_median = float(_median(digital_busy)) if digital_busy else 0.0
+    digital_ratio = (digital_max / digital_median) if digital_median > 0 else None
+
+    long_stages: List["OrderedDict[str, object]"] = []
+    for row in rows:
+        busy = float(row["occupancy_s_per_beat"])
+        if median <= 0 or busy <= median * STAGE_BALANCE_MAX_RATIO:
+            continue
+        block, device_class, term_busy = _dominant(int(row["stage"]))
+        long_stages.append(
+            OrderedDict(
+                (
+                    ("stage", int(row["stage"])),
+                    ("busy_s", busy),
+                    ("ratio_to_median", busy / median),
+                    ("dominant_block", block),
+                    ("dominant_device_class", device_class),
+                    ("dominant_busy_s", term_busy),
+                    ("outgoing_link_s", float(row["outgoing_link_s"])),
+                    ("sets_the_beat", int(row["stage"]) == (
+                        -1 if binding_stage is None else int(binding_stage)
+                    )),
+                )
+            )
+        )
+    long_stages.sort(key=lambda entry: -float(entry["busy_s"]))
+
+    # THE THREE FLOORS A REPARTITION CANNOT GET UNDER.
+    layer_floor = 0.0
+    busiest_layer = None
+    for layer, spans in layer_spans.items():
+        fired = max(1, len(layer_fires.get(layer, ()) or ()))
+        busy = _union_busy_s(list(spans)) / float(fired)
+        if busy > layer_floor:
+            layer_floor, busiest_layer = busy, int(layer)
+    compute_total = math.fsum(float(row["compute_s_per_beat"]) for row in rows)
+    distributable_floor = compute_total / float(max(1, stage_count))
+    link_floor = max(
+        (float(row["outgoing_link_s"]) for row in rows), default=0.0
+    )
+    bound = max(layer_floor, distributable_floor, link_floor)
+    which = "unsplittable_layer"
+    if distributable_floor >= layer_floor and distributable_floor >= link_floor:
+        which = "distributable_work_over_stages"
+    elif link_floor >= layer_floor and link_floor >= distributable_floor:
+        which = "chip_link"
+    balanced = ratio <= STAGE_BALANCE_MAX_RATIO
+    return OrderedDict(
+        (
+            ("measured", True),
+            ("verdict", "balanced" if balanced else "MISMATCHED"),
+            ("max_stage_busy_s", largest),
+            ("median_stage_busy_s", median),
+            ("ratio", ratio),
+            ("max_stage_digital_s", digital_max),
+            ("median_stage_digital_s", digital_median),
+            ("digital_ratio", digital_ratio),
+            ("threshold", float(STAGE_BALANCE_MAX_RATIO)),
+            ("stages", stage_count),
+            ("binding_stage", None if binding_stage is None else int(binding_stage)),
+            ("long_stages", long_stages),
+            ("balanced_beat_bound_s", bound),
+            ("balanced_beat_bound_binding", which),
+            ("unsplittable_layer_floor_s", layer_floor),
+            ("unsplittable_layer", busiest_layer),
+            ("distributable_floor_s", distributable_floor),
+            ("link_floor_s", link_floor),
+            (
+                "headroom_ratio",
+                (largest / bound) if bound > 0 else None,
+            ),
+            (
+                "basis",
+                "D34. Balance is measured on the SAME per-beat stage occupancy that "
+                "sets the beat (compute union plus outgoing link), so this is one "
+                "accounting and not a second reading. `digital_ratio` is the same "
+                "spread over the NON-ANALOG time only - a hybrid's attention stages "
+                "run tens of times the median digital time while their whole-stage "
+                "occupancy is a few times it, because every stage also walks its "
+                "analog macros; the verdict is taken on the OCCUPANCY, which is what "
+                "sets the beat. verdict is MISMATCHED when the "
+                f"busiest stage exceeds {STAGE_BALANCE_MAX_RATIO}x the median - a "
+                "WARNING, never a gate: nothing is refused for it. "
+                "balanced_beat_bound_s is the beat a perfectly balanced partition of "
+                "THIS work could reach, the largest of three floors a repartition "
+                "cannot get under: the busiest single LAYER (a layer sits on exactly "
+                "one stage), the total compute spread evenly over the stages that "
+                "exist, and the busiest outgoing CHIP HOP (a hop is atomic). It is a "
+                "bound on what is left on the table; nothing here repartitions "
+                "anything, and D34 names the balance-aware partitioner as the "
+                "follow-on that would collect it.",
+            ),
+        )
+    )
+
+
 def _build_pipeline_metrics(
     mapping: FwsMapping,
     serving: ServingPoint,
     costs: Sequence[OpCost],
     timeline: CoarseEvalResult,
+    op_annotations: Sequence[FwsOpAnnotation] = (),
 ) -> Tuple[Tuple[Metric, ...], Tuple[float, ...], Dict[str, object], "OrderedDict[str, object]"]:
     """The FILLED PIPELINE's metrics (D29), every one read off the timeline.
 
@@ -2202,10 +2797,15 @@ def _build_pipeline_metrics(
     """
     system = mapping.system_id
     streams = max(1, int(serving.streams))
+    stage_count = max(1, int(getattr(serving, "stages", 0) or len(mapping.stages)))
+    fill = float(streams) / float(stage_count)
     beats_lowered = int(serving.beats)
-    # A traversal COMPLETES inside the window when its last stage fits: it
-    # enters at beat j and leaves at beat j + D - 1.
-    complete = [j for j in range(beats_lowered) if j + streams - 1 <= beats_lowered - 1]
+    # A traversal COMPLETES inside the window when its LAST STAGE fits: it
+    # enters at its own entry beat (one per beat at the full fill, stages/D
+    # beats apart under an underfilled pipeline) and leaves `stages - 1` beats
+    # later. The window is sized from the same law (`lowered_beats`), so this
+    # is that law read back, not a second one.
+    complete = [j for j in range(beats_lowered) if serving.completes(j)]
     exits: List[Tuple[int, float, float]] = []
     for traversal in complete:
         first, last = _phase_window(costs, timeline, "decode", traversal)
@@ -2233,15 +2833,151 @@ def _build_pipeline_metrics(
     tail = list(_converged_beat_tail(steady))
     ramp = steady[: len(steady) - len(tail)]
     beat = float(_median(tail)) if tail else 0.0
+    # LITTLE'S LAW IS A FLOOR ON THE BEAT, NOT A DIAGNOSTIC (M1/M4).
+    #
+    # A filled pipeline holds D streams. A token whose traversal takes L cannot
+    # be replaced faster than L / D, because at 1/beat tokens per second there
+    # would be (L / beat) tokens in flight and the machine has room for D. The
+    # exit intervals alone cannot see this: they measure how fast tokens LEAVE
+    # inside a bounded window, and a window that never reaches steady state
+    # reports the ramp's spacing as the rhythm.
+    #
+    # Falcon-Mamba read 1,208,651 tokens/s off a 0.827 us exit spacing while its
+    # own traversal took 59.33 us over 32 streams - 71.7 tokens in flight in a
+    # machine built for 32. The cause is structural, not a short window: a token
+    # crosses 32 compute stages AND the 31 inter-chip links between them, and
+    # only the stages were counted as pipeline positions. Widening the window
+    # from 3 to 16 beats does not converge it.
+    #
+    # The floor is applied and NAMED. When it binds, the analog side is not what
+    # sets the pace and the artifact says so.
+    # LITTLE'S LAW IS CHECKED AND REPORTED, NEVER SILENTLY IMPOSED.
+    #
+    # A filled pipeline holds D streams, so a token whose traversal takes L
+    # cannot be replaced faster than L / D. The exit spacing can report a faster
+    # rhythm than that, and when it does the machine is NOT in steady state -
+    # tokens are entering faster than it drains them.
+    #
+    # An earlier revision of this block took the max and called it the beat.
+    # That was wrong: the traversal latency itself GROWS with the measurement
+    # window on an over-subscribed pipeline (Granite moved 1.53e-05 -> 2.51e-05
+    # between decode_window 3 and 14), so the "fixed" beat simply inherited the
+    # divergence and made a built number depend on an analysis knob (M10).
+    #
+    # So the violation is NAMED and the measured beat is left alone. A reader
+    # who sees `beat_sustainable = False` must not quote the throughput.
+    # OPTION 2, TAKEN: a stage's time includes its outgoing link. The beat can
+    # never be shorter than the slowest stage's per-beat occupancy, because the
+    # machine has no buffer to park a sequence in between stages. The exit
+    # spacing can read faster than that while the pipeline is still filling, so
+    # the floor is applied and the fact is disclosed.
+    stage_floor, stage_occupancy, stage_balance = _stage_beat_floor(
+        op_annotations, costs, timeline, beats_lowered
+    )
+    # A MEASUREMENT IS USED ONLY WHEN IT CONVERGED; otherwise the derived bound
+    # stands. The exit spacing is one sample of the rhythm and it needs a window
+    # long enough to settle - Granite's never settles (its last two intervals
+    # disagree by 51% at window 3 and still by 62% at window 14), so reading a
+    # beat off it reported the ramp. The stage-occupancy floor is a RATE, busy
+    # time over beats lowered, and it is stable to 0.5% across those same
+    # windows.
+    #
+    # When the exits DO converge and sit above the floor, the machine really is
+    # stalling on dependencies rather than on resources, and the slower measured
+    # rhythm is the honest one. So: converged exits win when they are slower,
+    # and the floor stands whenever they are faster or unusable.
+    # TWO PHYSICAL FLOORS, AND THE BEAT IS THE LARGER.
+    #
+    #   1. RESOURCE OCCUPANCY. No stage can be busy more than a whole beat, and
+    #      a stage holds its slot until its outgoing link completes - there is
+    #      no buffer to park a sequence in between stages.
+    #   2. LITTLE'S LAW. A traversal takes L and the machine has D stream slots,
+    #      so a token cannot be replaced faster than L / D.
+    #
+    # Either can bind. Falcon-Mamba is occupancy-bound (its inter-chip link is
+    # longer than the analog pass). Granite and Qwen are Little-bound: their
+    # resources idle 56% of the beat while the traversal is what limits them.
+    # Applying only the first raised Granite to 81,203 tokens/s with 21 tokens
+    # in flight in a machine built for 10.
+    #
+    # The measured exit spacing is used only when it CONVERGED, and then only if
+    # it is slower than both floors - a converged, slower rhythm means the
+    # machine really stalls on dependencies, and that is the honest reading.
+    # Granite's exits never converge (51% disagreement at window 3, still 62% at
+    # window 14), so reading a beat off them reported the ramp.
+    little_floor = 0.0
+    settled_latency_s = 0.0
+    if streams > 0 and exits:
+        # THE MEDIAN OF THE COMPLETED TRAVERSALS, not the last one. A single
+        # traversal is one sample of a quantity that is still settling, and
+        # reading the floor off it made the beat swing 2x with the measurement
+        # window (Granite: 2.59e-05 at window 3 against 1.32e-05 at window 14).
+        # The median over the settled half is stable and is still a measurement,
+        # not a smoothing of ramp into rhythm: the fill transient sits in the
+        # first half and is dropped whole.
+        spans = sorted(float(last - first) for _t, first, last in exits)
+        settled = spans[len(spans) // 2:] if len(spans) > 2 else spans
+        settled_latency_s = float(_median(settled))
+        little_floor = settled_latency_s / float(streams)
+    exits_converged = bool(len(tail) >= 2)
+    floor = max(float(stage_floor), float(little_floor))
+    beat_binding = "exit_intervals"
+    if not exits_converged or floor > beat > 0.0:
+        if floor > 0.0:
+            beat = floor
+            beat_binding = (
+                "stage_occupancy_including_outgoing_link"
+                if stage_floor >= little_floor
+                else "littles_law_traversal_over_streams"
+            )
+    tokens_in_flight = (float(little_floor) * float(streams) / beat) if beat > 0 else 0.0
+    beat_sustainable = not (beat > 0.0 and little_floor > beat * (1.0 + 1e-9))
     metrics: List[Metric] = []
     pipeline: "OrderedDict[str, object]" = OrderedDict(
         (
             ("regime", str(serving.regime)),
             ("resident_streams", streams),
+            ("stage_count", stage_count),
+            # D38: the DECLARED fill and the one D realizes over the stages.
+            ("pp_util", float(getattr(mapping, "pp_util", PP_UTIL_FULL))),
+            ("pipeline_fill", fill),
+            (
+                "fill_basis",
+                "D = round(pp_util x stages) resident streams over "
+                f"{stage_count} stage(s), realized fill {fill:.6g}. The fill enters "
+                "the machine ONCE, in the DAG's rotation: traversals are spaced "
+                "stages/D beats apart, so D streams are in flight and D tokens leave "
+                "every `stages` beats. Every number below is then MEASURED off that "
+                "timeline - no throughput, occupancy or state figure is multiplied by "
+                "the fill anywhere, because that would be a second accounting of one "
+                "fact (D21).",
+            ),
             ("stage_plan_basis", str(mapping.stage_basis)),
             ("stages", [stage.as_dict() for stage in mapping.stages]),
+            ("beat_binding", beat_binding),
+            ("stage_occupancy", stage_occupancy),
+            # D34: is this partition balanced, and what would a balanced one
+            # reach? Beside the occupancy it is measured from.
+            ("stage_balance", stage_balance),
+            ("beat_sustainable", bool(beat_sustainable)),
+            ("beat_littles_law_floor_s", float(little_floor)),
+            ("tokens_in_flight", float(tokens_in_flight)),
+            ("beat_binding_note", (
+                "the exit spacing measured on the timeline, and it satisfies "
+                "Little's law against the resident stream count"
+                if beat_sustainable else
+                "THIS BEAT IS NOT SUSTAINABLE AND THE THROUGHPUT MUST NOT BE QUOTED. "
+                "The exit spacing reports a faster rhythm than the machine can hold: at "
+                "this beat there are `tokens_in_flight` tokens inside a pipeline built "
+                "for `resident_streams`. A token crosses the compute stages AND the "
+                "inter-chip links between them, and only the stages are counted as "
+                "pipeline positions, so the link chain has nowhere to live. Either the "
+                "links become stages (and D grows, with the state store that implies), "
+                "or a stage's time must include its outgoing link. That is a modelling "
+                "decision, and this model does not take it silently."
+            )),
             ("beats_lowered", beats_lowered),
-            ("fill_beats", streams - 1),
+            ("fill_beats", stage_count - 1),
             ("steady_beats_measured", len(steady)),
             ("tokens_exited", len(exits)),
             ("exit_times_s", [row[2] for row in exits]),
@@ -2288,9 +3024,13 @@ def _build_pipeline_metrics(
                 value=1.0 / beat,
                 unit="tokens/s",
                 basis=(
-                    "D29's identity, on the measured beat: the pipeline is always full, "
-                    "so exactly ONE token leaves the last stage per beat and the system "
-                    f"rate is 1/beat. The beat is the median of the SETTLED TAIL "
+                    "D29's identity, on the measured beat: ONE token leaves the last "
+                    "stage per beat and the system rate is 1/beat. Under an UNDERFILLED "
+                    "pipeline (D38) the exit spacing is what carries the fill - "
+                    f"{streams} stream(s) over {stage_count} stage(s) means D tokens "
+                    "leave every `stages` beats, so the measured spacing is already the "
+                    "full pipeline's beat divided by the fill and nothing is scaled "
+                    f"here. The beat is the median of the SETTLED TAIL "
                     f"({len(tail)} interval(s)) of the {len(intervals)} measured "
                     "inter-exit intervals; the fill transient and any still-ramping "
                     "intervals are held out and printed beside it, and this headline is "
@@ -2320,16 +3060,29 @@ def _build_pipeline_metrics(
             value=float(streams),
             unit="streams",
             basis=(
-                f"the stage count, DERIVED from {mapping.stage_basis or 'the stage plan'}. "
-                "D29 makes D a consequence of the stage plan, never a configured batch — "
-                "the serving surface refuses a batch by name."
+                f"round(pp_util x stages) = round({float(getattr(mapping, 'pp_util', PP_UTIL_FULL))} "
+                f"x {stage_count}), on the stage plan DERIVED from "
+                f"{mapping.stage_basis or 'the stage plan'}. D29 makes D a consequence "
+                "of the stage plan and never a configured batch — the serving surface "
+                "refuses a batch by name — and D38 makes the FILL the one axis that "
+                "moves it."
             ),
         )
     )
     if exits:
-        # The LAST completed traversal is the most steady one in the window.
+        # ONE LATENCY, ONE NUMBER (D21). The SETTLED MEDIAN of the completed
+        # traversals is the reading, and it is taken BEFORE the metric is
+        # built: the metric used to publish the LAST traversal while the beat
+        # floor was derived from the median, so the two disagreed and the
+        # reported tokens-in-flight could exceed D by a few percent on a
+        # machine the floor had already made legal. The last traversal is one
+        # sample of a quantity that is still settling; on a 12-stage plan the
+        # two readings part by 0.03%, on a 2-stage one they coincided and hid
+        # the split.
         traversal, first, last = exits[-1]
         measured_latency = float(last - first)
+        if settled_latency_s > 0.0:
+            measured_latency = settled_latency_s
         metrics.append(
             Metric(
                 key=f"{system}.per_token_latency",
@@ -2337,11 +3090,15 @@ def _build_pipeline_metrics(
                 value=measured_latency,
                 unit="s",
                 basis=(
-                    f"finish of traversal {traversal}'s last op minus the issue of its "
-                    "first, both read off the one timeline: the wall time one stream "
-                    "needs to walk every stage and emit one token. D29's identity says "
-                    "this is D x beat; the identity residual is reported in the pipeline "
-                    "block rather than replacing the measurement."
+                    "the MEDIAN of the settled half of the completed traversals' spans "
+                    "(finish of a traversal's last op minus the issue of its first, "
+                    f"both read off the one timeline; {len(exits)} traversal(s) "
+                    "completed, the fill transient sits in the first half and is "
+                    "dropped whole): the wall time one stream needs to walk every stage "
+                    "and emit one token. It is the SAME number the Little's-law floor "
+                    "is computed from, so the two can never disagree. D29's identity "
+                    "says this is D x beat; the identity residual is reported in the "
+                    "pipeline block rather than replacing the measurement."
                 ),
             )
         )
@@ -2814,12 +3571,42 @@ def _state_residency(mapping: FwsMapping, batch: int, act_bytes: float, block: s
         if ssm is None:
             return 0.0
         d_inner = ssm.resolve_d_inner(int(params.hidden_dim))
-        return float(batch) * float(d_inner) * float(ssm.d_state) / tp * act_bytes
+        # THE h-STATE AND THE CONV WINDOW. A selective-scan layer holds two
+        # resident things per stream, not one: the recurrent state
+        # (d_inner x d_state) and the short depthwise conv's ROLLING WINDOW of
+        # the last (d_conv - 1) inputs over d_inner channels. The window was
+        # missing, so a Mamba stage's bill - and the store sized from it - was
+        # short by d_inner x (d_conv - 1) x act_bytes per stream.
+        elems = float(d_inner) * float(ssm.d_state)
+        window = max(0, int(getattr(ssm, "d_conv", 0) or 0) - 1)
+        if window:
+            elems += float(d_inner) * float(window)
+        return float(batch) * elems / tp * act_bytes
     if block == "delta_rule":
         la = getattr(mapping.model, "linear_attention", None)
         if la is None:
             return 0.0
-        elems = int(la.num_key_heads) * int(la.key_head_dim) * int(la.value_head_dim)
+        # ONE LAW FOR ONE QUANTITY (M7). This used to multiply the three
+        # declared dims straight through, which under-counts whenever value
+        # heads outnumber key heads: each key head carries every value channel
+        # it serves, so the state is key_head_dim x value_dim, not
+        # num_key_heads x key_head_dim x value_head_dim. Qwen3.5 has 16 key
+        # heads against 32 value heads, so the bill was 2.07x short - 686 mm2
+        # of SRAM the machine has to build and was not being charged for. The
+        # repo already had the right law and this site was not calling it.
+        heads, d_k, d_v = _delta_state_dims(
+            int(la.num_key_heads), int(la.key_head_dim),
+            int(getattr(la, "num_value_heads", la.num_key_heads) or la.num_key_heads),
+            int(la.value_head_dim),
+        )
+        elems = int(heads) * int(d_k) * int(d_v)
+        # THE ROLLING CONV WINDOW rides with the mixer that declares it: a
+        # k-tap depthwise conv must keep k-1 past activations per channel, and
+        # that state is as resident as the fast weights are (ADJ-15).
+        taps = int(getattr(la, "conv_kernel", 0) or 0)
+        if taps > 1:
+            channels = int(heads) * int(d_v)
+            elems += channels * (taps - 1)
         return float(batch) * float(elems) / tp * act_bytes
     return 0.0
 
@@ -2840,6 +3627,29 @@ def _resident_contexts(serving: ServingPoint) -> List[int]:
     for index in range(streams):
         turns = max(0, (beats - 1 - index) // streams)
         out.append(int(serving.prefill_len) + index + turns + 1)
+    return out
+
+
+def _served_contexts(serving: ServingPoint) -> List[int]:
+    """The context each resident stream reaches over the WHOLE SERVED REQUEST.
+
+    THE SILICON IS NOT SIZED BY THE MEASUREMENT WINDOW (M10). The store must
+    hold every resident stream at its LARGEST context, and the largest context
+    a stream reaches is the end of the request it was given -
+    `prefill_len + decode_len` - not wherever the lowered beat count happened
+    to stop. Sizing from `_resident_contexts` made `mapping.decode_window` -
+    a pure analysis knob (ADJ-6) - buy SRAM macros: raising it added 7,542
+    macros (399.7 mm2) on Qwen. A metric may be windowed; built silicon may
+    not.
+
+    `_resident_contexts` keeps its job of describing the priced ops, where the
+    window reading is the honest one.
+    """
+    streams = max(1, int(serving.streams))
+    full = int(serving.prefill_len) + int(getattr(serving, "decode_len", 0) or 0)
+    window = _resident_contexts(serving)
+    reached = max(window) if window else full
+    return [max(full, reached)] * streams
     return out
 
 
@@ -2898,7 +3708,36 @@ def _build_memory(
     # count times one context.
     filled = str(getattr(serving, "regime", "")) == REGIME_FILLED
     residents = int(serving.streams) if filled else int(serving.batch)
-    resident_contexts = _resident_contexts(serving) if filled else []
+    # D38: KV AND RECURRENT STATE ARE FP8 on the mapped path. One byte per
+    # element, from one named constant, and it does NOT follow the run's tensor
+    # format: a card that declares bf16 activations still builds an FP8 state
+    # store. The retired lockstep regime keeps the declared precisions, because
+    # it is the pass-1/2 comparison and D38 did not move it.
+    if filled:
+        state_bytes_per_element = float(STATE_ELEMENT_BYTES)
+        kv_bytes_per_element = float(STATE_ELEMENT_BYTES)
+        disclosures.append(
+            Relaxation(
+                constraint="state_element_precision",
+                value=(
+                    f"{STATE_ELEMENT_DTYPE}: {STATE_ELEMENT_BYTES:g} B/element for KV "
+                    "and recurrent state"
+                ),
+                reason=(
+                    STATE_ELEMENT_BASIS
+                    + " The declared precisions this REPLACES on the mapped path are "
+                    f"sw_param.precision.activations = {act_bytes:g} B and "
+                    f"sw_param.precision.kv_cache = {kv_precision:g} B; they keep "
+                    "sizing activations and the retired lockstep regime."
+                ),
+            )
+        )
+    else:
+        state_bytes_per_element = float(act_bytes)
+        kv_bytes_per_element = float(kv_precision)
+    # SIZING contexts, not measurement ones: the store is built for the whole
+    # served request, never for wherever the lowered window stopped (M10).
+    resident_contexts = _served_contexts(serving) if filled else []
     per_chip_state: Dict[int, float] = {}
     state_items: List[Tuple[int, int, float]] = []   # (chip, layer, bytes)
     seen_state: set = set()
@@ -2916,7 +3755,7 @@ def _build_memory(
                 continue
             seen_state.add(key)
             bytes_here = _state_residency(
-                mapping, residents, act_bytes, annotation.block
+                mapping, residents, state_bytes_per_element, annotation.block
             )
             per_chip_state[chip_id] = per_chip_state.get(chip_id, 0.0) + bytes_here
             state_items.append((chip_id, int(annotation.layer or 0), bytes_here))
@@ -2938,10 +3777,9 @@ def _build_memory(
                 # D29: the stage holds ALL D streams' KV for this layer, whether
                 # or not the WINDOW happened to lower every stream's pass on it
                 # (a late stage sees fewer traversals inside a bounded window).
-                # The contexts come from the regime's own convention, which is
-                # the same convention stamped on the priced ops — so the two can
-                # never disagree, and a truncated window cannot under-report
-                # resident memory.
+                # The contexts are the SERVED ones - each stream at the end of
+                # the request it was given - so neither a truncated window nor
+                # a generous one can move the silicon this store buys.
                 for index, value in enumerate(resident_contexts):
                     per_stream[index] = max(per_stream.get(index, 0), int(value))
 
@@ -2959,13 +3797,15 @@ def _build_memory(
                 # resident: stream i holds its own KV at its own context.
                 contexts = [per_stream[key] for key in sorted(per_stream)]
                 bytes_here = math.fsum(
-                    mapping.device.kv_bytes_per_stream_layer(ctx, kv_precision, tp)
+                    mapping.device.kv_bytes_per_stream_layer(
+                        ctx, kv_bytes_per_element, tp
+                    )
                     for ctx in contexts
                 )
             else:
                 contexts = [max(per_stream.values())]
                 bytes_here = float(residents) * mapping.device.kv_bytes_per_stream_layer(
-                    contexts[0], kv_precision, tp
+                    contexts[0], kv_bytes_per_element, tp
                 )
             kv_context_census.extend(contexts)
             per_chip_kv[chip_id] = per_chip_kv.get(chip_id, 0.0) + bytes_here
@@ -3118,19 +3958,18 @@ def _build_memory(
                     # MemoryVerdict rows are P4's capacity machinery and are
                     # what the DSE's `memory` stage gates a candidate on, and
                     # that gate belongs to the size the config DECLARES for the
-                    # activation/KV store. The tighter ON-CHIP reading is D29's
-                    # own feasibility question and rides state_residency, whose
-                    # `verdict` is the on-chip one — a sweep gates its stage
-                    # plans on its own declared max_stage_state_bytes budget,
-                    # not on this row (D21: two questions, two names).
+                    # activation/KV store. The ON-CHIP store is a different
+                    # question with a different answer: ADJ-11 SIZES it to this
+                    # very bill rather than checking it against anything, so it
+                    # cannot appear here as a capacity a stage passes or fails.
                     capacity_bytes=float(row["activation_tier_capacity_bytes"]),
                     status=str(row["activation_tier_verdict"]),
                     basis=_RESIDENCY_BASIS
                     + " This row is taken against tech_param.DRAM.size, the declared "
-                    "activation tier. The ON-CHIP reading against tech_param.SRAM-L2.size "
-                    f"({float(row['capacity_bytes']):.6g} B) is "
-                    f"{str(row['verdict']).upper()} and rides "
-                    "evaluation.state_residency as its headline verdict.",
+                    "activation tier. The ON-CHIP store is not a check at all (ADJ-11): "
+                    f"it is BUILT to this stage's bill - {int(row.get('store_macros', 0))} "
+                    f"measured SRAM macro(s) holding {float(row['capacity_bytes']):.6g} B - "
+                    "and its silicon is charged in evaluation.digital_silicon.",
                     contributors=OrderedDict(
                         (
                             ("recurrent_state", float(row["recurrent_state_bytes"])),
@@ -3154,25 +3993,26 @@ def _build_memory(
             )
         disclosures.append(
             Relaxation(
-                constraint="stage_state_tier_is_one_declared_size",
+                constraint="stage_state_store_is_built_per_stage",
                 value=(
-                    f"on-chip {onchip_capacity:.6g} B (tech_param.SRAM-L2.size) applied "
-                    f"to EVERY stage; the activation stub {sram_capacity:.6g} B "
-                    "(tech_param.DRAM.size) reported beside it"
+                    "one store BUILT per stage, sized to that stage's own bill; the "
+                    f"declared on-chip tier {onchip_capacity:.6g} B "
+                    "(tech_param.SRAM-L2.size) gates nothing and the activation stub "
+                    f"{sram_capacity:.6g} B (tech_param.DRAM.size) rides beside it"
                 ),
                 reason=(
-                    "The state/KV feasibility check needs a per-stage capacity and the "
-                    "schema declares no per-stage field. D29's state is RESIDENT and "
-                    "read every beat, so the tier that decides feasibility is the "
-                    "declared ON-CHIP SRAM-L2 size, and that is what "
-                    "state_residency.verdict is taken against; the DRAM activation stub "
-                    "is orders of magnitude larger and would make the check vacuous, so "
-                    "it rides under its own name as activation_tier_verdict rather than "
-                    "as the headline. Each declared size is applied to each stage "
-                    "independently, exactly as the per-chip verdicts apply theirs to "
-                    "each chip. A stage that spans several chips is judged against one "
-                    "chip's tier, which is PESSIMISTIC, and it is disclosed rather than "
-                    "silently scaled by a chip count the schema does not tie to a stage."
+                    "ADJ-11: the resident state is not checked against a capacity, it "
+                    "is what the capacity is BUILT FROM. Each stage gets its own store "
+                    "of whole measured SRAM macros, sized to that stage's measured bill, "
+                    "and the silicon is charged in evaluation.digital_silicon - so "
+                    "state_residency.verdict is the word 'sized' and there is no stage a "
+                    "machine can fail here. What CAN refuse a machine is its area budget, "
+                    "which is a statement about the package rather than about memory. "
+                    "The declared SRAM-L2 size is still reported, under "
+                    "declared_onchip_tier_bytes, because a reader comparing this machine "
+                    "to a declared part will want it - but nothing is taken against it. "
+                    "One store per STAGE, not one pooled store: the stages sit on "
+                    "different chips and a macro cannot straddle two."
                 ),
             )
         )
@@ -3208,57 +4048,86 @@ _RESIDENCY_BASIS = (
 )
 
 
-def _sized_store(mapping: FwsMapping, required_bytes: float) -> Dict[str, float]:
+def _sized_store(mapping: FwsMapping, required_bytes: float) -> Dict[str, object]:
     """The on-chip store built to hold ``required_bytes``, in measured macros.
 
-    A stage's resident state is not checked against a declared tier size: the
-    store is BUILT to it. When the card names a synthesis library the store is
-    integer copies of the measured SRAM macro and its area is real silicon;
-    when it names none there is no measured macro to build from, so the store
-    reports the requirement and no area, and says so by carrying 0 macros.
+    A stage's resident state is not checked against a declared tier: the store
+    is BUILT to it (ADJ-11).
+
+    WHEN NOTHING CAN BE BUILT, THE ROW SAYS SO. A card that names no synthesis
+    library, or one whose library has no SRAM macro, has no measured block to
+    build from — that is an ABSENT LAW, and it is reported as one under
+    ``provenance`` and ``uncovered``. It used to be swallowed by a bare
+    ``except`` and returned as 0 macros / 0.0 mm2 with the verdict still
+    "sized" and the prose still claiming the area was charged, so a store that
+    could not be composed was byte-identical to a store that measured zero.
+    That is the one thing the honesty rules forbid.
     """
+    device = getattr(mapping, "device", None)
+    if device is None or not device.has_synthesis_library():
+        return {
+            "bytes": float(required_bytes),
+            "macros": 0,
+            "area_mm2": 0.0,
+            "provenance": "absent",
+            "uncovered": (
+                "the on-chip state store is NOT composed: this card names no synthesis "
+                "library, so there is no measured SRAM macro to build it from. The bytes "
+                "are the requirement; the silicon that would hold them is unpriced."
+            ),
+        }
     try:
-        device = mapping.device
-        if not device.has_synthesis_library():
-            return {"bytes": float(required_bytes), "macros": 0, "area_mm2": 0.0}
         composition = device.state_sram_composition(float(required_bytes))
         macros = int(sum(composition.blocks.values()))
         per_macro = sram_macro_bytes(device.synthesis_library())
+    except SynthesisLibraryError as exc:
         return {
-            "bytes": float(macros * per_macro),
-            "macros": macros,
-            "area_mm2": float(composition.area_mm2),
+            "bytes": float(required_bytes),
+            "macros": 0,
+            "area_mm2": 0.0,
+            "provenance": "absent",
+            "uncovered": (
+                "the on-chip state store is NOT composed: " + str(exc).split(".")[0]
+                + ". The bytes are the requirement; the silicon is unpriced."
+            ),
         }
-    except Exception:
-        # A library that cannot compose is an absent law, not a zero: report
-        # the requirement and no store rather than inventing one.
-        return {"bytes": float(required_bytes), "macros": 0, "area_mm2": 0.0}
-
+    return {
+        "bytes": float(macros * per_macro),
+        "macros": macros,
+        "area_mm2": float(composition.area_mm2),
+        "provenance": "composed-measured",
+        "uncovered": None,
+    }
 
 def _stage_chiplet_groups(mapping: FwsMapping) -> Tuple[Tuple[int, ...], ...]:
     """Which pipeline stages share each shared digital chiplet.
 
-    One chiplet per stage is the balanced default and returns singletons, which
-    changes no derivation. When a machine declares FEWER chiplets than stages,
-    the stages are dealt out in CONTIGUOUS blocks — a chiplet serves neighbours
-    in the pipeline, so the activations it reads come from the analog chips
-    beside it rather than from across the package.
+    Taken from the mapping's own :meth:`chiplet_index_of_chip` — the SAME
+    function the lowering places ops with — so an engine is always sized for
+    the grouping the DAG actually builds. It used to deal the stages itself,
+    contiguously, while the lowering dealt the chips round-robin; the two
+    disagreed on every machine with fewer chiplets than stages, and the engine
+    was widened for a chiplet nobody built.
+
+    A chiplet that serves no stage still gets a row, because the machine builds
+    it and a sizing that cannot see it cannot report it.
     """
     stages = list(getattr(mapping, "stages", ()) or ())
     if not stages:
         return ()
-    chiplets = 0
-    for chip in getattr(mapping, "chips", ()) or ():
-        if getattr(chip, "pool", None) != "analog":
-            chiplets += 1
-    if chiplets <= 0 or chiplets >= len(stages):
+    engines = mapping.shared_digital_devices()
+    if not engines:
         return tuple((int(stage.index),) for stage in stages)
-    groups: List[List[int]] = [[] for _ in range(chiplets)]
-    per = math.ceil(len(stages) / chiplets)
-    for position, stage in enumerate(stages):
-        groups[min(chiplets - 1, position // per)].append(int(stage.index))
-    return tuple(tuple(group) for group in groups if group)
-
+    groups: List[List[int]] = [[] for _ in engines]
+    for stage in stages:
+        chips = list(getattr(stage, "chips", ()) or ())
+        if not chips:
+            continue
+        # A stage's digital work rides the chiplet that serves its FIRST chip;
+        # a stage spanning several chips is placed by the same rule op by op,
+        # and the group list below is what the sizing sums over.
+        groups[mapping.chiplet_index_of_chip(int(chips[0]))].append(int(stage.index))
+    return tuple(tuple(group) for group in groups)
 
 def _build_state_residency(
     mapping: FwsMapping,
@@ -3314,7 +4183,10 @@ def _build_state_residency(
         # store the stage needs, and its verdict is "sized" — never a
         # violation. What can refuse a machine is its AREA budget.
         store = _sized_store(mapping, total)
-        status = "sized"
+        # "sized" is a claim that a store was BUILT. When none could be, the
+        # row says "uncovered" instead, so a reader is never shown a composed
+        # store and an absent law under the same word.
+        status = "sized" if store.get("provenance") == "composed-measured" else "uncovered"
         rows.append(
             OrderedDict(
                 (
@@ -3329,6 +4201,8 @@ def _build_state_residency(
                     ("capacity_bytes", float(store["bytes"])),
                     ("store_macros", int(store["macros"])),
                     ("store_area_mm2", float(store["area_mm2"])),
+                    ("store_provenance", str(store.get("provenance", "absent"))),
+                    ("store_uncovered", store.get("uncovered")),
                     ("declared_onchip_tier_bytes", float(onchip_capacity_bytes)),
                     ("verdict", status),
                     ("activation_tier_capacity_bytes", float(capacity_bytes)),
@@ -3368,7 +4242,16 @@ def _build_state_residency(
                 "measured SRAM macro; its area is charged as silicon",
             ),
             ("stages_violating", [int(row["stage"]) for row in violated]),
-            ("verdict", "sized"),
+            (
+                "verdict",
+                "sized"
+                if all(row["store_provenance"] == "composed-measured" for row in rows)
+                else "uncovered",
+            ),
+            (
+                "store_uncovered",
+                next((row["store_uncovered"] for row in rows if row["store_uncovered"]), None),
+            ),
             ("activation_tier_capacity_bytes", float(capacity_bytes)),
             (
                 "activation_tier",
@@ -3398,6 +4281,16 @@ def _build_state_residency(
 # ---------------------------------------------------------------------------
 
 
+def _conv_pool_dims(mapping: FwsMapping) -> "OrderedDict[str, int]":
+    """The short depthwise conv this model runs — the DEVICE's own answer.
+
+    One definition (D21): :meth:`CimDeviceModel.conv_pool_dims` reads whichever
+    of the three schemas declares it (`short_conv`, an `ssm` block's ``d_conv``,
+    a gated linear-attention block's ``conv_kernel``), and the pool composition
+    that prices the silicon reads the same function.
+    """
+    return mapping.device.conv_pool_dims()
+
 def _build_pools(
     mapping: FwsMapping,
     program: Program,
@@ -3418,13 +4311,14 @@ def _build_pools(
         return ()
 
     device = mapping.device
-    short_conv = getattr(mapping.model, "short_conv", None)
-    conv_kwargs = {}
-    if short_conv is not None:
-        conv_kwargs = {
-            "conv_kernel": int(short_conv.kernel_size),
-            "conv_channels": int(short_conv.conv_dim),
-        }
+    # THE SHORT DEPTHWISE CONV, FROM EITHER PLACE IT IS DECLARED (ADJ-3). A
+    # `short_conv:` block declares one; an `ssm:` block declares the SAME
+    # operator as `d_conv` over `d_inner` channels, which is where Mamba-1 and
+    # Mamba-2 keep it. Reading only the first meant a pure-SSM machine sized
+    # ZERO conv lanes while the mapper had already dropped the conv weights
+    # from the tile set "because they run on the per-macro pool" - so the work
+    # was charged on neither side.
+    conv_kwargs = _conv_pool_dims(mapping)
     per_unit = device.digital_pool_sizing(**conv_kwargs)
 
     out: List[PoolSizingReport] = []
@@ -3489,6 +4383,7 @@ def _analog_beat_of(
     serving: ServingPoint,
     pricing: PricingResult,
     timeline: CoarseEvalResult,
+    op_annotations: Sequence[FwsOpAnnotation] = (),
 ) -> float:
     """The PROBE beat and its convergence, on a timeline whose vector ops cost nothing.
 
@@ -3499,7 +4394,7 @@ def _analog_beat_of(
     """
     if str(getattr(serving, "regime", "")) == REGIME_FILLED:
         _, _, _, pipeline = _build_pipeline_metrics(
-            mapping, serving, pricing.costs, timeline
+            mapping, serving, pricing.costs, timeline, op_annotations
         )
         beat = float(pipeline.get("beat_s", 0.0) or 0.0)
         settled = [float(v) for v in pipeline.get("converged_tail_intervals_s", ())]
@@ -3867,7 +4762,7 @@ def _derive_engine(
         durations=probe.durations,
         require_pipeline=False,
     )
-    beat, convergence = _analog_beat_of(mapping, serving, probe, timeline)
+    beat, convergence = _analog_beat_of(mapping, serving, probe, timeline, annotations)
     # ADJ-10 FIRST: the fabric is derived and installed before the scan engine,
     # so a report that prints both prints them in the order they were taken.
     # The ORDER MOVES NO NUMBER — both are sized against the per-stage analog
@@ -3912,6 +4807,78 @@ def _derive_engine(
     _PROBE_BEAT_CONVERGENCE.clear()
     _PROBE_BEAT_CONVERGENCE.update(convergence)
     return fabric_sizing, engine_sizing
+
+
+def analog_card_disclosures(mapping: FwsMapping) -> List[Relaxation]:
+    """The DERIVED analog card, stated in the artifact (not only in the code).
+
+    A card that names a ``calc_profile`` did not have its footprint, per-vector
+    energy or vec_latency written by a human: all three were computed from the
+    ADC-macro sheet at the card's (X, Y, Z) — rows, total CTT columns, ADCs.
+    That is exactly the kind of number D21 requires to name its origin, so the
+    provenance rides the report the way a derived engine's sizing does.
+    """
+    device = getattr(mapping, "device", None)
+    card = getattr(device, "card", None) if device is not None else None
+    derivation = getattr(card, "calc_derivation", None) if card is not None else None
+    if not derivation:
+        return []
+    # The SENTENCE is the law layer's (cim_timing owns what a card discloses);
+    # this function only decides that it belongs in the artifact.
+    reason = " ".join(device.analog_card_disclosures())
+    terms = derivation.get("area_terms_mm2", {})
+    return [
+        Relaxation(
+            constraint="derived_analog_card",
+            value=(
+                f"cim.cards.{card.name} = {derivation['label']} (X x Y : Z) DERIVED "
+                f"from calc_profile '{derivation['calc_profile']}': "
+                f"{int(derivation['rows'])} rows x {int(derivation['cols'])} total CTT "
+                f"columns behind {int(derivation['adcs'])} ADC(s), so mux = Y/Z = "
+                f"{int(derivation['mux'])}; "
+                f"area_mm2_per_array = {float(derivation['area_mm2_per_array']):.6g} "
+                f"(ADC term {float(derivation['adc_area_mm2']):.6g}, cell array "
+                f"{float(terms.get('ctt_array', 0.0)):.6g}), energy_per_vec_pj = "
+                f"{float(derivation['energy_per_vec_pj']):.6g}, vec_cycles = "
+                f"{int(derivation['vec_cycles'])} at "
+                f"{float(derivation['analog_clock_mhz']):g} MHz "
+                f"({float(derivation['vec_latency_s']):.6g} s per vector)"
+            ),
+            reason=reason,
+        )
+    ]
+
+
+def nonstandard_macro_disclosures(mapping: FwsMapping) -> List[Relaxation]:
+    """The D35 platform-macro exemption, stated in the artifact (D35).
+
+    D35 fixes the analog macro as a PLATFORM CONSTANT. A config may still build
+    another geometry, but only through ``cim.analog.nonstandard_macro``, and
+    only by saying why — and the reason it gave belongs in the report, not just
+    in the YAML. Without it a reader could not tell an off-platform point from a
+    platform one, which is exactly the comparison D35 exists to protect.
+    """
+    device = getattr(mapping, "device", None)
+    if device is None:
+        return []
+    notes = device.nonstandard_macro_disclosures()
+    if not notes:
+        return []
+    card = device.card
+    return [
+        Relaxation(
+            constraint="nonstandard_macro",
+            value=(
+                f"cim.cards.{card.name} is OFF-PLATFORM: {device.analog.label} "
+                f"(X x Y : Z, mux {int(device.analog.mux)}) against the "
+                f"{_analog_calc.PLATFORM_MACRO_DECISION} box X = "
+                f"{_analog_calc.PLATFORM_MACRO_ROWS}, Z in "
+                f"{list(_analog_calc.MACRO_Z_VALUES)}, Y in "
+                f"{list(_analog_calc.MACRO_Y_VALUES)}"
+            ),
+            reason=" ".join(notes),
+        )
+    ]
 
 
 def fabric_sizing_disclosures(
@@ -3980,6 +4947,100 @@ def fabric_sizing_disclosures(
             ),
         )
     ]
+    geometry = sizing.geometry
+    if geometry is not None:
+        # SA-GEOM: THREE NAMED DISCLOSURES, one per thing a reader has to know
+        # before they can use a derived-geometry number — the rule, the
+        # dataflow the law is exact under, and the assumption it rests on. They
+        # are separate constraints rather than one paragraph because they fail
+        # separately: a ws-dataflow machine invalidates the second and leaves
+        # the first intact, and a stalling feed invalidates the third alone.
+        out.append(
+            Relaxation(
+                constraint="sa_geometry_rule",
+                value=(
+                    f"array {int(geometry.rows)} x {int(geometry.cols_qk)} (QK group) "
+                    f"and {int(geometry.rows)} x {int(geometry.cols_pv)} (PV group), "
+                    f"DERIVED; declared {int(geometry.declared_rows)} x "
+                    f"{int(geometry.declared_cols)}. R = next_pow2(decode m = "
+                    f"{int(geometry.call_m)})"
+                ),
+                reason=(
+                    SA_GEOMETRY_RULE_DISCLOSURE
+                    + f" THIS RUN: {geometry.basis}."
+                ),
+            )
+        )
+        if int(getattr(sizing, "context_split", 1)) > 1 or sizing.floors:
+            split_rows = ", ".join(
+                f"stage {row.stage}: qk x{row.qk_split} / pv x{row.pv_split}, "
+                f"reduce {row.combine_cycles} cycles on {row.combine_lanes} FP_ADD "
+                f"lane(s), gather {row.gather_bytes:.4g} bytes at 0 s, "
+                f"{row.operand_bytes_per_cycle:.4g} K/V bytes per cycle"
+                for row in sizing.per_stage[:6]
+            )
+            out.append(
+                Relaxation(
+                    constraint="sa_context_split",
+                    value=(
+                        f"context dealt {int(sizing.context_split)}-ways at its deepest; "
+                        f"{int(sizing.combine_lanes)} FP_ADD reduce lane(s) provisioned"
+                    ),
+                    reason=(
+                        "CTX-SPLIT: ADJ-10's widening no longer stops at fold saturation. "
+                        "A fold's QK call is dealt across S arrays over the CONTEXT — each "
+                        "running THE SAME sa_cycles law on an n/S chunk — and PV is dealt "
+                        "the same way over its own contraction, returning S partial output "
+                        "blocks. THE PER-CHUNK PRICE NEEDS NO NEW VALIDATION: sa_cycles is "
+                        "bit-exact against ScaleSim's output-stationary schedule at any "
+                        "geometry and any n, so a chunk is a shape the validated law "
+                        "already covers. THE COMBINE IS PRICED, NOT ASSUMED FREE: the QK "
+                        "chunks concatenate (no arithmetic) but must meet before the "
+                        "softmax normalises the row, and those bytes ride the intra-chip "
+                        "convention — reported, 0 s, because D17 declares one network law "
+                        "and it is the p2p fabric BETWEEN chips; the PV partials are "
+                        "add-reduced on FP_ADD lanes composed from the measured 22nm "
+                        "library (D32) and timed with depth + ceil(results / lanes) - 1, "
+                        "the same pipelined-tree expression every other reduction here "
+                        f"uses. Per stage: {split_rows}."
+                    ),
+                )
+            )
+            floors = sizing.floors
+            out.append(
+                Relaxation(
+                    constraint="sa_fabric_floor",
+                    value="; ".join(
+                        f"{name}: stage(s) {stages}" for name, stages in floors.items()
+                    )
+                    or "no floor recorded",
+                    reason=(
+                        "CTX-SPLIT requires that whatever stops the widening be a REAL "
+                        "limit and be NAMED. Every stage carries exactly one of "
+                        + ", ".join(cim_timing_FABRIC_FLOORS)
+                        + ", and the point of the list is that a reader can tell an "
+                        "achievement from a wall from an admission. "
+                        + " ".join(
+                            f"[{name}] " + FABRIC_FLOOR_REASONS[name]
+                            for name in floors
+                        )
+                    ),
+                )
+            )
+        out.append(
+            Relaxation(
+                constraint="sa_geometry_dataflow_validity",
+                value="sa_cycles is exact vs ScaleSim OUTPUT-STATIONARY only",
+                reason=SA_GEOMETRY_DATAFLOW_DISCLOSURE,
+            )
+        )
+        out.append(
+            Relaxation(
+                constraint="sa_geometry_bandwidth_assumption",
+                value="stall-free operand bandwidth ASSUMED; no stall model",
+                reason=SA_GEOMETRY_BANDWIDTH_DISCLOSURE,
+            )
+        )
     for composition, label in (
         (sizing.composition, "derived_fabric_area"),
         (sizing.softmax_composition, "derived_softmax_area"),
@@ -4036,29 +5097,57 @@ def binding_term_disclosures(
             "adjudicated to reach."
         )
     elif block in ("attention_qk", "attention_pv", "attention_softmax"):
-        rows = int(device.fabric.rows)
-        cols = int(device.fabric.cols)
-        verdict = (
-            "THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY. The largest term is "
-            f"the attention fabric's {block}, and it is at the floor ADJ-10's derivation "
-            f"walked it to: the fabric is {device.fabric_num_arrays} DERIVED arrays of "
-            f"{rows} x {cols}, so every fold of the call already runs on its own array "
-            "and another copy of the measured block would carry no fold. What is left "
-            f"is ONE array's own walk — ceil(n / {cols}) column passes, each costing "
-            f"k + {rows} + {cols} - 2 cycles, plus the fill/drain — and no COUNT of "
-            "measured blocks shortens it. TWO LEVERS WOULD, AND BOTH ARE REFUSED HERE "
-            "RATHER THAN TAKEN. (1) A WIDER ARRAY: cim.fabric.cols is what the "
-            "ceil(n / cols) term divides by, and a wider array would also be a whole "
-            "number of measured 32x32 blocks — but rows x cols is the geometry the "
-            "systolic closed form was validated at, bit-exact against OPTIMA's recorded "
-            "ScaleSim outputs, and the fill/drain surrogate is 3 x rows. Deriving a new "
-            "geometry would move a VALIDATED law onto an unvalidated shape, which is a "
-            "card change a human makes, not a derivation (ADJ-4, D21). (2) SPLITTING ONE "
-            "FOLD'S N ACROSS ARRAYS, which needs a claim about how the K matrix is "
-            "broadcast and how the column tiles are merged that no recorded reference in "
-            "this repo covers. So it is REPORTED as the limit rather than derived away "
-            "(D28: a limit named is a provisioning finding; a limit padded away is not)."
-        )
+        geometry = device.derived_sa_geometry
+        rows = int(device.fabric_rows)
+        cols = int(device.fabric_cols)
+        if geometry is not None:
+            # SA-GEOM: the array is no longer the declared one, so the verdict
+            # below — which is entirely about the DECLARED geometry being the
+            # residue — would be a false sentence. What binds here is the
+            # DERIVED geometry, and the levers it names are different ones.
+            verdict = (
+                "THE NEXT REAL LIMIT IS THE DERIVED ARRAY GEOMETRY. The largest term is "
+                f"the attention fabric's {block} on a fabric of "
+                f"{device.fabric_num_arrays} DERIVED arrays whose SHAPE was also derived "
+                f"(SA-GEOM): {geometry.rows} x {geometry.cols_qk} on the QK group and "
+                f"{geometry.rows} x {geometry.cols_pv} on the PV group, against the "
+                f"declared {geometry.declared_rows} x {geometry.declared_cols}. Every "
+                "fold already runs on its own array and another copy carries none, so "
+                f"what is left is ONE array's own walk — ceil(n / C) column passes, each "
+                f"costing k + R + C - 2 cycles, plus the fill/drain (3 x R = "
+                f"{int(device.fabric_fill_drain_cycles)}). THE RULE ALREADY TOOK THE "
+                "GEOMETRY LEVER: C was searched over the powers of two in [32, 1024] "
+                "and this is the argmin, so a wider array is not an untaken option here "
+                "— it was priced and it was worse or equal. SPLITTING ONE FOLD'S N "
+                "ACROSS ARRAYS is still NOT modelled and still needs a claim about K "
+                "broadcast and column-tile merging that no recorded reference in this "
+                "repo covers. And the walk above is exact only under an OUTPUT-"
+                "STATIONARY dataflow with stall-free operand bandwidth; both conditions "
+                "ride this run's sa_geometry_dataflow_validity and "
+                "sa_geometry_bandwidth_assumption disclosures."
+            )
+        else:
+            verdict = (
+                "THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY. The largest term is "
+                f"the attention fabric's {block}, and it is at the floor ADJ-10's derivation "
+                f"walked it to: the fabric is {device.fabric_num_arrays} DERIVED arrays of "
+                f"{rows} x {cols}, so every fold of the call already runs on its own array "
+                "and another copy of the measured block would carry no fold. What is left "
+                f"is ONE array's own walk — ceil(n / {cols}) column passes, each costing "
+                f"k + {rows} + {cols} - 2 cycles, plus the fill/drain — and no COUNT of "
+                "measured blocks shortens it. TWO LEVERS WOULD, AND BOTH ARE REFUSED HERE "
+                "RATHER THAN TAKEN. (1) A WIDER ARRAY: cim.fabric.cols is what the "
+                "ceil(n / cols) term divides by, and a wider array would also be a whole "
+                "number of measured 32x32 blocks — but rows x cols is the geometry the "
+                "systolic closed form was validated at, bit-exact against OPTIMA's recorded "
+                "ScaleSim outputs, and the fill/drain surrogate is 3 x rows. Deriving a new "
+                "geometry would move a VALIDATED law onto an unvalidated shape, which is a "
+                "card change a human makes, not a derivation (ADJ-4, D21). (2) SPLITTING ONE "
+                "FOLD'S N ACROSS ARRAYS, which needs a claim about how the K matrix is "
+                "broadcast and how the column tiles are merged that no recorded reference in "
+                "this repo covers. So it is REPORTED as the limit rather than derived away "
+                "(D28: a limit named is a provisioning finding; a limit padded away is not)."
+            )
     elif device_class == "link":
         verdict = (
             "THE NEXT REAL LIMIT IS A BANDWIDTH TERM: the largest term is a priced "
@@ -4313,7 +5402,7 @@ def evaluate_fws(
     pipeline: "OrderedDict[str, object]" = OrderedDict()
     if str(getattr(serving, "regime", "")) == REGIME_FILLED:
         metrics, step_times, extrapolation, pipeline = _build_pipeline_metrics(
-            mapping, serving, pricing.costs, timeline
+            mapping, serving, pricing.costs, timeline, annotations_of(program)
         )
     else:
         metrics, step_times, extrapolation = _build_metrics(
@@ -4346,6 +5435,8 @@ def evaluate_fws(
     # exists, which is its own kind of dishonesty.
     disclosures = [item for item in disclosures if item.constraint != "op_durations"]
     disclosures.extend(pricing.disclosures)
+    disclosures.extend(analog_card_disclosures(mapping))
+    disclosures.extend(nonstandard_macro_disclosures(mapping))
     disclosures.extend(fabric_sizing_disclosures(fabric_sizing))
     disclosures.extend(engine_sizing_disclosures(engine_sizing))
     disclosures.extend(binding_term_disclosures(binding_term, mapping))
@@ -4605,6 +5696,11 @@ def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, objec
     engines = [
         composition.summary() for composition in device.shared_digital_compositions()
     ]
+    # THE POOL THE MACHINE BUILDS. The conv is deliberately NOT in it - see
+    # CimDeviceModel.CONV_POOL_WIDTH_UNRESOLVED - so this is the shift-add
+    # reduction and its registers, which do consume ADC results one for one.
+    # The conv's absence from the SILICON is named in the disclosures below;
+    # its WORK is priced wherever the card times it.
     pool_sizing = device.digital_pool_sizing()
     pool = device.macro_pool_composition(pool_sizing)
     chiplet_area = float(device.shared_digital_area_mm2())
@@ -4642,8 +5738,109 @@ def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, objec
             ),
         )
     )
-    out["digital_area_mm2_total"] = chiplet_area * chiplets + pool.area_mm2 * slots
-    out["digital_power_W_total"] = chiplet_power * chiplets + pool.power_w * slots
+    # THE STATE STORE IS DIGITAL SILICON TOO (ADJ-11). It used to be missing
+    # from this total while the sweep's own digital term carried it, so one
+    # machine had two digital areas and the markdown report printed the smaller
+    # one three lines below the line naming the store (D21). The store is sized
+    # from the SAME measured per-stage bill the residency block reports, so this
+    # is the same accounting read here, not a second one.
+    store_area = 0.0
+    store_power = 0.0
+    store_macros = 0
+    residency = getattr(evaluation, "state_residency", None) or {}
+    for row in (residency.get("per_stage") or []):
+        store_area += float(row.get("store_area_mm2", 0.0) or 0.0)
+        store_macros += int(row.get("store_macros", 0) or 0)
+    if store_macros and device.has_synthesis_library():
+        try:
+            block = device.synthesis_library().block(STATE_SRAM_BLOCK)
+            store_power = float(block.power_w) * store_macros
+        except Exception:
+            store_power = 0.0
+    out["state_store_area_mm2_total"] = store_area
+    out["state_store_power_W_total"] = store_power
+    out["state_store_macros"] = store_macros
+    if device.conv_dims() and device.conv_placement == "macro_pool":
+        out["conv_pool_unpriced"] = device.CONV_POOL_WIDTH_UNRESOLVED
+    out["state_store_basis"] = (
+        f"{store_macros} measured {STATE_SRAM_BLOCK} macro(s), summed over the per-stage "
+        "stores in evaluation.state_residency. The power is the block's measured LEAKAGE "
+        "only: the library measures read and write energy per word, this repo has no "
+        "access law to apply them with, and the store's DYNAMIC energy is therefore "
+        "UNPRICED and named here rather than reported as zero."
+    )
+    # D36 (GEORGE, 2026-08-29): THE CHIPLET IS ENGINES + STATE IN ONE AREA, and
+    # the [50, 400] mm2 band is PACKAGING ARITHMETIC that follows from it.
+    #
+    # REPORTED, NOT APPLIED — the same standing as `derived_chiplets`. This block
+    # says what the D36 packaging law makes of the areas the D32 accounting above
+    # already composed; it does NOT re-price them, and `digital_area_mm2_total`
+    # below is byte-for-byte the number it always was. There is ONE accounting of
+    # every mm2 (D21): `engines_mm2` is `area_mm2_per_chiplet` read again, and
+    # `state_mm2` is this chiplet's SHARE of the one `state_store_area_mm2_total`
+    # reported three lines up — never a second store.
+    #
+    # The state is INSIDE the area on purpose: D36 says a plan that holds more
+    # state buys a bigger chiplet, so the band is walked against engines + state
+    # and not against the engines alone.
+    packaging = None
+    groups_available = 1
+    group_plan = None
+    try:
+        group_plan = device.layer_group_plan()
+        groups_available = max(1, int(group_plan.instances))
+    except Exception:
+        # A model with no layer plan the motif law can read is not a packaging
+        # failure: it is one group, and the block says so rather than vanishing.
+        group_plan = None
+    state_share = (store_area / chiplets) if chiplets > 0 else store_area
+    try:
+        packaging = derive_digital_chiplet_packaging(
+            chiplet_area,
+            state_share,
+            groups_available=groups_available,
+            context="cim.cards.<digital chiplet> (D36 packaging, REPORTED)",
+        )
+    except Exception as exc:  # pragma: no cover - reported, never fatal
+        out["chiplet_packaging"] = OrderedDict(
+            (
+                ("measured", False),
+                ("reason", f"the D36 packaging law could not be read here: {exc}"),
+            )
+        )
+    if packaging is not None:
+        packed = OrderedDict(packaging.summary())
+        packed["measured"] = True
+        packed["applied"] = False
+        packed["groups_available"] = groups_available
+        packed["group_motif_period"] = (
+            int(group_plan.period) if group_plan is not None else None
+        )
+        packed["state_share_basis"] = (
+            f"{store_area:.6g} mm2 of state store over {chiplets} shared digital "
+            f"chiplet(s) = {state_share:.6g} mm2 inside each. This is the SAME store "
+            "state_store_area_mm2_total reports, divided, not a second one."
+        )
+        packed["band_arithmetic"] = (
+            f"engines {chiplet_area:.6g} mm2 + state {state_share:.6g} mm2 = "
+            f"{packaging.area_mm2:.6g} mm2 against the band "
+            f"[{DIGITAL_CHIPLET_AREA_MIN_MM2:.6g}, {DIGITAL_CHIPLET_AREA_MAX_MM2:.6g}] "
+            f"mm2 -> chips_per_group = {packaging.chips_per_group}, "
+            f"groups_per_chiplet = {packaging.groups_per_chiplet}"
+        )
+        packed["disclosures"] = list(packaging.disclosures)
+        packed["standing"] = (
+            "REPORTED, NOT APPLIED: this is the D36 reading of the areas the D32 "
+            "accounting above composed. It re-prices nothing, and "
+            "digital_area_mm2_total is unchanged by it."
+        )
+        out["chiplet_packaging"] = packed
+    out["digital_area_mm2_total"] = (
+        chiplet_area * chiplets + pool.area_mm2 * slots + store_area
+    )
+    out["digital_power_W_total"] = (
+        chiplet_power * chiplets + pool.power_w * slots + store_power
+    )
     sizing = device.derived_engine
     # ADJ-9's beat-setting evidence rides derived_engine_sizing itself, so the
     # block carries no second copy of it (D21).
@@ -4656,6 +5853,26 @@ def _digital_silicon_block(evaluation: FwsEvaluation) -> "OrderedDict[str, objec
     out["fabric_num_arrays"] = int(device.fabric_num_arrays)
     out["fabric_num_arrays_provenance"] = device.fabric_provenance
     out["fabric_softmax_lanes"] = int(device.fabric_softmax_lanes)
+    # SA-GEOM: the array SHAPE this run was priced on, beside the COUNT. It is
+    # written ONLY when the shape was DERIVED. A declared-geometry run must
+    # serialize BYTE for BYTE what it always did (the shipped atlas artifacts
+    # are compared as bytes against a fresh run), so an opt-in rule adds an
+    # opt-in key rather than a null one, and the declared shape already rides
+    # derived_fabric_sizing.array_rows / array_cols where it always did.
+    geometry = device.derived_sa_geometry
+    if geometry is not None:
+        out["fabric_geometry_mode"] = device.fabric_geometry_mode
+        out["fabric_array_rows"] = int(device.fabric_rows)
+        out["fabric_array_cols_qk"] = int(device.sa_geometry("qk")[1])
+        out["fabric_array_cols_pv"] = int(device.sa_geometry("pv")[1])
+        out["fabric_array_geometry_provenance"] = PROVENANCE_DERIVED_COUNT
+        out["fabric_fill_drain_cycles"] = int(device.fabric_fill_drain_cycles)
+        # CTX-SPLIT: how deep the context was dealt, what the reduce cost in
+        # silicon, and WHICH REAL FLOOR stopped the widening on each stage.
+        if fabric is not None:
+            out["fabric_context_split"] = int(fabric.context_split)
+            out["fabric_combine_lanes"] = int(fabric.combine_lanes)
+            out["fabric_floors"] = dict(fabric.floors)
     # ADJ-10's headline: what binds the machine that GETS BUILT, measured on
     # the priced timeline. Not the probe's evidence and never merged with it.
     out["binding_term"] = dict(evaluation.binding_term or {}) or None
@@ -4862,6 +6079,16 @@ def report_document(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
                         # never comparing two different machines under one word.
                         ("batch", int(serving.batch)),
                         ("resident_streams", int(serving.streams)),
+                        # D38: the stages the machine has, the fill it was
+                        # asked for and the fill the integer stream count
+                        # realizes. A rate read without them is a rate for a
+                        # machine the reader cannot identify.
+                        ("stages", int(getattr(serving, "stages", 0))),
+                        (
+                            "pp_util",
+                            float(getattr(evaluation.mapping, "pp_util", PP_UTIL_FULL)),
+                        ),
+                        ("pipeline_fill", float(getattr(serving, "fill", 0.0))),
                         ("beats_lowered", int(serving.beats)),
                         ("steady_beats", int(serving.steady_beats)),
                         ("prefill_len", int(serving.prefill_len)),
@@ -4914,6 +6141,8 @@ def _packing_point(evaluation: FwsEvaluation) -> "OrderedDict[str, object]":
             # regime beside it says which machine produced it.
             ("serving_regime", str(getattr(evaluation.serving, "regime", ""))),
             ("resident_streams", int(getattr(evaluation.serving, "streams", 0))),
+            ("stages", int(getattr(evaluation.serving, "stages", 0))),
+            ("pp_util", float(getattr(mapping, "pp_util", PP_UTIL_FULL))),
             ("decode_step_times_s", [float(value) for value in steps]),
             ("median_decode_step_s", _median(steps)),
             ("tokens_per_s", float(tokens[0].value) if tokens else None),

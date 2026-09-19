@@ -24,9 +24,17 @@ device_class: fws_cim
 # would be rewritten into byte counts by the YAML preprocessor.
 cim:
   analog:
+    # D35 OVERRIDE. This card predates D35 (2026-08-29), which fixes the analog
+    # macro at 1024 x 1024 stored cells as a PLATFORM CONSTANT. Its geometry is
+    # NOT moved: the OPTIMA validator and the pre-D35 gates read these numbers
+    # and moving them would silently rewrite what they check. The key below is
+    # the only exemption D35 admits, and it buys the exemption by stating the
+    # reason, which rides a named disclosure into every artifact this config
+    # produces. A point carrying it is NOT comparable with a platform point.
+    nonstandard_macro: 'predates D35; kept for validator/OPTIMA parity'
     rows: 4096               # array rows (K per array tile)
-    cols_adc: 1024           # ADC columns per array
-    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    cols: 4096            # Y: total CTT columns (storage tile)
+    adcs: 1024            # Z: ADCs; mux = Y/Z = 4 is DERIVED
     slice_cycles: 2          # analog cycles per ADC evaluation
     analog_clock_mhz: 100
     energy_per_vec_pj: 97637.774   # T1 point scaled by cell count (x10.24)

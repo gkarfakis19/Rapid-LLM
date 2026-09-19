@@ -12,9 +12,17 @@
 device_class: fws_cim
 cim:
   analog:
+    # D35 OVERRIDE. This card predates D35 (2026-08-29), which fixes the analog
+    # macro at 1024 x 1024 stored cells as a PLATFORM CONSTANT. Its geometry is
+    # NOT moved: the OPTIMA validator and the pre-D35 gates read these numbers
+    # and moving them would silently rewrite what they check. The key below is
+    # the only exemption D35 admits, and it buys the exemption by stating the
+    # reason, which rides a named disclosure into every artifact this config
+    # produces. A point carrying it is NOT comparable with a platform point.
+    nonstandard_macro: 'predates D35; kept for validator/OPTIMA parity'
     rows: 1536
-    cols_adc: 384
-    adc_mux: 4
+    cols: 1536
+    adcs: 384
     slice_cycles: 2
     analog_clock_mhz: 100
     energy_per_vec_pj: 13730.312016

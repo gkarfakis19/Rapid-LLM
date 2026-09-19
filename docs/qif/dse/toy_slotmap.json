@@ -1,0 +1,18 @@
+{
+  "schema": "fws_run_bundle/1",
+  "bundle": "toy_slotmap",
+  "label": "Toy slot map (mapper debug)",
+  "generated_at": "2026-09-01T22:40:40Z",
+  "members": [
+    {
+      "name": "toy_slotmap",
+      "model_id": "Toy slot-map",
+      "label": "Toy slot map (mapper debug)",
+      "mode": "TOY",
+      "dir": "docs/qif/dse/toy_slotmap_frontier",
+      "run_id": "5be92ef6f0ea78e7",
+      "selected_id": "p00",
+      "headline": "6.25e+06 tokens/s"
+    }
+  ]
+}

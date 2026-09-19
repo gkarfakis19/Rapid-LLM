@@ -142,10 +142,10 @@ network:
     - pp
     - dp
 mapping:
+  layers_per_chip: 32
   parallelism:
     tp: 1
   regime: lockstep
-  layers_per_chip: 32
 execution_backend:
   model: analytical
 inference:

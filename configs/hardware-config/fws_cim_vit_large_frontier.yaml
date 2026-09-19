@@ -1,0 +1,205 @@
+# ViT-Large-story seq 64 frontier sweep — the smaller of the two vision points,
+# on the D35-REVISED PLATFORM MACRO.
+#
+# Same machine as fws_cim_vit_frontier.yaml (ViT-Huge-story). THE MACRO IS
+# X x Y : Z — X rows, Y total CTT columns, Z ADCs, mux = Y/Z DERIVED. X is
+# fixed at 512; the card below is the SHIPPED machine's point,
+# 512 x 2048 : 512 (mux 4), sheet-derived by
+# cim_analog_calc.derive_analog_card(512, 2048, 512). The sweep's rungs are
+# declared in mapping_dse.axes and each point re-derives the card from the
+# sheet, so the card here is the machine a plain run_perf run prices, not a
+# rung of the grid.
+#
+# Hidden dim 1024 against X = 512 is exactly 2 row tiles — no row remainder,
+# which makes this the cleanest of the four and a useful control. The digital
+# 'sa' chiplet keeps the 22nm synthesis library it is priced from.
+device_class: fws_cim
+cim:
+  analog:
+    rows: 512
+    cols: 2048            # Y: total CTT columns (storage tile)
+    adcs: 512            # Z: ADCs; mux = Y/Z = 4 is DERIVED
+    slice_cycles: 2
+    analog_clock_mhz: 100
+    energy_per_vec_pj: 12950.954799267838
+    shots_per_output: 2
+    area_mm2_per_array: 1.2826567311359998
+  fabric:
+    model: sa
+    rows: 32
+    cols: 64
+    num_arrays: 2
+    replicas: 1
+    clock_ghz: 0.95
+    softmax_lanes: 1
+    softmax_pipeline_depth: 20
+  chip:
+    layers_per_chip: 24
+  cards:
+    ctt_sheet:
+      kind: analog_macro
+      device: ctt
+      calc_profile: george_cima_mux1
+      params:
+        rows: 512
+        cols: 2048
+        adcs: 512
+        shots_per_output: 2
+      bank_depth: 1
+    sa:
+      kind: digital_chiplet
+      synthesis_library: 22nm
+sw_param:
+  full_recomputation: false
+  kernel_launch_overhead: 0
+  dp_zero_stage: 0
+  precision:
+    tensor_format: bf16
+    kv_cache: as_tensor_format
+    parameters: as_tensor_format
+    gradients: fp32
+    grad_communication: fp32
+    optimizer_states: as_tensor_format
+    stats: as_tensor_format
+    master_parameters: 0.0
+  h2d_bandwidth: -1
+  const_mem_offset: 0 GB
+tech_param:
+  core:
+    operating_frequency: 0.95e9
+    num_bundles: 2
+    nominal_flop_rate_per_mcu: 4096
+    nominal_energy_per_flop: 1e-13
+    num_mcu_per_bundle: 1
+    FMA_d1: 8
+    FMA_d2: 4
+    dataflow: best
+    util: 1
+  DRAM:
+    size: 256 MB
+    bandwidth: 4 TB
+    dynamic_energy_per_bit: 1e-13
+    latency: 0
+    util: 1.0
+  SRAM-L2:
+    size: 64 MB
+    bandwidth: 8 TB
+    dynamic_energy_per_bit: 1e-13
+    latency: 0
+    util: 1
+  SRAM-L1:
+    size: 8 MB
+    bandwidth: 16 TB
+    dynamic_energy_per_bit: 1e-13
+    latency: 0
+    util: 1
+  SRAM-R:
+    size: 4 MB
+    bandwidth: 128 TB
+    dynamic_energy_per_bit: 1e-13
+    latency: 0
+    util: 1
+memory_hierarchy:
+  l0:
+    type: SRAM-R
+    scope: mcu
+  l1:
+    type: SRAM-L1
+    scope: mcu-bundle
+  l2:
+    type: SRAM-L2
+    scope: global
+  l3:
+    type: DRAM
+    scope: global
+parallelism:
+  tp: 1
+  tp_sp: false
+  cp: 1
+  pp: 1
+  mb: 1
+  train:
+    dp: 1
+    ep: 1
+    tp_ep: true
+  inference:
+    replica_count: 1
+    moe_dp: 1
+network:
+  overlap:
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
+    cp_overlap: 0.0
+  dimensions:
+  - id: dim0
+    label: chip_ring_tp
+    size: auto
+    topology:
+      type: Ring
+      bandwidth: 100 GB
+      latency: 1e-6
+      energy_per_bit: 1e-12
+      util: 1.0
+    collective_override: {}
+    parallelisms:
+    - tp
+    - cp
+    - ep
+  - id: dim1
+    label: chip_ring_pp
+    size: auto
+    topology:
+      type: Ring
+      bandwidth: 100 GB
+      latency: 1e-6
+      energy_per_bit: 1e-12
+      util: 1.0
+    collective_override: {}
+    parallelisms:
+    - pp
+    - dp
+mapping:
+  layers_per_chip: 24
+  parallelism:
+    tp: 1
+  regime: lockstep
+execution_backend:
+  model: analytical
+inference:
+  kvcache_type: cim_sram
+mapping_dse:
+  label: 'ViT-Large-story seq 64 SMOKE GRID: the platform box (Z x Y) x the fill
+    fraction (D38). The partition, the banking, the conv placement and the chiplet
+    count are all REFUSED BY NAME as axes (D36/D38) and derive under the mapping law'
+  objective: throughput
+  max_silicon_mm2: 20000
+  search: cross_product
+  axes:
+    # THE PLATFORM AXES (D35-REVISED, 2026-08-29). The macro is X x Y : Z and
+    # mux = Y/Z is DERIVED, so the sweep walks the axis-aligned legal box in the
+    # CONSTRAINT-NATIVE coordinates: Z (converter count, output interface,
+    # calibration) and Y (wordline length, tile granularity). Sweeping the fold
+    # instead would let an absurd corner hide inside a derived quantity, so
+    # adc_capacity_mux is REFUSED BY NAME. Y >= Z always; mux = 1 is legal.
+    #
+    # THIS IS A SMOKE GRID, not the design sweep: two rungs per axis, 8 points,
+    # enough to walk the machinery end to end on the new axis table. The real
+    # ladder returns when the mapping law lands.
+    macro_z:
+    - 64
+    - 128
+    macro_y:
+    - 2048
+    - 4096
+    # THE FILL FRACTION (D38, 2026-08-29) — the axis that REPLACED the
+    # partition. layers_per_chip, layers_per_stage, bank_depth, conv_placement
+    # and shared_chiplets are all REFUSED BY NAME now: stage granularity
+    # DERIVES (finest motif-compatible stages, local microbatch 1), the
+    # mux-slot allocation question is PARKED, the conv is always on the shared
+    # digital chiplet, and the chiplet count is a derived FUNCTION of the
+    # analog point (D36). What is still a choice is how full the pipeline is
+    # run: resident streams = max(1, round(pp_util * stages)), throughput
+    # linear in the fill, per-stage state and KV area linear in the streams.
+    pp_util:
+    - 1.0
+    - 0.5

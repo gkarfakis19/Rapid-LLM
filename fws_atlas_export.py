@@ -47,8 +47,14 @@ def _card_block(mapping: FwsMapping) -> Dict[str, object]:
     device = mapping.device
     card = device.card
     fabric = device.digital_card.fabric
-    cols_adc = int(card.stored_columns_per_set)
-    mux = int(card.column_sets_per_macro)
+    # THE ATLAS DOCUMENT KEEPS THE OLD SPELLING, on purpose. docs/qif/atlas/
+    # atlas.html is the page that validates these documents and it is not this
+    # change's to edit: its rule R24 checks stored_cols == cols_adc x mux by
+    # name. So the export keeps emitting the page's vocabulary — where cols_adc
+    # is Z (the ADC count, which is what it always was) and stored_cols is Y —
+    # and the D35-REVISED label rides beside it for a human reader.
+    adcs = int(card.params.adcs)
+    mux = int(card.params.mux)
     # A card that declares neither width says so with 0/0 (P2.1: "both 0 means
     # the card declares no cell width and slicing is off"). The atlas needs a
     # positive stored-weight width, so an undeclared one falls back to the
@@ -70,7 +76,7 @@ def _card_block(mapping: FwsMapping) -> Dict[str, object]:
                     (
                         (
                             "label",
-                            f"analog macro, {card.params.rows} x ({cols_adc} ADC x {mux} mux)",
+                            f"analog macro, {card.params.rows} x ({adcs} ADC x {mux} mux)",
                         ),
                         ("kind", "analog_macro"),
                         (
@@ -78,9 +84,9 @@ def _card_block(mapping: FwsMapping) -> Dict[str, object]:
                             OrderedDict(
                                 (
                                     ("rows", int(card.params.rows)),
-                                    ("cols_adc", cols_adc),
+                                    ("cols_adc", adcs),
                                     ("mux", mux),
-                                    ("stored_cols", cols_adc * mux),
+                                    ("stored_cols", adcs * mux),
                                 )
                             ),
                         ),

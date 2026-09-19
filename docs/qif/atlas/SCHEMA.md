@@ -284,10 +284,15 @@ panel, each naming the field path that failed. Warnings draw, and say so.
 
 `atlas.html` carries a self-test that corrupts a copy of the loaded document
 once per rule and asserts each refusal fires and names the right field. Open
-the atlas and press **Self-test**, or open it with `?selftest=1`. It runs 37
+it with `?selftest=1`; there is no button, and it never runs on a plain load —
+it clones the document once per rule and that is not work to do on the way to
+a picture. It runs 37
 cases: the clean document plus one per corruption — one for every rule the
 loader can emit, with extra cases for rules 1, 9, 18 and 24, which refuse
-more than one way. `tests/test_qif_atlas.py` asserts that the integer in this
+more than one way. Every case that indexes a table declares what it NEEDS, so
+a document with no link, no relaxation or no tile skips that case instead of
+throwing: ViT places no inter-chip link, and the two link cases used to take
+the whole results layer down with them. `tests/test_qif_atlas.py` asserts that the integer in this
 sentence equals `ATLAS.selfTest(doc).length`, so it cannot rot again. `tests/test_qif_atlas.py` runs the same self-test headlessly in
 node, so a rule that stops firing fails the suite rather than a screenshot.
 
@@ -295,7 +300,9 @@ A corruption a given document gives the harness no way to BUILD — rule 13
 needs a macro holding two tiles, rule 22 needs a second shared digital
 chiplet — is reported as `n/a`, "not constructible on this document". It is
 neither a pass nor a miss, and calling it a miss would read as a broken loader
-on a perfectly good file.
+on a perfectly good file. It is counted OUT OF THE DENOMINATOR: the panel
+prints "30 / 30 pass · 7 not constructible on this document", never a score
+that divides by cases nothing ran.
 
 ## What the renderer promises — the view rules
 
@@ -323,17 +330,102 @@ picture.
 
 | Parameter | Effect |
 |---|---|
-| `?data=<file>` | Load a sibling document from the atlas's own directory instead of the embedded fixture. A bare basename; a path is ignored. Needs http (a `file://` page cannot fetch). Without it the page keeps the EMBEDDED document: the sibling fetch runs only when this parameter asks for one, or when the file carries no embedded blob at all, so an embedded document is never silently replaced by whatever else sits in the directory. A dropped or picked file always wins over an in-flight fetch. |
-| `?view=package\|chip\|macro` | Open at that level. |
-| `?chip=<chip id>`, `?macro=<macro id>` | Which chip or macro to open. A macro implies its own chip. |
-| `?duty=1` | Turn the duty-cycle overlay on. |
-| `?model=`, `?layer=`, `?group=`, `?pool=`, `?q=` | Pre-set the filters and the owner search. |
-| `?selftest=1` | Open the self-test panel: refusals and view rules, for every contract this page loads. |
-| `?view=fold` | Open the folding card. Enabled only for a document that carries a `folding` block. |
-| `?fold=<card id>` | Which folding card to open. |
-| `?lanes=1` | In the macro view, draw the time lanes instead of the column map. Enabled only where a `passes` block covers that macro. |
-| `?view=frontier` | Open the frontier explorer. |
-| `?frontier=<file>` | Load a sibling `fws_frontier/1` document instead of the embedded frontier fixture. A bare basename, same rule as `?data=`. The frontier NEVER displaces the atlas: they are two documents and the page holds both. |
+| `?model=<model id>` | Which WORKLOAD the results page opens on. The default set is the bundle in `../dse/subset_v1.json`; this parameter opens any model whose artifacts exist, in or out of that bundle, and a model opened this way is appended to the selector and marked. A model with no sweep artifact raises the one band the page has. |
+| `?cand=<candidate id>` | Which DESIGN POINT of that model's sweep binds the page (D33). Every panel below the frontier describes it. An id the sweep does not carry is reported in a band and the page falls back to the sweep's own initial pick. |
+| `?view=package\|chip\|macro` | Open the drilldown at that level of the document bound to the selected point. Any other value is reported and ignored. |
+| `?chip=<chip id>`, `?macro=<macro id>` | Which chiplet or macro to open. A macro implies its own chip. An id the bound document does not hold is reported and ignored — it is not a dead end. |
+| `?duty=1` | Turn the duty-cycle overlay on. Reported and ignored on a document that declares no duty cycle. |
+| `?fmodel=`, `?layer=`, `?group=`, `?pool=`, `?q=` | Pre-set the drilldown filters and the owner search. A value the bound document does not contain is reported and ignored. `?fmodel=` is the tile-owner filter; `?model=` above is the workload selector. |
+| `?bundle=<name>` | Which RUN BUNDLE the page reads: `../dse/<name>.json`, default `subset_v1`. See the `fws_slot/1` section at the end of this file. |
+| `?selftest=1` | Run this page's own conformance self-test — the loader refusals and the view rules — against the document bound to the selected point, and show it in the drilldown panel. It runs on request only: never on a plain load. |
+
+The page WRITES this state back with `pushState` on every model click, point
+click, descent and filter change, so the browser's Back button walks the
+reading position and a copied URL redraws the same picture on the same point.
+
+A parameter the page cannot honour — a candidate the sweep does not carry, a
+chip the bound document does not hold — is dropped in silence and the page
+keeps the position it had. It used to print a band about it at the top of the
+page, which is a scolding for a typo.
+
+`?data=` and `?frontier=` are GONE. They loaded a sibling document into a
+one-document mode, and under D33 the drilldown is bound to the selected point:
+a document chosen by URL could not state which point it described. Both are
+reported in the rejected-parameter band rather than silently ignored. To read
+a file that is not the selected point's, open it with the page's own file
+picker — a hand-opened document is labelled as one and is never presented as
+the selected point's machine.
+
+
+## What the results page is, top to bottom
+
+Nine panels, in this order, and nothing else:
+
+1. **The design space** — the Pareto frontier (x = the headline rate, y = total
+   silicon mm2) and the all-candidates table under it. This is the entry: the
+   page opens here and a click here binds everything below.
+2. **The two chiplet kinds of the selected point** — the shared digital card
+   and the analog weight card, with the point's knobs, rate, silicon, beat and
+   latency on the heading.
+3. **The map of the selected point** — the pipeline stages and the drilldown
+   into a chiplet and a macro.
+4. **Where the beat goes** — per-stage engine, fabric and analog times.
+5. **The state it holds while it runs** — the per-stage bill.
+6. **Energy**, with each component's coverage.
+7. **Duty cycle**, per device class.
+8. **Boundaries** — what crosses between chiplets.
+9. **What this point does not account for** — the disclosures, quoted verbatim.
+
+There is no headline stat row and no provenance footer. Both printed numbers
+the frontier and the cards had already printed.
+
+**One band, one condition.** `h-alerts`, above the frontier, renders only when
+the sweep artifact is missing or unparseable — without it there is no design
+space, no point and no panel. Every other condition is inline where it belongs:
+a legacy companion that 404s, a point document refused for naming another
+candidate or another run, a query parameter the page cannot honour. The sweep
+is the report and it is authoritative in silence; the page does not compare it
+against `<model>_report.json` or `<model>.json` and does not comment on their
+age.
+
+## Plain language, and one fact once
+
+- **Absence copy is one plain sentence.** The artifacts speak to the decision
+  register ("EMPTY, and not a measured zero: ... so D31/ADJ-10 derived neither
+  engine"). The page does not. Decision codenames are stripped from every
+  string it renders except inside the disclosures panel, where the text is a
+  quotation and stays verbatim.
+- **An absent column is dropped, not dash-filled.** A row with no value for the
+  selected point is not drawn; a table with nothing to say becomes one
+  sentence; a workload with no concept of a quantity (an encoder has no beat,
+  no resident streams and no KV) gets no panel and no column for it. An
+  em-dash survives only where the absence is itself the finding: an uncovered
+  energy term, an area no library could compose.
+- **Identical rows collapse with a count.** Twenty stages holding the same bill
+  are one row; 620 identical boundary crossings are one row and a count.
+- **A refused point is a result.** Every panel that finds no data on an
+  `ok: false` candidate prints the sweep's own refusal message instead of
+  reporting a missing number.
+- **An unbalanced pipeline is a finding.** When the sweep judges a point's
+  stages badly matched (`stage_balance`), the beat panel leads with one plain
+  paragraph naming the long stages, what makes them long, and the rate a
+  balanced partition could reach. A balanced point prints nothing extra, and an
+  artifact without the block prints nothing.
+
+## The model set is a manifest
+
+`../dse/subset_v1.json` names the models the report is about:
+
+```
+{ "bundle": "subset_v1", "generated_at": "...",
+  "members": [ { "name", "model_id", "label", "mode", "dir",
+                 "run_id", "selected_id", "headline" }, ... ] }
+```
+
+The selector is exactly `members`, in order, and each member's sweep is read
+from `../dse/<dir>/dse_report.json` with its per-point maps under the same
+directory. A checkout without the manifest falls back to the list in
+`atlas.html`; a `?model=` deep link opens any model whose artifacts exist.
 
 ## The encoding law
 
@@ -446,7 +538,7 @@ The four below are the ones `tests/test_qif_atlas.py` holds to the schema.
 
 | File | What it is |
 |---|---|
-| `fixture_llama7b_tp2.json` | The P5.1 phase-0 fixture: a hand-authored Llama2-7B tp = 2 decode placement with its invented fields marked. It is what `atlas.html` embeds and what the loader self-test is proved against. |
+| `fixture_llama7b_tp2.json` | The P5.1 phase-0 fixture: a hand-authored Llama2-7B tp = 2 decode placement with its invented fields marked. It is what the loader self-test is proved against. The page does not open on it and does not embed it. |
 | `p3_llama7b_tp2.json` | The same model emitted by the real producer, placement only (P3.6). |
 | `granite_4_0_h_tiny.json` | The ADJ-1 headline artifact: Granite-4.0-H-Tiny, placed and priced (`--priced`). |
 | `fixture_granite_folding.json` | The P7.6 folding fixture: a real Granite excerpt carrying the `folding` and `passes` blocks. |
@@ -457,16 +549,37 @@ Each exported document names in `provenance.reference_run.command` the exact
 command that regenerates it, and each is pinned by a regenerate-and-compare
 test — a stale artifact is a wrong picture under a right title.
 
-## Keeping the embedded copy honest
+## The page embeds nothing
 
-`atlas.html` embeds a copy of the fixture in a
-`<script type="application/json" id="atlas-embedded">` block so one file can
-be handed to someone with its mapping already inside. When the fixture
-changes, re-embed it — the header prints which source loaded and the
-document's `provenance.authored` date, so a stale copy is visible rather than
-silent.
+`atlas.html` used to carry a copy of the fixture in a
+`<script type="application/json" id="atlas-embedded">` block, with a second
+one for a frontier document, and a `window.RS_PRELOADED` branch that
+short-circuited every fetch. All three are GONE. An embedded document is a
+stale document the moment the artifacts move, and the two blobs had been null
+for long enough that the "re-embed it when the fixture changes" instruction
+described nothing. The page fetches its artifacts on every load and names
+each one, its HTTP status and its run id in the provenance footer; a fetch
+that fails is a visible band naming the URL and the status, not an empty
+panel.
+
+The page needs http to read those artifacts. Opened from a `file://` URL it
+cannot fetch at all, and it says so in the failure band instead of drawing an
+empty design space.
 
 # The P7.6 folding extensions
+
+> **`atlas.html` no longer implements any of this.** D33 makes the results
+> page a frontier and a selected point, and the three views below never drew
+> on a shipped artifact: no document this repository produces has ever carried
+> a `folding` or a `passes` block, and no `fws_frontier/1` document is fetched
+> anywhere. The viewer's loaders, corruption harnesses and drawings for them
+> (about 1,300 lines) were cut with the rest of the dead layer. The three
+> contracts below stand as DATA contracts for their Python producers and their
+> fixtures; the sentences in this part that say "the loader refuses", "the
+> page draws" or "the self-test panel prints" describe a viewer that no longer
+> exists. `tests/test_qif_atlas.py` still exercises them against
+> `ATLAS.validateFold` / `validatePasses` / `validateFrontier`, which are gone
+> from the page — see the blocker note in the rebuild report.
 
 Three views were added for P7 (folding): the **folding card**, the **macro
 time-lane view**, and the **frontier explorer**. They read three contracts.
@@ -689,9 +802,82 @@ why `fixture_granite_folding.json` exists.
 | V12 | Every drawn frontier point carries its own per-device utilization and its own waste, and the front and the knee are flags the explorer DRAWS, never values it computes. |
 | V13 | A frontier point is clickable only when its artifact exists; a point with none is drawn as unavailable and says why. |
 
-V10 and V11 are emitted by `ATLAS.viewTest` only for a document that carries
+V10 to V13 are no longer emitted by anything: `ATLAS.viewTest` returns V1 to
+V9 only, and `frontierViewTest` is gone with the rest of the extension layer.
+
+V10 and V11 were emitted by `ATLAS.viewTest` only for a document that carries
 the blocks — a rule with nothing to judge would be a pass that proved nothing.
 V12 and V13 are emitted by `ATLAS.frontierViewTest` on a frontier document.
+
+## What the results page is, top to bottom
+
+Nine panels, in this order, and nothing else:
+
+1. **The design space** — the Pareto frontier (x = the headline rate, y = total
+   silicon mm2) and the all-candidates table under it. This is the entry: the
+   page opens here and a click here binds everything below.
+2. **The two chiplet kinds of the selected point** — the shared digital card
+   and the analog weight card, with the point's knobs, rate, silicon, beat and
+   latency on the heading.
+3. **The map of the selected point** — the pipeline stages and the drilldown
+   into a chiplet and a macro.
+4. **Where the beat goes** — per-stage engine, fabric and analog times.
+5. **The state it holds while it runs** — the per-stage bill.
+6. **Energy**, with each component's coverage.
+7. **Duty cycle**, per device class.
+8. **Boundaries** — what crosses between chiplets.
+9. **What this point does not account for** — the disclosures, quoted verbatim.
+
+There is no headline stat row and no provenance footer. Both printed numbers
+the frontier and the cards had already printed.
+
+**One band, one condition.** `h-alerts`, above the frontier, renders only when
+the sweep artifact is missing or unparseable — without it there is no design
+space, no point and no panel. Every other condition is inline where it belongs:
+a legacy companion that 404s, a point document refused for naming another
+candidate or another run, a query parameter the page cannot honour. The sweep
+is the report and it is authoritative in silence; the page does not compare it
+against `<model>_report.json` or `<model>.json` and does not comment on their
+age.
+
+## Plain language, and one fact once
+
+- **Absence copy is one plain sentence.** The artifacts speak to the decision
+  register ("EMPTY, and not a measured zero: ... so D31/ADJ-10 derived neither
+  engine"). The page does not. Decision codenames are stripped from every
+  string it renders except inside the disclosures panel, where the text is a
+  quotation and stays verbatim.
+- **An absent column is dropped, not dash-filled.** A row with no value for the
+  selected point is not drawn; a table with nothing to say becomes one
+  sentence; a workload with no concept of a quantity (an encoder has no beat,
+  no resident streams and no KV) gets no panel and no column for it. An
+  em-dash survives only where the absence is itself the finding: an uncovered
+  energy term, an area no library could compose.
+- **Identical rows collapse with a count.** Twenty stages holding the same bill
+  are one row; 620 identical boundary crossings are one row and a count.
+- **A refused point is a result.** Every panel that finds no data on an
+  `ok: false` candidate prints the sweep's own refusal message instead of
+  reporting a missing number.
+- **An unbalanced pipeline is a finding.** When the sweep judges a point's
+  stages badly matched (`stage_balance`), the beat panel leads with one plain
+  paragraph naming the long stages, what makes them long, and the rate a
+  balanced partition could reach. A balanced point prints nothing extra, and an
+  artifact without the block prints nothing.
+
+## The model set is a manifest
+
+`../dse/subset_v1.json` names the models the report is about:
+
+```
+{ "bundle": "subset_v1", "generated_at": "...",
+  "members": [ { "name", "model_id", "label", "mode", "dir",
+                 "run_id", "selected_id", "headline" }, ... ] }
+```
+
+The selector is exactly `members`, in order, and each member's sweep is read
+from `../dse/<dir>/dse_report.json` with its per-point maps under the same
+directory. A checkout without the manifest falls back to the list in
+`atlas.html`; a `?model=` deep link opens any model whose artifacts exist.
 
 ## The encoding law in the folding views
 
@@ -717,3 +903,192 @@ one channel FEWER.
 |---|---|
 | `fixture_granite_folding.json` | The P7.6 hand fixture: eight real macro slots of `granite_4_0_h_tiny.json` — chips, macros, tiles, cards and the link byte law copied row for row — plus hand-authored `folding` and `passes` blocks built from those very shapes. It is an EXCERPT and says so in `relaxations[]`; its `excerpt.` metrics are facts about the excerpt and its `run.` metrics name the whole-model run they were quoted from. `tests/test_qif_atlas.py` asserts the copied rows are byte-identical to the source artifact, which is the anti-staleness gate a hand fixture can have. |
 | `fixture_frontier_granite.json` | The P7.6 frontier fixture: the eight REAL candidate rows of `docs/qif/dse/granite_lanes_banks/dse_report.json` plus the shipped Granite atlas run as a ninth point, the only one with an artifact to click through to. Its silicon is fully composed and carries all THREE terms — analog macro slots, shared digital chiplets and per-macro digital pools, the last added by P7.9 — so `area.total_mm2` equals the source sweep's own `total_silicon_mm2` point for point and `invented_fields` is empty. ONE field is still marked: the per-candidate shared-digital UTILIZATION, which no producer emits. Two relaxations name what the document is rather than what it lacks: its waste figure is D27's CELL census of ONE reference mapping repeated on every row (the per-point census is emitted by the D31-legal curves under `docs/qif/dse/*_frontier/`), and its eight swept points sweep `vector_lanes`, the axis D31 retires — they are kept as the frozen Wave-D demo, while the ninth point's widths are ALL DERIVED — ADJ-10 derives its attention fabric (`num_arrays`, `softmax_lanes`) as well as its scan engine, so it carries a `num_arrays_provenance` of `derived-count` that no swept point has, and it is the fastest point on the picture rather than the dominated one ADJ-9 left. It is the shape `fws_frontier/1` producers emit. |
+
+# The `fws_slot/1` slot-map extension
+
+D39 (2026-08-31). A macro of X rows x Y columns behind Z ADCs rotates through
+`mux = Y/Z` slots once per beat, so **a slot index is a firing phase**: the
+slot-layer sitting in slot j fires on every tick that is j modulo mux. Where a
+weight sits and when it fires are ONE decision, and `slots` is that decision
+written down.
+
+The block rides on a normal `fws_atlas/1` document. Everything the base
+contract requires is still required and still refused the same way; `slots` adds
+the schedule the base contract has no words for. A document without it is
+unchanged, and a reader without the slot view still sees a conformant map.
+
+    "slots": {
+      "schema": "fws_slot/1",
+      "platform": {...}, "chips": [...], "macros": [...],
+      "bundles": [...], "ledgers": {...}, "check": {...}
+    }
+
+Ids are strings, zero-padded, and sorted id order IS layout order:
+`chip.00`, `mac.000`, `b.000`. Ticks are integers and they are TOKEN 0's
+firing ticks, counted from tick 0 of the first bundle.
+
+## `slots.platform`
+
+One object. It states the machine the schedule runs on, and every number in it
+is fixed by the platform point, not by the mapper.
+
+| Field | What it is |
+|---|---|
+| `rows` | X: the macro's row count. In the simple universe it equals the model's hidden size. |
+| `z` | Z: how many ADCs a macro has. One slot-layer is Z columns wide. |
+| `y` | Y: the macro's stored columns. `y = mux * z` or the loader refuses. |
+| `mux` | Y/Z, DERIVED. The number of slots a macro rotates through, and the number of firings it owes per token. |
+| `tick_ns` | One ADC firing. 20 ns. |
+| `beat_ticks`, `beat_ns` | The rotation: `beat_ticks = mux`, `beat_ns = beat_ticks * tick_ns`. Throughput is one token per beat and nothing the mapper does moves it. |
+| `hop_gap_ticks` | Ticks between consecutive bundles: one to finish converting, one for the wire and the reduce. 2. |
+| `seam_ticks`, `seam_ns` | What a chip crossing adds on top of the hop. 25 ticks, 500 ns. |
+| `chip_macros` | How many macros a chip holds. |
+| `macro_area_mm2` | The area of ONE macro of this platform, from the sheet: `cim_analog_calc.derive_analog_card(rows, y, z)`. |
+| `label` | The platform's name, `512x2048:64`. Shown as written. |
+
+## `slots.chips[]` and `slots.macros[]`
+
+Containment is stated in both directions, exactly as the base contract states
+it for `chips[]`/`macros[]`, and the loader checks both.
+
+| Field | What it is |
+|---|---|
+| `chips[].id`, `.index` | The chip and its position left to right. |
+| `chips[].macros[]` | Its macro ids, in column order. |
+| `chips[].capacity_macros` | How many macros the chip holds. It equals `macros.length`. |
+| `macros[].id`, `.chip`, `.index` | The macro, the chip that holds it, and its column position WITHIN that chip. |
+| `macros[].slots[]` | One entry per OCCUPIED slot (see below). |
+| `macros[].free_slots[]` | Slot indices the rotation reaches and nothing fires: capacity this map did not need. |
+| `macros[].stranded_slots[]` | Slot indices left behind when the next bundle did not fit this chip and moved whole. Their cells are WASTE. |
+
+Occupied, free and stranded together account for exactly `mux` slots, each
+index once.
+
+### `macros[].slots[]` — one slot-layer
+
+| Field | What it is |
+|---|---|
+| `slot` | The slot index, 0..mux-1. It is the firing phase. |
+| `bundle` | The bundle id this slot-layer belongs to. |
+| `layer`, `block` | The model layer number and the weight block, for colour and hatch. |
+| `kblock` | Which K-block of the bundle, 0 when the bundle has one. |
+| `columns` | `{start, count}` — the span this slot-layer holds WITHIN its bundle's column range. `count < z` is a ragged slot-layer, and `z - count` columns of the ADC set hold nothing. |
+| `tick` | Token 0's firing tick. `tick % mux == slot` or the loader refuses. |
+
+## `slots.bundles[]`
+
+A bundle is one weight matrix of one layer: the unit that moves whole, is
+never split across chips, and hops to the next bundle in chain order.
+
+| Field | What it is |
+|---|---|
+| `id`, `order` | The bundle and its position in the chain. Sorted order is chain order. |
+| `layer`, `block` | Which layer and which weight block. |
+| `columns` | Its real columns, ALL K-BLOCKS TOGETHER. The K-blocks share the range equally and own contiguous chunks of it, so `columns` divides by `k_blocks` and K-block k holds `[k * columns / k_blocks, (k+1) * columns / k_blocks)`. This is the figure the chain prints beside the slot-layer count, and the two only agree on this reading. |
+| `k_blocks` | How many row-blocks the matrix is cut into. Above one their partials REDUCE, and they may fire at the same tick on different macros because each has its own input slice. |
+| `reduce` | True when those partials are summed. |
+| `slot_layers` | How many slots it occupies. It equals the map's own count. |
+| `ragged_columns` | Columns of committed ADC width that hold no weight. |
+| `chip`, `macros[]` | Where it sits. One chip, always. |
+| `start_tick`, `end_tick` | Token 0's first and last firing of this bundle. |
+| `serial_ticks` | `end_tick - start_tick + 1`. |
+| `stall_ticks` | How long the bundle waited past the earliest tick the law allows: `start_tick` minus the previous bundle's `end_tick` plus the hop gap, plus the seam when `seam_before`. It is a wait BEFORE the span, not idle ticks inside it. Its floor is 0. |
+| `seam_before` | True when it sits on another chip than the bundle before it, which is what buys the 25-tick seam. |
+
+## `slots.ledgers`
+
+The three ledgers the mapper controls are cell waste, chain latency (and the
+sequences it puts in flight) and seams. THE ATLAS READS THESE VERBATIM. It
+recounts them only to disagree out loud (rule S9); it never substitutes its
+own figure for the producer's.
+
+| Field | How it is counted |
+|---|---|
+| `beat_ticks`, `beat_ns` | The platform's, repeated here so a ledger reads on its own. |
+| `L_ticks`, `L_ns` | The chain latency: the last firing tick of the last bundle, plus the one tick that converts it, counted from tick 0. |
+| `L_min_ticks` | The tight floor the law permits: `2n - 1` ticks for `n` bundles (the 2-tick hop gap separates the `n - 1` joins, and `L` counts the last firing plus one), plus 25 for each seam that chip capacity forces. `L_ticks` is what the map achieved; the gap between the two is stalls and temporal depth. |
+| `D`, `D_min` | Little's law: `ceil(L / beat_ticks)` sequences in flight, and the same over the floor. |
+| `macros_used`, `chips_used` | Counted from the enumerated map. |
+| `slots_total` | `macros * mux` over every macro in the map. |
+| `slots_used`, `slots_stranded` | Occupied and stranded slots. Free slots are the remainder. |
+| `cells_total` | `slots_total * z * rows`: every cell the map commits. |
+| `cells_used` | Cells holding real weights: the slot-layers' own columns times rows. |
+| `cells_wasted` | Ragged cells plus every stranded slot's cells. Free slots are NOT waste: nothing was displaced to leave them. |
+| `waste_frac` | `cells_wasted / cells_total` — a share of EVERY cell the mapping commits, free slots included, which is the denominator the atlas prints beside it. Its floor is 0. |
+| `seams` | Bundles with `seam_before`. |
+| `stall_ticks` | The bundles' stalls, summed. |
+| `throughput_tokens_per_s` | `1 / beat`. Occupancy only. |
+| `per_user_tokens_per_s` | `1 / (D * beat_ns)`, which is `throughput / D`. A user's next token re-enters on the first bundle's own phase, and that phase comes round once per beat, so one user's period is D beats. Little's law closes on the strip: `D` times this rate is the throughput, and no user out-runs the machine. |
+| `per_user_ceiling_tokens_per_s` | `1 / (L_ticks * tick_ns)`: the rate a user would get if the next token could start the instant the last one left. It is a CEILING, not a rate. Only a beat that divides `L_ticks` reaches it. |
+| `analog_area_mm2` | `macros_used * macro_area_mm2`. The toy has no other silicon term. |
+
+## `slots.check`
+
+`{"ok": bool, "violations": []}` — the verdict of the INDEPENDENT checker that
+reads the emitted document alone. `ok: false` is not a warning: the atlas draws
+no map at all and prints the violations. Every emitted mapping carries it.
+
+## What the slot loader refuses to draw
+
+S1-S8 are refusals: the section draws nothing and prints the rule, the field
+and the sentence. S9 is a disagreement, printed under the ledgers with the
+producer's own numbers left standing. They live in `ATLAS.validateSlots(doc)`
+inside the headless core block, beside the base loader.
+
+| Rule | What it refuses |
+|---|---|
+| S1 | A `slots` block that is not `fws_slot/1`, or that is missing `platform`, `chips[]`, `macros[]`, `bundles[]`, `ledgers` or a `check` of `{ok, violations[]}`. |
+| S2 | A platform that contradicts itself: a non-positive geometry, `y != mux * z`, `beat_ticks != mux`, or a `beat_ns`/`seam_ns` that is not its tick count times `tick_ns`. |
+| S3 | Containment stated one way only: a chip listing a macro that does not name it back, a macro naming a chip that does not hold it, or a `capacity_macros` that is not the number of macros listed. |
+| S4 | A rotation that does not add up: a slot index outside 0..mux-1, a slot filled twice, a slot-layer holding 0 or more than Z columns, or occupied + free + stranded that is not exactly `mux` slots each named once. |
+| S5 | A firing tick that is not the slot's own phase (`tick % mux != slot`). Placement and schedule are one decision, and a document that separates them describes a machine that cannot run. |
+| S6 | One macro firing twice at the same tick. One ADC set, one firing, one tick. |
+| S7 | A bundle the map contradicts: no slots at all, a `slot_layers` count the map does not hold, a span the map does not fire, a `chip` the map does not put it on, or a bundle split across two chips. It also refuses a column count the map does not lay down: `columns` must divide by `k_blocks`, `slot_layers` must be `ceil(columns / k_blocks / z) * k_blocks`, and the slot-layers of K-block k must cover that K-block's own contiguous chunk of `0..columns` exactly once. Without it a document can print one width in the chain and store another in the grid, and each looks right on its own. |
+| S8 | A gap the law forbids: a first bundle that does not start at tick 0, a next firing sooner than the previous bundle's last firing plus the hop (plus the seam when the chip changes), or a `seam_before` that disagrees with whether the chip actually changed. |
+| S9 | (warning) A ledger the enumerated slots count differently, `waste_frac` included: the percentage and the sentence under it are the same division, so a reader who does the arithmetic cannot catch the page out. The figure on screen stays the producer's; the difference is printed under it. |
+
+## What the slot view draws
+
+| Encoding | Meaning |
+|---|---|
+| Cell fill | The LAYER number, on the same monotone hue ramp the rest of the page uses. |
+| Cell hatch | The weight block, from the same block-order hatch table. |
+| Cell width | A full cell is Z columns. A narrower fill is a ragged slot-layer, and the remainder is drawn in the ragged texture. |
+| Very light cell | A free slot. |
+| Textured neutral cell | A stranded slot. |
+| Grid row | The slot index, slot 0 on top. It is also the firing phase. |
+| Grid column | One macro. Columns are grouped into the labelled box of the chip that holds them. |
+| Timeline mark | One firing of TOKEN 0 at (tick, macro), in the layer's hue. |
+| Faint timeline mark | The same firing for TOKEN 1, one beat later. The overlap is the throughput. |
+| Dashed vertical rule | A beat boundary, labelled beat 1, beat 2, ... |
+| Shaded span | The gap between two bundles: the hop, or the 25-tick chip crossing, labelled with its 500 ns. |
+| Bracket above the marks | One bundle's span, in chain order. |
+| Dashed accent rule | L, with the sequences in flight beside it. |
+
+The grid and the timeline scroll INSIDE their own container; the page never
+scrolls sideways. A mux of 128 stays legible: the cells shrink and the slot
+axis labels thin out, and no cell is ever dropped.
+
+Clicking a bundle — in the chain strip, the slot map or the timeline — follows
+it through all three; clicking it again clears. The selection is a view state
+and is not written to the URL.
+
+## Query parameter
+
+| Parameter | Effect |
+|---|---|
+| `?bundle=<name>` | Which RUN BUNDLE the page reads: `../dse/<name>.json`. The default is `subset_v1`, the model report. A bundle named here and missing from the checkout raises the one band the page has, naming the URL — the page does not fall back to another bundle's models, because that would answer a question the reader did not ask. The name is a file name in `../dse`, never a path. A small link beside the model selector switches between the model report and the toy slot map (`toy_slotmap`) and back, and `stateURL()` carries the bundle so a copied link opens the same report. |
+
+A member of a bundle whose `mode` is `TOY` is a mapper debug run. It renders on
+the same page in the same order — frontier first, then the hardware cards, then
+the map — and the panels it has no data for state their absence in the words
+they already use. The toy has NO digital chiplet and NO per-sequence state
+store, so the digital card says so in one sentence and no zero is printed
+anywhere for either.
+
+## The documents the slot view is proved against
+
+| File | What it is |
+|---|---|
+| `fixture_slotmap.json` | The atlas's slot fixture: one toy block — qkv 768 columns, out 512, ffn1 2048, ffn2 as 4 K-blocks of 512 whose partials reduce — mapped onto 512 x 512 : 64 (mux 8) with 6 macros per chip. ffn1 does not fit the slots chip 0 has left, so it moves WHOLE to chip 1 and pays a crossing, and ffn2 does the same to chip 2: three chiplets, two crossings, 44 stranded slots, 30.6% cell waste, L = 69 ticks and 9 sequences in flight. It is EMITTED, not typed: a hand document drifts from the contract it claims to illustrate, and this one twice did. Rebuild it with `python tools/fws_toy_slotmap.py --fixture`; a test compares the bytes, so a contract change that is not carried into it fails. |
+| `../dse/toy_slotmap.json` and `../dse/toy_slotmap_frontier/` | The real sweep the view is read on: `?bundle=toy_slotmap`. Twelve bundles over six platform points — mux 8, 16, 32, 64, 128 and one at Z = 512 where qkv is ragged. Every point carries its own tick schedule and its checker's verdict. |

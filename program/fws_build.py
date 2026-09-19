@@ -64,6 +64,8 @@ from fws_mapping import (
     MappingError,
     PipelineStage,
     ShardCoord,
+    lowered_beats,
+    stream_entry_beat,
 )
 from program.ir import GroupKey, Program, ProgramBuilder, ProgramMeta
 from program.layout import RankLayout
@@ -82,6 +84,15 @@ LAW_POOL = "P2 pool component costs (D12)"
 LAW_FABRIC = "P2 fabric laws (D13)"
 LAW_LINK = "bytes / link law (D17)"
 LAW_PD_LINK = "bytes / link law (D16)"
+#: THE STAGE HANDOFF. A filled pipeline's stage hands its activation to the
+#: next stage, and that handoff is priced by the LAW LAYER's hop constants
+#: (cim_timing.stage_handoff_time_s): a flat 50 ns when the next stage is on
+#: the same analog chip, a flat 500 ns when it is on another one, and 0 s when
+#: it never leaves the macro. It is NOT the D17 bytes/bandwidth law - the two
+#: are different laws for different boundaries, so they carry different names
+#: and P4 dispatches on the name (P4 1). The tp all-reduce and the D16 PD
+#: handoff keep LAW_LINK / LAW_PD_LINK and the card's p2p law.
+LAW_STAGE_HOP = "flat hop latency per stage handoff (interim link prices)"
 LAW_COLLECTIVE = "analytical collective over the p2p law"
 
 #: Set on every ComputeOp/TransferOp; P4 replaces it with a priced timeline.
@@ -166,13 +177,35 @@ class ServingPoint:
     decode_len: int
     decode_steps: int
     regime: str = REGIME_LOCKSTEP
-    #: D — resident streams, which IS the stage count (D29). 0 under lockstep.
+    #: D — resident streams: ``round(pp_util x stages)`` (D29 + D38). 0 under
+    #: lockstep. At the full fill it IS the stage count, which is D29.
     streams: int = 0
     #: Beats lowered (fill + steady). 0 under lockstep.
     beats: int = 0
-    #: Beats of STEADY state the window measures (beats - streams). 0 under
-    #: lockstep.
+    #: Beats of STEADY state the window measures. 0 under lockstep.
     steady_beats: int = 0
+    #: The PIPELINE'S STAGES. D29 made this the same number as ``streams`` and
+    #: D38 separated them: a stage is a position, a stream is a token in one.
+    #: A traversal crosses every STAGE, and only D of them are occupied at any
+    #: beat. 0 under lockstep.
+    stages: int = 0
+
+    @property
+    def fill(self) -> float:
+        """D / stages — the REALIZED fill (D38). 0.0 under lockstep."""
+        if int(self.stages) <= 0:
+            return 0.0
+        return float(self.streams) / float(self.stages)
+
+    def entry_beat(self, traversal: int) -> int:
+        """The beat traversal ``j`` enters at — the fill's one point of entry."""
+        return stream_entry_beat(int(traversal), int(self.stages), int(self.streams))
+
+    def completes(self, traversal: int) -> bool:
+        """Does traversal ``j`` cross its LAST stage inside the lowered window?"""
+        if int(self.stages) <= 0:
+            return False
+        return self.entry_beat(traversal) + int(self.stages) - 1 <= int(self.beats) - 1
 
     @classmethod
     def from_mapping(cls, mapping: FwsMapping, decode_steps: Optional[int] = None) -> "ServingPoint":
@@ -182,23 +215,27 @@ class ServingPoint:
         window = mapping.decode_window if decode_steps is None else int(decode_steps)
         if getattr(mapping, "regime", REGIME_LOCKSTEP) == REGIME_FILLED:
             streams = int(mapping.resident_streams)
+            stages = len(mapping.stages)
             if streams <= 0:
                 raise MappingError(
                     "execution",
                     "the filled-pipeline regime needs a stage plan and this mapping "
-                    "carries none: D IS the stage count (D29).",
+                    "carries none: D is round(pp_util x stages) and there are no "
+                    "stages (D29, D38).",
                 )
             steady = max(1, int(window))
             # THE WINDOW, sized so that `steady` STEADY beats are actually
-            # measured. D - 1 beats fill the pipeline; `steady + 2` traversals
-            # then complete inside D + steady + 1 beats, giving `steady + 1`
-            # inter-exit intervals, of which the FIRST belongs to the traversal
-            # that travelled through the filling pipeline and is held out as
-            # the transient. What is left is exactly `steady` intervals and the
-            # beat is their median. Nothing is extrapolated to get there, and
-            # the extra beat is lowered rather than the transient being
-            # averaged in.
-            beats = streams + steady + 1
+            # measured. `stages - 1` beats fill the pipeline; `steady + 2`
+            # traversals then have to COMPLETE, which is what `lowered_beats`
+            # counts: the last of them enters at its own entry beat (traversals
+            # enter one per beat at the full fill and stages/D beats apart
+            # under an underfilled one) and leaves `stages` beats later. Their
+            # `steady + 1` inter-exit intervals are measured, of which the
+            # FIRST belongs to the traversal that travelled through the filling
+            # pipeline and is held out as the transient. What is left is
+            # exactly `steady` intervals and the beat is their median. Nothing
+            # is extrapolated to get there.
+            beats = lowered_beats(stages, streams, steady)
             return cls(
                 batch=1,
                 prefill_len=prefill_len,
@@ -208,6 +245,7 @@ class ServingPoint:
                 streams=streams,
                 beats=beats,
                 steady_beats=steady,
+                stages=stages,
             )
         return cls(
             batch=int(params.batch_size),
@@ -240,16 +278,24 @@ class _Lowering:
         self._owner_tiles = OrderedDict(
             (owner, tuple(tiles)) for owner, tiles in self._owner_tiles.items()
         )
-        # P7.3: the packer's own K-stack descriptors, indexed by the pair that
-        # identifies an output block, (owner, n_start). Only the LOCAL stacks
-        # are here: a stack whose blocks span macros is priced end to end by
-        # the row-block partial-sum law this builder already emits, and pricing
-        # it twice would be two accountings of one metric (D21).
-        self._k_stacks: Dict[Tuple[TileOwner, int], KStack] = {}
+        # P7.3: the packer's own K-stack descriptors, indexed by the triple
+        # that identifies one in-macro accumulation, (owner, n_start, macro).
+        # These are the packer's LOCAL SEGMENTS — the runs of a stack that sit
+        # inside one macro. A wholly local stack is one segment equal to
+        # itself, so nothing about that shape moves; a stack that SPANS macros
+        # contributes one segment per macro that holds more than one of its
+        # blocks, and those adds are real and happen inside that macro.
+        #
+        # THE BETWEEN-MACRO REDUCTION IS NOT HERE. It is priced end to end by
+        # the row-block partial-sum law this builder already emits (one partial
+        # per macro, transported to the sink), so a stack is charged once for
+        # what it does inside a macro and once for what it does between them —
+        # never twice for either (D21).
+        self._k_stacks: Dict[Tuple[TileOwner, int, int], KStack] = {}
         for packing in getattr(mapping, "packings", {}).values():
-            for stack in packing.k_stacks:
-                if stack.depth > 1 and stack.local:
-                    self._k_stacks[(stack.owner, int(stack.n_start))] = stack
+            for segment in getattr(packing, "local_k_segments", ()):
+                key = (segment.owner, int(segment.n_start), int(segment.sink_macro_id))
+                self._k_stacks[key] = segment
         #: Local K stacks the DAG found but the PACKER did not describe — the
         #: dedicated placement can build one when a card's bank is finer than
         #: its macro. Keyed by (owner, output block, macro) so the count is
@@ -431,19 +477,27 @@ class _Lowering:
         """The steady-state rotation: D staggered streams, one token per beat.
 
         Traversal ``j`` (one stream carrying one token through every stage)
-        ENTERS at beat ``j`` and occupies stage ``d`` at beat ``j + d``, so at
-        any beat of the steady state all D stages are busy on D DIFFERENT
-        streams. Nothing here schedules that: the DAG says which work exists
-        and on which devices, and the timeline produces the stagger from the
-        contention, which is the only place a beat is allowed to come from
-        (A1).
+        ENTERS at ``serving.entry_beat(j)`` and occupies stage ``d`` one beat
+        per stage after that, so at any beat of the steady state D stages are
+        busy on D DIFFERENT streams. Nothing here schedules that: the DAG says
+        which work exists and on which devices, and the timeline produces the
+        stagger from the contention, which is the only place a beat is allowed
+        to come from (A1).
+
+        THE FILL ENTERS HERE AND NOWHERE ELSE (D38). At pp_util = 1.0 the entry
+        beat is ``j`` and D = the stage count: D29's rotation, unchanged. Below
+        it, D is smaller than the stage count and entries are spaced
+        ``stages / D`` beats apart, so the machine really holds D streams and
+        D tokens leave every ``stages`` beats. The throughput that follows is
+        MEASURED off this timeline; no number is scaled by the fill anywhere,
+        because that would be the second accounting of one fact (D21).
 
         Three things the window has to get right:
 
-        * **the fill.** The first D - 1 beats are the pipeline filling; a
-          traversal that entered before the window is lowered only from the
-          stage it has reached. The transient is DISCLOSED by P4 and never
-          averaged into the beat.
+        * **the fill.** The first ``stages - 1`` beats are the pipeline
+          filling; a traversal that entered before the window is lowered only
+          from the stage it has reached. The transient is DISCLOSED by P4 and
+          never averaged into the beat.
         * **the stream's own context.** Resident streams sit at DIFFERENT
           decode depths: stream i enters at context ``prefill_len + i`` and
           advances one token every D beats, so attention and scan are priced
@@ -453,8 +507,8 @@ class _Lowering:
           That edge is real and it is in the graph.
 
         One more edge is the regime itself: **a stage holds ONE stream at a
-        time.** D29's machine has D resident streams and D stages, one stream
-        per stage per beat — so stage ``d`` cannot start traversal ``j + 1``
+        time.** The machine has D resident streams over its stages, at most one
+        stream per stage per beat — so stage ``d`` cannot start traversal ``j + 1``
         before it has finished traversal ``j``. Without that edge the DAG would
         let a stage's layers pipeline several streams at once, which is a
         DIFFERENT machine: more streams in flight than the state/KV accounting
@@ -471,9 +525,12 @@ class _Lowering:
         traversal_tail: Dict[int, List[int]] = {}
         stage_tail: Dict[Tuple[int, int], List[int]] = {}
         for traversal in range(beats):
+            entry = serving.entry_beat(traversal)
+            if entry >= beats:
+                break  # every later traversal enters later still
             deps: List[int] = list(traversal_tail.get(traversal - streams, ()))
             for stage in stages:
-                beat = traversal + stage.index
+                beat = entry + stage.index
                 if beat >= beats:
                     break  # the window ends; the rest of this traversal is outside it
                 self._stage = int(stage.index)
@@ -505,9 +562,31 @@ class _Lowering:
         for tp_idx in range(tp_count):
             pending = list(deps)
             previous_chip = self._last_chip.get((traversal, tp_idx))
+            first = True
             for layer in stage.layers:
                 chip_id = self._layer_chip(layer, tp_idx)
-                if previous_chip is not None and chip_id != previous_chip:
+                if first and previous_chip is not None:
+                    # THE STAGE HANDOFF, priced by the hop law WHETHER OR NOT
+                    # it crosses a chip: the previous stage hands this stream
+                    # on, and that costs 50 ns inside a chip and 500 ns across
+                    # one. Before the hop law an intra-chip handoff emitted no
+                    # op at all, which charged 0 s for a movement that happens
+                    # on every beat of every stage boundary the packer kept on
+                    # one die - and the stub packer keeps most of them there.
+                    pending = self._chip_boundary(
+                        previous_chip,
+                        chip_id,
+                        pending,
+                        "decode",
+                        traversal,
+                        1.0,
+                        layer,
+                        law=LAW_STAGE_HOP,
+                    )
+                elif previous_chip is not None and chip_id != previous_chip:
+                    # A chip change INSIDE one stage (a stage plan coarser than
+                    # D38's per-layer one). It is not a stage handoff, so it
+                    # keeps the D17 bytes/bandwidth law it always had.
                     pending = self._chip_boundary(
                         previous_chip, chip_id, pending, "decode", traversal, 1.0, layer
                     )
@@ -515,6 +594,7 @@ class _Lowering:
                     layer, chip_id, tp_idx, pending, "decode", traversal, 1.0
                 )
                 previous_chip = chip_id
+                first = False
             self._last_chip[(traversal, tp_idx)] = previous_chip
             tails.extend(pending)
         return tails
@@ -631,28 +711,68 @@ class _Lowering:
         step: int,
         tokens: float,
         layer: int,
+        *,
+        law: str = LAW_LINK,
     ) -> List[int]:
-        """The activation handoff across a chip boundary (role `act`, ADJ-5)."""
+        """The activation handoff between two placements (role `act`, ADJ-5).
+
+        ``law`` names WHICH law prices it: :data:`LAW_LINK` is D17's
+        bytes/bandwidth p2p and is what a mid-stage chip change has always
+        been; :data:`LAW_STAGE_HOP` is the filled pipeline's STAGE handoff,
+        priced at the law layer's flat hop latency. A stage handoff is emitted
+        even when the two stages share a chip, because an intra-chip hop is 50
+        ns and not free; only movement that never leaves a macro is free.
+        """
         mapping = self.mapping
         if not deps:
             return list(deps)
+        # THE PRODUCER MUST BE THE OP THAT HOLDS THE ACTIVATION, AND IT MUST
+        # LIVE ON THE SOURCE CHIP. Taking deps[-1] took whichever edge happened
+        # to be appended last, which in the filled pipeline is the STAGE-HOLD
+        # edge - an op already on the DESTINATION chip. The link law then saw
+        # producer and consumer on one chip, called the hop intra-chip, and
+        # charged 0 s: 589 of Falcon-Mamba's 620 handoffs and 72 of Granite's
+        # were free. The traversal's real data edge was dropped from the graph.
         producer = deps[-1]
+        for candidate in reversed([int(d) for d in deps]):
+            if 0 <= candidate < len(self.annotations):
+                if int(self.annotations[candidate].chip_id) == int(src_chip):
+                    producer = candidate
+                    break
         dst_macro = next(
-            m for m in mapping.macros if m.chip_id == dst_chip and m.pool == "analog"
+            (m for m in mapping.macros if m.chip_id == dst_chip and m.pool == "analog"),
+            None,
         )
+        if dst_macro is None:
+            raise MappingError(
+                "assembly",
+                f"the activation handoff into chip {dst_chip} has no analog macro to "
+                "land on: a stage's chip is the chip its layers' weights sit on, and "
+                "this one enumerates none.",
+            )
         size = tokens * float(mapping.device.params.hidden_dim) * self.act_bytes
+        note = (
+            "chip-boundary activation handoff; a chip boundary is never called pp (ADJ-5)"
+            if law != LAW_STAGE_HOP
+            else (
+                "stage handoff, priced at the flat hop latency for its kind "
+                f"({'cross-chip' if src_chip != dst_chip else 'intra-chip'}); a chip "
+                "boundary is never called pp (ADJ-5)"
+            )
+        )
         uid = self.transfer(
             f"{phase}{step}.boundary.c{src_chip}->c{dst_chip}",
             producer,
             dst_macro.pool_device,
             size,
             boundary_id=f"act.c{src_chip}->c{dst_chip}",
+            law=law,
             phase=phase,
             step=step,
             layer=layer,
             block="boundary",
             tokens=tokens,
-            note="chip-boundary activation handoff; a chip boundary is never called pp (ADJ-5)",
+            note=note,
         )
         return [uid]
 
@@ -717,11 +837,14 @@ class _Lowering:
                         note=f"{len(slices)} bit slices composed on the host macro's pool",
                     )
                 # P7.3: this macro holds SEVERAL K blocks of one output block
-                # (a K stack). The banks fired back to back; their partials now
-                # reduce on this macro's own pool, with the packer's descriptor
-                # carrying the depth and the width P4 prices from.
-                stack = self._k_stacks.get((owner, int(n_start)))
-                if stack is not None and stack.sink_macro_id == macro_id:
+                # (a K stack, or the run of one that lives here). The banks
+                # fired back to back; their partials now reduce on this macro's
+                # own pool, with the packer's segment descriptor carrying the
+                # depth and the width P4 prices from. A stack that continues on
+                # the NEXT macro gets its own accumulator there, and the two
+                # results meet under the row-block partial-sum law below.
+                stack = self._k_stacks.get((owner, int(n_start), int(macro_id)))
+                if stack is not None:
                     uid = self.compute(
                         f"{prefix}.n{n_start}.m{macro_id}.kacc",
                         macro.pool_device,
@@ -813,7 +936,9 @@ class _Lowering:
                 "an act x act op needs a shared digital chiplet (D13) and the mapping "
                 "declares none.",
             )
-        engine = engines[chip_id % len(engines)]
+        # ONE DEFINITION of who serves whom (D21): the mapping owns it, and the
+        # engine derivations size against the SAME grouping this places on.
+        engine = engines[self.mapping.chiplet_index_of_chip(chip_id, shard)]
         return self.compute(
             name,
             engine.device_id,
@@ -949,17 +1074,66 @@ class _Lowering:
     def _routed_tokens(self, tokens: float) -> float:
         """Tokens ONE routed expert sees, from P2's ``moe_tokens_hot``.
 
-        ``ceil(tokens * top_k * alpha / E)`` — the hot-expert load the closed
-        form's ``moe_routed_ffn_time`` prices. It is never re-derived here.
-        """
-        return float(self.mapping.device.moe_tokens_hot(int(math.ceil(tokens))))
+        The closed form's ``moe_tokens_hot`` is ``ceil(tokens * top_k * alpha /
+        E)``: it spreads the routed load over ALL E experts and rounds up. That
+        reading belongs to the all-E parallel model. Here the lowering fires
+        only the experts that actually receive the token (``_active_experts``),
+        so the load per firing expert is the token itself - rounding a sub-token
+        share up to a full pass on top of firing every expert was the same
+        residency error counted twice (M6).
 
-    def _stage_owners(self, layer: int, op: str, tp_idx: int) -> Tuple[TileOwner, ...]:
-        return tuple(
+        Above the point where every expert is busy the two readings agree, and
+        the closed form's imbalance factor takes over.
+        """
+        device = self.mapping.device
+        experts = int(getattr(device.params, "num_experts", 0) or 0)
+        if experts > 0 and self._active_experts(tokens) < experts:
+            return float(tokens)
+        return float(device.moe_tokens_hot(int(math.ceil(tokens))))
+
+    def _active_experts(self, tokens: float) -> int:
+        """How many routed experts FIRE in one beat (M6: resident is not active).
+
+        Under D29 local batch is 1, so one token is routed to exactly `top_k`
+        experts. The other E - top_k hold their weights and do nothing that
+        beat. Charging all E was the single largest distortion in the model:
+        on Granite (E=64, top_k=6) it fired 64 experts instead of 6 and put
+        84% of the analog energy term on arrays that never switched.
+
+        Above one token the active count grows with the routing until every
+        expert is busy, which recovers the closed form's all-E reading exactly
+        where that reading is true.
+        """
+        p = self.mapping.device.params
+        experts = int(getattr(p, "num_experts", 0) or 0)
+        if experts <= 0:
+            return 0
+        top_k = int(getattr(p, "top_k", 0) or 0)
+        if top_k <= 0:
+            return experts
+        return int(min(experts, math.ceil(max(float(tokens), 0.0) * top_k)))
+
+    def _stage_owners(
+        self, layer: int, op: str, tp_idx: int, tokens: Optional[float] = None
+    ) -> Tuple[TileOwner, ...]:
+        owners = tuple(
             owner
             for owner in self._owner_tiles
             if owner.layer == layer and owner.op == op and self._owner_tp(owner) == tp_idx
         )
+        # `routed` is a StageShape flag, not a TileOwner one; the op name is the
+        # discriminator the lowering already uses ("ffn1_routed"/"ffn2_routed").
+        if tokens is None or not owners or not str(op).endswith("_routed"):
+            return owners
+        # Fire a FIXED representative subset: which experts the router picks is
+        # data, and this model has no data (D23). The COUNT is the modelling
+        # fact, so the lowest indices stand in for the picked ones and the
+        # choice is stable across runs.
+        active = self._active_experts(tokens)
+        present = {o.expert for o in owners if o.expert >= 0}
+        if not present or active >= len(present):
+            return owners
+        return tuple(o for o in owners if o.expert < 0 or o.expert < active)
 
     def _run_stage(
         self,
@@ -972,7 +1146,7 @@ class _Lowering:
         tokens: float,
     ) -> List[int]:
         out: List[int] = []
-        for owner in self._stage_owners(layer, op, tp_idx):
+        for owner in self._stage_owners(layer, op, tp_idx, tokens):
             tiles = self._owner_tiles[owner]
             chip_id = self.mapping.macro(tiles[0].site.macro_id).chip_id
             out.extend(
@@ -1102,6 +1276,24 @@ class _Lowering:
             stage = self._run_stage(layer, op, tp_idx, produced, phase, step, tokens)
             if stage:
                 produced = stage
+        # A recurrent mixer carries the same short depthwise conv before its
+        # scan. Under `macro_pool` it is absorbed into the pool sizing and is
+        # not an op at all; under `shared_digital` it is REAL WORK on the
+        # chiplet and has to appear on the timeline, or the machine would run
+        # an operator nobody paid for.
+        if (
+            self.mapping.device.conv_placement == "shared_digital"
+            and self.mapping.device.conv_dims()
+        ):
+            produced = [
+                self._fabric_op(
+                    f"{phase}{step}.L{layer}.short_conv", chip_id, produced,
+                    block="short_conv",
+                    note="short causal depthwise conv of the recurrent mixer, TIMED on "
+                         "the shared digital chiplet (cim.allocation.conv_placement)",
+                    **common,
+                )
+            ]
         scan = self._fabric_op(
             f"{phase}{step}.L{layer}.{fabric_op}", chip_id, produced,
             block=fabric_op, note=note, **common
@@ -1119,18 +1311,34 @@ class _Lowering:
         step: int,
         tokens: float,
     ) -> List[int]:
-        """ADJ-3: the short depthwise conv runs on the per-macro digital pool."""
+        """The short depthwise conv, on whichever device the card places it.
+
+        Its WEIGHTS are on analog arrays under neither placement: a k-tap
+        depthwise kernel would light a handful of cells in a macro that holds
+        millions. What `cim.allocation.conv_placement` chooses is where the
+        WORK runs - absorbed by the per-macro pool (ADJ-3) or timed on the
+        shared digital chiplet.
+        """
         common = dict(phase=phase, step=step, layer=layer, tokens=tokens)
         produced = self._run_stage(
             layer, "conv_in_proj", tp_idx, deps, phase, step, tokens
         ) or list(deps)
-        macro_id = self.annotations[produced[-1]].macro_id
-        conv = self._pool_op(
-            f"{phase}{step}.L{layer}.short_conv", macro_id, produced,
-            block="short_conv",
-            note="short causal depthwise conv absorbed by the per-macro pool (ADJ-3)",
-            **common,
-        )
+        if self.mapping.device.conv_placement == "shared_digital":
+            conv = self._fabric_op(
+                f"{phase}{step}.L{layer}.short_conv", chip_id, produced,
+                block="short_conv",
+                note="short causal depthwise conv, TIMED on the shared digital chiplet "
+                     "(cim.allocation.conv_placement)",
+                **common,
+            )
+        else:
+            macro_id = self.annotations[produced[-1]].macro_id
+            conv = self._pool_op(
+                f"{phase}{step}.L{layer}.short_conv", macro_id, produced,
+                block="short_conv",
+                note="short causal depthwise conv absorbed by the per-macro pool (ADJ-3)",
+                **common,
+            )
         out = self._run_stage(layer, "conv_out_proj", tp_idx, [conv], phase, step, tokens)
         return self._reduce_row_parallel(out, layer, "conv_out_proj", phase, step, tokens)
 
@@ -1345,7 +1553,7 @@ class _Lowering:
                 "the workload needs a shared digital chiplet (D13) and the mapping "
                 "declares none.",
             )
-        return engines[chip_id % len(engines)]
+        return engines[self.mapping.chiplet_index_of_chip(chip_id, shard)]
 
 
 def build_fws_program(

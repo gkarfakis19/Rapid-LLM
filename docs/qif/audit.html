@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FWS-CIM Audit — 9bd394b</title>
+<style>
+:root{
+  --ink:#1c2a33; --muted:#5f7280; --faint:#8497a2; --accent:#176778;
+  --line:#dde5e9; --bg:#f7f9fa; --card:#ffffff; --code:#eef2f4;
+  --crit:#7a2e2e; --crit-bg:#f6ecea;
+  --major:#8a5a10; --major-bg:#f7f1e6;
+  --minor:#4a5f6d; --minor-bg:#eef2f4;
+  --ok:#2f6b46; --ok-bg:#edf4ef;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+     font:15px/1.62 "Segoe UI",system-ui,sans-serif}
+main{max-width:60rem;margin:0 auto;padding:2.4rem 1.5rem 6rem}
+a{color:var(--accent)}
+code{font:.86em ui-monospace,Menlo,monospace;background:var(--code);
+     padding:.08em .32em;border-radius:3px;word-break:break-word}
+.pid{font:12px/1 "Segoe UI",system-ui,sans-serif;letter-spacing:.07em;
+     text-transform:uppercase;color:var(--faint);margin-bottom:1rem}
+.pid a{color:var(--faint);text-decoration:none}
+.pid a:hover{color:var(--accent)}
+h1{font:400 2.1rem/1.2 Georgia,serif;margin:.2rem 0 .5rem;text-wrap:balance}
+.sub{color:var(--muted);margin:0 0 1.6rem;max-width:46rem}
+h2{font:600 1.02rem/1.3 "Segoe UI",system-ui,sans-serif;margin:2.6rem 0 .9rem;
+   padding-top:1rem;border-top:1px solid var(--line);letter-spacing:.01em}
+.verdict{background:var(--crit-bg);border-left:4px solid var(--crit);
+         border-radius:5px;padding:1rem 1.2rem;margin:0 0 1.4rem;
+         font-size:16px;line-height:1.6}
+.verdict b{color:var(--crit)}
+.lede{background:var(--card);border:1px solid var(--line);border-radius:6px;
+      padding:1.1rem 1.3rem;margin:1rem 0 .4rem}
+.lede h3{margin:0 0 .5rem;font:600 1.06rem/1.35 "Segoe UI",system-ui,sans-serif}
+.stats{display:flex;flex-wrap:wrap;gap:.7rem;margin:1.2rem 0 .4rem}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:6px;
+      padding:.6rem .9rem;min-width:7.2rem}
+.stat .v{font:600 1.3rem/1.15 "Segoe UI",system-ui,sans-serif;
+         font-variant-numeric:tabular-nums}
+.stat .k{font:10.5px/1.3 "Segoe UI",system-ui,sans-serif;letter-spacing:.05em;
+         text-transform:uppercase;color:var(--muted);margin-top:.2rem}
+ol.defects{list-style:none;counter-reset:d;padding:0;margin:.6rem 0}
+ol.defects>li{counter-increment:d;background:var(--card);border:1px solid var(--line);
+   border-left:4px solid var(--minor);border-radius:6px;padding:.95rem 1.15rem;margin:.7rem 0}
+ol.defects>li.crit{border-left-color:var(--crit)}
+ol.defects>li.major{border-left-color:var(--major)}
+ol.defects>li h3{margin:0 0 .15rem;font:600 1rem/1.4 "Segoe UI",system-ui,sans-serif}
+ol.defects>li h3::before{content:counter(d) ". ";color:var(--faint);font-weight:400}
+.where{font:12.5px/1.5 ui-monospace,Menlo,monospace;color:var(--muted);margin:.1rem 0 .5rem}
+.chip{display:inline-block;font:600 10px/1 "Segoe UI",system-ui,sans-serif;
+      letter-spacing:.07em;text-transform:uppercase;padding:.32em .55em;
+      border-radius:3px;vertical-align:.12em;margin-left:.4rem}
+.chip.crit{background:var(--crit-bg);color:var(--crit)}
+.chip.major{background:var(--major-bg);color:var(--major)}
+.chip.minor{background:var(--minor-bg);color:var(--minor)}
+.chip.fixed{background:var(--ok-bg);color:var(--ok)}
+p{margin:.55rem 0}
+.note{color:var(--muted);font-size:13.5px}
+ul.plain{margin:.5rem 0;padding-left:1.15rem}
+ul.plain li{margin:.5rem 0}
+.held{background:var(--ok-bg);border-left:4px solid var(--ok);border-radius:5px;
+      padding:.9rem 1.15rem}
+.unaud{background:var(--card);border:1px dashed var(--faint);border-radius:6px;
+       padding:.95rem 1.15rem}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
+       color:var(--muted);font-size:12.5px}
+</style>
+</head>
+<body>
+<main>
+
+<div class="pid"><a href="index.html">QIF board</a> &middot; <a href="atlas/atlas.html">results</a> &middot; audit</div>
+
+<h1>What the audit found</h1>
+<p class="sub">Adversarial audit of commit <code>9bd394b</code> — the change set that added the sized
+state store, the ViT and pure-SSM workloads, derived chip capacity, and the chiplet-count axis
+(ADJ-11 through ADJ-14).</p>
+
+<div class="stats">
+  <div class="stat"><div class="v">8</div><div class="k">lanes</div></div>
+  <div class="stat"><div class="v">53</div><div class="k">candidates</div></div>
+  <div class="stat"><div class="v">14</div><div class="k">verified</div></div>
+  <div class="stat"><div class="v">14</div><div class="k">survived</div></div>
+  <div class="stat"><div class="v">13</div><div class="k">confirmed</div></div>
+  <div class="stat"><div class="v">2</div><div class="k">plausible</div></div>
+</div>
+<p class="note">Every finding faced two independent skeptics — one reading the code to refute it, one
+trying to reproduce it by running something — both instructed to default to refuted. All 14 verified
+findings survived, which is itself a signal: the lanes were not padding.</p>
+
+<div class="verdict">
+<b>The change set is not sound.</b> Three defects change reported numbers, one of them on a shipped
+candidate. A fourth makes the ADJ-11 one-accounting gate self-fulfilling in both the unit test and
+the shipped validator. The tree ships with five failing tests in its own QIF suite.
+</div>
+
+<div class="lede">
+<h3>The one that matters: ADJ-14 sizes a chiplet grouping the machine does not build</h3>
+<p><code>fws_eval.py:3259</code> deals stages to chiplets in <b>contiguous</b> blocks and hands that
+grouping to the engine and fabric derivations. The lowering assigns every shared-digital op
+<b>round-robin</b>: <code>engines[chip_id % len(engines)]</code> at
+<code>program/fws_build.py:816</code>, and the same modulo at <code>:1348</code>. Whenever
+<code>shared_chiplets &lt; stages</code>, the two disagree — the engine is widened for a machine
+nobody builds.</p>
+<p>It is not sign-safe. Checked-in candidate <code>c012</code> of the Granite sweep ships
+<code>vector_lanes: 28175</code>; the grouping the DAG actually builds needs 32,332. That chiplet
+runs 1.874&nbsp;µs against a 1.7&nbsp;µs analog pace — <b>under-provisioned by 10% against ADJ-14's
+own criterion</b> — while the shipped disclosure states the criterion "is met."</p>
+<p>No headline number moves: Granite ships one chiplet per stage, and Qwen's stages are homogeneous.
+But the frontier ADJ-14 exists to explore is scored on a machine that is not built, and
+<code>DECISIONS.md:377</code> ("a chiplet serves neighbours in the pipeline and reads its operands
+locally") is false of every shared machine the repo builds.</p>
+</div>
+
+<h2>Confirmed — reproduced or traced precisely</h2>
+
+<ol class="defects">
+
+<li class="crit">
+<h3>Contiguous vs round-robin chiplet assignment<span class="chip crit">critical</span></h3>
+<div class="where">program/fws_build.py:816 &nbsp;vs&nbsp; fws_eval.py:3259</div>
+<p>As above. It also makes <code>_stage_chiplet_groups</code> return fewer groups than there are
+chiplets when <code>chiplets &gt; stages/2</code> — 10 stages over 8 chiplets yields 5 groups — so
+all 8 chiplets are built 16.2% too wide while only 5 are sized.</p>
+</li>
+
+<li class="major">
+<h3>The Mamba depthwise conv is charged nowhere<span class="chip major">major</span></h3>
+<div class="where">fws_eval.py:3421 &middot; fws_eval.py:2817 &middot; fws_mapping.py:411</div>
+<p>Conv dimensions are read only from <code>model.short_conv</code>, which is <code>None</code> for a
+pure-SSM model, so <code>digital_pool_sizing()</code> receives <code>conv_kernel = 0</code> and every
+shipped report carries <code>conv_lanes: 0</code>. The mapper drops the conv weights from the tile
+set <em>because</em> they "run on the per-macro pool", and the scan work law has no conv term — so
+the work is charged on neither side.</p>
+<p>Separately, the state bill counts only the h-state and omits the per-stream conv window of
+<code>d_inner × (d_conv−1)</code>: 3.15&nbsp;MB per stage on Falcon-Mamba, +18.75% on a store that
+ships at 856.58&nbsp;mm², while <code>uncovered_terms</code> is <code>[]</code>. The run's own
+disclosure says "'absorbed' is a sized claim here, not a hope." For this model nothing was sized.</p>
+</li>
+
+<li class="major">
+<h3>Five tests are red on the shipped tree<span class="chip major">major</span><span class="chip fixed">1 fixed</span></h3>
+<div class="where">tests/test_qif_atlas.py (×3) &middot; tests/test_qif_dse_allocation.py (×2)</div>
+<p>Two root causes. ADJ-14 restored <code>shared_chiplets</code> to <code>AXIS_TARGETS</code> without
+adding it to the one-axis-one-field map at <code>tests/test_qif_dse_allocation.py:253</code> —
+<b>fixed</b>. And the Granite card was rewritten to its selected design while the fixtures that copy
+from it were not: <code>fixture_frontier_granite.json:595</code> reports 62,661.48 tokens/s where the
+shipped atlas now says 65,325.09, and that fixture is user-reachable at
+<code>atlas.html?frontier=fixture_frontier_granite.json</code>.
+<code>fws_cim_granite_tiny_dse.yaml:53</code> still declares 640 slots against the shipped 484 —
+the exact drift the failing test's own docstring says it exists to catch.</p>
+</li>
+
+<li class="major">
+<h3>The ADJ-11 one-accounting gate compares a value with a copy of itself<span class="chip major">major</span></h3>
+<div class="where">tools/fws_qif_dse.py:1496 &middot; tests/test_qif_frontier.py:574 &middot; validate_fws_cim_vs_optima.py:2773</div>
+<p>The DSE assigns <code>state_bill["store_macros"] = silicon["state_sram_macros"]</code>, and both
+the unit test and the shipped validator then assert those two are equal. Both pass
+unconditionally.</p>
+<p>Underneath sits a real divergence: <code>fws_eval.py:3316</code> ceils each stage to whole macros
+and sums, while <code>tools/fws_qif_dse.py:876</code> ceils the pooled total once — contradicting
+<code>state_sram_composition</code>'s own contract ("the caller sums the stages"). Same bill, two
+published answers: 12,940 macros / 685.90&nbsp;mm² in the report against 12,933 / 685.53&nbsp;mm² in
+the sweep. Stages sit on different chips, so a macro cannot straddle two; the pooled ceil
+under-charges by up to (stages − 1) macros. No shipped point flips — but the gate that would catch a
+future one is inert.</p>
+</li>
+
+<li class="major">
+<h3><code>digital_area_mm2_total</code> omits the whole state store<span class="chip major">major</span></h3>
+<div class="where">fws_eval.py:4645, docstring at :4564</div>
+<p>The evaluator's digital total is <code>chiplet_area × chiplets + pool_area × slots</code>, under a
+docstring claiming "every digital mm² and watt … ONE ACCOUNTING (D21)". At the parent commit it
+agreed with the DSE; this change set added the store to one side only. The shipped markdown report
+prints 319.551&nbsp;mm² three lines below the line naming a 685.532&nbsp;mm² store. The correct figure
+is 1005.45. The store's composed leakage (0.4194&nbsp;W) is read by nothing anywhere, so
+<code>DECISIONS.md:262</code> ("only the macro's LEAKAGE power is carried") is false as written.</p>
+</li>
+
+<li class="major">
+<h3><code>built_duty_max</code> is the duty of a chiplet that is not built<span class="chip major">major</span></h3>
+<div class="where">tools/fws_qif_dse.py:790, prose at :1245</div>
+<p>Computed from per-stage loads on the premise "one chiplet per stage". Granite at
+<code>shared_chiplets = 2</code> publishes <code>built_duty_max: 0.2431</code>; the two chiplets
+actually built run at 0.5061 and 0.5063 — understated 2.08×. The same premise is written into the
+shipped prose: candidate <code>c002</code> says "the 10 shared digital chiplets this machine builds
+(one per stage)" over 20 stages.</p>
+</li>
+
+<li class="major">
+<h3>The DSE writes one home of the slot count and refuses the other by neither name nor value<span class="chip major">major</span></h3>
+<div class="where">tools/fws_qif_dse.py:733/738 &middot; :230 &middot; :2659</div>
+<p><code>mapping.macros_per_chip</code> is a legal, documented field and is not in
+<code>REFUSED_AXES</code>. Declare it co-consistently in a frontier config and four of five
+candidates die at stage <code>mapping</code> with "macros_per_chip = 386 disagrees with
+arrays_per_chip = 193 … (D21)" — a disagreement the tool wrote one line earlier and blames on the
+user. The surviving candidate is the one whose derived capacity happens to match the stale
+declaration, and the report then publishes "flat_area: every valid candidate carries the SAME total
+silicon" for a sweep that in fact spans 541.6 to 561.2&nbsp;mm². <code>emit_selected_config</code>
+shares the blind spot, so the "COMPLETE RUNNABLE" emitted YAML is itself un-runnable whenever the
+derived count differs.</p>
+</li>
+
+<li class="major">
+<h3>The state-residency disclosure names a config field and prints something else<span class="chip major">major</span></h3>
+<div class="where">fws_eval.py:3130, :3147, :3157, :3166, comment at :3122</div>
+<p>The row labels <code>capacity_bytes</code> — now the <em>built</em> store — as
+<code>tech_param.SRAM-L2.size</code>. A fresh Granite run prints "the ON-CHIP reading against
+tech_param.SRAM-L2.size (3.148e+07 B)" on one stage and "(6.044e+07 B)" on another, in one document,
+against a declared 64&nbsp;MB. The text also says the verdict "is taken against" that tier; the
+verdict is the constant <code>"sized"</code>. The relaxation is still named
+<code>stage_state_tier_is_one_declared_size</code>, and the justifying comment cites
+<code>max_stage_state_bytes</code> — a key the DSE refuses by name. This text is live, not stale: it
+regenerates into every report.</p>
+</li>
+
+<li class="major">
+<h3>One absent block, two behaviours<span class="chip major">major</span></h3>
+<div class="where">fws_eval.py:3232 &nbsp;vs&nbsp; tools/fws_qif_dse.py:876</div>
+<p>The evaluator swallows <code>SynthesisLibraryError</code> with a bare <code>except Exception</code>
+and returns 0 macros / 0.0&nbsp;mm² with the stage verdict still <code>"sized"</code> and the prose
+still asserting the store is "charged as silicon". The DSE raises on the same condition. Point the
+Granite card at the repo's 12nm library — which has no SRAM macro — and the report path completes
+silently with 685.9&nbsp;mm² of store vanished while the sweep path exits 2. The page renders
+<code>capacity_bytes</code> under the header "store built", so a reader cannot tell a composed store
+from a swallowed refusal. <b>A measured zero and an absent law are byte-identical here</b> — which is
+the one thing the honesty rules forbid.</p>
+</li>
+
+<li class="major">
+<h3>The decisions register is half-updated<span class="chip major">major</span></h3>
+<div class="where">docs/qif/DECISIONS.md:283, :298, :306</div>
+<p>ADJ-12 records "241,362 tokens/s at 14,788&nbsp;mm²" for Falcon-Mamba; the shipped sweep selects
+1,240,208.88 tokens/s at 8,559.05&nbsp;mm², and neither recorded number appears in any candidate of
+any shipped sweep. ViT is recorded as "1 chip, 400 slots, 386 tiles, 779 requests/s" against a
+shipped 386 slots / 789.84&nbsp;req/s — and 386 tiles in 400 slots is exactly the unowned-slot waste
+ADJ-13 claims two sections later to have eliminated. ADJ-14's numbers match today's artifacts
+exactly; within one ADJ-11 sentence the areas are current and the throughputs are not.</p>
+</li>
+
+<li class="minor">
+<h3>The demo sweep cannot be regenerated<span class="chip minor">minor</span></h3>
+<div class="where">configs/hardware-config/fws_cim_granite_tiny_dse.yaml:273 &middot; docs/fws_cim/README.md:416</div>
+<p>The config declares <code>arrays_per_chip</code> as an axis, which is now refused by name, and the
+README still publishes that exact command writing to a directory this change set renamed. The
+checked-in report can no longer be re-derived from its own config.</p>
+</li>
+
+<li class="minor">
+<h3>Saturation guard measures the wrong chiplet<span class="chip minor">minor</span></h3>
+<div class="where">cim_timing.py:5059, :5070 &middot; duplicated at :4674/:4711</div>
+<p>The <code>measure</code> handed to <code>_grow</code> is the <em>max group time</em> while the loop
+predicate is a <em>per-group deficit</em>. A group that is flat in width but absolutely slowest
+freezes the search, and the still-failing group is declared unreachable. Reproduced: the emitted line
+reads "UNREACHABLE at any width", with both numbers taken from the chiplet that <em>meets</em> its
+target, while another group sits 2× over its pace and would reach it at 2× width. Latent — every
+shipped stack has uniform per-stage pace, so this needs a heterogeneous
+<code>layers_per_stage</code>.</p>
+<p class="note">This is the failure mode I asked the lane to hunt for, and it is real — just not for
+the reason I guessed. The plateau is not the problem; measuring the wrong group is.</p>
+</li>
+
+<li class="minor">
+<h3>The fabric's ADJ-14 verdict is computed and dropped<span class="chip minor">minor</span></h3>
+<div class="where">cim_timing.py:4716, surviving text at :4761</div>
+<p><code>fabric_shared_widened</code> is assigned and never read; <code>DerivedFabricSizing</code> has
+no field for it, so the fabric never emits the ADJ-14 disclosure its engine twin emits. Qwen at
+<code>shared_chiplets = 2</code> produces <code>target_reached: False</code> with the shared group 56×
+over its analog pace, and the run says nothing. Where the widening does move the width, the surviving
+ADJ-10 text still claims the count is "the smallest … for which every stage's attention time fits
+that stage's own ANALOG m-pass time", which is then false.</p>
+</li>
+
+</ol>
+
+<h2>Plausible — argued, not reproduced end to end</h2>
+<ul class="plain">
+<li><b>The size of the missing conv pool silicon.</b> Two independent reproductions disagree: one
+computed ~58&nbsp;mm², the other ran <code>compose_macro_pool</code> and got 0.404&nbsp;mm² per macro
+against the shipped 0.0024 — about 1,449&nbsp;mm² over 3,584 slots, 17% of Falcon-Mamba's total.
+<code>cim_timing.py:2276</code> adds an FP_MULT and an FP_ADD per conv lane, which favours the larger
+figure. No gate flips at 20,000&nbsp;mm² either way; the reported term is wrong regardless.</li>
+<li><b>Whether the <code>stage_state_kv</code> memory verdict can ever be the decisive refuser.</b>
+In every reproduction the per-chip <code>activation_sram+kv</code> row violated first. What is
+certainly wrong is the justifying comment, which is item 8 above.</li>
+</ul>
+
+<h2>What held</h2>
+<div class="held">
+<p>The <code>max_silicon_mm2</code> gate is correct — <code>_silicon</code> does include the store and
+the page renders the right total. The four shipped hardware cards do equal their sweeps'
+<code>selected_config.yaml</code>. The OPTIMA validator is green at 525/525. The shipped atlas JSON
+for Falcon-Mamba and ViT reproduces byte-identically from the emitter, so the artifacts are current
+and the decisions register is the stale side. The suspected unguarded attention dereference at
+<code>base_timing.py:152</code> is not a defect: <code>attention</code> is a dataclass field that is
+<code>None</code> rather than absent.</p>
+</div>
+
+<h2>Unaudited</h2>
+<div class="unaud">
+<p>The validator changed 129 lines and only its ADJ-11 gate was read; the rewritten ADJ-13 and ADJ-14
+gates were not. <b>ViT and Falcon-Mamba have no gate coverage anywhere</b> — not in the validator, not
+in the frontier tests; nobody ran <code>--verify</code> on their frontier configs and diffed against
+the checked-in reports. ViT maps to zero pipeline stages, so the chiplet grouping returns empty and
+ADJ-14, the sized store and D are all degenerate on it; its
+<code>state_sram_provenance: "absent"</code> is missing from <code>uncovered_terms</code> while the
+basis string names it — expect a real honesty-rule defect there, unexamined. Nothing checked the
+energy and power laws, the MoE and expert-parallel paths, <code>program/fws_build.py</code> beyond the
+two placement lines, or the results page beyond spot checks.</p>
+</div>
+
+<footer>
+Method: 8 parallel lanes (state store, derived capacity, sharing-aware sizing, attention-absent
+guards, the FFN fix, test integrity, artifact consistency, the results page) → 53 candidate findings
+→ 50 after dedup → top 14 verified by two adversarial skeptics each, refute-by-default → a
+completeness critic that closed two gaps itself → synthesis. 38 agents, ~3.1M tokens, 57 minutes.
+Audited commit <code>9bd394b</code> against parent <code>86182d8</code>.
+</footer>
+
+</main>
+</body>
+</html>

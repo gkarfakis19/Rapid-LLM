@@ -3067,37 +3067,194 @@ def _parse_synthesis_library(card_dict: Dict[str, object], context: str) -> str:
     return name
 
 
+#: The retired macro spellings, each pointing at what replaced it. The old
+#: ``cols_adc`` meant the ADC COUNT while reading like a column count, and the
+#: total stored columns existed nowhere in the file — they had to be
+#: multiplied out. D35-REVISED names the three numbers a macro actually has.
+RETIRED_MACRO_KEYS = {
+    "cols_adc": (
+        "'adcs' (Z, the ADC count — which is what cols_adc always meant) plus 'cols' "
+        "(Y, the TOTAL CTT columns, which the old schema never wrote down: it had to "
+        "be reconstructed as cols_adc x adc_mux)"
+    ),
+    "adc_mux": (
+        "nothing to declare: mux = Y/Z is DERIVED from 'cols' and 'adcs' "
+        "(D35-REVISED). Muxed columns are storage and the ADCs are the FLOP "
+        "producers, so the two counts are the inputs and the fold is their ratio"
+    ),
+    "stored_cols": "'cols' (Y, total CTT columns)",
+    "adc_capacity_mux": (
+        "nothing to declare: mux = Y/Z is DERIVED. Set 'cols' and 'adcs' on the "
+        "card's params and the fold follows"
+    ),
+}
+
+
+def _refuse_retired_macro_keys(context: str, block: Dict[str, object]) -> None:
+    """Refuse a retired macro spelling BY NAME, pointing at its replacement."""
+    import cim_analog_calc as _calc
+
+    retired = [key for key in RETIRED_MACRO_KEYS if key in block]
+    if not retired:
+        return
+    named = "; ".join(f"{context}.{key} -> {RETIRED_MACRO_KEYS[key]}" for key in retired)
+    raise ValueError(
+        f"{context} declares the RETIRED macro key(s) {retired}. "
+        f"{_calc.PLATFORM_MACRO_DECISION} names a macro X x Y : Z — rows X, cols Y "
+        "(total CTT columns), adcs Z (converters) — and the fold mux = Y/Z is DERIVED. "
+        f"Rewrite: {named}. The old keys are refused rather than translated, because "
+        "the translation is exactly the ambiguity that made a reader take cols_adc for "
+        "a column count."
+    )
+
+
+def _check_macro_shape(context: str, rows: int, cols: int, adcs: int) -> None:
+    """Positive counts and an integral fold — the shape, before the platform box."""
+    import cim_analog_calc as _calc
+
+    if rows <= 0 or cols <= 0 or adcs <= 0:
+        raise ValueError(
+            f"{context}: rows (X), cols (Y) and adcs (Z) must all be positive "
+            f"(got X = {rows}, Y = {cols}, Z = {adcs})."
+        )
+    try:
+        _calc.derived_mux(cols, adcs, context=context)
+    except _calc.AnalogCalcError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _parse_nonstandard_macro(context: str, block: Dict[str, object]) -> Optional[str]:
+    """The D35 override key, read as a REASON and never as a flag.
+
+    ``cim.analog.nonstandard_macro`` is the ONE key that exempts a config from
+    the platform macro (D35), and it buys the exemption only by SAYING WHY: the
+    string it carries is what rides the artifact's disclosure. Absent is the
+    compliant default. A bool is refused by name — `true` would put an
+    unexplained off-platform macro into every report, which is exactly the
+    silence D35 ends.
+    """
+    import cim_analog_calc as _calc
+
+    key = _calc.NONSTANDARD_MACRO_KEY
+    if key not in block:
+        return None
+    value = block[key]
+    if isinstance(value, bool) or not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{context}.{key} must be a non-empty REASON string (got {value!r}). "
+            f"{_calc.PLATFORM_MACRO_DECISION} fixes the macro box at X = "
+            f"{_calc.PLATFORM_MACRO_ROWS} rows with Z in {list(_calc.MACRO_Z_VALUES)} "
+            f"and Y in {list(_calc.MACRO_Y_VALUES)}; this key is the only exemption "
+            "from it, and it is granted against a stated reason that is carried into "
+            "every artifact, never against a bare flag."
+        )
+    return value.strip()
+
+
 @dataclass
 class CIMAnalogConfig:
-    """Analog fixed-weight-stationary array parameters (cim.analog).
+    """Analog fixed-weight-stationary macro parameters (cim.analog).
 
-    Modeling assumptions: an array stores rows x (cols_adc * adc_mux) weights;
-    one input vector is evaluated in adc_mux * slice_cycles analog cycles;
-    shots_per_output affects energy only, never time. All values are plain
+    THE MACRO IS ``X x Y : Z`` (D35-REVISED, 2026-08-29): ``rows`` X, ``cols``
+    Y total CTT columns, ``adcs`` Z converters. ``mux = Y / Z`` is DERIVED —
+    muxed columns are STORAGE, the ADCs are the FLOP producers — and it is a
+    notation, never a config input and never a swept axis.
+
+    THE NAMING TRAP THIS SCHEMA KILLS. The retired spelling was
+    ``cols_adc`` + ``adc_mux``, where ``cols_adc`` meant the ADC COUNT and the
+    total stored columns had to be reconstructed as ``cols_adc * adc_mux``. A
+    reader (and more than one artifact) read ``cols_adc`` as "columns". Both
+    old keys are now refused BY NAME and the refusal names the replacement.
+
+    Modeling assumptions: a macro stores ``rows x cols`` weights; one input
+    vector is evaluated in ``mux * slice_cycles`` analog cycles;
+    ``shots_per_output`` affects energy only, never time. All values are plain
     numbers (no unit strings — see convert()).
+
+    THE TWO MUXES ARE ONE NUMBER HERE, and the ADC-macro sheet (OPTIMA.xlsx,
+    ported in :mod:`cim_analog_calc`) separates them:
+
+    * the CAPACITY mux — physical weight-column banks behind one ADC. It sets
+      the stored columns, the cell array and the BL/SL driver pitch, and it is
+      what the ADC bill is divided by.
+    * the VECTOR mux — ADC slices per full output vector, i.e.
+      ``vec_cycles = mux * slice_cycles``. It sets time and per-vector energy
+      and touches no area term.
+
+    They are EQUAL in every point this repo ships: one muxed column behind an
+    ADC is one slice of the vector, which is exactly the call OPTIMA's own
+    consumer makes (perf_model/config/loader.py ``materialize_analog_config``:
+    ``mux_factor = adc_muxing = mux_degree``). The historical anchor still
+    holds under the new names: the ViT card as shipped until D35 was
+    ``1280 x 1280 : 320`` (mux 4), area 1.403065 mm2, energy_per_vec_pj
+    9534.9389, and ``cim_analog_calc.derive_analog_card(1280, 1280, 320)``
+    reproduces both to full precision.
+
+    A card that names ``calc_profile`` stops declaring the priced numbers and
+    DERIVES them at its own (X, Y, Z) — see :class:`CIMAnalogCardConfig`.
     """
 
-    rows: int
-    cols_adc: int
-    adc_mux: int
+    rows: int                  # X — macro height (the platform-fixed dimension)
+    cols: int                  # Y — total CTT columns (storage tile)
+    adcs: int                  # Z — ADC count (the FLOP producers)
     slice_cycles: int
     analog_clock_mhz: float
     energy_per_vec_pj: float   # per array per input vector (already includes mux); 0 reports zero analog energy
     shots_per_output: int      # energy only, never time
     area_mm2_per_array: float  # 0 disables area reporting
+    #: D35-REVISED override (`cim.analog.nonstandard_macro`): the REASON this
+    #: config's macro departs from the platform box. None — the default and
+    #: every compliant config — means the macro IS on-platform and there is
+    #: nothing to disclose. A non-None reason is carried onto every analog card
+    #: of this `cim:` block and rides a named disclosure into every artifact
+    #: (:func:`cim_analog_calc.nonstandard_macro_disclosure`).
+    nonstandard_macro: Optional[str] = None
 
     @property
-    def cols(self) -> int:
-        """Stored weight columns per array (cols_adc * adc_mux)."""
-        return int(self.cols_adc) * int(self.adc_mux)
+    def mux(self) -> int:
+        """``Y / Z`` — DERIVED, never declared (D35-REVISED)."""
+        return int(self.cols) // int(self.adcs)
+
+    @property
+    def adc_mux(self) -> int:
+        """The DERIVED mux, under the name the pricing laws call it.
+
+        cim_timing's active-column-set law counts MUX SLOTS per macro, which is
+        this number. It is a read-only view of ``cols / adcs``; the retired
+        config key of the same name is refused at parse.
+        """
+        return self.mux
+
+    @property
+    def cols_adc(self) -> int:
+        """Stored weight columns in ONE column set — i.e. Z, the ADC count.
+
+        A read-only view of ``adcs`` under the name the pricing laws use for
+        "one ADC pass' worth of columns". The retired config key of this name
+        is refused at parse, because in a FILE it read as "columns" and meant
+        converters.
+        """
+        return int(self.adcs)
+
+    @property
+    def label(self) -> str:
+        """``X x Y : Z`` — the one way this macro is named."""
+        import cim_analog_calc as _calc
+
+        return _calc.macro_label(self.rows, self.cols, self.adcs)
 
     @classmethod
     def from_dict(cls, analog_dict: Optional[Dict[str, object]]) -> "CIMAnalogConfig":
         analog_dict = _require_mapping("cim.analog", analog_dict)
+        _refuse_retired_macro_keys("cim.analog", analog_dict)
+        rows = _parse_int_field("cim.analog", analog_dict, "rows")
+        cols = _parse_int_field("cim.analog", analog_dict, "cols")
+        adcs = _parse_int_field("cim.analog", analog_dict, "adcs")
+        _check_macro_shape("cim.analog", rows, cols, adcs)
         return cls(
-            rows=_parse_int_field("cim.analog", analog_dict, "rows"),
-            cols_adc=_parse_int_field("cim.analog", analog_dict, "cols_adc"),
-            adc_mux=_parse_int_field("cim.analog", analog_dict, "adc_mux"),
+            rows=rows,
+            cols=cols,
+            adcs=adcs,
             slice_cycles=_parse_int_field("cim.analog", analog_dict, "slice_cycles"),
             analog_clock_mhz=_parse_cim_float(analog_dict, "cim.analog", "analog_clock_mhz", strict=True),
             energy_per_vec_pj=_parse_cim_float(analog_dict, "cim.analog", "energy_per_vec_pj", default=0.0),
@@ -3105,6 +3262,7 @@ class CIMAnalogConfig:
                 analog_dict.get("shots_per_output", 1), "cim.analog.shots_per_output", min_value=1
             ),
             area_mm2_per_array=_parse_cim_float(analog_dict, "cim.analog", "area_mm2_per_array", default=0.0),
+            nonstandard_macro=_parse_nonstandard_macro("cim.analog", analog_dict),
         )
 
 
@@ -3126,19 +3284,57 @@ class CIMFabricConfig:
     fill_drain_penalty_cycles: int  # default 3 * rows when absent
     softmax_lanes: int
     softmax_pipeline_depth: int
+    #: SA-GEOM. How `rows` x `cols` above are fixed for a run.
+    #:
+    #: `declared` (the DEFAULT, and every shipped card) is the shipped law: the
+    #: array IS the rows x cols above and its silicon is integer copies of the
+    #: measured GEMMINI 32x32 block. A config that does not spell this key
+    #: produces bit-identical numbers.
+    #:
+    #: `derived` asks for the SA GEOMETRY RULE (cim_timing.derive_sa_geometry):
+    #: R = next_pow2(decode m) clamped to [1, 32], and C PER ENGINE GROUP
+    #: derived to the analog floor. It is a DECODE rule and is REFUSED BY NAME
+    #: on a lockstep / prefill-regime machine, where 32 x 64 is what the study
+    #: found optimal. The spellings live in cim_timing.FABRIC_GEOMETRY_MODES;
+    #: this block spells the name and the law module owns the law (D21).
+    geometry: str = "declared"
+    #: Did the card DECLARE `fill_drain_penalty_cycles`, or is the value above
+    #: the `3 * rows` default? The two are the same number on every shipped
+    #: card; they differ under a DERIVED geometry, where an UNDECLARED penalty
+    #: follows the derived R and a DECLARED one is honoured as declared.
+    fill_drain_declared: bool = False
 
     @classmethod
     def from_dict(cls, fabric_dict: Optional[Dict[str, object]]) -> "CIMFabricConfig":
+        from cim_timing import FABRIC_GEOMETRY_DECLARED, FABRIC_GEOMETRY_MODES
+
         fabric_dict = _require_mapping("cim.fabric", fabric_dict)
         model = str(fabric_dict.get("model", "sa")).strip().lower()
         if model not in {"sa", "gpu_native"}:
             raise ValueError(
                 f"cim.fabric.model must be 'sa' or 'gpu_native' (got {fabric_dict.get('model')!r})"
             )
+        geometry = str(
+            fabric_dict.get("geometry", FABRIC_GEOMETRY_DECLARED)
+        ).strip().lower()
+        if geometry not in FABRIC_GEOMETRY_MODES:
+            raise ValueError(
+                f"cim.fabric.geometry must be one of {', '.join(FABRIC_GEOMETRY_MODES)} "
+                f"(got {fabric_dict.get('geometry')!r}). 'declared' is the DEFAULT and "
+                "the shipped law: the array is the rows x cols this block declares and "
+                "its silicon is integer copies of the measured GEMMINI 32x32 block. "
+                "'derived' asks for the SA GEOMETRY RULE — R = next_pow2(decode m) "
+                "clamped to [1, 32], C per engine group derived to the analog floor "
+                "(SA geometry study 2026-08-28). There is no third mode: a name this "
+                "field does not know would be an array shape nobody derived and nobody "
+                "measured, which is refused rather than guessed (ADJ-4)."
+            )
         rows = _parse_int_field("cim.fabric", fabric_dict, "rows")
         return cls(
             model=model,
             rows=rows,
+            geometry=geometry,
+            fill_drain_declared="fill_drain_penalty_cycles" in fabric_dict,
             cols=_parse_int_field("cim.fabric", fabric_dict, "cols"),
             num_arrays=_coerce_int(fabric_dict.get("num_arrays", 2), "cim.fabric.num_arrays", min_value=1),
             replicas=_coerce_int(fabric_dict.get("replicas", 1), "cim.fabric.replicas", min_value=1),
@@ -3402,6 +3598,121 @@ class CIMCardValidityPoint:
         return (self.bits_per_cell, self.weight_bits, self.mux)
 
 
+#: The card params a `calc_profile` DERIVES. Declaring one beside the profile
+#: is a CONTRADICTION, not an override: the sheet and the hand would both be
+#: claiming the same number and the run would have to pick one silently.
+DERIVED_ANALOG_PARAM_FIELDS = (
+    "energy_per_vec_pj",
+    "area_mm2_per_array",
+    "slice_cycles",
+    "analog_clock_mhz",
+)
+
+#: What a DERIVED card's `params` block may declare: the MACRO SHAPE it is
+#: (X x Y : Z) and the energy-only shot count. Everything else comes from the
+#: profile — including the fold, which is Y/Z and is derived, not declared.
+DERIVED_ANALOG_PARAM_KEYS = ("rows", "cols", "adcs", "shots_per_output")
+
+
+def _analog_calc_module():
+    import cim_analog_calc as _calc  # local: config.py is imported by its callers
+
+    return _calc
+
+
+#: The device family the shipped calc profiles describe. The ADC-macro sheet
+#: is a CTT sheet: its cell area, WL/BL currents and settle times are that
+#: device's. Deriving a reram or mram card from it would be the same silent
+#: mis-pricing the family list exists to prevent.
+CALC_PROFILE_DEVICE_FAMILY = "ctt"
+
+
+def _derive_analog_card_params(context, card_dict, params_dict, device):
+    """A calc-profile card's params, DERIVED from the ADC-macro sheet.
+
+    Returns ``(CIMAnalogConfig, profile name, derived mux, derivation dict)``.
+
+    THE CARD DECLARES A MACRO, THE PROFILE PRICES IT. `params` states the
+    SHAPE — ``rows`` X, ``cols`` Y total CTT columns, ``adcs`` Z converters —
+    and nothing else; the profile then says what that macro costs in area,
+    per-vector energy and cycles. The fold is ``mux = Y/Z``, DERIVED
+    (D35-REVISED): it is not a card field and not a sweep axis, and declaring
+    it under any of its retired spellings is refused by name.
+    """
+    _calc = _analog_calc_module()
+    if device != CALC_PROFILE_DEVICE_FAMILY:
+        raise ValueError(
+            f"{context}.calc_profile is declared on a card with device = {device!r}. "
+            f"Every profile this repo carries ({list(_calc.CALC_PROFILE_NAMES)}) is a "
+            f"'{CALC_PROFILE_DEVICE_FAMILY}' sheet — its cell area, currents and settle "
+            "times are that device's measurements — so deriving another family's card "
+            "from it would price one device with another's silicon. A non-CTT card "
+            "declares its own complete params block."
+        )
+    raw_profile = card_dict.get("calc_profile")
+    if not isinstance(raw_profile, str) or not raw_profile.strip():
+        raise ValueError(
+            f"{context}.calc_profile must be the NAME of a sheet-grounded calc profile "
+            f"(one of {list(_calc.CALC_PROFILE_NAMES)}); got {raw_profile!r}."
+        )
+    profile = raw_profile.strip()
+    if profile not in _calc.CALC_PROFILE_NAMES:
+        raise ValueError(
+            f"{context}.calc_profile = {profile!r} names no profile this repo carries. "
+            f"Legal: {list(_calc.CALC_PROFILE_NAMES)}. A profile is a set of MEASURED "
+            f"ADC-macro sheet constants ported from {_calc.CALC_SOURCE_PATH}; an "
+            "unlisted name has no constants behind it, so it is refused rather than "
+            "resolved to the only profile there is."
+        )
+    if params_dict is None:
+        raise ValueError(
+            f"{context}: a card with calc_profile = {profile!r} must supply its own "
+            "'params' block declaring the MACRO it is (rows X, cols Y, adcs Z). "
+            "Inheriting cim.analog is refused here because that block DECLARES "
+            f"{', '.join(DERIVED_ANALOG_PARAM_FIELDS)} — the very numbers this profile "
+            "derives — and the card would then carry two answers for each of them."
+        )
+    params_dict = _require_mapping(f"{context}.params", params_dict)
+    _refuse_retired_macro_keys(f"{context}.params", params_dict)
+    _refuse_retired_macro_keys(context, card_dict)
+    contradictions = [key for key in DERIVED_ANALOG_PARAM_FIELDS if key in params_dict]
+    if contradictions:
+        raise ValueError(
+            f"{context}.params declares {', '.join(contradictions)} beside "
+            f"calc_profile = {profile!r}, which is a CONTRADICTION: each of those is "
+            f"DERIVED from the profile's sheet constants ({_calc.CALC_SOURCE_PATH}) at "
+            "this card's (X, Y, Z). The tool does not pick a winner silently — a "
+            "hand-declared value would either be overwritten without a word or override "
+            "a measurement with a guess. Drop the field, or drop calc_profile and "
+            "declare the whole card by hand."
+        )
+    _reject_unknown_keys(f"{context}.params", params_dict, DERIVED_ANALOG_PARAM_KEYS)
+    rows = _parse_int_field(f"{context}.params", params_dict, "rows")
+    cols = _parse_int_field(f"{context}.params", params_dict, "cols")
+    adcs = _parse_int_field(f"{context}.params", params_dict, "adcs")
+    _check_macro_shape(f"{context}.params", rows, cols, adcs)
+    try:
+        derived = _calc.derive_analog_card(rows, cols, adcs, profile=profile, context=context)
+    except _calc.AnalogCalcError as exc:
+        raise ValueError(str(exc)) from exc
+    shots_per_output = _coerce_int(
+        params_dict.get("shots_per_output", 1),
+        f"{context}.params.shots_per_output",
+        min_value=1,
+    )
+    params = CIMAnalogConfig(
+        rows=derived.rows,
+        cols=derived.cols,
+        adcs=derived.adcs,
+        slice_cycles=derived.slice_cycles,
+        analog_clock_mhz=derived.analog_clock_mhz,
+        energy_per_vec_pj=derived.energy_per_vec_pj,
+        shots_per_output=shots_per_output,
+        area_mm2_per_array=derived.area_mm2_per_array,
+    )
+    return params, profile, int(derived.mux), derived.as_dict()
+
+
 @dataclass
 class CIMAnalogCardConfig:
     """A named analog-macro device card: `cim.analog` plus structural knobs.
@@ -3421,6 +3732,23 @@ class CIMAnalogCardConfig:
       * pool_* — per-macro digital pool cost knobs (D12, P2.5). 0 means the
         card declares no number and the pool term reports zero, exactly as
         ``area_mm2_per_array: 0`` disables area reporting.
+      * calc_profile — the SHEET-GROUNDED card. ``calc_profile`` names a
+        profile in :mod:`cim_analog_calc` (today only ``george_cima_mux1``,
+        the OPTIMA.xlsx ADC-macro sheet); with it the card's ``params`` declare
+        only the MACRO SHAPE (rows X, cols Y, adcs Z) and its footprint,
+        per-vector energy and vec_latency are DERIVED from the sheet at the
+        fold ``mux = Y/Z``. Declaring a derived quantity beside the profile is
+        refused BY NAME as a contradiction
+        (:data:`DERIVED_ANALOG_PARAM_FIELDS`), and so is declaring the fold
+        itself under any retired spelling (:data:`RETIRED_MACRO_KEYS`).
+
+        THE TRADE THE (Y, Z) BOX BUYS. Holding the cell count X*Y fixed and
+        halving Z halves the ADC count and the ADC area term, and doubles mux
+        — and with it ``vec_cycles``, vec_latency and per-vector energy.
+        Holding Z and raising Y buys storage at no converter cost and pays for
+        it in wordline length and in latency, since mux rises with Y. The two
+        move independently because their CONSTRAINTS do, which is exactly why
+        D35-REVISED sweeps the box and not the ratio.
     """
 
     name: str
@@ -3440,6 +3768,21 @@ class CIMAnalogCardConfig:
     #: DISCLOSED relaxation (AUDIT finding 3: OPTIMA priced switching at zero
     #: silently; this states it). A card that knows its number declares it.
     bank_switch_cycles: int = 0
+    #: The sheet-grounded calc profile this card's numbers are DERIVED from
+    #: (:mod:`cim_analog_calc`). None — the default and every shipped card —
+    #: means the card DECLARES its numbers and nothing about it changes.
+    calc_profile: Optional[str] = None
+    #: The DERIVED fold ``mux = Y/Z`` this card's numbers were priced at.
+    #: 0 means "no derivation" (calc_profile is None). It is REPORTED, never
+    #: declared: the retired ``adc_capacity_mux`` config key is refused by name.
+    derived_mux: int = 0
+    #: What the derivation returned, as a dict, for the artifact's disclosure
+    #: (D21: a derived number states where it came from). None when declared.
+    calc_derivation: Optional[Dict[str, object]] = None
+    #: The D35 override this card was admitted under, or None when the card IS
+    #: the platform macro. Set by :meth:`CIMConfig.from_dict`, which is the one
+    #: place the platform check runs; the card never decides its own exemption.
+    nonstandard_macro: Optional[str] = None
 
     @property
     def n_slices(self) -> int:
@@ -3504,7 +3847,15 @@ class CIMAnalogCardConfig:
                 "device: 'custom' and supplies a complete 'params' block."
             )
         params_dict = card_dict.get("params")
-        if params_dict is None:
+        calc_profile: Optional[str] = None
+        capacity_mux = 0
+        calc_derivation: Optional[Dict[str, object]] = None
+        if card_dict.get("calc_profile") is not None:
+            params, calc_profile, capacity_mux, calc_derivation = _derive_analog_card_params(
+                context, card_dict, params_dict, device
+            )
+        elif params_dict is None:
+            _refuse_retired_macro_keys(context, card_dict)
             if device == CIM_CUSTOM_DEVICE_FAMILY:
                 raise ValueError(
                     f"{context}: device 'custom' names a device this tool ships no "
@@ -3525,6 +3876,7 @@ class CIMAnalogCardConfig:
                 )
             params = analog_default
         else:
+            _refuse_retired_macro_keys(context, card_dict)
             params = CIMAnalogConfig.from_dict(_require_mapping(f"{context}.params", params_dict))
         bits_per_cell = _coerce_int(
             card_dict.get("bits_per_cell", 0), f"{context}.bits_per_cell", min_value=0
@@ -3590,6 +3942,9 @@ class CIMAnalogCardConfig:
                 f"{context}.bank_switch_cycles",
                 min_value=0,
             ),
+            calc_profile=calc_profile,
+            derived_mux=capacity_mux,
+            calc_derivation=calc_derivation,
         )
         if validity and not card.admits(bits_per_cell, weight_bits, int(params.adc_mux)):
             raise ValueError(
@@ -3958,6 +4313,27 @@ class CIMAllocationConfig:
 
     #: Mux slots per tile; None inherits the card's bank_depth.
     column_sets_per_tile: Optional[int] = None
+    #: WHERE THE SHORT DEPTHWISE CONV RUNS.
+    #:
+    #: A depthwise conv maps terribly onto a weight-stationary analog crossbar:
+    #: the kernel is k taps per channel with NO channel mixing, so a macro that
+    #: holds one would activate a handful of cells out of millions. Its weights
+    #: are therefore never tiled onto arrays under either placement - what this
+    #: chooses is where the WORK goes:
+    #:
+    #: ``macro_pool``     - absorbed by the per-macro digital pool (ADJ-3). The
+    #:                      conv costs no timeline, and the pool is widened to
+    #:                      carry it ON EVERY MACRO SLOT the machine enumerates.
+    #: ``shared_digital`` - a TIMED op on the shared digital chiplet, priced on
+    #:                      the vector engine beside the scan. It costs beat
+    #:                      time and competes for the chiplet, and the silicon
+    #:                      is bought once per chiplet instead of once per macro.
+    #:
+    #: Neither is free and neither is a default worth assuming: replicating a
+    #: small operator across thousands of macros is expensive in area, and
+    #: putting it on the chiplet is expensive in time. It is a design choice, so
+    #: it is a declared knob and a sweepable axis.
+    conv_placement: str = "macro_pool"
     assignments: Tuple[CIMTileAssignment, ...] = ()
 
     @classmethod
@@ -3969,6 +4345,18 @@ class CIMAllocationConfig:
             if raw is None
             else _coerce_int(raw, "cim.allocation.column_sets_per_tile", min_value=1)
         )
+        placement = str(alloc_dict.get("conv_placement", "macro_pool") or "macro_pool").strip()
+        if placement not in CONV_PLACEMENTS:
+            raise ValueError(
+                f"cim.allocation.conv_placement = {placement!r} is not a placement this "
+                f"model knows. Choose one of {sorted(CONV_PLACEMENTS)}: 'macro_pool' "
+                "absorbs the short depthwise conv into every macro's own digital pool "
+                "(ADJ-3, no timeline cost, area on every enumerated slot), "
+                "'shared_digital' makes it a timed op on the shared digital chiplet "
+                "(beat time, silicon once per chiplet). The conv's WEIGHTS are never "
+                "tiled onto analog arrays under either: a k-tap depthwise kernel would "
+                "activate a handful of cells in a macro that holds millions."
+            )
         assignments_raw = alloc_dict.get("assignments", ())
         if not isinstance(assignments_raw, (list, tuple)):
             raise ValueError(
@@ -3977,11 +4365,20 @@ class CIMAllocationConfig:
             )
         return cls(
             column_sets_per_tile=column_sets_per_tile,
+            conv_placement=placement,
             assignments=tuple(
                 CIMTileAssignment.from_dict(item, index)
                 for index, item in enumerate(assignments_raw)
             ),
         )
+
+
+#: Where the short depthwise conv's WORK may be placed. Its weights are on
+#: neither: a depthwise kernel is k taps per channel with no channel mixing, so
+#: an analog crossbar holding one would waste essentially the whole array.
+CONV_PLACEMENT_MACRO_POOL = "macro_pool"
+CONV_PLACEMENT_SHARED_DIGITAL = "shared_digital"
+CONV_PLACEMENTS = (CONV_PLACEMENT_MACRO_POOL, CONV_PLACEMENT_SHARED_DIGITAL)
 
 
 class MissingCardLibraryError(AttributeError, ValueError):
@@ -3997,6 +4394,66 @@ class MissingCardLibraryError(AttributeError, ValueError):
     probe on the card path (fws_atlas_export's optional area) keeps its default
     instead of turning a hand-built config into a traceback.
     """
+
+
+def _check_platform_macro_geometry(
+    analog: CIMAnalogConfig, cards: CIMCardLibrary
+) -> None:
+    """D35-REVISED: every analog macro in this `cim:` block is in the box.
+
+    THE ONE PLACE THE CHECK RUNS, and it runs on EVERY macro the block
+    declares: `cim.analog` and each `cim.cards` analog card that brings its own
+    params. Checking only the active card would let a file price one macro and
+    describe another — the fallback block is what a reader sees when no card is
+    named, so it is not exempt.
+
+    The exemption is `cim.analog.nonstandard_macro`, declared ONCE for the
+    block: the fallback and the cards of one config describe one machine, so
+    one stated reason covers it. The reason is stamped onto every OFF-PLATFORM
+    analog card, which is how the disclosure reaches the artifact — through the
+    device model, the same route the derived card's provenance takes.
+
+    A block whose every macro is inside the box and that declares the key
+    anyway is refused too: the key rides a claim into every artifact, and a
+    claim that is not true is worse than no key at all.
+    """
+    _calc = _analog_calc_module()
+    override = analog.nonstandard_macro
+    macros = [("cim.analog", int(analog.rows), int(analog.cols), int(analog.adcs))]
+    for name, card in cards.analog.items():
+        if card.params is analog:
+            # The synthesized card IS `cim.analog`; listing it again would be
+            # one macro judged twice under two names.
+            continue
+        macros.append(
+            (
+                f"cim.cards.{name}.params",
+                int(card.params.rows),
+                int(card.params.cols),
+                int(card.params.adcs),
+            )
+        )
+    off_platform = [
+        entry for entry in macros if not _calc.is_platform_macro(entry[1], entry[2], entry[3])
+    ]
+    try:
+        target = off_platform[0] if off_platform else macros[0]
+        _calc.check_platform_macro(
+            target[1],
+            target[2],
+            target[3],
+            context=target[0],
+            override_reason=override,
+        )
+    except _calc.AnalogCalcError as exc:
+        raise ValueError(str(exc)) from exc
+    for card in cards.analog.values():
+        params = card.params
+        card.nonstandard_macro = (
+            None
+            if _calc.is_platform_macro(int(params.rows), int(params.cols), int(params.adcs))
+            else override
+        )
 
 
 @dataclass
@@ -4071,6 +4528,7 @@ class CIMConfig:
             _cim_timing.check_allocation_capacity(
                 int(cards.analog_card.column_sets_per_macro), allocation.assignments
             )
+        _check_platform_macro_geometry(analog, cards)
         return cls(
             analog=analog,
             fabric=fabric,
@@ -4138,7 +4596,6 @@ class MappingParallelism:
                 values[axis] = _coerce_int(raw[axis], f"{context}.{axis}", min_value=1)
         return cls(**values)
 
-
 @dataclass(frozen=True)
 class MappingSystemConfig:
     """One system's declared placement (the whole block, or one PD half).
@@ -4199,6 +4656,38 @@ class MappingSystemConfig:
     #: The modes themselves live in :data:`fws_mapping.PACKING_MODES`; this
     #: block spells the name, the mapper owns the law (D21).
     packing: str = "dedicated"
+    #: THE LINK PRICING MODE for this system (TEMPORARY, George 2026-08-27).
+    #:
+    #: ``priced`` (the default, so no shipped config moves) charges every
+    #: INTER-CHIP boundary handoff the D17 p2p law, and a stage holds its slot
+    #: until the handoff lands — so a link can set the beat.
+    #:
+    #: ``zeroed`` prices those handoffs at 0 s. It is a RELAXATION, not a
+    #: machine: every link and boundary floor vacates, the beat and the binding
+    #: term read COMPUTE ONLY, and the BYTES are still annotated and reported,
+    #: because bytes are a fact of the mapping and only the time is relaxed.
+    #: Every artifact of such a run carries the ``links_zeroed`` disclosure.
+    #:
+    #: The modes themselves live in :data:`fws_mapping.LINK_MODES`; this block
+    #: spells the name, the mapper owns the law (D21).
+    links: str = "priced"
+    #: THE PIPELINE FILL FRACTION (D38, 2026-08-29). ``1.0`` is D29's filled
+    #: pipeline and is the default, so an absent key is today's machine. A
+    #: lower fraction runs the pipeline deliberately UNDERFILLED: resident
+    #: streams = max(1, round(pp_util * stages)), throughput scales with the
+    #: fill, and the per-stage state/KV bill scales with the resident streams.
+    #: It is the axis that replaced the retired partition (D38); the values it
+    #: admits are ``fws_mapping.PP_UTIL_VALUES`` and the mapper owns the law
+    #: (D21): the fill is spelled here and MEANT there.
+    #:
+    #: The default is a LITERAL, not ``fws_mapping.PP_UTIL_FULL``, for the same
+    #: reason :func:`_parse_packing` defers its import — the mapper imports THIS
+    #: module, so a class-body reference would be circular. Every value that
+    #: reaches this field from a YAML goes through :func:`parse_pp_util`, which
+    #: asks the mapper; the literal is only where an in-process
+    #: ``MappingSystemConfig()`` starts, and a contract test pins it equal to
+    #: the mapper's constant so the two cannot drift.
+    pp_util: float = 1.0
 
     _KEYS = (
         "chips",
@@ -4211,6 +4700,8 @@ class MappingSystemConfig:
         "packing",
         "regime",
         "layers_per_stage",
+        "links",
+        "pp_util",
     )
 
     #: Keys the fws serving surface REFUSES BY NAME (D29). Batch size does not
@@ -4313,10 +4804,12 @@ class MappingSystemConfig:
                 else _coerce_int(raw["decode_window"], f"{context}.decode_window", min_value=1)
             ),
             packing=_parse_packing(raw.get("packing"), f"{context}.packing"),
+            links=_parse_links(raw.get("links"), f"{context}.links"),
             regime=_parse_regime(raw.get("regime"), f"{context}.regime"),
             layers_per_stage=_parse_layers_per_stage(
                 raw.get("layers_per_stage"), f"{context}.layers_per_stage"
             ),
+            pp_util=parse_pp_util(raw.get("pp_util"), f"{context}.pp_util"),
         )
 
 
@@ -4360,6 +4853,39 @@ def _parse_layers_per_stage(
     return _coerce_int(raw, context, min_value=1)
 
 
+def _parse_links(raw: object, context: str) -> str:
+    """`mapping.links` -> one of the mapper's link pricing modes (TEMPORARY).
+
+    The list of modes is NOT restated here: it is imported from the module
+    that implements them, so a mode can never be spelled in the config surface
+    and be missing from the mapper (D21). The import is deferred because
+    ``fws_mapping`` imports this module.
+    """
+    from fws_mapping import LINK_MODES, LINKS_PRICED, LINKS_ZEROED
+
+    if raw is None:
+        return LINKS_PRICED
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"{context} must be one of {LINK_MODES} (got {raw!r}): the link pricing "
+            "mode is a named LAW, not a number — a bandwidth or a time here would be a "
+            "second spelling of the network layout the card already declares."
+        )
+    value = raw.strip().lower()
+    if value not in LINK_MODES:
+        raise ValueError(
+            f"{context} = {value!r} is not a link pricing mode this mapper has. The "
+            f"modes are {LINK_MODES}: '{LINKS_PRICED}' charges every inter-chip "
+            "boundary handoff the D17 p2p law (bytes / bandwidth + latency), which is "
+            f"the machine; '{LINKS_ZEROED}' is the TEMPORARY relaxation (George, "
+            "2026-08-27) that prices those handoffs at 0 s, vacates every link and "
+            "boundary floor, and makes the beat read compute only. The BYTES are "
+            "annotated and reported under both, and a zeroed run carries the "
+            "'links_zeroed' disclosure on every artifact it writes."
+        )
+    return value
+
+
 def _parse_packing(raw: object, context: str) -> str:
     """`mapping.packing` -> one of the mapper's placement laws (P7.3).
 
@@ -4386,6 +4912,37 @@ def _parse_packing(raw: object, context: str) -> str:
             "every bank holds real weights (Invariant W, D27)."
         )
     return value
+
+
+def parse_pp_util(raw: object, context: str) -> float:
+    """`mapping.pp_util` -> one of D38's fill fractions (the MAPPER's list).
+
+    PUBLIC, unlike its neighbours, because the sweep tool validates the axis's
+    declared rungs with it: the fill fractions that exist are ONE list checked
+    by ONE function, so a sweep can never offer a fraction the mapper refuses.
+
+    The list is NOT restated here. It is imported from the module that
+    implements the law — ``fws_mapping.check_pp_util``, which is also what
+    turns the fill into resident streams — so a fraction can never be spellable
+    on the config surface and missing from the mapper (D21). The import is
+    deferred because ``fws_mapping`` imports this module.
+
+    The mapper raises its own ``MappingError``; this surface re-raises it as
+    the ``ValueError`` every other config refusal is, with the message intact.
+    """
+    from fws_mapping import PP_UTIL_FULL, check_pp_util
+
+    if raw is None:
+        return PP_UTIL_FULL
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(
+            f"{context} must be a fill FRACTION (D38): how full the pipeline is "
+            f"deliberately run, not a count and not a name (got {raw!r})."
+        )
+    try:
+        return check_pp_util(raw, context=context)
+    except Exception as exc:  # MappingError -> the config surface's ValueError
+        raise ValueError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -5000,6 +5557,84 @@ def _validate_fws_filled_pipeline(hw_config: HWConfig, model: "LLMConfig") -> No
         )
 
 
+def _validate_fws_fabric_geometry(hw_config: HWConfig) -> None:
+    """SA-GEOM: `cim.fabric.geometry: derived` is a DECODE rule, refused elsewhere.
+
+    The rule is read off the DECODE attention call's own row count — R =
+    next_pow2(shared_heads) — and the study it comes from measured the win at
+    decode shapes only. PREFILL AND ViT INVERT: 32 x 64 is the optimal geometry
+    there, and the same re-shape that wins 5.7x to 20x on decode attention
+    cycles LOSES on a prefill traversal. So a machine that runs under the
+    RETIRED LOCKSTEP REGIME — which is what a ViT declares, because a
+    prefill-only model has nothing to stagger into a filled pipeline — is
+    refused BY NAME rather than quietly given a decode array.
+
+    A run with NO `mapping:` block is refused on the same grounds and for a
+    second reason besides: it lowers under lockstep too, and the derivation
+    never runs on that path at all, so the key would be an input that changes
+    nothing — which is worse than an error, because it reads as if it worked.
+    """
+    from cim_timing import FABRIC_GEOMETRY_DECLARED, FABRIC_GEOMETRY_DERIVED
+    from fws_mapping import REGIME_FILLED, REGIME_LOCKSTEP
+
+    cim = getattr(hw_config, "cim_config", None)
+    if cim is None:
+        return
+    named: List[Tuple[str, object]] = []
+    fabric = getattr(cim, "fabric", None)
+    if fabric is not None:
+        named.append(("cim.fabric", fabric))
+    cards = getattr(cim, "cards", None)
+    for name, card in (getattr(cards, "digital", {}) or {}).items():
+        card_fabric = getattr(card, "fabric", None)
+        if card_fabric is not None and card_fabric is not fabric:
+            named.append((f"cim.cards.{name}.params", card_fabric))
+    asked = [
+        name
+        for name, block in named
+        if str(getattr(block, "geometry", FABRIC_GEOMETRY_DECLARED))
+        == FABRIC_GEOMETRY_DERIVED
+    ]
+    if not asked:
+        return
+    mapping_config = getattr(hw_config, "mapping_config", None)
+    if mapping_config is None:
+        raise ValueError(
+            f"{asked[0]}.geometry = {FABRIC_GEOMETRY_DERIVED!r} on a run that declares "
+            "no `mapping:` block. The SA GEOMETRY RULE is derived from the per-stage "
+            "attention demand of a MAPPED, lowered decode beat, and an unmapped run "
+            "lowers under the retired lockstep regime where that derivation never runs "
+            "— so the key would change nothing and read as if it had. Declare a "
+            f"`mapping:` block, or set {asked[0]}.geometry: {FABRIC_GEOMETRY_DECLARED}."
+        )
+    systems = [
+        system
+        for system in (
+            mapping_config.system,
+            mapping_config.prefill,
+            mapping_config.decode,
+        )
+        if system is not None
+    ]
+    lockstep = [
+        system for system in systems if str(system.regime or "") == REGIME_LOCKSTEP
+    ]
+    if lockstep:
+        raise ValueError(
+            f"{asked[0]}.geometry = {FABRIC_GEOMETRY_DERIVED!r} on a machine that "
+            f"declares mapping.regime: {REGIME_LOCKSTEP}. The SA GEOMETRY RULE is a "
+            "DECODE rule: R = next_pow2(decode m), read off the decode attention call's "
+            "own row count, and the SA geometry study (2026-08-28) measured the 5.7x "
+            "(granite) to 20x (llama) win at DECODE shapes. PREFILL AND ViT INVERT — "
+            f"32 x 64 is the optimal geometry there — and {REGIME_LOCKSTEP} is the "
+            "regime a prefill-only machine runs under (a ViT declares it by name, "
+            "because there is nothing to stagger into a filled pipeline). Deriving a "
+            "short-R decode array for a prefill traversal would move a measured result "
+            "onto the shapes it was measured to be wrong for. Keep the declared "
+            f"geometry on this machine, or run it under {REGIME_FILLED}."
+        )
+
+
 def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> None:
     sch = getattr(hw_config, "sch_config", None)
     if sch is None:
@@ -5024,6 +5659,12 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
         getattr(hw_config, "mapping_config", None) is not None
     )
     if device_class == "fws_cim":
+        # SA-GEOM: the geometry MODE is a property of the MACHINE, not of the
+        # model, so it is checked first — before any model-shaped refusal
+        # narrows the path. A card that asks for a decode array on a
+        # prefill-regime machine has a wrong card whatever model is loaded, and
+        # hearing about the model instead would send a reader to the wrong file.
+        _validate_fws_fabric_geometry(hw_config)
         _validate_fws_cim_model(model, mapped=mapped_fws)
 
     if isinstance(model, GEMMConfig):

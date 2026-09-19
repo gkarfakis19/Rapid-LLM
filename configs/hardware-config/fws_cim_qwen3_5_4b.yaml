@@ -54,10 +54,24 @@ device_class: fws_cim
 # All values inside cim must be plain numbers: unit strings like "100 MB"
 # would be rewritten into byte counts by the YAML preprocessor.
 cim:
+  # SELECTED BY THE SWEEP (ADJ-15). Where the short depthwise conv's WORK
+  # runs; its weights are never tiled onto analog arrays under either value.
+  # Granite picks shared_digital and Falcon-Mamba picks macro_pool, which is
+  # why this is an axis and not an assumption.
+  allocation:
+    conv_placement: macro_pool
   analog:
+    # D35 OVERRIDE. This card predates D35 (2026-08-29), which fixes the analog
+    # macro at 1024 x 1024 stored cells as a PLATFORM CONSTANT. Its geometry is
+    # NOT moved: the OPTIMA validator and the pre-D35 gates read these numbers
+    # and moving them would silently rewrite what they check. The key below is
+    # the only exemption D35 admits, and it buys the exemption by stating the
+    # reason, which rides a named disclosure into every artifact this config
+    # produces. A point carrying it is NOT comparable with a platform point.
+    nonstandard_macro: 'predates D35; kept for validator/OPTIMA parity'
     rows: 2560               # array rows (K per array tile) = hidden_dim
-    cols_adc: 640            # ADC columns per array
-    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    cols: 2560            # Y: total CTT columns (storage tile)
+    adcs: 640            # Z: ADCs; mux = Y/Z = 4 is DERIVED
     slice_cycles: 2          # analog cycles per ADC evaluation
     analog_clock_mhz: 100
     energy_per_vec_pj: 38139.7556   # T1 point scaled by cell count (x4.0)
@@ -74,7 +88,10 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 73     # worst chip: 3*20 + 19 = 79 under D30 (which DROPS
+  # arrays_per_chip is NOT declared here: ADJ-13 builds the chip TO ITS
+  # PLACEMENT. Writing the derived capacity back as a declaration made it a
+  # false CAP - inert for the design it was derived from, and a refusal for
+  # any placement that needs one more slot.
                              # the lm_head; the +97 that used to sit here is
                              # gone). 180 is deliberately held at the pre-D30
                              # value, so 808 of the 1440 enumerated slots hold
@@ -92,7 +109,7 @@ cim:
   # source).
   cards:
     ctt:
-      bank_depth: 1
+      bank_depth: 2
       kind: analog_macro
       device: ctt
     sa:
@@ -242,8 +259,8 @@ inference:
 mapping:
   # SELECTED BY THE SWEEP (ADJ-13/ADJ-14): this machine is the point
   # tools/fws_qif_dse.py chose on its own frontier, not a hand-declared one.
-  shared_chiplets: 4
-  layers_per_chip: 4
+  shared_chiplets: 8
+  layers_per_chip: 1
   parallelism:
     tp: 1
   # D27 / Invariant W (HARD): weight space is NEVER wasted, so the DENSE packer

@@ -85,14 +85,26 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import cim_timing
 from cim_timing import (
+    ANALOG_CHIP_AREA_MM2,
     CANONICAL_WALK,
     CimDeviceModel,
     DensePacking,
+    HOP_CROSS_CHIP,
+    HOP_INTRA_CHIP,
+    HOP_INTRA_MACRO,
+    LINK_PRICE_BASIS,
     PackRequest,
+    T_HOP_CROSS_CHIP,
+    T_HOP_INTRA_CHIP,
     Tile,
     TileOwner,
     TileSite,
+    analog_chip_capacity,
+    analog_chip_capacity_disclosures,
+    hop_kind,
+    link_price_disclosures,
     refuse_dead_fold,
+    stage_handoff_time_s,
 )
 from program.groups import CommunicatorFactory, canonical_axis_label
 from program.ir import GroupKey
@@ -186,6 +198,158 @@ REGIME_FILLED = "filled_pipeline"
 REGIME_LOCKSTEP = "lockstep"
 SERVING_REGIMES: Tuple[str, ...] = (REGIME_FILLED, REGIME_LOCKSTEP)
 
+#: The two LINK PRICING modes a mapped fws_cim run can be lowered under.
+#:
+#: ``priced`` is the machine: every inter-chip boundary handoff is charged the
+#: D17 p2p law (bytes / bandwidth + latency), the stage that sends it holds its
+#: slot until it lands, and the beat can be set by a link. It is the DEFAULT
+#: and no shipped number moves.
+#:
+#: ``zeroed`` is a TEMPORARY relaxation George asked for on 2026-08-27: the
+#: inter-chip handoffs are priced at 0 s so the run reads COMPUTE ONLY. The
+#: BYTES are untouched — they are a fact of the mapping and stay annotated and
+#: reported — and only the TIME is relaxed. Intra-chip movement is unaffected:
+#: it was already a dependency and not a priced link (D17). Every artifact of
+#: a zeroed run carries the ``links_zeroed`` disclosure, because a throughput
+#: read off a machine whose links are free is not this machine's throughput.
+#:
+#: EVERY inter-chip transfer means every one: the stage handoffs, the fabric
+#: and reduction hops that cross a chip, and the D16 PD pair handoff, which
+#: rides the same pp link under the same law (:func:`build_pd_pair`). What is
+#: NOT relaxed is the boundary TABLE: its ``required_time_s`` is what the
+#: DECLARED link needs for those bytes, a property of the card rather than a
+#: priced duration, and its congestion note says in its own words that the
+#: excess is REPORTED and NOT priced. Vacating it would delete the one warning
+#: that says what the relaxation is hiding.
+LINKS_PRICED = "priced"
+LINKS_ZEROED = "zeroed"
+LINK_MODES: Tuple[str, ...] = (LINKS_PRICED, LINKS_ZEROED)
+
+
+# ---------------------------------------------------------------------------
+# THE STUB ROUND'S LAW CONSTANTS (D38 and the platform interface)
+# ---------------------------------------------------------------------------
+#
+# THE LINK PRICES AND THE CHIP CAPACITY LIVE IN THE LAW LAYER. ``cim_timing``
+# declares T_HOP_INTRA_CHIP / T_HOP_CROSS_CHIP, the hop classifier, the flat
+# stage-handoff price and ``analog_chip_capacity`` (C = floor(400 mm2 / macro
+# footprint)); they are imported above and re-exported here so the mapper, the
+# pricer and the DAG builder read ONE spelling of each (D21: one law, one
+# place). Nothing about them is restated in this module.
+#
+# The stage handoff hop REPLACES `links: zeroed` as the default for a mapped
+# run: handoffs are priced at a platform latency instead of at 0 s, and a run
+# that still wants free links declares `mapping.links: zeroed` by name.
+
+#: KV AND RECURRENT STATE ARE FP8 (D38: "KV and recurrent state are FP8
+#: (8 bits/element) for now"). One byte per element, named once, so no site
+#: reads the tensor precision for a quantity D38 fixed.
+STATE_ELEMENT_BYTES: float = 1.0
+STATE_ELEMENT_DTYPE: str = "fp8"
+STATE_ELEMENT_BASIS: str = (
+    "D38: KV and recurrent state are FP8 — 8 bits, so STATE_ELEMENT_BYTES = 1.0 "
+    "byte per element. It is a PLATFORM choice for now and not the run's tensor "
+    "format: sw_param.precision keeps sizing activations and weights, and the "
+    "state store this mapping builds is sized at 1 B/element whatever the "
+    "activations are. Every artifact that carries a state or KV byte count "
+    "carries this disclosure by name."
+)
+
+#: THE STUB DISCLOSURE. Every artifact of a mapped run carries it BY NAME until
+#: the mapping law lands: what this round places is not a designed mapping.
+MAPPING_STUB_KEY: str = "mapping_stub"
+MAPPING_STUB_VALUE: str = (
+    "mapping = stub-v0 (pipeline-order dense packing, per-layer stages, "
+    "full K-stack)"
+)
+MAPPING_STUB_REASON: str = (
+    "THE MAPPING LAW HAS NOT LANDED. This run places weights by walking the "
+    "model in pipeline order and packing them densely into analog chips at the "
+    "chip's derived slot capacity, cutting a chip wherever the stream fills one "
+    "— ACROSS stage boundaries, so a layer may sit on two chips. The stages are "
+    "the finest granularity D38 admits (one layer per stage) and the K stack is "
+    "carried whole. No balance objective, no area objective and no search chose "
+    "any of it. RESULTS FROM THIS MAPPING ARE NOT DESIGN-VALID: they are what a "
+    "dense pipeline-order packing happens to reach, and they will move when the "
+    "mapping law lands. Results are NOT design-valid until the mapping law "
+    "lands."
+)
+
+#: THE PIPELINE FILL AXIS (D38). ``pp_util`` is the fraction of the stages that
+#: hold a resident stream: 1.0 is the full pipeline D29 always assumed, and the
+#: two underfilled values trade throughput (linear in the fill) against
+#: state/KV area (linear in the resident streams). It is DECLARED — the one
+#: mapping axis D38 leaves — and every underfilled run discloses it by name.
+PP_UTIL_FULL: float = 1.0
+PP_UTIL_VALUES: Tuple[float, ...] = (1.0, 0.75, 0.5)
+
+
+def resident_streams_of(stages: int, pp_util: float) -> int:
+    """D — resident streams = max(1, round(pp_util x stages)) (D38).
+
+    ONE spelling of the rounding, because D is what the state bill, the DAG's
+    rotation and the throughput all read. A mapping with no stage plan has no
+    resident streams and reports 0 (the retired lockstep regime).
+    """
+    count = int(stages)
+    if count <= 0:
+        return 0
+    return max(1, int(round(float(pp_util) * count)))
+
+
+def stream_entry_beat(traversal: int, stages: int, streams: int) -> int:
+    """The beat traversal ``j`` ENTERS the pipeline at (D29 + D38's fill).
+
+    A full pipeline admits one traversal per beat, which is what D29 always
+    lowered. An UNDERFILLED one admits a traversal only when a stream comes
+    free, so entries are spaced ``stages / D`` beats apart and the machine
+    holds exactly D streams instead of one per stage. The spacing is the ONLY
+    place the fill enters the machine: throughput, occupancy and the state bill
+    then all read it off the same timeline (D21).
+
+    Integer arithmetic, so the spacing never drifts: ``j x stages // D``. At
+    the full fill (D = stages) it is ``j``, which is the pre-D38 rotation
+    unchanged.
+    """
+    count = max(1, int(streams))
+    return (int(traversal) * int(stages)) // count
+
+
+def lowered_beats(stages: int, streams: int, steady: int) -> int:
+    """Beats the DAG lowers so ``steady`` STEADY inter-exit intervals exist.
+
+    ``steady + 2`` traversals have to COMPLETE: the last of them enters at
+    ``stream_entry_beat(steady + 1)`` and leaves ``stages`` beats later. Their
+    ``steady + 1`` inter-exit intervals are measured and the first is held out
+    as the fill transient, which leaves exactly ``steady``.
+    """
+    if int(stages) <= 0 or int(streams) <= 0:
+        return 0
+    return stream_entry_beat(int(steady) + 1, stages, streams) + int(stages)
+
+
+def check_pp_util(value: object, *, context: str) -> float:
+    """`mapping.pp_util` -> one of D38's fill fractions, or a named refusal."""
+    try:
+        fill = float(value)
+    except (TypeError, ValueError):
+        raise MappingError(
+            "execution",
+            f"{context} = {value!r} is not a fill fraction. D38 makes pp_util the "
+            f"pipeline's FILL, one of {PP_UTIL_VALUES}: resident streams = pp_util x "
+            "stages.",
+        )
+    for candidate in PP_UTIL_VALUES:
+        if abs(fill - candidate) <= 1e-12:
+            return float(candidate)
+    raise MappingError(
+        "execution",
+        f"{context} = {fill!r} is not one of D38's fill fractions {PP_UTIL_VALUES}. "
+        "D38: \"THE NEW AXIS: pp_util in {1.0, 0.75, 0.5} — a deliberately UNDERFILLED "
+        "pipeline (resident streams = pp_util x stages)\". The axis is a closed list, "
+        "not a continuum: a fill nobody adjudicated is a machine nobody priced.",
+    )
+
 
 @dataclass(frozen=True)
 class PipelineStage:
@@ -215,63 +379,55 @@ class PipelineStage:
 
 def stage_partition(
     num_layers: int,
-    layers_per_stage: Optional[object],
-    chip_layers: Sequence[Tuple[int, ...]],
-    pp_of_backbone_chip: Sequence[int],
-    pp: int,
+    layers_per_stage: Optional[object] = None,
+    chip_layers: Sequence[Tuple[int, ...]] = (),
+    pp_of_backbone_chip: Sequence[int] = (),
+    pp: int = 1,
 ) -> Tuple[Tuple[int, ...], str]:
-    """Partition the backbone layers into PP stages — the D29 stage plan.
+    """The stage plan — DERIVED, one layer per stage (D38).
 
-    Three sources, in this order, and no fourth:
+    D38 retired the partition as an input: "layers_per_stage RETIRES as a sweep
+    axis. The machine is always maximally disaggregated: local microbatch 1,
+    finest motif-compatible stages, everything time-matched by area sizing...
+    Stage granularity DERIVES." So there is ONE source and no fourth: the layer
+    list itself, one layer per stage.
 
-    1. ``mapping.layers_per_stage`` — an int (uniform) or a list (per stage).
-    2. ``mapping.parallelism.pp`` > 1 — the DECLARED pp membership already
-       groups chips into stages, so the stage's layers are its chips' layers.
-    3. the chip partition itself — the default: **one stage per chip**.
+    ``layers_per_stage`` survives only to be REFUSED BY NAME: a config that
+    still declares a partition is asking for a machine D38 removed, and a
+    silently ignored input is worse than a refusal. ``chip_layers``,
+    ``pp_of_backbone_chip`` and ``pp`` are accepted and unused — the chip
+    partition is where weights SIT, which after D38 no longer decides where a
+    stage BOUNDARY falls.
 
-    Returns the per-stage layer tuples and the basis string that names which
-    source produced them, because a stage count is the resident-stream count
-    and a reader must be able to see where it came from.
+    Returns the per-stage layer tuples and the basis string that names where
+    they came from, because a stage count is the resident-stream count's
+    denominator and a reader must be able to see it derive.
     """
     total = int(num_layers)
     if layers_per_stage is not None:
-        if isinstance(layers_per_stage, (list, tuple)):
-            counts = [int(value) for value in layers_per_stage]
-        else:
-            width = int(layers_per_stage)
-            counts = [width] * (total // width)
-            if total % width:
-                counts.append(total % width)
-        if any(count <= 0 for count in counts):
-            raise MappingError(
-                "execution",
-                f"mapping.layers_per_stage = {layers_per_stage!r} produces an EMPTY "
-                "stage. A stage with no layers is a resident stream with nothing to "
-                "do (D29).",
-            )
-        if sum(counts) != total:
-            raise MappingError(
-                "execution",
-                f"mapping.layers_per_stage = {layers_per_stage!r} covers {sum(counts)} "
-                f"layers but the model has {total}. The stage plan is a PARTITION of "
-                "the layers: every layer is on exactly one stage.",
-            )
-        basis = f"mapping.layers_per_stage = {layers_per_stage!r}"
-    elif int(pp) > 1:
-        groups: "OrderedDict[int, List[int]]" = OrderedDict()
-        for chip_index, stage_index in enumerate(pp_of_backbone_chip):
-            groups.setdefault(int(stage_index), []).extend(chip_layers[chip_index])
-        counts = [len(groups[key]) for key in sorted(groups)]
-        basis = f"mapping.parallelism.pp = {int(pp)} (the declared pp membership)"
-    else:
-        counts = [len(layers) for layers in chip_layers]
-        basis = "the chip partition (default: one stage per analog chip)"
-    stages: List[Tuple[int, ...]] = []
-    cursor = 0
-    for count in counts:
-        stages.append(tuple(range(cursor, cursor + count)))
-        cursor += count
-    return tuple(stages), basis
+        raise MappingError(
+            "execution",
+            f"mapping.layers_per_stage = {layers_per_stage!r} is REFUSED BY NAME "
+            "(D38): \"layers_per_stage RETIRES as a sweep axis. The machine is always "
+            "maximally disaggregated: local microbatch 1, finest motif-compatible "
+            "stages, everything time-matched by area sizing... Stage granularity "
+            "DERIVES.\" The stage plan is one layer per stage and there is no input "
+            "that changes it; the fill fraction mapping.pp_util is the axis that "
+            "replaced it, and it changes the resident STREAMS, never the stages.",
+        )
+    if total <= 0:
+        raise MappingError(
+            "execution",
+            "a stage plan needs layers: the model declares num_layers = "
+            f"{total}, so there is nothing to stage (D38's finest granularity is one "
+            "layer per stage).",
+        )
+    stages = tuple((index,) for index in range(total))
+    basis = (
+        f"DERIVED (D38): one layer per stage, {total} stages — the finest "
+        "granularity, which is the only one D38 leaves. Nothing declared it."
+    )
+    return stages, basis
 
 
 @dataclass(frozen=True)
@@ -630,9 +786,13 @@ class FwsMapping:
         relaxations: Sequence[Relaxation],
         packing: str = PACKING_DEDICATED,
         packings: Mapping[int, DensePacking] = (),
+        links: str = LINKS_PRICED,
         regime: str = REGIME_LOCKSTEP,
         stages: Sequence[PipelineStage] = (),
         stage_basis: str = "",
+        pp_util: float = PP_UTIL_FULL,
+        chip_capacity: int = 0,
+        tail_slots: int = 0,
     ) -> None:
         self.device = device
         self.hw = hw_config
@@ -668,6 +828,22 @@ class FwsMapping:
         self.regime = str(regime)
         self.stages = tuple(stages)
         self.stage_basis = str(stage_basis)
+        #: D38's fill fraction: the share of the stages that hold a resident
+        #: stream. 1.0 is D29's always-full pipeline and the default; 0.75 and
+        #: 0.5 are the priced, disclosed underfills. It is the ONE mapping axis
+        #: D38 leaves, and it moves D — never the stage plan.
+        self.pp_util = float(pp_util)
+        #: The analog chip's derived slot capacity C = floor(400 mm2 / macro
+        #: footprint) and the ONE tail the pipeline-order packer leaves in the
+        #: last chip of each stream. 0 when the stub packer did not run.
+        self.chip_capacity = int(chip_capacity)
+        self.tail_slots = int(tail_slots)
+        #: WHICH LINK PRICING MODE this mapping is lowered under. ``priced`` is
+        #: the machine (D17 p2p on every inter-chip boundary); ``zeroed`` is
+        #: the TEMPORARY relaxation that charges those handoffs 0 s and
+        #: discloses it by name. The mapper spells the mode; the pricer
+        #: applies it (D21: one law, one place).
+        self.links = str(links)
 
         sizes = {axis: max(1, int(self.degrees[axis])) for axis in MAPPING_AXES}
         strides: Dict[str, int] = {}
@@ -697,14 +873,32 @@ class FwsMapping:
 
     @property
     def resident_streams(self) -> int:
-        """D — the resident stream count, which IS the stage count (D29).
+        """D — the resident stream count: ``round(pp_util x stages)`` (D38).
 
-        Derived, never declared: one stream per stage, one token out per beat.
-        A mapping with no stage plan (the retired lockstep regime) has no
-        resident streams and reports 0 rather than 1, so the two regimes can
-        never be read off one field as if they were the same machine.
+        Derived, never declared. At the default fill (pp_util = 1.0) it is D29
+        exactly: one stream per stage, one token out per beat. Under an
+        UNDERFILLED pipeline it is the smaller resident count D38 prices —
+        state and KV scale with it (linear in the streams) and throughput
+        scales with the fill (linear in the streams over the stages), which is
+        the whole trade. A mapping with no stage plan (the retired lockstep
+        regime) has no resident streams and reports 0 rather than 1, so the two
+        regimes can never be read off one field as if they were the same
+        machine.
         """
-        return len(self.stages)
+        return resident_streams_of(len(self.stages), self.pp_util)
+
+    @property
+    def pipeline_fill(self) -> float:
+        """D / stages — what the resident streams actually fill (D38).
+
+        The REALIZED fill, not the declared one: D is an integer count of
+        streams, so a 0.75 fill of 10 stages is 8 streams and the realized fill
+        is 0.8. Every number that scales with the fill scales with THIS.
+        """
+        stages = len(self.stages)
+        if stages <= 0:
+            return 0.0
+        return float(self.resident_streams) / float(stages)
 
     def stage_of_layer(self, layer: int) -> int:
         for stage in self.stages:
@@ -810,6 +1004,57 @@ class FwsMapping:
         same = tuple(dev for dev in devs if dev.shard.tp == shard.tp)
         return same or devs
 
+    # -- who serves whom ---------------------------------------------------
+
+    def chiplet_index_of_chip(self, chip_id: int, shard=None) -> int:
+        """Which shared digital chiplet serves this analog chip.
+
+        THE ONE DEFINITION (D21). The lowering asks it to place an op and the
+        engine derivations ask it to size a chiplet for the stages it carries;
+        before this existed the two answered differently — the lowering dealt
+        chips round-robin (chip_id % chiplets) while the sizing dealt them in
+        contiguous blocks — so an engine was widened for a grouping the machine
+        did not build.
+
+        CONTIGUOUS is the answer both use, because it is the one the design
+        wants: a chiplet serves NEIGHBOURING pipeline stages, so the
+        activations it reads come from the analog chips beside it instead of
+        from across the package. Round-robin maximised the distance instead.
+        """
+        engines = self.shared_digital_devices(shard)
+        count = len(engines)
+        if count <= 0:
+            return 0
+        analog = [chip.chip_id for chip in self.chips if chip.pool == "analog"]
+        try:
+            position = analog.index(int(chip_id))
+        except ValueError:
+            position = int(chip_id)
+        total = len(analog) or 1
+        if count >= total:
+            return min(position, count - 1)
+        per = math.ceil(total / count)
+        return min(count - 1, position // per)
+
+    def chiplet_groups(self) -> Tuple[Tuple[int, ...], ...]:
+        """The analog chips each shared digital chiplet serves, in order.
+
+        The inverse of :meth:`chiplet_index_of_chip`, and taken FROM it rather
+        than re-derived, so the grouping the engines are sized for is the
+        grouping the DAG builds. A chiplet that serves nothing still gets a row
+        (an empty tuple): the machine builds it, so the sizing has to see it.
+        """
+        engines = self.shared_digital_devices()
+        count = len(engines)
+        if count <= 0:
+            return ()
+        groups: List[List[int]] = [[] for _ in range(count)]
+        for chip in self.chips:
+            if chip.pool != "analog":
+                continue
+            groups[self.chiplet_index_of_chip(chip.chip_id)].append(int(chip.chip_id))
+        return tuple(tuple(group) for group in groups)
+
     # -- derived reports --------------------------------------------------
 
     def macro_occupancy(self, macro_id: int) -> float:
@@ -905,6 +1150,17 @@ class FwsMapping:
                 ("k_stacks", sum(len(p.k_stacks) for p in packings)),
                 ("local_k_stacks", sum(len(p.local_k_stacks) for p in packings)),
                 ("spread_k_stacks", sum(len(p.spread_k_stacks) for p in packings)),
+                (
+                    "local_k_segments",
+                    sum(len(p.local_k_segments) for p in packings),
+                ),
+                # THE STUB PACKER'S CHIP ARITHMETIC, reported once: the derived
+                # slot capacity every analog chip is built to, and the ONE tail
+                # the pipeline-order stream leaves in the last chip it fills.
+                # 0/0 when the stream was cut per chip instead (the pre-stub
+                # per-chip dense packing).
+                ("chip_capacity_slots", int(self.chip_capacity)),
+                ("tail_slots", int(self.tail_slots)),
             )
         )
 
@@ -956,6 +1212,11 @@ class FwsMapping:
                 ("serving_regime", self.regime),
                 ("pipeline_stages", len(self.stages)),
                 ("resident_streams", self.resident_streams),
+                # D38: the declared fill and the one the integer stream count
+                # realizes. Two mappings that differ only by this pair are two
+                # different machines, so both ride the summary.
+                ("pp_util", float(self.pp_util)),
+                ("pipeline_fill", float(self.pipeline_fill)),
                 ("stage_plan_basis", self.stage_basis),
                 ("layers_per_stage", [len(stage.layers) for stage in self.stages]),
                 # P7.3: the placement LAW these numbers came out of. Two
@@ -1398,6 +1659,42 @@ def _shard_shapes(device: CimDeviceModel, model, layer_idx: int, tp: int) -> Tup
     return tuple(stage.sharded(tp) for stage in stages)
 
 
+def _stub_requests(
+    device: CimDeviceModel,
+    model,
+    model_id: str,
+    degrees: Mapping[str, int],
+    tp_idx: int,
+    tp: int,
+) -> Tuple[PackRequest, ...]:
+    """One tp shard's weights, IN PIPELINE ORDER — the stub packer's stream.
+
+    The order is the model's own: layer 0's matrices, then layer 1's, to the
+    end. The packer never reorders it (D27), so the stream is the pipeline and
+    cutting it at the chip's capacity is exactly "fill chips in pipeline order,
+    across stage boundaries".
+
+    Endpoints are not in it: D30 drops embedding and lm_head entirely on the
+    mapped path, and a filled-pipeline mapping refuses a model that still
+    declares them.
+    """
+    shard = ShardCoord(tp=int(tp_idx), ep=0, pp=0)
+    shard_index = int(_linearize(degrees, shard))
+    out: List[PackRequest] = []
+    for layer in range(int(device.params.num_layers)):
+        for stage in _shard_shapes(device, model, layer, tp):
+            owner = TileOwner(model_id, layer, stage.op, stage.expert, shard_index)
+            out.append(
+                PackRequest(
+                    owner=owner,
+                    k=stage.k,
+                    n=stage.n,
+                    group=f"{model_id}.L{layer}",
+                )
+            )
+    return tuple(out)
+
+
 def _endpoint_shapes(device: CimDeviceModel, tp: int) -> Tuple[Tuple[str, StageShape], ...]:
     """(position, stage) for the model-shaped endpoints; position is head/tail."""
     p = device.params
@@ -1474,6 +1771,8 @@ def build_mapping(
     model_id: Optional[str] = None,
     packing: Optional[str] = None,
     regime: Optional[str] = None,
+    links: Optional[str] = None,
+    pp_util: Optional[float] = None,
 ) -> FwsMapping:
     """``(workload, platform) -> mapping`` — the seam P3 fixes now.
 
@@ -1494,6 +1793,12 @@ def build_mapping(
     where a run DECLARES its placement law; an explicit keyword overrides the
     config for a caller that wants both laws out of one machine (the packing
     comparison is exactly that caller). One law reaches the packer either way.
+
+    ``links`` selects the LINK PRICING MODE by the same one sentence:
+    ``"priced"`` is the machine and the DEFAULT, ``"zeroed"`` is the TEMPORARY
+    relaxation that charges every inter-chip boundary handoff 0 s and rides a
+    ``links_zeroed`` disclosure into every artifact. ``None`` reads
+    ``mapping.links``.
     """
     import config as _config
 
@@ -1532,6 +1837,19 @@ def build_mapping(
             "macros, 'dense' packs one contiguous bank stream (Invariant W, D27).",
         )
     dense = packing == PACKING_DENSE
+    # --- the LINK PRICING MODE (TEMPORARY relaxation, George 2026-08-27) ---
+    # Same one sentence as the packing law: the config declares it, an explicit
+    # keyword overrides it, and there is no third source (D21).
+    links = str(getattr(spec, "links", LINKS_PRICED) if links is None else links)
+    if links not in LINK_MODES:
+        raise MappingError(
+            "package",
+            f"links = {links!r} is not a link pricing mode this mapper has. The modes "
+            f"are {LINK_MODES}: '{LINKS_PRICED}' charges every inter-chip boundary the "
+            f"D17 p2p law (the machine), '{LINKS_ZEROED}' is the TEMPORARY relaxation "
+            "that prices those handoffs at 0 s and discloses it by name. The BYTES are "
+            "reported under both.",
+        )
     # --- the SERVING REGIME (D29) ----------------------------------------
     declared_regime = regime if regime is not None else getattr(spec, "regime", None)
     if declared_regime is None:
@@ -1570,6 +1888,38 @@ def build_mapping(
             "batch. Set model_param.global_batch_size: 1, or lower this run under the "
             f"retired {REGIME_LOCKSTEP!r} regime, which is what the pass-1/2 closed "
             "form models.",
+        )
+    # --- THE FILL FRACTION (D38's one mapping axis) -----------------------
+    # Same one sentence as the packing law and the link mode: the config
+    # declares it, an explicit keyword overrides it, there is no third source.
+    declared_fill = getattr(spec, "pp_util", None) if pp_util is None else pp_util
+    fill = (
+        PP_UTIL_FULL
+        if declared_fill is None
+        else check_pp_util(declared_fill, context="mapping.pp_util")
+    )
+    if fill != PP_UTIL_FULL and regime != REGIME_FILLED:
+        raise MappingError(
+            "execution",
+            f"mapping.pp_util = {fill} on a {regime!r} mapping. The fill fraction is a "
+            f"property of the FILLED PIPELINE — D38 defines it as 'resident streams = "
+            "pp_util x stages', and the retired lockstep regime has neither stages nor "
+            "resident streams. Drop pp_util, or lower this run under "
+            f"{REGIME_FILLED!r}.",
+        )
+    # --- THE PARTITION IS NOT AN INPUT (D38) ------------------------------
+    # Refused here as well as in `stage_partition`, because a LOCKSTEP mapping
+    # never calls the stage plan and would otherwise carry a declared partition
+    # that nothing reads.
+    if getattr(spec, "layers_per_stage", None) is not None:
+        raise MappingError(
+            "execution",
+            f"mapping.layers_per_stage = {spec.layers_per_stage!r} is REFUSED BY NAME "
+            "(D38): \"layers_per_stage RETIRES as a sweep axis. The machine is always "
+            "maximally disaggregated: local microbatch 1, finest motif-compatible "
+            "stages... Stage granularity DERIVES.\" One layer is one stage and no "
+            "input changes it. The axis that replaced it is mapping.pp_util, which "
+            f"moves the RESIDENT STREAMS over the stages ({PP_UTIL_VALUES}).",
         )
     if dense and phase == "prefill":
         # D25 / D26: the refusal IS the implementation.
@@ -1670,29 +2020,95 @@ def build_mapping(
         )
     degrees = {"tp": tp, "ep": ep, "pp": pp}
 
+    # --- THE STUB PACKER (stub-v0): does it place this run? ----------------
+    #
+    # The pipeline-order packer walks the model once, packs it densely and cuts
+    # a chip whenever the stream fills one — ACROSS stage boundaries. It needs
+    # ONE stream per tp shard to do that, so it places a run whose chips are
+    # all backbone chips of one pp stage: a MoE expert pool (ep > 1) and a
+    # declared pp membership are separate chip sets with their own placement,
+    # and the stub does not pretend to pack them. Such a run keeps the per-chip
+    # placement and says so by name, rather than being packed by a law that
+    # does not cover it.
+    stub_pack = bool(regime == REGIME_FILLED and dense and ep <= 1 and pp <= 1)
+    stub_skipped = ""
+    if regime == REGIME_FILLED and dense and not stub_pack:
+        stub_skipped = (
+            f"ep = {ep}, pp = {pp}: this mapping enumerates chip sets the "
+            "pipeline-order packer does not cover (a MoE expert pool and a declared "
+            "pp membership are placed as their own chips), so the weights are packed "
+            "PER CHIP as before and the chip partition is the declared one."
+        )
+    stub_capacity = 0
+    stub_packings: "OrderedDict[int, DensePacking]" = OrderedDict()
+    stub_tiles_by_chip: Dict[int, List[Tile]] = {}
+    stub_layers_of_chip: List[Tuple[int, ...]] = []
+
     # --- layer -> chip ----------------------------------------------------
-    if spec.layers_per_chip is None:
-        counts = device.chip_layer_counts()
-        placement_source = "cim.chip.layers_per_chip"
+    if stub_pack:
+        # ONE PASS TO SIZE THE MACHINE. The stream is the same shape on every
+        # tp shard, so the chip count is read off shard 0's packing and the
+        # per-shard streams are then packed at their own enumerated bases.
+        stub_capacity = int(device.analog_chip_slots())
+        probe = device.dense_pack(
+            _stub_requests(device, model, model_id, degrees, 0, tp),
+            first_macro_id=0,
+            walk=CANONICAL_WALK,
+        )
+        backbone_per_shard = max(1, -(-int(probe.macro_count) // stub_capacity))
+        counts = ()
+        placement_source = (
+            "the pipeline-order stub packer (stub-v0): "
+            f"{probe.macro_count} macros of one tp shard's stream cut into "
+            f"{backbone_per_shard} chip(s) of C = {stub_capacity} slot(s)"
+        )
+        layers_of_chip = []  # DERIVED below, off the tiles the packer placed
     else:
-        counts = _layer_counts_from_spec(spec.layers_per_chip, device)
-        placement_source = "mapping.layers_per_chip"
-    backbone_per_shard = len(counts)
-    layers_of_chip: List[Tuple[int, ...]] = []
-    cursor = 0
-    for count in counts:
-        layers_of_chip.append(tuple(range(cursor, cursor + count)))
-        cursor += count
+        if spec.layers_per_chip is None:
+            counts = device.chip_layer_counts()
+            placement_source = "cim.chip.layers_per_chip"
+        else:
+            counts = _layer_counts_from_spec(spec.layers_per_chip, device)
+            placement_source = "mapping.layers_per_chip"
+        backbone_per_shard = len(counts)
+        layers_of_chip = []
+        cursor = 0
+        for count in counts:
+            layers_of_chip.append(tuple(range(cursor, cursor + count)))
+            cursor += count
 
     # --- macro slots per chip --------------------------------------------
     declared_slots = int(getattr(device.chip, "arrays_per_chip", 0) or 0)
-    if spec.macros_per_chip is not None:
+    if stub_pack:
+        # CAPACITY IS AREA (the law layer's analog_chip_capacity). ADJ-13's
+        # per-point capacity probe retires with it: a derived capacity has
+        # nothing to discover. A declared count is REFUSED when it is the
+        # mapping block's own key (a claim about a quantity this run derives)
+        # and SUPERSEDED with a disclosure when it is the legacy card key,
+        # which nearly every shipped card still carries.
+        if spec.macros_per_chip is not None:
+            raise MappingError(
+                "residency",
+                f"mapping.macros_per_chip = {int(spec.macros_per_chip)} is REFUSED BY "
+                "NAME on a mapped fws_cim run: the analog chip's slot count is DERIVED "
+                f"from area — C = floor({ANALOG_CHIP_AREA_MM2:.6g} mm2 / this macro's "
+                f"package footprint) = {stub_capacity} slot(s) — and the pipeline-order "
+                "packer fills chips at that capacity. Two capacities is two accountings "
+                "of one fact (D21). Drop the key.",
+            )
+        macro_slots = stub_capacity
+    elif spec.macros_per_chip is not None:
         macro_slots = int(spec.macros_per_chip)
     elif declared_slots > 0:
         macro_slots = declared_slots
     else:
         macro_slots = 0  # derived below, once the placement is known
-    if spec.macros_per_chip is not None and declared_slots > 0 and macro_slots != declared_slots:
+    if (
+        not stub_pack
+        and spec.macros_per_chip is not None
+        and declared_slots > 0
+        and macro_slots != declared_slots
+    ):
         raise MappingError(
             "assembly",
             f"mapping.macros_per_chip = {macro_slots} disagrees with "
@@ -1801,6 +2217,37 @@ def build_mapping(
         all_tiles.extend(tiles)
         return tiles
 
+    # --- THE STUB PACKER RUNS HERE (stub-v0) ------------------------------
+    #
+    # One stream per tp shard, packed from the shard's own enumerated macro
+    # base, and the chip a macro belongs to is the slot arithmetic itself:
+    # chip = macro_id // C. The stream crosses stage boundaries, so a layer
+    # whose matrices straddle a cut sits on TWO chips and the layer -> chip map
+    # says so. Nothing here chooses a partition; the capacity does.
+    if stub_pack:
+        for tp_idx in range(tp):
+            shard_base = tp_idx * backbone_per_shard * macro_slots
+            shard_packing = device.dense_pack(
+                _stub_requests(device, model, model_id, degrees, tp_idx, tp),
+                first_macro_id=shard_base,
+                walk=CANONICAL_WALK,
+            )
+            validate_tile_row_convention(shard_packing.tiles, rows)
+            # THE PACKING IS ONE STREAM, so it is recorded once — under the
+            # FIRST chip it filled. Recording it under every chip it touches
+            # would count its cells once per chip, which is exactly the second
+            # accounting D21 forbids.
+            stub_packings[tp_idx * backbone_per_shard] = shard_packing
+            for tile in shard_packing.tiles:
+                chip_id = int(tile.site.macro_id) // macro_slots
+                stub_tiles_by_chip.setdefault(chip_id, []).append(tile)
+        for local in range(backbone_per_shard):
+            layers = sorted(
+                {int(tile.owner.layer) for tile in stub_tiles_by_chip.get(local, ())}
+            )
+            stub_layers_of_chip.append(tuple(layers))
+        layers_of_chip = list(stub_layers_of_chip)
+
     moe_layer_indices = [idx for idx, is_moe in enumerate(device.layer_class_mask()) if is_moe]
     tiles_by_chip: Dict[int, List[Tile]] = {}
     macro_base_of_chip: Dict[int, int] = {}
@@ -1853,6 +2300,22 @@ def build_mapping(
         tiles_by_chip[chip_id] = []
         shard_index = int(_linearize(degrees, shard))
         chip_index_in_shard = [c[0] for c in chip_specs if c[2].tp == shard.tp].index(chip_id)
+        if stub_pack and chip_role == "backbone":
+            # The tiles are already placed: this chip is a WINDOW on the
+            # shard's one stream, [chip_macro_base, +C). Its layers were read
+            # off those tiles, so the layer -> chip map is the packing's own
+            # answer and not a second placement of the same weights.
+            resident_tiles = list(stub_tiles_by_chip.get(chip_id, ()))
+            tiles_by_chip[chip_id] = resident_tiles
+            all_tiles.extend(resident_tiles)
+            for layer in chip_layers:
+                layer_chip.setdefault(layer, []).append(chip_id)
+            used = {int(tile.site.macro_id) for tile in resident_tiles}
+            macro_usage[chip_id] = len(used)
+            auto_cursor[chip_id] = len(used)
+            if chip_id in stub_packings:
+                packings[chip_id] = stub_packings[chip_id]
+            continue
         if chip_role == "backbone":
             if chip_index_in_shard == 0:
                 for where, stage in endpoints:
@@ -2146,19 +2609,25 @@ def build_mapping(
             Relaxation(
                 constraint="serving_regime",
                 value=(
-                    f"{REGIME_FILLED} (D29): D = {len(stages)} resident streams, "
-                    "local batch 1"
+                    f"{REGIME_FILLED} (D29 + D38): {len(stages)} stage(s), pp_util = "
+                    f"{fill}, D = {resident_streams_of(len(stages), fill)} resident "
+                    "stream(s), local batch 1"
                 ),
                 reason=(
-                    f"The pipeline is ALWAYS FULL. {len(stages)} PP stages from "
-                    f"{stage_basis}; D = the stage count, DERIVED and never configured "
-                    "as a batch (D29 removes batch size from this surface). Decode is "
-                    "independent streams staggered one stage apart: one token exits per "
-                    "BEAT, throughput = 1/beat, per-stream rate = 1/(D x beat), every "
-                    "analog op fires at M = 1 and attention/scan are priced per stream "
-                    "at that stream's own context. EVERY stage holds all D streams' "
-                    "state and KV for its layers, which the evaluation reports per "
-                    "stage and checks against the declared tiers."
+                    f"{len(stages)} PP stages from {stage_basis}; D = "
+                    f"{resident_streams_of(len(stages), fill)} resident streams = "
+                    f"round(pp_util {fill} x stages), DERIVED and never configured as a "
+                    "batch (D29 removes batch size from this surface; D38 makes the "
+                    "FILL the axis). At pp_util = 1.0 the pipeline is ALWAYS FULL and "
+                    "this is D29 unchanged: decode is independent streams staggered one "
+                    "stage apart, one token exits per BEAT, throughput = 1/beat. Below "
+                    "1.0 the entries are spaced stages/D beats apart, D tokens leave "
+                    "every `stages` beats, and the throughput is the full pipeline's "
+                    "scaled by the fill. Every analog op fires at M = 1 and "
+                    "attention/scan are priced per stream at that stream's own context. "
+                    "EVERY stage holds all D streams' state and KV for its layers, "
+                    "which the evaluation reports per stage and checks against the "
+                    "declared tiers."
                 ),
             )
         )
@@ -2180,7 +2649,25 @@ def build_mapping(
                 ),
             )
         )
-    decode_window = int(spec.decode_window or DEFAULT_DECODE_WINDOW)
+    # THE MEASUREMENT WINDOW IS DERIVED, NOT DECLARED (M3/M10).
+    #
+    # The window must be long enough that the beat it reports is the machine's
+    # rhythm rather than its ramp. A pipeline with uneven stage service times is
+    # still settling for on the order of D beats after it fills, so a window
+    # shorter than the stage count reports the ramp: Granite's derived beat
+    # moved 2.3x between window 3 and window 14 on a hand-set 3, and settled to
+    # within 5% only once the window reached the stage count.
+    #
+    # So the floor is the stage count - every stage is then observed in steady
+    # state at least once. A card may still declare a LARGER window (more
+    # measurement is never wrong); a smaller one is raised to the floor and the
+    # raise is disclosed. This costs lowering time and buys a number that does
+    # not move with the knob. It changes NO silicon: the store is sized from the
+    # served request, never from the window.
+    _declared_window = int(spec.decode_window or 0)
+    _window_floor = len(stages) if regime == REGIME_FILLED and phase == "decode" else 0
+    decode_window = max(_declared_window or DEFAULT_DECODE_WINDOW, _window_floor)
+    _window_raised = decode_window > (_declared_window or DEFAULT_DECODE_WINDOW)
     if regime == REGIME_FILLED and phase == "decode":
         # Under D29 the window is measured in BEATS, not in a request's decode
         # steps: the DAG lowers D - 1 beats of fill plus `decode_window` beats
@@ -2191,13 +2678,21 @@ def build_mapping(
             Relaxation(
                 constraint="decode_window",
                 value=(
-                    f"{len(stages) + decode_window + 1} beats lowered "
-                    f"({len(stages) - 1} to fill the pipeline, then {decode_window} "
-                    "STEADY inter-exit intervals measured)"
+                    f"{lowered_beats(len(stages), resident_streams_of(len(stages), fill), decode_window)} "
+                    f"beats lowered ({len(stages) - 1} to fill the pipeline, then "
+                    f"{decode_window} STEADY inter-exit intervals measured)"
                 ),
                 reason=(
-                    "ADJ-6 bounds the lowered window; D29 makes the unit a BEAT. The "
-                    f"pipeline needs D - 1 = {len(stages) - 1} beats to fill; "
+                    (
+                        f"DERIVED: raised from the declared "
+                        f"{_declared_window or DEFAULT_DECODE_WINDOW} to the stage count "
+                        f"{len(stages)} so every stage is observed in steady state at "
+                        "least once; a shorter window reports the ramp. "
+                        if _window_raised else ""
+                    )
+                    + "ADJ-6 bounds the lowered window; D29 makes the unit a BEAT. The "
+                    f"pipeline needs {len(stages) - 1} beats to fill (one per stage "
+                    "after the first, whatever the fill); "
                     f"{decode_window + 2} traversals then complete inside the window and "
                     f"their {decode_window + 1} inter-exit intervals are measured, of "
                     "which the FIRST is held out (that traversal travelled through a "
@@ -2219,6 +2714,129 @@ def build_mapping(
                     "window is lowered and the remaining steps are an extrapolation the "
                     "consumer must declare. P3 lowers the window and states the bound; "
                     "it extrapolates nothing."
+                ),
+            )
+        )
+
+    # (1) THE MAPPING IS A STUB, and EVERY MAPPED RUN SAYS SO — filled or
+    # lockstep. This used to sit inside the `regime == REGIME_FILLED` guard
+    # below, which contradicted the constant's own contract ("Every artifact of
+    # a mapped run carries it BY NAME") and left the lockstep artifacts — every
+    # ViT point, among others — with no stub disclosure at all. A reader could
+    # not tell a stub-round result from a designed one on those pages.
+    #
+    # The VALUE is verbatim in both regimes, because it names the STUB ROUND
+    # this artifact belongs to and a grep for it must find every page of it.
+    # The REASON is regime-aware, because on lockstep the three mechanisms the
+    # value names did not actually run, and printing that they did would be a
+    # false statement about the machine. Both readings end in the same place:
+    # the result is not design-valid.
+    _stub_reason = MAPPING_STUB_REASON
+    if regime != REGIME_FILLED:
+        _stub_reason = (
+            MAPPING_STUB_REASON
+            + f" THIS RUN IS {regime!r}, NOT THE FILLED PIPELINE: the pipeline-order "
+            "packer, the per-layer stage plan and the resident-stream state bill "
+            "named in the value above did NOT run on it — the retired lockstep "
+            "regime places per chip and has no stage plan at all. What binds THIS "
+            "point is that per-chip placement. The value names the stub round the "
+            "artifact belongs to, and the conclusion is unchanged: NOT DESIGN-VALID "
+            "until the mapping law lands."
+        )
+    relaxations.append(
+        Relaxation(
+            constraint=MAPPING_STUB_KEY,
+            value=MAPPING_STUB_VALUE,
+            reason=_stub_reason,
+        )
+    )
+
+    # --- THE STUB ROUND'S DISCLOSURES (one per fact, each by name) --------
+    stub_tail_slots = 0
+    if regime == REGIME_FILLED:
+        # (2) THE FILL, when it is not the full pipeline D29 assumed.
+        _stage_count = len(stages)
+        _residents = resident_streams_of(_stage_count, fill)
+        if fill != PP_UTIL_FULL:
+            relaxations.append(
+                Relaxation(
+                    constraint="pipeline_underfill",
+                    value=(
+                        f"mapping.pp_util = {fill}: D = {_residents} resident stream(s) "
+                        f"over {_stage_count} stage(s) (realized fill "
+                        f"{(_residents / _stage_count) if _stage_count else 0.0:.6g})"
+                    ),
+                    reason=(
+                        "D38: \"THE NEW AXIS: pp_util in {1.0, 0.75, 0.5} - a "
+                        "deliberately UNDERFILLED pipeline (resident streams = pp_util x "
+                        "stages). Trades state/KV area (linear in resident streams) "
+                        "against throughput (linear in fill).\" THIS PIPELINE IS NOT "
+                        "FULL: only D of its stages hold a stream at any beat, so the "
+                        "machine emits D tokens every `stages` beats and its throughput "
+                        "is the full pipeline's scaled by the realized fill. The saving "
+                        "is state and KV: every stage holds D streams' worth, not "
+                        "`stages` streams' worth. Both halves are measured, not "
+                        "asserted - the DAG lowers exactly D streams and spaces their "
+                        "entries by stages/D, so one accounting produces both."
+                    ),
+                )
+            )
+        # (3) THE LINK PRICES, whenever the hop law is what charged the handoffs.
+        if links != LINKS_ZEROED:
+            relaxations.append(
+                Relaxation(
+                    constraint="stage_handoff_hop_prices",
+                    value=(
+                        f"intra-chip {T_HOP_INTRA_CHIP * 1e9:.6g} ns, cross-chip "
+                        f"{T_HOP_CROSS_CHIP * 1e9:.6g} ns, intra-macro 0 s"
+                    ),
+                    reason=" ".join(link_price_disclosures()),
+                )
+            )
+    if stub_pack:
+        _shard_macros = int(
+            stub_packings[0].macro_count if 0 in stub_packings else 0
+        )
+        stub_tail_slots = backbone_per_shard * macro_slots - _shard_macros
+        for line in analog_chip_capacity_disclosures(device.macro_footprint_mm2()):
+            if line not in notes:
+                notes.append(line)
+        relaxations.append(
+            Relaxation(
+                constraint="pipeline_order_packing",
+                value=(
+                    f"C = {macro_slots} slot(s)/chip, {_shard_macros} macro(s) per tp "
+                    f"shard in {backbone_per_shard} chip(s), tail_slots = "
+                    f"{stub_tail_slots}"
+                ),
+                reason=(
+                    "The stub packer walks ONE stream per tp shard in pipeline order "
+                    "and cuts a chip every C macros, ACROSS stage boundaries: a layer "
+                    "whose matrices straddle a cut sits on two chips, which the layer "
+                    "-> chip map reports. There is exactly ONE tail - the slots the "
+                    "stream did not reach in the last chip it filled - and it is the "
+                    "number above; every other chip is full by construction. C is "
+                    "DERIVED from area by the law layer, so cim.chip.arrays_per_chip "
+                    "and mapping.macros_per_chip place nothing here and ADJ-13's "
+                    "per-point capacity probe retires with them. The declared "
+                    "partition (cim.chip.layers_per_chip / mapping.layers_per_chip) is "
+                    "SUPERSEDED: D38 makes the machine maximally disaggregated and the "
+                    "capacity decides where a chip ends. The packing is recorded once "
+                    "per stream, under the first chip it filled, so its cells are "
+                    "counted once."
+                ),
+            )
+        )
+    elif stub_skipped:
+        relaxations.append(
+            Relaxation(
+                constraint="pipeline_order_packing",
+                value="not applied",
+                reason=(
+                    f"{stub_skipped} The stub packer places a mapped run's backbone as "
+                    "one pipeline-order stream per tp shard; this run is placed by the "
+                    "per-chip law instead, and its chip count is the declared "
+                    f"partition's ({placement_source})."
                 ),
             )
         )
@@ -2248,9 +2866,13 @@ def build_mapping(
         relaxations=relaxations,
         packing=packing,
         packings=packings,
+        links=links,
         regime=regime,
         stages=tuple(stages),
         stage_basis=stage_basis,
+        pp_util=fill,
+        chip_capacity=stub_capacity,
+        tail_slots=stub_tail_slots,
     )
     if dense:
         summary = mapping.packing_summary()
@@ -2507,6 +3129,11 @@ def build_pd_pair(
     two halves equal reproduces the non-disaggregated machine exactly: both
     inventories are the unified mapping, and the only extra quantity is the
     handoff byte count.
+
+    The handoff is priced under the halves' LINK PRICING MODE: ``priced`` (the
+    default) charges it the D17 p2p law, ``zeroed`` prices it at 0 s like every
+    other inter-chip transfer of that run. The two halves must declare the same
+    mode — one wire, one law.
     """
     mapping_config = getattr(hw_config, "mapping_config", None)
     if prefill_spec is None and mapping_config is not None:
@@ -2541,12 +3168,38 @@ def build_pd_pair(
     kv_bytes, state_bytes, basis = pd_handoff_bytes(prefill)
     bandwidth, latency = hw_config.network_layout.link_for_parallelism("pp")
     total = kv_bytes + state_bytes
+    # --- the LINK PRICING MODE reaches the D16 handoff too -----------------
+    # This handoff IS an inter-chip boundary transfer: it rides the same pp
+    # link and the same D17 p2p law every other one rides, and it is the
+    # LARGEST hop in a PD machine. A mode that vacates that law has to reach
+    # it, or a zeroed run prints a nonzero inter-chip time beside a disclosure
+    # that says every inter-chip transfer is 0 s. The two halves declare the
+    # mode independently and ONE wire cannot be priced two ways, so a
+    # disagreement is refused by name rather than silently resolved.
+    if prefill.links != decode.links:
+        raise MappingError(
+            "package",
+            f"mapping.pd.prefill.links = {prefill.links!r} and mapping.pd.decode.links "
+            f"= {decode.links!r} disagree, and the D16 handoff is ONE wire between the "
+            "two halves: it cannot be charged the D17 p2p law by one side and relaxed "
+            "to 0 s by the other. Declare the SAME link pricing mode on both halves.",
+        )
+    if prefill.links == LINKS_ZEROED:
+        handoff_time = 0.0
+        handoff_basis = (
+            f"{basis} Handoff priced at 0 s: mapping.links = '{LINKS_ZEROED}', the "
+            "TEMPORARY relaxation (disclosed as links_zeroed on every artifact of "
+            "both halves). The BYTES above are untouched; only the TIME is relaxed."
+        )
+    else:
+        handoff_time = CimDeviceModel.p2p_time_s(total, bandwidth, latency)
+        handoff_basis = basis
     handoff = PDHandoff(
         kv_bytes=kv_bytes,
         state_bytes=state_bytes,
         bandwidth_bytes_per_s=bandwidth,
         latency_s=latency,
-        time_s=CimDeviceModel.p2p_time_s(total, bandwidth, latency),
-        basis=basis,
+        time_s=handoff_time,
+        basis=handoff_basis,
     )
     return PDPair(prefill=prefill, decode=decode, handoff=handoff)

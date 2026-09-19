@@ -155,9 +155,9 @@ def test_unknown_key_and_unknown_axis_are_refused(tmp_path):
     assert "objectiv" in str(excinfo.value)
 
     with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        _run(tmp_path, {"axes": {"adc_mux": [1, 2]}})
+        _run(tmp_path, {"axes": {"cache_line_bytes": [1, 2]}})
     message = str(excinfo.value)
-    assert "adc_mux" in message
+    assert "cache_line_bytes" in message
     # An unknown axis names what IS swept and what each axis moves.
     assert "cim.cards.<analog card>.bank_depth" in message
 
@@ -258,27 +258,69 @@ def test_every_axis_writes_exactly_one_documented_field():
         # count IS the resident-stream count D and a sweep has to be able to
         # move it without moving the chip split.
         "layers_per_stage": lambda raw: raw["mapping"]["layers_per_stage"],
+        # ADJ-14: the chiplet count is an axis again, because an engine is now
+        # sized for the stages its chiplet serves.
+        "shared_chiplets": lambda raw: raw["mapping"]["shared_chiplets"],
+        # ADJ-15: where the short depthwise conv's WORK runs. Its weights are
+        # never tiled onto analog arrays under either value; the axis moves the
+        # work between every macro's own pool and the shared chiplet, and the
+        # models disagree about which is cheaper.
+        "conv_placement": lambda raw: raw["cim"]["allocation"]["conv_placement"],
+        # THE PLATFORM BOX (D35-REVISED, 2026-08-29): the macro is X x Y : Z
+        # and the fold mux = Y/Z is DERIVED, so the two axes are the
+        # constraint-native coordinates Z (converters) and Y (storage tile).
+        # Both are legal only on a card that DERIVES its numbers from the
+        # ADC-macro sheet, so they are walked on a base whose ctt card names a
+        # calc_profile; the refusal on a hand-pinned card has its own test.
+        "macro_z": lambda raw: raw["cim"]["cards"]["ctt"]["params"]["adcs"],
+        "macro_y": lambda raw: raw["cim"]["cards"]["ctt"]["params"]["cols"],
     }
     assert set(fields) == set(DSE.AXIS_TARGETS)
+    derived_base = copy.deepcopy(base)
+    declared_analog = derived_base["cim"]["analog"]
+    derived_base["cim"]["cards"]["ctt"] = {
+        "kind": "analog_macro",
+        "device": "ctt",
+        "calc_profile": "george_cima_mux1",
+        "params": {
+            "rows": int(declared_analog["rows"]),
+            "cols": int(declared_analog["cols"]),
+            "adcs": int(declared_analog["adcs"]),
+            "shots_per_output": int(declared_analog["shots_per_output"]),
+        },
+    }
     values = {
         "bank_depth": 2,
         "column_sets_per_tile": 2,
         "layers_per_chip": 4,
         "layers_per_stage": 2,
+        "shared_chiplets": 3,
+        "conv_placement": "shared_digital",
+        "macro_z": 512,
+        "macro_y": 2048,
     }
     for axis, reader in fields.items():
-        moved = DSE.apply_point(base, {axis: values[axis]}, "ctt", "sa", "test")
+        axis_base = derived_base if axis in ("macro_z", "macro_y") else base
+        moved = DSE.apply_point(axis_base, {axis: values[axis]}, "ctt", "sa", "test")
         assert reader(moved) == values[axis], axis
         # Everything else is untouched: rebuild the base from the moved dict
         # by putting the one field back and compare the whole document.
         restored = copy.deepcopy(moved)
-        if axis == "column_sets_per_tile":
+        if axis in ("column_sets_per_tile", "conv_placement"):
             restored["cim"].pop("allocation")
         elif axis == "bank_depth":
             restored["cim"]["cards"]["ctt"].pop("bank_depth")
+        elif axis in ("macro_z", "macro_y"):
+            # The macro axes write the CARD and re-derive the `cim.analog`
+            # fallback from the same sheet call, so one file never carries two
+            # macros. Restoring means putting BOTH back.
+            restored["cim"]["cards"]["ctt"]["params"] = copy.deepcopy(
+                axis_base["cim"]["cards"]["ctt"]["params"]
+            )
+            restored["cim"]["analog"] = copy.deepcopy(axis_base["cim"]["analog"])
         else:
             restored["mapping"].pop(axis)
-        assert restored == base, axis
+        assert restored == axis_base, axis
 
 
 def test_card_axis_is_refused_when_the_config_declares_no_card(tmp_path):

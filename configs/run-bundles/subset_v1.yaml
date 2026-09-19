@@ -1,0 +1,32 @@
+bundle: subset_v1
+label: 'George''s default test set: pure SSM, two ViT sizes, one SSM/attention hybrid'
+manifest: docs/qif/dse/subset_v1.json
+members:
+- name: mamba2_2p7b
+  model_id: Mamba2-2.7B
+  model_config: configs/model-config/mamba2_2p7b_decode_inf.yaml
+  hardware_config: configs/hardware-config/fws_cim_mamba2_frontier.yaml
+  mode: LLM
+  output_dir: docs/qif/dse/mamba2_2p7b_frontier
+  label: Mamba2-2.7B (pure SSM)
+- name: vit_large_story_64
+  model_id: ViT-Large-story-64
+  model_config: configs/model-config/vit_large_story_64_inf.yaml
+  hardware_config: configs/hardware-config/fws_cim_vit_large_frontier.yaml
+  mode: VIT
+  output_dir: docs/qif/dse/vit_large_story_64_frontier
+  label: ViT-Large (encoder)
+- name: vit_huge_story_64
+  model_id: ViT-Huge-story-64
+  model_config: configs/model-config/vit_huge_story_64_inf.yaml
+  hardware_config: configs/hardware-config/fws_cim_vit_frontier.yaml
+  mode: VIT
+  output_dir: docs/qif/dse/vit_huge_story_64_frontier
+  label: ViT-Huge (encoder)
+- name: granite_4_0_h_1b
+  model_id: Granite-4.0-H-1B
+  model_config: configs/model-config/granite_4_0_h_1b_decode_inf.yaml
+  hardware_config: configs/hardware-config/fws_cim_granite_1b_frontier.yaml
+  mode: LLM
+  output_dir: docs/qif/dse/granite_4_0_h_1b_frontier
+  label: Granite-4.0-H-1B (small hybrid SSM)

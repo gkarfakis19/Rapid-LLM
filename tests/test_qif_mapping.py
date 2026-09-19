@@ -1290,3 +1290,84 @@ def test_a_contradicting_slice_index_is_refused_through_a_real_config():
     assignments[2]["slice_index"] = 3
     with pytest.raises(MappingError, match="slice_index = 3 but declaration order"):
         _sliced_moe_mapping(assignments)
+
+
+# ---------------------------------------------------------------------------
+# THE STUB PACKER (stub-v0): chips are filled in pipeline order, at the
+# capacity the law layer derives from area (D38 round)
+# ---------------------------------------------------------------------------
+
+
+def _granite_frontier_mapping():
+    """A mapped, DENSE fws_cim run - the shape the stub packer places."""
+    return _mapping(
+        HW_DIR / "fws_cim_granite_tiny_frontier.yaml",
+        MODEL_DIR / "granite_4_0_h_tiny_inf.yaml",
+    )
+
+
+def test_the_packer_fills_chips_in_pipeline_order_at_the_derived_capacity():
+    """Capacity is AREA, the cut is the capacity, and the tail is reported."""
+    mapping = _granite_frontier_mapping()
+    device = mapping.device
+    capacity = device.analog_chip_slots()
+    assert capacity == mapping.chip_capacity > 0
+    # C = floor(400 mm2 / macro footprint): DERIVED, never declared.
+    assert capacity == int(
+        fws_mapping.ANALOG_CHIP_AREA_MM2 // device.macro_footprint_mm2()
+    )
+    chips = mapping.analog_chips()
+    assert {chip.macro_slots for chip in chips} == {capacity}
+
+    # ONE stream per tp shard, cut every C macros: the macros the stream
+    # reached plus the ONE tail fill the chips exactly.
+    packing = next(iter(mapping.packings.values()))
+    assert len(chips) * capacity == packing.macro_count + mapping.tail_slots
+    assert 0 <= mapping.tail_slots < capacity
+    summary = mapping.packing_summary()
+    assert summary["chip_capacity_slots"] == capacity
+    assert summary["tail_slots"] == mapping.tail_slots
+
+
+def test_the_pipeline_order_cut_crosses_stage_boundaries():
+    """A layer whose matrices straddle a cut sits on TWO chips, and says so."""
+    mapping = _granite_frontier_mapping()
+    straddling = [
+        layer for layer, chips in mapping.layer_chip.items() if len(chips) > 1
+    ]
+    assert straddling, (
+        "the whole point of packing in pipeline order at a capacity is that the "
+        "cut falls where the stream fills a chip, not where a layer ends"
+    )
+    # Every layer is on at least one chip and the chips are contiguous, because
+    # the stream is walked in order.
+    for layer, chips in mapping.layer_chip.items():
+        assert chips == tuple(range(min(chips), max(chips) + 1))
+    # The stages still name the chips their layer sits on.
+    for stage in mapping.stages:
+        assert stage.chips == tuple(mapping.layer_chip[stage.layers[0]])
+
+
+def test_the_stub_packing_is_disclosed_and_the_declared_capacity_is_refused():
+    mapping = _granite_frontier_mapping()
+    named = {d.constraint: d for d in mapping.relaxations()}
+    assert fws_mapping.MAPPING_STUB_KEY in named
+    assert named[fws_mapping.MAPPING_STUB_KEY].value == fws_mapping.MAPPING_STUB_VALUE
+    packer = named["pipeline_order_packing"]
+    assert "tail_slots" in packer.value and "ACROSS stage boundaries" in packer.reason
+    assert "ADJ-13" in packer.reason
+    # The chip's capacity arithmetic rides the mapping's notes, once.
+    assert any("analog chip capacity C = floor(" in note for note in mapping.notes)
+
+    # A DECLARED capacity is a second accounting of a derived quantity.
+    def declare(raw):
+        raw["mapping"]["macros_per_chip"] = 64
+
+    with pytest.raises(MappingError) as excinfo:
+        _mapping(
+            HW_DIR / "fws_cim_granite_tiny_frontier.yaml",
+            MODEL_DIR / "granite_4_0_h_tiny_inf.yaml",
+            mutate=declare,
+        )
+    assert "mapping.macros_per_chip" in str(excinfo.value)
+    assert "REFUSED BY NAME" in str(excinfo.value)

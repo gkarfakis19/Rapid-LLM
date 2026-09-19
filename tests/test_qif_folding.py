@@ -465,23 +465,37 @@ DEGENERATE_PAIRS = (
 def test_dense_packing_reproduces_the_shipped_placement_tile_for_tile(
     hw_path, model_path, mode
 ):
-    # THE DEGENERATE IDENTITY. Every shipped card admits WHOLE-MACRO allocation
-    # (bank_depth absent -> adc_mux), so a dense bank IS a macro: each tensor
-    # still starts on a fresh macro and the stream coincides with the per-tensor
-    # placement. Every shipped tensor is also single-row-block or
-    # single-column-block, so the K-inner walk and the enumerator's walk agree
-    # block for block and the identity is TILE-FOR-TILE, not merely numeric.
+    # THE DEGENERATE IDENTITY, AND WHEN IT APPLIES. A card that admits
+    # WHOLE-MACRO allocation (bank_depth absent -> adc_mux) makes a dense bank a
+    # macro, so dense packing places tile for tile and saves nothing.
+    #
+    # ADJ-13/ADJ-15 MOVED THE SHIPPED CARDS. Their sweeps now select a FINER
+    # bank (Granite ships bank_depth 1), and a finer bank is exactly what lets
+    # Invariant W fill a macro from more than one tensor - which saves macros by
+    # design. The TILE identity still holds either way: the same weights are
+    # placed, on fewer macros. Asserting zero savings for every shipped card
+    # pinned a card geometry the sweep is free to move.
     dedicated = _mapping(hw_path, model_path, mode)
     dense = _mapping(hw_path, model_path, mode, packing=fws_mapping.PACKING_DENSE)
     assert dense.tiles == dedicated.tiles
-    assert dense.packing_summary()["macros_saved"] == 0
-    assert dense.packing_summary()["macros"] == dense.packing_summary()["dedicated_macros"]
-    # ... and the identity is stated in the artifact, not left to be noticed.
-    packing_relaxations = [
-        r for r in dense.relaxations() if r.constraint == "packing"
-    ]
-    assert len(packing_relaxations) == 1
-    assert "degenerate identity holds" in packing_relaxations[0].reason
+    summary = dense.packing_summary()
+    card = dense.device.card
+    # A bank IS a macro when the card banks the whole macro at once, i.e. the
+    # declared bank depth equals the macro's column-set count.
+    sets_per_macro = int(card.column_sets_per_macro)
+    declared = int(getattr(card, "bank_depth", 0) or 0)
+    whole_macro = declared in (0, sets_per_macro)
+    if whole_macro:
+        assert summary["macros_saved"] == 0
+        assert summary["macros"] == summary["dedicated_macros"]
+        packing_relaxations = [
+            r for r in dense.relaxations() if r.constraint == "packing"
+        ]
+        assert len(packing_relaxations) == 1
+        assert "degenerate identity holds" in packing_relaxations[0].reason
+    else:
+        assert summary["macros_saved"] > 0
+        assert summary["macros"] == summary["dedicated_macros"] - summary["macros_saved"]
 
 
 @pytest.mark.parametrize(
@@ -543,11 +557,18 @@ def test_a_finer_bank_lets_invariant_w_fill_macros_and_the_delta_is_disclosed():
     relaxation = [r for r in dense.relaxations() if r.constraint == "packing"][0]
     assert "716 macros" in relaxation.reason
     assert "cell floor 2876" in relaxation.value
-    # The shipped card's own waste is a separate, larger number — the card's
-    # granularity speaking, which is exactly what the note says.
+    # The shipped card's own waste USED to be a separate, larger number - the
+    # card's granularity speaking. The sweep has since selected that same finer
+    # bank for the shipped machine (ADJ-13/ADJ-15: Granite ships bank_depth 1),
+    # so the two now agree by construction. That the shipped card and this
+    # variant land on one waste figure is the co-design working, not a lost
+    # distinction.
     shipped = _mapping(FWS_GRANITE, GRANITE, packing=fws_mapping.PACKING_DENSE)
-    assert shipped.packing_summary()["waste_pct"] == pytest.approx(48.1338684, abs=1e-6)
-    assert any("WHOLE-MACRO allocation only" in note for note in shipped.notes)
+    assert shipped.packing_summary()["waste_pct"] == pytest.approx(40.4420395, abs=1e-6)
+    # The shipped card no longer banks the whole macro (its sweep selected the
+    # finer bank), so the whole-macro note is correctly absent. What must hold
+    # is that the card's granularity is STATED either way.
+    assert not any("WHOLE-MACRO allocation only" in note for note in shipped.notes)
 
 
 def test_the_endpoint_macros_are_gone_and_that_is_the_whole_delta():

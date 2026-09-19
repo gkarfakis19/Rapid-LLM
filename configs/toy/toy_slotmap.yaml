@@ -1,0 +1,84 @@
+# The TOY SLOT-MAP MODEL - a mapper DEBUG toy, not a machine anybody would build.
+#
+# It exists to exercise the slot mapper and its independent checker end to end
+# on a chain small enough to read by hand: three blocks of four bundles, one
+# hidden size that is exactly the macro height, and a chip capacity that is a
+# debug override rather than a die budget. No accuracy, no digital chiplet, no
+# per-sequence state store, no priced bytes. Nothing here should be quoted as
+# a result for any real model.
+#
+# The register entry behind the law is D39 (docs/qif/DECISIONS.md): the beat is
+# occupancy only, slot equals phase, and the mapper's ledgers are waste, chain
+# latency and seams.
+
+schema: fws_toy_slotmap/1
+
+toy:
+  model_id: "Toy slot-map"
+  label: "Toy slot map (mapper debug)"
+  name: toy_slotmap
+
+  # hidden == macro rows, so every bundle's K fits one macro exactly.
+  rows: 512
+  hidden: 512
+  layers: 3
+
+  # A DEBUG OVERRIDE passed straight to the mapper. It is not the 400 mm2 die
+  # law the real platform work uses; it is a small number that makes seams and
+  # stranded slots happen on a twelve-bundle chain.
+  chip_macros: 6
+
+  # Chain order inside one block. columns is the bundle's stored column-slots,
+  # ALL K-BLOCKS TOGETHER, the meaning slots.bundles[].columns carries in the
+  # document (docs/qif/atlas/SCHEMA.md). The K-blocks share it equally.
+  bundles:
+    - block: qkv
+      columns: 768          # q 512 + k 128 + v 128
+      k_blocks: 1
+      reduce: false
+      note: "K = 512 = the macro height"
+    - block: out
+      columns: 512
+      k_blocks: 1
+      reduce: false
+      note: "K = 512"
+    - block: ffn1
+      columns: 2048
+      k_blocks: 1
+      reduce: false
+      note: "K = 512, the widest bundle in the chain"
+    - block: ffn2
+      columns: 2048         # four K-blocks of 512 column-slots each
+      k_blocks: 4
+      reduce: true
+      note: >-
+        K = 2048 = four K-blocks of 512 rows. Each K-block is its own 512
+        column-slots on its own input slice, so the four may fire on different
+        macros at the same tick and their partials reduce.
+
+# One point per macro geometry. mux = Y / Z is derived, and it fixes the beat.
+points:
+  - id: p00
+    z: 64
+    y: 512
+    note: "mux 8"
+  - id: p01
+    z: 64
+    y: 1024
+    note: "mux 16"
+  - id: p02
+    z: 64
+    y: 2048
+    note: "mux 32"
+  - id: p03
+    z: 64
+    y: 4096
+    note: "mux 64 - the whole chain fits one chip, so it crosses no seam"
+  - id: p04
+    z: 512
+    y: 2048
+    note: "mux 4 - qkv is 768 columns against Z = 512, so this point shows ragged waste"
+  - id: p05
+    z: 16
+    y: 2048
+    note: "mux 128"

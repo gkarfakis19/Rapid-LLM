@@ -6,8 +6,8 @@
 #
 # sweep base:  configs/hardware-config/fws_cim_qwen3_5_4b_frontier.yaml
 # model:       configs/model-config/qwen3_5_4b_inf.yaml
-# candidate:   c005 (layers_per_chip = 4, bank_depth = 1, shared_chiplets = 4, arrays_per_chip = 73 (DERIVED))
-# headline:    43433.8 tokens/s, measured on this point's own timeline by fws_eval
+# candidate:   c022 (layers_per_chip = 1, bank_depth = 2, shared_chiplets = 8, conv_placement = macro_pool, arrays_per_chip = 19 (DERIVED))
+# headline:    52546.9 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
@@ -30,17 +30,19 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 73
+    arrays_per_chip: 19
     layers_per_chip: 4
     moe_expert_parallel: 1
   cards:
     ctt:
+      bank_depth: 2
       kind: analog_macro
       device: ctt
-      bank_depth: 1
     sa:
       kind: digital_chiplet
       synthesis_library: 22nm
+  allocation:
+    conv_placement: macro_pool
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 0
@@ -155,9 +157,9 @@ execution_backend:
 inference:
   kvcache_type: cim_sram
 mapping:
+  shared_chiplets: 8
+  layers_per_chip: 1
   parallelism:
     tp: 1
   packing: dense
   decode_window: 3
-  layers_per_chip: 4
-  shared_chiplets: 4

@@ -42,6 +42,11 @@ MATRIX_YAMLS = {
     "falcon_h1_3b": ("ssm",),
     "hunyuan_4b": (),
     "gemma_3_4b": (),
+    # subset_v1 (GEORGE, 2026-08-28): the REAL PURE SSM of the default test
+    # set. falcon_mamba_7b is the other pure-recurrence row, but it is Mamba-1
+    # and over the D2 cutoff, so it is a reference. This one is Mamba-2 (SSD)
+    # and inside the cutoff, which makes it the only SUPPORTED pure-SSM row.
+    "mamba2_2p7b": ("ssm",),
 }
 #: The rows that must parse AND run on the existing (non-hybrid) paths.
 RUNS_NOW_YAMLS = ("hunyuan_7b", "smollm3_3b", "hunyuan_4b")
@@ -765,6 +770,170 @@ def test_param_census_rejects_vit_configs():
     model = config.parse_config(str(MODEL_DIR / "vit_base_inf.yaml"), "VIT").model_config
     with pytest.raises(ValueError, match="ViT"):
         llm_util.model_raw_param_count(model)
+
+
+# ---------------------------------------------------------------------------
+# P6.1 (vision) — the ViT rows, which have their OWN census
+#
+# ``model_raw_param_count`` refuses a ViT BY NAME (the test just above pins
+# that), because an encoder has no vocabulary embedding, no lm_head and a patch
+# projection instead. So a vision row's census is composed from the ViT-specific
+# helpers llm_util already exports plus the per-block terms the LLM census
+# shares, and it is held to the SAME provenance discipline as every LLM row:
+# a published source, a verification date, a published total, and the same
+# 3% gate with the same capped, justified widening path.
+# ---------------------------------------------------------------------------
+
+
+#: The vision rows that carry a provenance block and a census.
+VIT_MATRIX_YAMLS = ("vit_large_story_64",)
+
+
+def _vit_yaml_path(name):
+    return MODEL_DIR / f"{name}_inf.yaml"
+
+
+def vit_raw_param_count(model):
+    """Total RAW parameters of a ViT encoder config.
+
+    Patch projection + position table + prefix tokens + every block's attention
+    and MLP weights + the norm/classifier head. Weight matrices only, on the
+    same convention as :func:`llm_util.model_raw_param_count`: biases, norms
+    inside the blocks and rotary tables are omitted, and they are well under
+    the 3% gate this feeds.
+    """
+    hidden_dim = int(model.hidden_dim)
+    gated = llm_util.uses_gated_mlp(model.model_type, getattr(model, "swiglu_mlp", False))
+    tokens = int(model.num_patches) + int(model.num_prefix_tokens)
+    total = llm_util.vit_patch_embed_param_count(
+        hidden_dim=hidden_dim, patch_size=model.patch_size, in_chans=model.in_chans
+    )
+    total += tokens * hidden_dim  # position table (+ any prefix token embeddings)
+    total += int(model.num_layers) * (
+        llm_util.attention_block_param_count(hidden_dim=hidden_dim, attention=model.attention)
+        + llm_util.ffn_param_count(
+            hidden_dim=hidden_dim, intermediate_size=model.intermediate_size, gated=gated
+        )
+    )
+    total += llm_util.vit_head_param_count(
+        hidden_dim=hidden_dim, num_classes=int(model.vocab_size)
+    )
+    return int(total)
+
+
+@pytest.mark.parametrize("name", VIT_MATRIX_YAMLS)
+def test_vit_matrix_yaml_parses_as_a_uniform_encoder(name):
+    model = config.parse_config(str(_vit_yaml_path(name)), "VIT").model_config
+    assert model.run_type == "inference"
+    # A ViT is a UNIFORM encoder: the block-typed layer plan does not apply to
+    # it (config refuses one by name), so it declares no hybrid block kinds.
+    assert model.layer_plan is None
+    assert model.hybrid_block_kinds == ()
+
+
+@pytest.mark.parametrize("name", VIT_MATRIX_YAMLS)
+def test_vit_matrix_yaml_records_its_published_source(name):
+    provenance = _load_yaml(_vit_yaml_path(name))["provenance"]
+    assert provenance["source"].startswith("https://huggingface.co/")
+    assert re.fullmatch(r"20\d\d-\d\d-\d\d", str(provenance["verified"]))
+    assert str(provenance["verified"]) >= "2026-08-23"
+    assert provenance["d2_status"] in {"supported", "reference"}
+    assert int(provenance["published_total_params"]) > 0
+
+
+@pytest.mark.parametrize("name", VIT_MATRIX_YAMLS)
+def test_vit_param_total_matches_published_figure(name):
+    path = _vit_yaml_path(name)
+    provenance = _load_yaml(path)["provenance"]
+    model = config.parse_config(str(path), "VIT").model_config
+    computed = vit_raw_param_count(model)
+    published = int(provenance["published_total_params"])
+    tolerance = _published_tolerance(name, provenance)
+    relative_error = abs(computed - published) / published
+    assert relative_error <= tolerance, (
+        f"{name}: census {computed:,} vs published {published:,} "
+        f"({relative_error:.2%} > {tolerance:.0%})"
+    )
+
+
+@pytest.mark.parametrize("name", VIT_MATRIX_YAMLS)
+def test_vit_param_total_agrees_with_the_d2_status(name):
+    path = _vit_yaml_path(name)
+    provenance = _load_yaml(path)["provenance"]
+    computed = vit_raw_param_count(config.parse_config(str(path), "VIT").model_config)
+    if provenance["d2_status"] == "supported":
+        assert computed <= D2_PARAM_CUTOFF
+    else:
+        assert computed > D2_PARAM_CUTOFF
+
+
+def test_vit_large_story_64_is_the_huge_row_one_size_down():
+    # subset_v1 pairs the two vision points, so the ONLY thing that may differ
+    # between them is the model size: same story-64 convention (128px / 16px
+    # patches, no CLS token), same plain-MLP encoder, same 16 heads.
+    large = config.parse_config(str(_vit_yaml_path("vit_large_story_64")), "VIT").model_config
+    huge = config.parse_config(str(MODEL_DIR / "vit_huge_story_64_inf.yaml"), "VIT").model_config
+    assert (large.hidden_dim, large.num_layers, large.num_heads, large.intermediate_size) == (
+        1024, 24, 16, 4096,
+    )
+    assert large.seq_len == huge.seq_len == 64
+    assert large.num_prefix_tokens == huge.num_prefix_tokens == 0
+    assert large.patch_size == huge.patch_size
+    assert large.image_size == huge.image_size
+    assert large.model_type == huge.model_type
+    assert large.num_heads == huge.num_heads
+
+
+# ---------------------------------------------------------------------------
+# subset_v1's pure-SSM member
+# ---------------------------------------------------------------------------
+
+
+def test_mamba2_2p7b_is_a_pure_ssd_stack():
+    # The point of this row: pure recurrence (like falcon_mamba_7b) but the
+    # MAMBA-2 variant and inside the D2 cutoff, so it is SUPPORTED rather than
+    # an architecture reference.
+    model = config.parse_config(str(_matrix_yaml_path("mamba2_2p7b")), "LLM").model_config
+    assert model.attention is None
+    assert model.ssm.variant == "mamba2"
+    assert model.ffn_per_layer is False
+    assert set(model.block_kinds) == {"ssm"}
+    assert (model.hidden_dim, model.num_layers) == (2560, 64)
+    assert model.ssm.d_state == 128
+    assert model.ssm.resolve_d_inner(model.hidden_dim) == 5120  # 80 heads x 64
+    assert model.ssm.chunk_size == 256
+    # Pure recurrence => the attention-only properties refuse by name (P1.3).
+    with pytest.raises(config.NoAttentionBlockError, match="has no attention block"):
+        model.num_heads
+
+
+def test_mamba2_2p7b_records_its_d3_exception_rather_than_taking_it_silently():
+    # D3 (model window, ~May 2025 - Aug 2026) does not cover Mamba-2. The row
+    # ships anyway on GEORGE's explicit order, and the honesty rule is that the
+    # exception is NAMED in the file, not left for a reader to notice.
+    provenance = _load_yaml(_matrix_yaml_path("mamba2_2p7b"))["provenance"]
+    assert provenance["d3_status"] == "out_of_window"
+    reason = provenance["d3_exception"]
+    assert isinstance(reason, str) and len(reason.strip()) >= 40
+    assert "GEORGE" in reason
+
+
+def test_mamba2_decode_twin_is_the_base_row_plus_d29_and_d30():
+    # The D29/D30 twin exists so the mapped path has a batch-1, no-embedding
+    # workload; it must not drift from the census row in any other field.
+    base = config.parse_config(str(_matrix_yaml_path("mamba2_2p7b")), "LLM").model_config
+    twin = config.parse_config(
+        str(MODEL_DIR / "mamba2_2p7b_decode_inf.yaml"), "LLM"
+    ).model_config
+    assert twin.global_batch_size == 1  # D29
+    assert twin.disable_embedding_unembedding is True  # D30
+    assert base.global_batch_size != 1 or base.disable_embedding_unembedding is False
+    for field in ("hidden_dim", "num_layers", "vocab_size", "seq_len", "decode_len",
+                  "intermediate_size", "tied_embeddings", "ffn_per_layer"):
+        assert getattr(twin, field) == getattr(base, field), field
+    for field in ("variant", "d_state", "n_groups", "n_heads", "d_head", "d_conv",
+                  "chunk_size"):
+        assert getattr(twin.ssm, field) == getattr(base.ssm, field), field
 
 
 # ---------------------------------------------------------------------------

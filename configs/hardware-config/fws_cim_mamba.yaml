@@ -10,10 +10,24 @@ device_class: fws_cim
 # All values inside cim must be plain numbers: unit strings like "100 MB"
 # would be rewritten into byte counts by the YAML preprocessor.
 cim:
+  # SELECTED BY THE SWEEP (ADJ-15). Where the short depthwise conv's WORK
+  # runs; its weights are never tiled onto analog arrays under either value.
+  # Granite picks shared_digital and Falcon-Mamba picks macro_pool, which is
+  # why this is an axis and not an assumption.
+  allocation:
+    conv_placement: macro_pool
   analog:
+    # D35 OVERRIDE. This card predates D35 (2026-08-29), which fixes the analog
+    # macro at 1024 x 1024 stored cells as a PLATFORM CONSTANT. Its geometry is
+    # NOT moved: the OPTIMA validator and the pre-D35 gates read these numbers
+    # and moving them would silently rewrite what they check. The key below is
+    # the only exemption D35 admits, and it buys the exemption by stating the
+    # reason, which rides a named disclosure into every artifact this config
+    # produces. A point carrying it is NOT comparable with a platform point.
+    nonstandard_macro: 'predates D35; kept for validator/OPTIMA parity'
     rows: 1536               # array rows (K per array tile) = hidden_dim
-    cols_adc: 384            # ADC columns per array
-    adc_mux: 4               # weight-column banks per ADC; stored cols = cols_adc*adc_mux
+    cols: 1536            # Y: total CTT columns (storage tile)
+    adcs: 384            # Z: ADCs; mux = Y/Z = 4 is DERIVED
     slice_cycles: 2          # analog cycles per ADC evaluation
     analog_clock_mhz: 100
     energy_per_vec_pj: 13730.312016  # T1 point scaled by cell count (x1.44)
@@ -30,7 +44,10 @@ cim:
     softmax_lanes: 1
     softmax_pipeline_depth: 20
   chip:
-    arrays_per_chip: 112     # worst chip: 4 layers * 139 = 556 under D30
+  # arrays_per_chip is NOT declared here: ADJ-13 builds the chip TO ITS
+  # PLACEMENT. Writing the derived capacity back as a declaration made it a
+  # false CAP - inert for the design it was derived from, and a refusal for
+  # any placement that needs one more slot.
                              # (which DROPS the lm_head; the +66 that used to
                              # sit here is gone). 640 is deliberately held at
                              # the pre-D30 value so the 84 unowned slots are

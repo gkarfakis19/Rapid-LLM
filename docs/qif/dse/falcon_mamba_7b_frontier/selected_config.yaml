@@ -6,8 +6,8 @@
 #
 # sweep base:  configs/hardware-config/fws_cim_mamba_frontier.yaml
 # model:       configs/model-config/falcon_mamba_7b_decode_inf.yaml
-# candidate:   c011 (layers_per_chip = 2, bank_depth = 1, shared_chiplets = 4, arrays_per_chip = 112 (DERIVED))
-# headline:    1.24021e+06 tokens/s, measured on this point's own timeline by fws_eval
+# candidate:   c013 (layers_per_chip = 2, bank_depth = 1, shared_chiplets = 4, conv_placement = macro_pool, arrays_per_chip = 112 (DERIVED))
+# headline:    534701 tokens/s, measured on this point's own timeline by fws_eval
 #              (ADJ-6: tokens/s at the decode terminal when the run decodes).
 device_class: fws_cim
 cim:
@@ -35,12 +35,14 @@ cim:
     moe_expert_parallel: 1
   cards:
     ctt:
+      bank_depth: 1
       kind: analog_macro
       device: ctt
-      bank_depth: 1
     sa:
       kind: digital_chiplet
       synthesis_library: 22nm
+  allocation:
+    conv_placement: macro_pool
 sw_param:
   full_recomputation: false
   kernel_launch_overhead: 0
@@ -155,9 +157,9 @@ execution_backend:
 inference:
   kvcache_type: cim_sram
 mapping:
+  shared_chiplets: 4
+  layers_per_chip: 2
   parallelism:
     tp: 1
   packing: dense
   decode_window: 3
-  layers_per_chip: 2
-  shared_chiplets: 4

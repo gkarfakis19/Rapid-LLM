@@ -1,0 +1,69 @@
+# Mamba2-2.7B inference config — the REAL PURE MAMBA-2 STACK (zero attention).
+# Dims verified 2026-08-28 against the published state-spaces config.json:
+#   https://huggingface.co/state-spaces/mamba2-2.7b/blob/main/config.json
+# That repo ships the ORIGINAL mamba_ssm config shape (d_model / n_layer /
+# ssm_cfg.layer: Mamba2 / d_intermediate: 0 / pad_vocab_size_multiple: 16), so
+# the HF-transformers spellings below were read off the transformers-format
+# conversion of the SAME checkpoint:
+#   https://huggingface.co/AntonV/mamba2-2.7b-hf/blob/main/config.json
+#   hidden_size 2560, num_hidden_layers 64, state_size 128, n_groups 1,
+#   num_heads 80, head_dim 64, expand 2, conv_kernel 4, chunk_size 256,
+#   vocab_size 50288 (50277 padded to a multiple of 16), tie_word_embeddings.
+# d_intermediate: 0 is why the layer plan sets ffn_per_layer: false: a Mamba-2
+# stack is the mixer alone, with no MLP anywhere. It is the pure-SSM sibling of
+# falcon_mamba_7b (Mamba-1 scan) at the SSD variant and inside the D2 cutoff.
+# Rejected on the GPU path until the P2-P4 SSM pricing laws land.
+provenance:
+  source: "https://huggingface.co/state-spaces/mamba2-2.7b/blob/main/config.json"
+  verified: "2026-08-28"
+  published_total_params: 2702599680  # HF safetensors total (F16)
+  # The published total is read off the transformers-format conversion of this
+  # same checkpoint, because state-spaces/mamba2-2.7b ships a single
+  # pytorch_model.bin (5,405,424,282 B) and no safetensors index to total:
+  published_total_params_source: "https://huggingface.co/AntonV/mamba2-2.7b-hf"
+  d2_status: supported  # 2.70B RAW, inside the 7B D2 cutoff
+  # D3 (model window, ~May 2025 - Aug 2026) DOES NOT COVER THIS ROW. Mamba-2
+  # and the state-spaces/mamba2-2.7b checkpoint predate the window. It is here
+  # because GEORGE EXPLICITLY ORDERED IT into the default test set (subset_v1)
+  # as the REAL PURE SSM member: every other SSM row in the matrix is either a
+  # hybrid (granite, falcon_h1) or Mamba-1 and over the cutoff (falcon_mamba_7b),
+  # so without it the set has no in-cutoff pure-SSD workload at all. Recorded as
+  # a named exception rather than taken silently.
+  d3_status: out_of_window
+  d3_exception: "GEORGE, 2026-08-28: ordered into the subset_v1 default test set as the real pure-SSM member; D3 is waived for this row by name, not relaxed."
+
+model_param:
+  mode: "LLM"
+  run_type: "inference"
+  tied_embeddings: true  # HF tie_word_embeddings: true
+  model_type: "llama"
+  global_batch_size: 4
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 256
+  hidden_dim: 2560  # HF hidden_size / mamba_ssm d_model
+  layer_plan:
+    pattern: ["mamba"]
+    ffn_per_layer: false  # mamba_ssm d_intermediate: 0 — the mixer stacks alone
+  ssm:
+    variant: "mamba2"  # ssm_cfg.layer: Mamba2 — chunked SSD, not a per-token scan
+    d_state: 128  # HF state_size
+    n_groups: 1  # HF n_groups
+    n_heads: 80  # HF num_heads
+    d_head: 64  # HF head_dim (80 x 64 = 5120 = expand x hidden_dim)
+    expand: 2  # HF expand
+    d_conv: 4  # HF conv_kernel
+    chunk_size: 256  # HF chunk_size
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 5120
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 64
+  intermediate_size: 5120  # required by the schema; unused (ffn_per_layer: false)
+  vocab_size: 50288
+  num_layers: 64
+
+inference_param:
+  sample_every: -1

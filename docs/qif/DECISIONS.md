@@ -295,7 +295,10 @@ debugging shapes come first.
 `mapping:` block): an encoder, uniform layers, NO KV and no decode step. It runs
 under `regime: lockstep` because the filled pipeline is a decode regime with
 nothing to stagger, and it refuses `packing: dense`, which is decode-only.
-ViT-Huge-story at seq 64: 1 chip, 400 slots, 386 tiles, 779 requests/s.
+ViT-Huge-story at seq 64: 1 chip, and the slot count is DERIVED from the
+placement (386 tiles, 386 slots) rather than the 400 first recorded here -
+those 14 unowned slots are exactly the waste ADJ-13 exists to remove. Read
+the shipped sweep for the current throughput.
 
 **Pure SSM** (`configs/hardware-config/fws_cim_mamba.yaml` + the new
 `falcon_mamba_7b_decode_inf.yaml` D29 twin): 64 Mamba-1 layers, no attention
@@ -303,7 +306,12 @@ block at all. It used to CRASH rather than refuse — three sites read attention
 attributes unguarded (`CimModelParams.from_model`, and two in
 `base_timing.TimeCalculation.__init__`). A model with no attention has no heads:
 the count is 0 and every attention law is already gated on a layer declaring an
-attention block. 241 362 tokens/s at 14 788 mm2 on the selected point.
+attention block. REGENERATED after ADJ-13/ADJ-14 and the conv fixes: read the shipped sweep
+(docs/qif/dse/falcon_mamba_7b_frontier/dse_report.json) for the current
+selected point. The number first recorded here (241 362 tokens/s at 14 788
+mm2) was measured on a machine whose chip declared its capacity and whose
+every layer carried a phantom FFN; both are gone, so it describes nothing
+that exists and is kept only as the reading it was.
 
 ## ADJ-13 — The machine sizes itself. Chip capacity and chip counts DERIVE; the sweep keeps only the free choices.
 
@@ -409,3 +417,327 @@ against 42214 at 4495. Sharing is both faster and smaller there, because one
 card carries one engine width: sizing it for a shared chiplet widens the engine
 for every stage on the machine. That is the kind of point the frontier exists
 to find, and it is exactly the point a hand-declared count would have missed.
+
+## ADJ-15 — A convolution maps terribly onto a crossbar. Where its WORK runs is a swept axis; where its WEIGHTS live was never a choice.
+
+**The physics.** A short depthwise conv is `k` taps per channel with no channel
+mixing. A weight-stationary analog macro holding one would activate a handful
+of cells out of millions — the worst possible use of the one resource Invariant
+W says is never wasted. So the conv's WEIGHTS are not tiled onto analog arrays,
+under any setting, and never were: `_hybrid_stages` excludes them from the tile
+set by name.
+
+**What was wrong.** The WORK had one hardcoded home — the per-macro digital
+pool (ADJ-3) — and two bugs hid its cost. The pool read conv dimensions only
+from a `short_conv:` block, so a Mamba stack that declares the same operator as
+`ssm.d_conv` sized ZERO conv lanes; and the recurrent mixers never emitted a
+conv op at all. The mapper had already dropped the weights *because* the pool
+runs them, so the operator was charged on neither side. It is now read from all
+three schemas that declare it (`short_conv`, `ssm.d_conv`,
+`linear_attention.conv_kernel`) and the conv's rolling window — `d_inner x
+(d_conv - 1)` per stream — is in the state bill it was missing from.
+
+**The choice, and it is a real one.** `cim.allocation.conv_placement`:
+
+* `macro_pool` — absorbed into every macro's own pool. No beat time, and the
+  silicon is bought on EVERY enumerated macro slot.
+* `shared_digital` — a TIMED op on the shared digital chiplet, priced on the
+  vector engine by the same `channels x (2k-1)` per-result law the pool sizing
+  uses (one law, two placements, D21). Costs beat time and engine width; the
+  silicon is bought once per chiplet.
+
+Neither is a default worth assuming, so it is an AXIS. Measured on
+Falcon-Mamba: `macro_pool` costs 1448.6 mm2 of pool silicon, `shared_digital`
+costs 6300 mm2 of extra vector engine (the conv's serialized work forces ADJ-9
+to widen it to hold the analog pace) for 1% less throughput. The pool wins on
+that model — the opposite of the intuition that replicating an operator
+thousands of times must be the expensive option — and a model with a narrow
+conv and a busy pool can flip it. A third value is refused by name.
+
+## ADJ-16 — The beat is the larger of two derived floors, and the measurement window is derived from the stage count.
+
+**What was wrong.** The beat was the MEASURED spacing between token exits and
+nothing else. Three defects hid behind that.
+
+*The links were free.* `_chip_boundary` took `deps[-1]` as the producer, which
+in the filled pipeline is the STAGE-HOLD edge — an op already on the
+DESTINATION chip. The link law saw producer and consumer on one chip, called
+the hop intra-chip, and charged 0 s. 589 of Falcon-Mamba's 620 handoffs and 72
+of Granite's 385 cost nothing. The producer is now the last dep that actually
+lives on the source chip.
+
+*The exits were read even when they had not converged.* Granite's last two
+steady intervals disagree by 51% at window 3 and still by 62% at window 14. A
+beat read off that is the ramp, not the rhythm.
+
+*Nothing checked the answer against the machine's own capacity.* Falcon-Mamba
+reported 1,240,209 tokens/s with **71.7 tokens in flight in a pipeline built for
+32 streams**.
+
+**The rule.** Two floors, both physical, both measured off the timeline:
+
+1. **Stage occupancy.** No stage can be busy more than one whole beat, and a
+   stage holds its slot until its OUTGOING LINK completes. There is no buffer
+   to park a sequence between stages, so a link that does not fit inside a beat
+   is not hidden by pipelining — it sets the pace. Occupancy is a RATE (busy
+   time over beats lowered) and does not move with the window.
+2. **Little's law.** A traversal takes L and the machine has D stream slots, so
+   a token cannot be replaced faster than L / D. L is the MEDIAN of the settled
+   traversals, never a single sample — one sample swung the beat 2x with the
+   window.
+
+The beat is the larger. The measured exit spacing is used only when it
+CONVERGED and only if it is slower than both floors — a converged, slower
+rhythm means the machine really stalls on dependencies, and that is honest.
+The artifact names which floor binds (`beat_binding`).
+
+**Why the link is folded into its stage rather than made a stage of its own.**
+Counting the 31 inter-chip links as pipeline positions would raise D from 32 to
+63 and roughly double the state store. The machine cannot buffer sequences in
+flight, so those positions do not exist: the honest reading is that a stage is
+not done until it has handed off.
+
+**The window is DERIVED.** `decode_window` is raised to the stage count, so
+every stage is observed in steady state at least once. A declared window below
+that is raised and the raise is disclosed; a larger one is honoured. It changes
+NO silicon (the store is sized from the served request, ADJ-11 + M10), and a
+declared 3, 6 or 10 now produce the identical beat.
+
+**Measured.** Falcon-Mamba 1,240,209 -> **534,701 tokens/s**, 31.64 tokens in
+flight against 32 slots, identity residual -0.0115. The independent Little's-law
+ceiling computed by the numbers audit was 538,345 — two methods, one answer.
+Granite and Qwen were already legal and stay legal (6.53/10 and 8.00/8).
+
+## D33 (GEORGE, HARD, 2026-08-28): There is NO SHIPPED POINT. The frontier is the entry, and the selection binds the page.
+
+George, verbatim: "WE SHOULD NOT HAVE A SHIPPED POINT AT ALL!!! THAT IS WHY WE
+SHOW FRONTIER FIRST. THEN WE CLICK ON A POINT AND EVERYTHING UPDATES TO SHOW
+THAT." Consequences, binding on the atlas and on every artifact that feeds it:
+
+- The atlas opens on the MODEL SELECTOR, then the PARETO FRONTIER
+  (x = decode tokens/s, y = total silicon mm2). Nothing renders above it but
+  the selector.
+- Every other element of the page — headline, hardware cards, beat, tables,
+  map, drilldown — describes the SELECTED point and rebinds on click. A
+  panel that cannot be produced for the selected point states that absence
+  for THAT point; it never falls back to another point's content.
+- The sweep's lexicographic pick survives only as the INITIAL selection and
+  carries no privileged name. The words "shipped design" leave the page.
+- The DSE emits per-candidate data sufficient to bind the whole page for
+  every FRONT point; the deep spatial map may be lazy-emitted per point,
+  and a point without one says so and names the command that emits it.
+
+## D34 (GEORGE, HARD, 2026-08-28): Stage mismatch is a mapper FAILURE, not a fact. The mapper eliminates it even at area cost.
+
+George, verbatim: "one of the stages is much longer than others. this causes
+pipeline waste and sets the beat, right? this should *never* happen unless we
+are reaching degenerate cases... The entire point of the mapper is to *try*
+and eliminate mismatch even if it comes at an area cost. thats the core
+philosophy." Consequences:
+
+- Every priced candidate computes a STAGE-BALANCE verdict: max stage busy
+  time over the median, the stages that exceed it, and WHAT makes them long
+  (block breakdown). A ratio beyond the disclosed threshold is a WARNING
+  printed to the sweep's stdout (visible during regeneration) and carried on
+  the candidate and in the report — never silent.
+- The warning names the reachable bound: the beat a balanced partition could
+  achieve given the point's own unavoidable floors (a saturated fabric stage
+  cannot be shrunk by repartitioning; everything else can be packed toward
+  it).
+- The follow-on build is a balance-aware partitioner: non-uniform
+  layers_per_stage packed toward equal stage time (the mapping schema
+  already admits non-uniform stage plans). Measured case that forced this:
+  Granite-4.0-H-1B at 2 layers/chip — stages 2/7/12/17 (the attention
+  layers) run 28.7x the median stage's digital time and set the beat while
+  16 stages idle.
+
+## D35 (GEORGE + adjudicated data, 2026-08-29): The macro is a PLATFORM CONSTANT. The sweepable list is closed.
+
+George: "the 2kx2k macros are too large... Macro size should not be
+[sweepable]. It should be a fixed 512x512 or 1024x1024." Until now the cards
+set rows = the model's hidden_dim — the hardware changed shape per workload,
+which is not a buildable chiplet platform and quietly flattered every
+comparison. Adjudicated on sheet data (George may overrule): **1024x1024**,
+which wins net silicon per useful cell on all four subset_v1 models (14-36%
+over 512x512: the 55% peripheral overhead of the smaller macro dominates its
+cleaner tiling) and stays inside the OPTIMA-characterized array family, which
+is exactly what is wrong with 2048+: extrapolated analog physics. Weights TILE
+onto the fixed macro (ceil row/col splits, the priced K-accumulator);
+dimension-mismatch remainders are D27's reported waste metric, never hidden.
+
+THE CLOSED LISTS — a knob is in exactly one:
+
+FIXED (platform constants; never swept, never model-derived):
+  macro geometry 1024x1024 · analog clock 100 MHz · slice structure and the
+  vector-mux tie (sheet profile) · shots_per_output · the measured 22nm
+  synthesis blocks · the measured SRAM macro · the measured GEMMINI block.
+
+SWEPT (the design space; exactly these):
+  adc_capacity_mux · layers_per_chip / layers_per_stage · bank_depth ·
+  shared_chiplets · conv_placement.
+
+DERIVED (from the point; never declared):
+  analog macro count (cell floor via tiling) · chip capacity · chiplet
+  count/balance · D · engine widths incl. context-split S · SA geometry R/C ·
+  softmax/vector/combine lanes · the state store.
+
+REFUSED BY NAME (axes and config spellings):
+  arrays_per_chip · num_arrays · vector_lanes · softmax_lanes ·
+  analog_clock_mhz · macro rows/cols in any spelling, including the retired
+  rows-equals-hidden convention.
+
+## D35-REVISED (GEORGE, 2026-08-29, supersedes D35's square-macro reading): The platform sweep is (Z, Y) in the constraint-native box. Mux is DERIVED and is the lens, never an axis.
+
+The macro is X x Y : Z — X rows (height, the analog sheet's constrained
+dimension), Y total CTT columns (storage tile), Z ADCs (the FLOP producers;
+muxed columns are storage). mux = Y/Z, always derived notation.
+
+- X is FIXED per platform (512 or 1024; George's device call, pending).
+- THE PLATFORM AXES: Z in pow2 {8 .. X} (never more ADCs than rows) and
+  Y in pow2 {X .. 8X}. Y >= Z always (mux = 1 is legal). The 8X ceiling is
+  adjudicated, not sacred: an EDGE-CROWDING check reports by name when a
+  model's front crowds the Y = 8X wall, and extending to 16X is then a
+  one-line data-justified change.
+- MUX IS NEVER SWEPT. It is derived, printed in every point's X x Y : Z
+  label, and is the plot's LENS: points colored by mux on a monotone
+  single-hue ramp; a two-handle RANGE control above the plot whose bounds
+  are the realized min/max mux among plotted points, defaulting to full
+  range, handles snapping only to realized values, controlling visibility.
+  Y gets button/toggle filters beside it. Rationale (measured, sheet):
+  total system ADC throughput = cells/(X*mux) — Y cancels — so mux is the
+  one density label; but the CONSTRAINTS are native to Z (converter count,
+  output interface, calibration) and Y (wordline length, tile granularity),
+  so the sweep walks the axis-aligned legal box and no absurd corner hides
+  in a derived quantity.
+- EVERY AXIS IS REFEREED: the per-axis vitality check (an axis must
+  contribute >= 2 distinct values to the non-dominated set across a bundle
+  run, else it is flagged for demotion by name) applies to Z and Y exactly
+  as to the mapping axes.
+
+WITHIN A TAPE-OUT (Y, Z), the mapping sweep is exactly:
+  layers_per_chip (partition) · bank_depth (ON PROBATION: it won depth-1
+  nearly everywhere on the old cards; the fixed-macro remainder economy is
+  its last chance, the vitality check is its judge) · shared_chiplets ·
+  conv_placement.
+Named exclusions, each with its promotion condition: tensor orientation
+(presumptively monotone; promote if remainder data shows both orientations
+winning), tp (presumptively link-dominated at <=7B; promote on measurement),
+PD split (returns with prefill), workload params (serving, not design).
+Everything else DERIVES (ADJ-9/10/13/14, the SA rule, context split, state
+store) — the doctrine stands: digital derives to the analog floor.
+
+## D36 (GEORGE, 2026-08-29): The two-stage DSE. Digital is a derived FUNCTION of the analog point; grouping is chiplet ATTACHMENT, never execution.
+
+- The GROUP = the model's minimal repeating motif (auto-derived from
+  layer_plan; 1 for homogeneous models). Execution is UNTOUCHED: the
+  pipeline stays per-layer staggered (D29). The group is the pattern at
+  which digital chiplets attach: every chiplet serves one group's stages
+  and therefore sees the SAME per-beat work mix — uniform chiplets by
+  construction, full pipelining preserved.
+- STAGE 1 (the megasweep): analog + mapping only — (Z, Y) x partition x
+  bank_depth x conv_placement. Under the standing doctrine (digital derives
+  to the analog floor; no saturation cliff post context-split; links
+  zeroed) THROUGHPUT IS A FUNCTION OF THE ANALOG POINT ALONE.
+- STAGE 2 (a function, not a search): per point, derive the group's
+  chiplet — engines to the group's summed per-beat digital work at the
+  analog pace, state store INSIDE the chiplet and inside its area.
+  Packaging arithmetic, not axes: chiplet area band [50, 400] mm2
+  (configurable, hard-set for now); over 400 -> chips_per_group =
+  ceil(area/400); under 50 -> merge groups per chiplet toward the band.
+- shared_chiplets is DEMOTED from axis to a STANDING LINEARITY CHECK
+  (price one point at 1x/2x/4x sharing; assert linearity within a few
+  percent). The nonlinearity that once made it a real axis was fabric
+  saturation, which the context-split law removed; if any future law
+  reintroduces a cliff the check fails loudly and the axis returns.
+- THE NAMED EXCEPTION: the day a card declares state_bytes_per_cycle and
+  an operand-bandwidth floor binds, digital sets the beat and stage 1 must
+  fold in the (closed-form) bandwidth beat-check. Until then it is a named
+  assumption.
+- Within-digital sweeps (mix, node, clock) return only when fidelity earns
+  them. 22nm measured library only; clock fixed at 1 GHz.
+
+## D38 (GEORGE, 2026-08-29): The partition is INTENT, not an axis. The fill fraction is the axis.
+
+- layers_per_stage RETIRES as a sweep axis. The machine is always maximally
+  disaggregated: local microbatch 1, finest motif-compatible stages,
+  everything time-matched by area sizing (the derive-to-floor doctrine is
+  what makes 100% utilization possible). Stage granularity DERIVES.
+- THE NEW AXIS: pp_util in {1.0, 0.75, 0.5} — a deliberately UNDERFILLED
+  pipeline (resident streams = pp_util x stages). Trades state/KV area
+  (linear in resident streams) against throughput (linear in fill). Usually
+  dominated; for state-limited large LLMs it is the escape valve. This
+  amends D29's "always full": full is the default, underfill is a priced,
+  disclosed choice.
+- KV and recurrent state are FP8 (8 bits/element) for now.
+- conv_placement RETIRES: the conv's work is ALWAYS on the shared digital
+  chiplet. Not an axis.
+- bank_depth is PARKED for ground-up reformulation (the mux-slot allocation
+  question, next).
+
+## D37 (GEORGE, 2026-08-29; recorded late — the code cited it before this entry existed, which an audit caught): The analog chiplet is a DENSE CARRIER. No axis lives at chip level.
+
+Agreed in the same session as D35-REVISED/D36, written down now:
+
+- The analog chiplet is a fixed grid of identical macros, capacity
+  C = floor(400 mm2 / macro_footprint) — the same area cap as D36's digital
+  band, derived per platform point, never swept.
+- The packer fills chiplets DENSE, in pipeline order, CROSSING stage
+  boundaries freely: stages are logical, silicon is packed. Per-stage
+  rounding waste does not exist; the only chip-level waste is ONE partial
+  tail chiplet per system, reported (packing tail), never multiplied by the
+  stage count. Invariant W holds.
+- Chip-level sweep axes: NONE. Chiplet capacity would fail the vitality
+  test on arrival (with links cheap, silicon is C-invariant under dense
+  packing and the tail shrinks monotonically with C). PROMOTION CONDITION:
+  analog area-per-chiplet becomes an axis when BOTH links and per-chiplet
+  overhead/yield are priced — a real counter-pressure pair.
+- Mid-chiplet stage boundaries are a FEATURE once links are priced: a
+  handoff inside a chiplet is an intra-chip hop, not a package link.
+
+## Amendment to the link prices (2026-08-29, George + adjudicated value): intra-chip hop = 5 ns (was 50 ns placeholder). Cross-chip stays 500 ns, no fancy packaging assumed.
+Basis: tightly packed macros on one 22 nm die; ~20 mm die edge at ~0.1 ns/mm
+repeated wire -> under 2 ns typical flight; 5 ns flat is conservative margin.
+
+## D39 (GEORGE, 2026-08-31): The beat is OCCUPANCY ONLY: beat = mux x 20 ns. Latency never sets the beat; it sets the state bill through Little's law. The mapper's ledgers are waste, L and seams.
+
+Settled in the 2026-08-30/31 mapping sessions, in George's "simpler universe"
+(hidden_size == macro height; column-height folding is a later add-on):
+
+- COUNTING, NOT SCHEDULING. Every dense column fires once per token, Z at a
+  time, so a macro owes mux = Y/Z firings per token. beat = mux x t_slice
+  (20 ns). The platform point (Z, Y) fixes the beat; the mapper cannot move
+  it. (George: "the beat is mux * 20ns.")
+- THROUGHPUT = 1/beat. Lowering mux buys CONCURRENCY, not speed. Per-user
+  token rate = 1/L, where L is the per-token chain latency. (George: "when we
+  lower mux, we are not actually making the pipeline any faster at all.")
+- LATENCY IS PIPELINED. Wire hops, reduce-tree depth and seams never bound
+  the beat (bandwidth is ASSUMED PROVISIONED - requirements are low here;
+  recorded as an assumption and disclosed on every artifact). Latency sets
+  the in-flight sequence count D = ceil(L / beat) (Little's law), and the
+  state bill = D x state per sequence. This SUPERSEDES the D29/D38 spelling
+  D = round(pp_util x stages): that is the stage-synchronous schedule's
+  number (one live sequence per stage) and overstates D by about mux/2 for
+  a spread machine. pp_util keeps its meaning as the fill fraction of D.
+- SLOT = PHASE. Each ADC rotates through its mux slots once per beat: slot
+  index j fires at ticks == j (mod mux). Placement and schedule are ONE
+  decision. A token hops slot to slot along the rotations (a wavefront); one
+  hop needs >= 2 ticks (fire, then wire + reduce <= 1 tick). Temporal depth
+  d on one macro costs d ticks of L, never beat.
+- THE MAPPER CONTROLS EXACTLY THREE LEDGERS: cell waste (ragged widths
+  against Z), L (-> D -> SRAM), and seams (500 ns = 25 ticks each). Rules:
+  spread each bundle across macros on ONE chip; place in chain order; never
+  split a bundle across chips. The only objective is zero waste; everything
+  else is measured and reported against its bound (L_min = 2n - 1 ticks for
+  n bundles, plus 25 per seam that chip capacity forces: the hop gap of 2
+  separates the n - 1 joins and L counts the last firing plus one).
+- NO NUMBER IS TRUSTED FROM THEORY. Every mapping emits an explicit tick
+  schedule, and an INDEPENDENT checker verifies it from the document alone:
+  one firing per macro per tick, every slot-layer once per token, hop gap
+  and seam gap honoured, columns conserved.
+- Supersedes the in-beat link accounting of the 2026-08-29 link-price
+  amendment and the stub's beat law pp_lat = t_serial + t_reduce + t_hop:
+  those terms now enter L, not the beat.
+- FIRST IMPLEMENTATION: a standalone slot mapper (fws_slot_mapper.py) and a
+  TOY debug model (about two analog chips, a few layers, no digital) shown
+  in the atlas under ?bundle=toy_slotmap. subset_v1 results stay
+  design-invalid until the mapper replaces the stub (mapping_stub stands).
