@@ -10,10 +10,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def qif_artifact(path, *, required=True):
-    """Resolve a repo-relative artifact; only its consuming test may skip.
+    """Resolve required evidence, failing unless missing results are opted out.
 
     ``required=False`` is for collection-time discovery and standalone gate
-    presence probes. Pytest readers use the default for an explicit skip.
+    presence probes. Required results are part of the test environment.
     """
     relative = Path(path)
     if relative.is_absolute():
@@ -21,5 +21,11 @@ def qif_artifact(path, *, required=True):
     root = Path(os.environ.get("RAPID_QIF_RESULTS", REPO_ROOT.parent / "Rapid-LLM-results" / "qif"))
     resolved = root / relative
     if required and not resolved.exists():
-        pytest.skip(f"QIF artifact missing: {resolved}; set RAPID_QIF_RESULTS to the results root")
+        message = (
+            f"QIF artifact missing: {resolved}; set RAPID_QIF_RESULTS to the results root "
+            "(skip missing evidence only with RAPID_QIF_ALLOW_MISSING=1)"
+        )
+        if os.environ.get("RAPID_QIF_ALLOW_MISSING") == "1":
+            pytest.skip(message)
+        pytest.fail(message, pytrace=False)
     return resolved
