@@ -178,7 +178,7 @@ code, pricing law, model parameter or historical result is changed in this round
 7. The validator now runs `--emit-config --verify` on CURRENT two-point fill
    frontiers for Granite and Qwen, requires selected IDs on the live Pareto
    front and checks throughput and placement round trips. The full validator
-   measures 142.36 s for Granite and 21.47 s for Qwen, each below five minutes.
+   measures 145.34 s for Granite and 21.43 s for Qwen, each below five minutes.
    These are required live checks, with fresh scratch directories to prevent
    stale outputs satisfying presence assertions. There is no remaining
    KNOWN GAP for the historical checks' lost round-trip property; only the
@@ -187,26 +187,63 @@ code, pricing law, model parameter or historical result is changed in this round
    D38 refuses retired axes before comparison with historical results.
 9. The 234 functional cases and Koyeb stay slow. TESTING.md now requires
    `-m slow` (or `RAPID_RUN_SLOW=1`) before merging. The entire 247-case slow
-   lane is being run for this audit, including the historical regeneration
-   checks; results below will distinguish expected failures and XPASS.
+   lane was run for this audit, including the historical regeneration
+   checks; the completed results below distinguish expected failures and XPASS.
 
 No additional NEEDS GEORGE case has been introduced. The Stage 1 list above
 remains the full list; the two frontier reasons are now more precise.
 
-## Audit gate results
+### Exact artifact equality and failure diagnostics
 
-- Golden gate: **221 passed**, exit 0 (36.95 s pytest; 39.15 s process wall).
+The first full slow run was interrupted after approximately 69 minutes while
+the Granite atlas case was active. A controlled run of the **unchanged** case
+with only assertion rewriting disabled (`--assert=plain`) regenerated and
+compared the atlas in **57.62 s** wall time (50.25 s pytest), producing the
+expected historical-reference failure. This identifies pytest's large-string
+failure diagnostics as the runtime problem rather than atlas generation.
+
+Seven report/atlas comparisons now compute their original exact string
+equality into `same_bytes`, then assert that Boolean. Every character and
+whitespace difference is still rejected; no parsed-value or hash comparison
+replaces equality. Only the failure rendering changes. The final full slow
+gate uses normal assertion rewriting and executes every regeneration check;
+the two retired-axis frontier cases still stop at their documented input
+refusals. The Granite atlas case completes in **51.87 s**, with the
+same historical reference mismatch. The interrupted attempt is retained in
+`tmp/qif-audit/slow-interrupted.log` and is not counted as a completed gate.
+Default, golden and validator gates were also rerun after this diagnostic fix.
+
+## Final audit gate results
+
+- Golden gate: **221 passed**, exit 0 (39.35 s pytest; 41.52 s process wall).
   All **46 golden SHA-256 hashes are unchanged** from the pre-repair manifest.
 - Full default suite: **2701 passed, 292 skipped, 8 xfailed, 0 failures**,
-  exit 0. Pytest time 671.70 s; process wall time **674.65 s** (11m 14.65s).
-  The skips retain the Stage 1 distribution (247 slow, 44 environment-gated,
-  one blocked local socket); none skips missing QIF evidence.
-- Focused restored-property checks: 11 helper/frontier checks and both the
-  Granite headline and mixed-feasibility checks pass. The three positive
-  whole-Granite packing checks also pass in the running slow lane.
+  exit 0. Pytest time 678.61 s; process wall time **681.32 s (11m 21.32s)**.
+  The skips are 247 slow, 44 environment-gated, and one blocked local socket;
+  none skips missing QIF evidence. The eight default xfails are listed above.
 - Standalone validator: **544/544 checks pass**, exit 0; process wall time
-  **288.73 s**. This includes 20 additional checks for the two CURRENT
+  **291.43 s**. This includes 20 additional checks for the two CURRENT
   frontier selections and their emitted-config round trips.
-- Complete slow-lane result is pending below.
+- Complete slow lane: **236 passed, 9 xfailed, 2 existing xpassed,
+  0 failures**, exit 0; **439.87 s (7m 19.87s)** process wall time.
+  Details, including all 234 functional cases and Koyeb, follow below.
+- Generated-output ignore probes match, `fixture_*.json` stays exempt, and
+  no tracked generated-output path is ignored. No production pricing changes
+  or golden/A100-baseline edits were made in this audit.
 
-Audit logs and JUnit reports are in repo scratch `tmp/qif-audit/`.
+Final logs: `tmp/qif-audit/golden-final.log`, `default-final.log`/`.xml`,
+`validator-final.log`, and `slow.log`/`.xml`; each gate has a zero `.exit` file.
+
+## Completed slow lane after the diagnostic fix
+
+`pytest -m slow` with normal assertion rewriting completes with **236 passed,
+9 xfailed, 2 xpassed, 0 failures**, exit 0; 2754 cases are deselected. Pytest
+time is 436.98 s; process wall time is **439.87 s (7m 19.87s)**.
+
+All 234 functional cases execute (232 pass plus the two existing non-strict
+XPASS markers), and Koyeb passes at 5.98% average absolute error against its
+unchanged 6.5% threshold. The three positive Granite packing checks pass.
+All nine historical regeneration checks execute and remain strict xfails;
+their full IDs and reasons are listed above and in `slow.log`/`slow.xml`.
+The two existing XPASS cases are hierarchical GLM4-MoE training with EP,
+for MHA and GQA, both DP2/EP2/TP2/CP1/PP2/MB2 with sequence parallel enabled.

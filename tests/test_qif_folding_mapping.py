@@ -848,7 +848,9 @@ def test_the_granite_packing_artifact_is_what_a_fresh_run_produces(
         "docs/qif/folding/granite_dense_vs_dedicated.json is committed; regenerate "
         "it with the command in its provenance block"
     )
-    assert regenerated == PACKING_ARTIFACT.read_text(encoding="utf-8"), (
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = regenerated == PACKING_ARTIFACT.read_text(encoding="utf-8")
+    assert same_bytes, (
         "docs/qif/folding/granite_dense_vs_dedicated.json is stale; regenerate it "
         "with the command in its provenance block"
     )

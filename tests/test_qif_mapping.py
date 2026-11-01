@@ -1015,7 +1015,9 @@ def test_the_checked_in_export_is_the_one_the_tool_emits_today(tmp_path):
         shared_chiplets=2,
     )
     regenerated = fws_atlas_export.write_atlas_json(document, tmp_path / "p3.json")
-    assert regenerated == qif_artifact(P3_ATLAS).read_text(encoding="utf-8"), (
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = regenerated == qif_artifact(P3_ATLAS).read_text(encoding="utf-8")
+    assert same_bytes, (
         "docs/qif/atlas/p3_llama7b_tp2.json is stale; regenerate it with "
         "tools/fws_emit_atlas.py (the command is in its provenance block)"
     )

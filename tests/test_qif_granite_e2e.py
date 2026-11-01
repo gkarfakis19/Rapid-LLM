@@ -877,7 +877,9 @@ def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     # fws_eval.report_document, regenerated in-process. No run_perf subprocess
     # runs here, so it is not evidence about run_perf's serialization, key order
     # or indent -- the status files and the plan page now say so.
-    assert shipped == json.dumps(fws_eval.report_document(granite), indent=2)
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = shipped == json.dumps(fws_eval.report_document(granite), indent=2)
+    assert same_bytes, "Granite report differs from the current serialization"
 
 
 @pytest.mark.slow
@@ -899,7 +901,9 @@ def test_the_shipped_granite_atlas_is_what_a_fresh_run_produces(tmp_path):
     path = os.path.join(
         PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
     )
-    assert regenerated == open(qif_artifact(path), encoding="utf-8").read(), (
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = regenerated == open(qif_artifact(path), encoding="utf-8").read()
+    assert same_bytes, (
         "docs/qif/atlas/granite_4_0_h_tiny.json is stale; regenerate it with "
         "the command in its provenance block"
     )

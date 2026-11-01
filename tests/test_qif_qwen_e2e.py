@@ -694,7 +694,9 @@ def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
         "must fail this gate, never skip it"
     )
     shipped = open(qif_artifact(REPORT_JSON), encoding="utf-8").read()
-    assert shipped == json.dumps(fws_eval.report_document(qwen), indent=2)
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = shipped == json.dumps(fws_eval.report_document(qwen), indent=2)
+    assert same_bytes, "Qwen report differs from the current serialization"
 
 
 @pytest.mark.slow
@@ -710,7 +712,9 @@ def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     regenerated = fws_atlas_export.write_atlas_json(
         document, os.path.join(str(tmp_path), "qwen.json")
     )
-    assert regenerated == open(qif_artifact(ATLAS_JSON), encoding="utf-8").read(), (
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = regenerated == open(qif_artifact(ATLAS_JSON), encoding="utf-8").read()
+    assert same_bytes, (
         "docs/qif/atlas/qwen3_5_4b.json is stale; regenerate it with the "
         "command in its provenance block"
     )

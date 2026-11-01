@@ -434,7 +434,9 @@ def test_the_pd_document_is_what_a_fresh_run_produces(tmp_path):
 
     _pair, _rows, document = emit.build_pd(**PD_ARGS)
     regenerated = fws_atlas_export.write_atlas_json(document, tmp_path / "pd.json")
-    assert regenerated == qif_artifact(PD_ATLAS).read_text(encoding="utf-8"), (
+    # Keep exact equality without pytest's expensive multi-MB string diff.
+    same_bytes = regenerated == qif_artifact(PD_ATLAS).read_text(encoding="utf-8")
+    assert same_bytes, (
         "docs/qif/atlas/pd_llama7b.json is stale; regenerate it with the command "
         "in its provenance block"
     )
