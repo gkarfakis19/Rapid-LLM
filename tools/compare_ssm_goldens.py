@@ -19,12 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import yaml
-import config
-from inference_timing import TimeCalculationLLMInference
 from tools.convert_ssm_config import convert_model
 
 
 def compare_case(reference: Path, output: Path) -> dict:
+    import config
+    from inference_timing import TimeCalculationLLMInference
     old = json.loads(reference.read_text())
     case = reference.stem
     source = reference.parent / "cases" / case
@@ -147,6 +147,11 @@ def main() -> int:
     if not output.is_relative_to(ROOT / "tmp"):
         parser.error("--output must be inside this worktree's tmp/")
     output.mkdir(parents=True, exist_ok=True)
+    runtime = output / "runtime"
+    runtime.mkdir(exist_ok=True)
+    os.environ["TMPDIR"] = str(runtime)
+    os.environ["MPLCONFIGDIR"] = str(runtime / "matplotlib")
+    sys.dont_write_bytecode = True
     os.environ["RAPID_ASTRA_CACHE_MODE"] = "NO_CACHE"
     os.environ["ASTRA_CACHE_DIR"] = str(output / "astra-cache")
     rows = []

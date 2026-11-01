@@ -80,6 +80,8 @@ def convert_model(data: dict, *, chunk_size: int = 256) -> dict:
         model["intermediate_size"] = int(model["hidden_dim"]) * int(ssm["expand"])
     if model.get("run_type") != "inference":
         raise ValueError("SSM conversion requires model_param.run_type: inference")
+    if pure_type and model.get("decode_len") is None:
+        model["decode_len"] = model["seq_len"]  # archive pure-Mamba default
     result.setdefault("inference_param", {"sample_every": -1})
     return result
 

@@ -1,5 +1,25 @@
 {
   "cache_mode": "NO_CACHE",
+  "code_sha256": {
+    "base_timing.py": "0ea5ae45f29cba86f96957e23dac7f7052e389e7b98f3cb026400c2ecbd78aba",
+    "config.py": "a4af61a7284a2d1dfcf0f85af80d65b4740b08d986da63995c78b7c3b7aae0d5",
+    "inference_timing.py": "64af2e66cda116f308efb0c45bdb00f0af9bf80680feabe9f4809d751a41c3ca",
+    "llm_execution.py": "0ceb3d9f13bbfa125b052a276f5f25b72b7ced600bf90f71c27850d01e253864",
+    "llm_util.py": "7c83f982451d288a582f0835d658ee483abde6b52e932b942f9fa8067ffe9d85",
+    "memory_estimation.py": "7dd24830f77393b5dc7a61118ef465292e250c712f994d3b9c72895fddd7bc96",
+    "program/build.py": "9b44784ae42a7153b2a06ea5468db15f918fe09822d050f050d077b2bb574622",
+    "program/groups.py": "14824f4eb883f0c19c9b88bc3713810a67e557772708f0cb9f088c92cacaa513",
+    "program/memory_sim.py": "e0c96903a8a4bf2c9b0659e8079f8f3ce590e2510aec84b44c1af9a7eaebd5d4",
+    "program/retime.py": "353c6b12bbb8bc1c034984390776a4f8d7fa61238cab9f493549fc7e18cbc0d9",
+    "program/work.py": "79164b5d5ea932e92c11ed668513cdf6b0ce24e58d84e3bed172d948ebd39896",
+    "program/workload.py": "6ad9bac5638d54ea31d32c34f93559cbcaee3c5eb5c04df416ef097ed7ae7186",
+    "simulate_inference_graph.py": "089b0d7d926b6c3aefd8bbfb1bb8a73c5350e22ad955581add3a0aaf8c74bc3b",
+    "ssm_gpu.py": "e9f785c71c0425188f5f8443167175e84f5f40cb9a7ccafef2f88478dfbc3a19",
+    "tests/ssm_gpu_pins.json": "1435af77973510e2abbe6f266eb273c125523361632111b7242d23f5e054c151",
+    "tools/compare_ssm_goldens.py": "46e8cc893d11f967c4ea5bdfb4a209bac30f2e0cd0f043d21fee0879dcfca945",
+    "tools/convert_ssm_config.py": "cee5a3d38dcdb3c77c4431b81be7f03d339cc77dafc088368eca3de9d2ff088b",
+    "train_timing.py": "3d4e2ee953c9f64920447cd62670a5b098250b44d2b9bd9bfd86b5e74ff058bb"
+  },
   "command": "./.venv/bin/python tools/compare_ssm_goldens.py --output tmp/ssm-final-comparison",
   "comparisons": [
     {
@@ -43,7 +63,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.12166383117437363
+      "wall_seconds": 0.1273774430155754
     },
     {
       "case": "mamba_a100_tp1_pp1_dp1_ep1_hierarchical",
@@ -86,7 +106,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.26590368151664734
+      "wall_seconds": 0.22358448803424835
     },
     {
       "case": "mamba_a100_tp1_pp2_dp1_ep1_analytical",
@@ -145,7 +165,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.0875159502029419
+      "wall_seconds": 0.08762039244174957
     },
     {
       "case": "mamba_a100_tp1_pp2_dp1_ep1_hierarchical",
@@ -190,7 +210,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.24375303089618683
+      "wall_seconds": 0.20393866300582886
     },
     {
       "case": "mamba_a100_tp2_pp1_dp1_ep2_analytical",
@@ -323,7 +343,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.100614994764328
+      "wall_seconds": 0.10038328915834427
     },
     {
       "case": "mamba_a100_tp2_pp1_dp1_ep2_hierarchical",
@@ -456,7 +476,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.8691458180546761
+      "wall_seconds": 0.5555647164583206
     },
     {
       "case": "mamba_a100_tp2_pp2_dp1_ep2_analytical",
@@ -605,7 +625,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.11861962080001831
+      "wall_seconds": 0.09988141804933548
     },
     {
       "case": "mamba_a100_tp2_pp2_dp1_ep2_hierarchical",
@@ -742,7 +762,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6064673885703087
+      "wall_seconds": 0.5518180280923843
     },
     {
       "case": "mamba_a100_tp2_pp2_dp2_ep2_hierarchical",
@@ -879,7 +899,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.844669446349144
+      "wall_seconds": 0.5545008927583694
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical",
@@ -1016,7 +1036,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.11995935440063477
+      "wall_seconds": 0.117229163646698
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms",
@@ -1177,7 +1197,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.12441055476665497
+      "wall_seconds": 0.13497038185596466
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms_subgroup",
@@ -1338,7 +1358,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.11995747685432434
+      "wall_seconds": 0.1210583746433258
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_hierarchical",
@@ -1475,7 +1495,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.9689957275986671
+      "wall_seconds": 0.6329367607831955
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_analytical",
@@ -1632,7 +1652,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.12814687192440033
+      "wall_seconds": 0.11953558772802353
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical",
@@ -1777,7 +1797,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.9539567828178406
+      "wall_seconds": 0.6515960544347763
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical_rms_wide_fullgroup",
@@ -1984,7 +2004,7 @@
         }
       ],
       "status": "EXPLAINED",
-      "wall_seconds": 1.004221759736538
+      "wall_seconds": 0.8507485613226891
     },
     {
       "case": "mamba_h100_tp1_pp1_dp1_ep1_hierarchical",
@@ -2027,7 +2047,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.2752464488148689
+      "wall_seconds": 0.21456176787614822
     },
     {
       "case": "mamba_h100_tp1_pp2_dp1_ep1_hierarchical",
@@ -2072,7 +2092,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.3016040250658989
+      "wall_seconds": 0.2138146087527275
     },
     {
       "case": "mamba_h100_tp2_pp1_dp1_ep2_hierarchical",
@@ -2205,7 +2225,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.7916654944419861
+      "wall_seconds": 0.5649752914905548
     },
     {
       "case": "mamba_h100_tp2_pp2_dp1_ep2_hierarchical",
@@ -2342,7 +2362,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6839815154671669
+      "wall_seconds": 0.5401486307382584
     },
     {
       "case": "mamba_h100_tp4_pp1_dp1_ep4_hierarchical",
@@ -2479,7 +2499,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6220166832208633
+      "wall_seconds": 0.6460407450795174
     },
     {
       "case": "mamba_h100_tp4_pp2_dp1_ep4_hierarchical",
@@ -2624,7 +2644,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6148237660527229
+      "wall_seconds": 0.6352573186159134
     },
     {
       "case": "mamba_hf_a100_tp1_pp1_dp1_ep1_hierarchical",
@@ -2667,7 +2687,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 1.9041509330272675
+      "wall_seconds": 1.7053252533078194
     }
   ],
   "count": 23,
@@ -2859,5 +2879,5 @@
       "reference_sha256": "08639c1afc937c69444eb5b0d67f25c87358b646406ce12b546f79b8f8006f7c"
     }
   },
-  "wall_seconds": 13.52
+  "wall_seconds": 11.05
 }

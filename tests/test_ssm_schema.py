@@ -36,6 +36,7 @@ def test_converter_intended_interval_zero(model):
     mp = model["model_param"]
     mp.pop("layer_plan")
     mp["model_type"] = "mamba2_ssm"
+    mp.pop("decode_len")
     mp["hybrid_schedule"] = {"full_attention_interval": 0}
     mp["linear"] = {"linear_type": "mamba2", "expand": 2, "state_size": 128,
                     "conv_kernel": 4, "num_heads": 24, "headdim": 64, "n_groups": 8}
@@ -45,6 +46,7 @@ def test_converter_intended_interval_zero(model):
     assert parsed.layer_mixers == (("ssm",),) * 24
     assert parsed.ssm.resolve_d_inner(768) == 1536
     assert parsed.ssm.chunk_size == 256
+    assert parsed.decode_len == parsed.seq_len
 
 
 @pytest.mark.parametrize("name", ["mamba2_base_inf", "mamba2_hf_inf",

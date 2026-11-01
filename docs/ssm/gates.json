@@ -1,0 +1,96 @@
+{
+  "archive": {
+    "cases": 23,
+    "exact_matches": 22,
+    "exit_code": 0,
+    "explained_differences": 1,
+    "wall_seconds": 11.05
+  },
+  "cim_validator": {
+    "command": "./.venv/bin/python validation_scripts/validate_fws_cim_vs_optima.py",
+    "exit_code": 0,
+    "passed": 544,
+    "total": 544,
+    "wall_seconds": 300.62
+  },
+  "default": {
+    "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/ -q",
+    "exit_code": 0,
+    "passed": 2737,
+    "pytest_elapsed_seconds": 682.55,
+    "skipped": 295,
+    "wall_seconds": 685.97,
+    "xfailed": 8
+  },
+  "environment": {
+    "LD_LIBRARY_PATH": "/u1/ee/karfakis/gcc-10.2.0/lib64:/app/nanocad/projects/personal/gkarfakis/anaconda3/lib",
+    "cpu_only": true,
+    "isolated_pytest_tmp_roots": true,
+    "python": "./.venv/bin/python",
+    "scratch": "tmp/ssm/"
+  },
+  "focused": {
+    "passed": 36,
+    "pytest_elapsed_seconds": 1.82,
+    "skipped": 3
+  },
+  "full_size_dual_device": {
+    "passed": 2,
+    "pytest_elapsed_seconds": 39.52
+  },
+  "golden": {
+    "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/test_equiv_golden.py -q",
+    "exit_code": 0,
+    "golden_files_byte_unchanged": {
+      "tests/golden_equiv/bug_ledger.json": "4a9fab9c436fbe7413d4997bc76dbdf1319e689ce493a10281394d7776589456",
+      "tests/golden_equiv/index.json": "1bbff963188335144934affac86e4d1962dadc1492a448a5aad37d5b5421a0cd",
+      "tests/golden_equiv/inf_analytical_dp1tp1cp1pp1mb1sp0.json": "4d45740066de11e59f82d8447df9d88f8a3097dbeaf9b5cdcaae7c9a9de0d668",
+      "tests/golden_equiv/inf_analytical_dp2tp2cp1pp2mb2sp1.json": "0231c6c6806e5229a64d0aa39aabc22a7a7bc0e68177ef51f79036367ad64650",
+      "tests/golden_equiv/inf_flattened_dp1tp1cp1pp1mb1sp0.json": "bf69c90b933ce098ea58c264512c74e5aa0313aa7189d59f61f99ae45ef75a5a",
+      "tests/golden_equiv/inf_flattened_dp2tp2cp1pp2mb2sp1.json": "120ba2592357ed778f834ff2813f554e4fa6a9c49625ec72115266aecb744fe3",
+      "tests/golden_equiv/inf_hierarchical_dp1tp1cp1pp1mb1sp0.json": "e302b16c3ca15533aff2cf0d3b1463cdc0a0ce8f9ff3be5ac91de7cf9d354112",
+      "tests/golden_equiv/inf_hierarchical_dp1tp2cp1pp2mb2sp0_vit.json": "d41467a26c579af42b5e774dc97ddb3de594b52695e537f83d4b77176c39f28f",
+      "tests/golden_equiv/inf_hierarchical_dp2tp2cp1pp2mb2sp1.json": "990bda512bc9d657b6450d2dde842455f78e54cc0d6e3d795dc23eb04cf643e1",
+      "tests/golden_equiv/train_analytical_dp1tp1cp1pp1mb1sp0.json": "592d43212e8afd9a615da789aefdcb29e0498c44b914c49e89193429aceac489",
+      "tests/golden_equiv/train_analytical_dp1tp1cp2pp2mb2sp0.json": "04b14580ce193b27b4386fa7b08bed3c5adf89461df6962f3959f7e6b9df285b",
+      "tests/golden_equiv/train_analytical_dp1tp2cp1pp2mb2sp1.json": "4c9f3f6b93acde5cba293890c5c742dee24fdc6832dec8240a05fc2d7b4e600a",
+      "tests/golden_equiv/train_analytical_dp2tp1cp1pp2mb2sp0.json": "391bc20ca28a948dbf50477de70ba1d2f8750c1bd3e614fc5cb6073c17569be5",
+      "tests/golden_equiv/train_analytical_dp2tp1cp1pp2mb2sp0_ga2.json": "27cdba315f9d4bb90d22d37137bb58f305609d45dba0a00357142f5354a90b6a",
+      "tests/golden_equiv/train_analytical_dp2tp1cp1pp2mb2sp0_zero2.json": "3ed6610bd53a5367e13317010e49b5d09953ee8746147f5cf19ea72aa61f31e4",
+      "tests/golden_equiv/train_analytical_dp2tp1cp1pp2mb2sp0_zero3.json": "016197c1b237123646690a218c5c5951ba60a999421e97cdf80d8431a4e5e974",
+      "tests/golden_equiv/train_analytical_dp2tp2cp2pp2mb2sp1.json": "522335bff2499787e1ab2ffc0a5a0609a7723d182f98b6d6808770c15991f90e",
+      "tests/golden_equiv/train_flattened_dp1tp1cp1pp1mb1sp0.json": "0b77c2b43265ab2ab0c012d0386d0c571d189217f1f4626e1fd3a4eaff68b99a",
+      "tests/golden_equiv/train_flattened_dp1tp1cp2pp2mb2sp0.json": "11c87b3e36118cfea6aef06bf79b29c5b2f157e8312b94d7cb2e6070b18caba6",
+      "tests/golden_equiv/train_flattened_dp1tp2cp1pp2mb2sp0_fault_tp.json": "90d7db3590ca980806e445b54fce273ef2b0e2c9d43f63b84170d9692bbaa511",
+      "tests/golden_equiv/train_flattened_dp1tp2cp1pp2mb2sp1.json": "f80953d1044b0de42a045172e105f098dbb5f1c825b77022a29c08d2f4e21da2",
+      "tests/golden_equiv/train_flattened_dp1tp2cp1pp2mb2sp1_gqa.json": "47ff8a2cf9aec487835f934f73ee52b68aa5826c33d5459016cbba6c02d12615",
+      "tests/golden_equiv/train_flattened_dp1tp2cp1pp2mb2sp1_moe_ep2.json": "25b5e4c44fed0a686afae1df2f3b9f0b3a919a804d2a76acf03959514052eeb8",
+      "tests/golden_equiv/train_flattened_dp1tp2cp1pp2mb2sp1_recompute.json": "77534da2ab84e391b07b6252084b9517030781953d83090152d6025dc3c96bf8",
+      "tests/golden_equiv/train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d.json": "05ecca122ce1a1c62a055d9fd89635dff18688f2571fb55d3a3e865029308f8d",
+      "tests/golden_equiv/train_flattened_dp1tp4cp1pp1mb1sp0_mesh2d_gmap.json": "3de0f319d9650eb1f586ddaeb71990e58fc5e3df7e45b778cd871cdba4c08a1b",
+      "tests/golden_equiv/train_flattened_dp2tp1cp1pp2mb2sp0.json": "943ca9669f485eb2b279a046bd63ed0f7338e6d409354b9f788dd7d71ea1e0f4",
+      "tests/golden_equiv/train_flattened_dp2tp1cp1pp2mb2sp0_ga2.json": "0d16358d1b977dab00b583de1df928cdf3220ba37bbc8ea46c420852e8c492c9",
+      "tests/golden_equiv/train_flattened_dp2tp1cp1pp2mb2sp0_zero2.json": "f067313bc6f0621e4cbeb97a4cde47082d3acea2bc8dfc70532fe733837f1a9b",
+      "tests/golden_equiv/train_flattened_dp2tp1cp1pp2mb2sp0_zero3.json": "e4f1288ab6686a8d5c0b2555c6b0c182ff496d8bb8d86e39dc4ea0e89fa114ae",
+      "tests/golden_equiv/train_flattened_dp2tp2cp1pp2mb2sp1_moe_ep2.json": "5eebec460cfe719e7f1f5b110a6bc3f848bc82a3c06fec54d4724f827158e103",
+      "tests/golden_equiv/train_flattened_dp2tp2cp2pp2mb2sp1.json": "4718438727bb37eec8412925dfa301d8dc29b485b0c2395ab32d4d99e9d08d58",
+      "tests/golden_equiv/train_hierarchical_dp1tp1cp1pp1mb1sp0.json": "8b028ad099e4624f530daedf46bc8de0999bbb81905e97f8a243ab800b7789e3",
+      "tests/golden_equiv/train_hierarchical_dp1tp1cp2pp2mb2sp0.json": "994776ac83e439d3d45d5426ee14b54fe40ec8f3936c37b0ff6ba315e1f09025",
+      "tests/golden_equiv/train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_pp.json": "d6f00530c4d6abe6d74707dcd86496d1810f8e5d39dd72a257b8417493f8c23e",
+      "tests/golden_equiv/train_hierarchical_dp1tp2cp1pp2mb2sp0_fault_tp.json": "8b9818e54b9bc788adb9ba126debb2e3dff1f2c65833766b816ab6324b8cf7f5",
+      "tests/golden_equiv/train_hierarchical_dp1tp2cp1pp2mb2sp1.json": "f85245b1987d131ee65bd3151143f6a098197eb7690edbe2faa896292d2c086e",
+      "tests/golden_equiv/train_hierarchical_dp2tp1cp1pp2mb2sp0.json": "3401346f91529b03973bb637f4352fa648c0f4766848f3182475ecc3c90435da",
+      "tests/golden_equiv/train_hierarchical_dp2tp2cp1pp2mb2sp1_moe_ep2.json": "a7391ba8088a3e2413681d47cdd83515e97ce43fa782259bababace439c8da0d",
+      "tests/golden_equiv/train_hierarchical_dp2tp2cp2pp2mb2sp1.json": "a915782d0e1bc40104a68d2fa8d6a8f03a57a5a1519b6a5f036bc6b6813f013c",
+      "tests/golden_equiv/train_hybrid_dp1tp1cp1pp1mb1sp0.json": "2161d48a87f9352b1db767b57f84b42178e103d0382fd8cfa98d0408d0a319e2",
+      "tests/golden_equiv/train_hybrid_dp1tp1cp2pp2mb2sp0.json": "371c62735a9526e06a9ca09bc21d23227cd5ff59260284b2e52a859701465cb2",
+      "tests/golden_equiv/train_hybrid_dp1tp2cp1pp2mb2sp1.json": "666bcc2dbf9c7dc8c5dff60ad1d26ebc2d202521ff5642c9def5db3b6e40847d",
+      "tests/golden_equiv/train_hybrid_dp2tp1cp1pp2mb2sp0.json": "3e1d7ba657b611baec4b3ca0943fbb2d57c3ef8124f096e963c857c3468a012d",
+      "tests/golden_equiv/train_hybrid_dp2tp2cp1pp2mb2sp1_moe_ep2.json": "c747530286d6bca5dffe47a44e593967741243bb04bf30e722632f6aeab3d2de",
+      "tests/golden_equiv/train_hybrid_dp2tp2cp2pp2mb2sp1.json": "3905ffacf5205193ad98115bdd2965726a4b48a525823663e431d575644e3918"
+    },
+    "passed": 221,
+    "pytest_elapsed_seconds": 38.81,
+    "wall_seconds": 41.21
+  }
+}
