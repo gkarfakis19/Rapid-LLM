@@ -23,6 +23,8 @@ import math
 import os
 
 import pytest
+
+from tests.qif_artifacts import qif_artifact
 import yaml
 
 import cim_timing
@@ -750,10 +752,7 @@ def test_the_shipped_granite_atlas_validates_through_the_real_loader(tmp_path):
     document = os.path.join(
         PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
     )
-    # A missing artifact FAILS (never skips). The repo's own precedent is
-    # test_run_perf_gpu_results_unchanged_vs_baseline: a silent skip would let
-    # deleting the file turn this gate green, which disarms it.
-    assert os.path.exists(document), (
+    assert qif_artifact(document).exists(), (
         "docs/qif/atlas/granite_4_0_h_tiny.json is the ADJ-1 headline artifact "
         "and is committed; regenerate it with the command in its provenance block"
     )
@@ -766,7 +765,7 @@ def test_the_shipped_granite_atlas_validates_through_the_real_loader(tmp_path):
         }));
         """,
         tmp_path,
-        document=__import__("pathlib").Path(document),
+        document=__import__("pathlib").Path(qif_artifact(document)),
     )
     verdict = json.loads(out)
     assert verdict["errors"] == []
@@ -786,7 +785,7 @@ def test_the_atlas_draws_a_service_wire_to_every_analog_chip():
     MEASURED off P4's timeline.
     """
     path = os.path.join(PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json")
-    document = json.load(open(path, encoding="utf-8"))
+    document = json.load(open(qif_artifact(path), encoding="utf-8"))
     svc = [link for link in document["links"] if link["role"] == "svc"]
     analog_chips = [c for c in document["chips"] if c["pool"] == "analog"]
     digital_chips = {c["id"] for c in document["chips"] if c["pool"] == "digital"}
@@ -829,11 +828,11 @@ def test_the_atlas_draws_a_service_wire_to_every_analog_chip():
 def test_the_shipped_granite_atlas_carries_p4s_duty_cycles():
     """--priced is what makes it the FULL artifact rather than a placement."""
     path = os.path.join(PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json")
-    assert os.path.exists(path), (
+    assert qif_artifact(path).exists(), (
         "docs/qif/atlas/granite_4_0_h_tiny.json is committed; a missing artifact "
         "must fail this gate, never skip it"
     )
-    with open(path) as handle:
+    with open(qif_artifact(path)) as handle:
         document = json.load(handle)
     assert "--priced" in document["provenance"]["reference_run"]["command"]
     duty = [
@@ -855,11 +854,11 @@ def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     path = os.path.join(
         PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny_report.json"
     )
-    assert os.path.exists(path), (
+    assert qif_artifact(path).exists(), (
         "docs/qif/atlas/granite_4_0_h_tiny_report.json is committed; a missing "
         "artifact must fail this gate, never skip it"
     )
-    shipped = open(path, encoding="utf-8").read()
+    shipped = open(qif_artifact(path), encoding="utf-8").read()
     # BYTES, against the exact serialization inference_timing._write_fws_dag_report
     # uses (json.dump(..., indent=2), no trailing newline). Comparing the parsed
     # objects would prove value equality only.
@@ -888,7 +887,7 @@ def test_the_shipped_granite_atlas_is_what_a_fresh_run_produces(tmp_path):
     path = os.path.join(
         PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
     )
-    assert regenerated == open(path, encoding="utf-8").read(), (
+    assert regenerated == open(qif_artifact(path), encoding="utf-8").read(), (
         "docs/qif/atlas/granite_4_0_h_tiny.json is stale; regenerate it with "
         "the command in its provenance block"
     )
@@ -903,9 +902,7 @@ def test_the_granite_artifacts_name_the_model_and_not_its_pricing_carrier():
     """
     atlas = json.load(
         open(
-            os.path.join(
-                PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
-            ),
+            qif_artifact("docs/qif/atlas/granite_4_0_h_tiny.json"),
             encoding="utf-8",
         )
     )
@@ -924,9 +921,7 @@ def test_the_granite_artifacts_name_the_model_and_not_its_pricing_carrier():
 
     report = json.load(
         open(
-            os.path.join(
-                PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny_report.json"
-            ),
+            qif_artifact("docs/qif/atlas/granite_4_0_h_tiny_report.json"),
             encoding="utf-8",
         )
     )
@@ -944,9 +939,7 @@ def test_the_atlas_and_the_report_size_the_pool_the_same_way(granite):
     """
     atlas = json.load(
         open(
-            os.path.join(
-                PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
-            ),
+            qif_artifact("docs/qif/atlas/granite_4_0_h_tiny.json"),
             encoding="utf-8",
         )
     )

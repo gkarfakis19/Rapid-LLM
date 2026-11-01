@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.qif_artifacts import qif_artifact
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ATLAS_DIR = PROJECT_ROOT / "docs" / "qif" / "atlas"
@@ -203,7 +205,7 @@ def test_the_shipped_documents_between_them_fire_every_corruption(tmp_path):
     """
     fired = set()
     total = None
-    for document in (FIXTURE, PD_ATLAS):
+    for document in (FIXTURE, qif_artifact(PD_ATLAS)):
         out = _run_core(
             """
             const rows = ATLAS.selfTest(doc);
@@ -332,14 +334,14 @@ def _shipped_documents():
     workstream lands is covered the moment it exists, with nobody to remember.
     """
     found = []
-    for path in sorted(ATLAS_DIR.glob("*.json")):
+    for path in sorted((*ATLAS_DIR.glob("*.json"), *qif_artifact(ATLAS_DIR, required=False).glob("*.json"))):
         try:
             blob = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, UnicodeDecodeError):
             continue
         if isinstance(blob, dict) and blob.get("schema") == "fws_atlas/1":
             found.append(path.name)
-    return tuple(found)
+    return tuple(sorted(set(found)))
 
 
 SHIPPED = _shipped_documents()
@@ -347,11 +349,11 @@ SHIPPED = _shipped_documents()
 
 def test_the_pd_document_is_a_two_system_machine_with_one_handoff():
     """D16 drawn: two inventories, two roles, one priced handoff between them."""
-    assert PD_ATLAS.exists(), (
+    assert qif_artifact(PD_ATLAS).exists(), (
         "docs/qif/atlas/pd_llama7b.json is the P5.4 PD artifact and is committed; "
         "regenerate it with the command in its provenance block"
     )
-    doc = json.loads(PD_ATLAS.read_text(encoding="utf-8"))
+    doc = json.loads(qif_artifact(PD_ATLAS).read_text(encoding="utf-8"))
     assert doc["schema"] == "fws_atlas/1"
     assert [system["role"] for system in doc["systems"]] == ["prefill", "decode"]
     assert [system["phase"] for system in doc["systems"]] == ["prefill", "decode"]
@@ -368,7 +370,7 @@ def test_the_pd_document_is_a_two_system_machine_with_one_handoff():
 def test_the_pd_document_prices_each_half_on_its_own_timeline():
     """P4 duty cycles and metrics per SYSTEM (P5.4). One evaluation shared
     between the halves would print a single measurement twice."""
-    doc = json.loads(PD_ATLAS.read_text(encoding="utf-8"))
+    doc = json.loads(qif_artifact(PD_ATLAS).read_text(encoding="utf-8"))
     chip_system = {chip["id"]: chip["system"] for chip in doc["chips"]}
     duty = {"sys.prefill": [], "sys.decode": []}
     for macro in doc["macros"]:
@@ -392,7 +394,7 @@ def test_the_pd_document_prices_each_half_on_its_own_timeline():
 
 def test_the_pd_document_discloses_what_two_inventories_mean():
     """The two facts a PD reader cannot infer from the picture (D21)."""
-    doc = json.loads(PD_ATLAS.read_text(encoding="utf-8"))
+    doc = json.loads(qif_artifact(PD_ATLAS).read_text(encoding="utf-8"))
     by_key = {item["constraint"]: item for item in doc["relaxations"]}
     assert "pd_each_half_maps_the_whole_model" in by_key
     assert "pd_each_half_prices_the_whole_request" in by_key
@@ -415,7 +417,7 @@ def test_the_pd_document_validates_clean_through_the_real_loader(tmp_path):
         }));
         """,
         tmp_path,
-        document=PD_ATLAS,
+        document=qif_artifact(PD_ATLAS),
     )
     report = json.loads(out)
     assert report["errors"] == []
@@ -430,7 +432,7 @@ def test_the_pd_document_is_what_a_fresh_run_produces(tmp_path):
 
     _pair, _rows, document = emit.build_pd(**PD_ARGS)
     regenerated = fws_atlas_export.write_atlas_json(document, tmp_path / "pd.json")
-    assert regenerated == PD_ATLAS.read_text(encoding="utf-8"), (
+    assert regenerated == qif_artifact(PD_ATLAS).read_text(encoding="utf-8"), (
         "docs/qif/atlas/pd_llama7b.json is stale; regenerate it with the command "
         "in its provenance block"
     )
@@ -475,7 +477,7 @@ def test_the_unpriced_pd_path_builds_a_clean_document_and_claims_less(tmp_path):
 
 
 def test_the_pd_command_in_the_provenance_block_is_the_one_that_made_it():
-    doc = json.loads(PD_ATLAS.read_text(encoding="utf-8"))
+    doc = json.loads(qif_artifact(PD_ATLAS).read_text(encoding="utf-8"))
     command = doc["provenance"]["reference_run"]["command"]
     assert command.startswith("tools/fws_emit_atlas.py --pd ")
     assert "--priced" in command
@@ -493,7 +495,8 @@ def test_no_shipped_document_smuggles_an_accuracy_field(tmp_path):
     # D23 is hard, and it applies to every artifact in this directory.
     banned = ("accuracy", "perplexity", "top1", "top_1", "bleu", "error_rate")
     for name in SHIPPED:
-        blob = (ATLAS_DIR / name).read_text(encoding="utf-8").lower()
+        path = ATLAS_DIR / name if name.startswith("fixture_") else qif_artifact(ATLAS_DIR / name)
+        blob = path.read_text(encoding="utf-8").lower()
         for word in banned:
             assert word not in blob, (name, word)
 
@@ -513,7 +516,7 @@ def test_the_view_rules_hold_on_every_shipped_document(name, tmp_path):
         }));
         """,
         tmp_path,
-        document=ATLAS_DIR / name,
+        document=ATLAS_DIR / name if name.startswith("fixture_") else qif_artifact(ATLAS_DIR / name),
     )
     report = json.loads(out)
     assert report["broken"] == []
@@ -678,7 +681,7 @@ def test_every_metric_in_the_pd_document_names_its_system(tmp_path):
         }));
         """,
         tmp_path,
-        document=PD_ATLAS,
+        document=qif_artifact(PD_ATLAS),
     )
     report = json.loads(out)
     assert report["orphans"] == []

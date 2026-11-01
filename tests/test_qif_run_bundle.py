@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.qif_artifacts import qif_artifact
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -472,6 +473,6 @@ def test_the_manifest_label_is_the_member_short_label_never_the_sweep_prose():
         assert row["label"] == member["label"]
         assert len(row["label"]) <= 48, row["label"]
         assert "derived" not in row["label"]
-        report = json.loads(open(row["dir"] + "/dse_report.json").read())
+        report = json.loads(qif_artifact(row["dir"] + "/dse_report.json").read_text())
         sweep_label = (report.get("sweep") or {}).get("label", "")
         assert row["label"] != sweep_label

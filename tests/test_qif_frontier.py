@@ -49,6 +49,8 @@ import json
 from pathlib import Path
 
 import pytest
+
+from tests.qif_artifacts import qif_artifact
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -792,7 +794,7 @@ def test_the_frontier_config_is_the_shipped_machine_plus_the_sweep_block(
 
 
 def _payload(art):
-    return json.loads((art / "dse_report.json").read_text())
+    return json.loads(qif_artifact(art / "dse_report.json").read_text())
 
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)

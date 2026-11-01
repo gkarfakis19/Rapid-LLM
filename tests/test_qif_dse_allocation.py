@@ -28,6 +28,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.qif_artifacts import qif_artifact
+
 import config as config_module
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -796,7 +798,7 @@ def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
     comparison ADJ-9 itself quotes, and it is labelled as a machine whose
     digital side was chosen rather than derived.
     """
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     assert payload["sweep"]["axes"] == {
         "arrays_per_chip": [604, 640, 965, 1207],
         "bank_depth": [1, 2],
@@ -899,7 +901,7 @@ def test_checked_in_selected_config_is_the_winner_and_runs_the_mapped_path():
     longer has a lane count to write down, because the width is derived from
     the machine's own analog m-pass every time it runs.
     """
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     raw = yaml.safe_load(GRANITE_SELECTED.read_text())
     assert DSE.DSE_BLOCK not in raw
     assert "vector_lanes" not in raw["cim"]["cards"]["sa"]
@@ -923,7 +925,7 @@ def test_the_retired_wave_d_sweep_is_frozen_and_says_so():
     its config declared an axis the tool now refuses by name. A frozen artifact
     with no label is a rotting one, so the label is what this pins.
     """
-    payload = json.loads((RETIRED_DEMO_DIR / "dse_report.json").read_text())
+    payload = json.loads(qif_artifact(RETIRED_DEMO_DIR / "dse_report.json").read_text())
     retired = payload["retired"]
     assert retired["decision"].startswith("ADJ-9")
     assert "FROZEN" in retired["status"]
@@ -958,7 +960,7 @@ def test_the_frozen_demo_sweep_can_never_be_re_walked(tmp_path):
     NAMES the axis and the reason, and that the frozen artifact is still on
     disk to be read.
     """
-    assert DEMO_JSON.exists(), "the frozen artifact is history and stays checked in"
+    assert qif_artifact(DEMO_JSON).exists(), "the frozen artifact is history and stays checked in"
     raw = yaml.safe_load(GRANITE_DSE.read_text())
     assert "arrays_per_chip" in raw[DSE.DSE_BLOCK]["axes"], (
         "the frozen sweep config is preserved verbatim, refused axis and all"
@@ -995,7 +997,7 @@ def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
     sections above it in its own report. The note may only name quantities that
     are actually constant.
     """
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     note = payload["front_note"]
     tiles = {c["placement"]["tiles"] for c in payload["candidates"] if c["ok"]}
     assert len(tiles) > 1, "this gate is only meaningful while the tiles differ"
@@ -1076,7 +1078,7 @@ def test_banking_moves_active_column_sets_and_not_wasted_columns():
     lane axis — which is the same statement about banking, scoped to the axis
     that actually holds capacity still.
     """
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     valid = [c for c in payload["candidates"] if c["ok"]]
     at_capacity = [c for c in valid if c["knobs"]["arrays_per_chip"] == 604]
     assert len(at_capacity) == 2
@@ -1179,7 +1181,7 @@ def test_disclosures_are_one_entry_per_constraint_and_name_their_candidates():
     name which candidates carried it and flag any candidate that disagrees —
     otherwise a per-candidate quantity is presented as a sweep-level one.
     """
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     for cand in payload["candidates"]:
         keys = [item["constraint"] for item in cand["disclosures"]]
         assert len(keys) == len(set(keys)), (cand["id"], keys)
@@ -1214,7 +1216,7 @@ def test_markdown_carries_the_silicon_accountings_coverage():
     measured zero, and the MD must say so on every front shape — not only
     when the flat_area note happens to mention it."""
     report = DEMO_MD.read_text()
-    payload = json.loads(DEMO_JSON.read_text())
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     assert "silicon_accounting" in report
     uncovered = payload["silicon_coverage"]["uncovered_terms"]
 

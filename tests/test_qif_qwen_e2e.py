@@ -30,6 +30,8 @@ import pathlib
 import tempfile
 
 import pytest
+
+from tests.qif_artifacts import qif_artifact
 import yaml
 
 import cim_timing
@@ -523,7 +525,7 @@ def test_the_unvalidated_law_label_rides_the_report_and_the_atlas(qwen_lockstep)
     )
     assert "UNVALIDATED" in entry["value"]
 
-    with open(ATLAS_JSON, encoding="utf-8") as handle:
+    with open(qif_artifact(ATLAS_JSON), encoding="utf-8") as handle:
         atlas = json.load(handle)
     assert [
         item for item in atlas["relaxations"]
@@ -688,18 +690,18 @@ def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
     ordering by hash -- so byte equality is the right bar. A law change that
     moves a Qwen number now has to move this file too, in the same commit.
     """
-    assert os.path.exists(REPORT_JSON), (
+    assert qif_artifact(REPORT_JSON).exists(), (
         "docs/qif/atlas/qwen3_5_4b_report.json is committed; a missing artifact "
         "must fail this gate, never skip it"
     )
-    shipped = open(REPORT_JSON, encoding="utf-8").read()
+    shipped = open(qif_artifact(REPORT_JSON), encoding="utf-8").read()
     assert shipped == json.dumps(fws_eval.report_document(qwen), indent=2)
 
 
 def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     import tools.fws_emit_atlas as emit
 
-    assert os.path.exists(ATLAS_JSON), (
+    assert qif_artifact(ATLAS_JSON).exists(), (
         "docs/qif/atlas/qwen3_5_4b.json is committed; a missing artifact must "
         "fail this gate, never skip it"
     )
@@ -707,7 +709,7 @@ def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     regenerated = fws_atlas_export.write_atlas_json(
         document, os.path.join(str(tmp_path), "qwen.json")
     )
-    assert regenerated == open(ATLAS_JSON, encoding="utf-8").read(), (
+    assert regenerated == open(qif_artifact(ATLAS_JSON), encoding="utf-8").read(), (
         "docs/qif/atlas/qwen3_5_4b.json is stale; regenerate it with the "
         "command in its provenance block"
     )
@@ -717,7 +719,7 @@ def test_the_shipped_qwen_atlas_validates_through_the_real_loader(tmp_path):
     """Judged by atlas.html's own ATLAS.validate (P5.3), not by a local schema."""
     from tests.test_qif_atlas import _run_core
 
-    assert os.path.exists(ATLAS_JSON)
+    assert qif_artifact(ATLAS_JSON).exists()
     out = _run_core(
         """
         const v = ATLAS.validate(doc);
@@ -727,7 +729,7 @@ def test_the_shipped_qwen_atlas_validates_through_the_real_loader(tmp_path):
         }));
         """,
         tmp_path,
-        document=pathlib.Path(ATLAS_JSON),
+        document=pathlib.Path(qif_artifact(ATLAS_JSON)),
     )
     verdict = json.loads(out)
     assert verdict["errors"] == []
@@ -741,7 +743,7 @@ def test_the_qwen_artifacts_name_the_model_and_not_its_pricing_carrier():
     is the arithmetic carrier. That is a pricing choice, not the model's
     identity, and every owner, label and title names the model.
     """
-    with open(ATLAS_JSON, encoding="utf-8") as handle:
+    with open(qif_artifact(ATLAS_JSON), encoding="utf-8") as handle:
         atlas = json.load(handle)
     assert "qwen3_5_4b" in atlas["title"]
     system = atlas["systems"][0]
@@ -753,7 +755,7 @@ def test_the_qwen_artifacts_name_the_model_and_not_its_pricing_carrier():
     ]
     assert carrier and "llama" in carrier[0]["value"]
 
-    with open(REPORT_JSON, encoding="utf-8") as handle:
+    with open(qif_artifact(REPORT_JSON), encoding="utf-8") as handle:
         report = json.load(handle)
     assert report["model"]["model_id"] == "qwen3_5_4b"
     assert report["model"]["model_type"] == "llama"
@@ -761,7 +763,7 @@ def test_the_qwen_artifacts_name_the_model_and_not_its_pricing_carrier():
 
 def test_the_gate_reaches_the_atlas_as_a_drawn_tile():
     """An artifact someone opens has to show the thing the wave added."""
-    with open(ATLAS_JSON, encoding="utf-8") as handle:
+    with open(qif_artifact(ATLAS_JSON), encoding="utf-8") as handle:
         atlas = json.load(handle)
     gate_tiles = [t for t in atlas["tiles"] if t["owner"]["block"] == "attn_gate_proj"]
     # ONE W_g PER GATED LAYER, however the allocation tiles it. The count of
@@ -779,4 +781,4 @@ def test_the_gate_reaches_the_atlas_as_a_drawn_tile():
 def test_accuracy_is_never_a_factor_in_the_qwen_artifacts():
     """D23, asserted on the artifacts a reader actually receives."""
     for path in (ATLAS_JSON, REPORT_JSON):
-        assert "accuracy" not in open(path, encoding="utf-8").read().lower()
+        assert "accuracy" not in open(qif_artifact(path), encoding="utf-8").read().lower()
