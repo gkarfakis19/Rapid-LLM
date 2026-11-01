@@ -2048,27 +2048,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         # decode_time, decode_energy, decode_samples = inference_engine._build_decode_graph()
         return inference_engine._build_decode_graph()
 
-    def calc_total_inference_time(self) -> dict:
+    def _kv_cache_diagnostic_bytes(self):
+        """Reporting only, after evaluation: KV belongs to attention layers.
+
+        This also corrects CIM hybrid diagnostics (Granite has 4 attention
+        layers out of 40). It does not feed mapped timing, QIF, area or energy.
         """
-        Calculate complete inference time including prefill + decode phases.
-
-        Returns:
-            dict: Breakdown of inference timing components
-        """
-        if self.ssm is not None and self.cim_model is None:
-            print("GPU SSM energy: UNMODELED; reported energy zeros are placeholders.")
-            if self.seq_len > self.model.decode_len:
-                print("GPU SSD prefill: NEW, UNVALIDATED against old goldens (CIM work law).")
-        # Calculate prefill time (existing functionality)
-        prefill_time, prefill_energy = self.calc_time()
-        # Calculate decode time (new functionality)
-        decode_time, decode_energy, decode_samples = self.calc_decode_time()
-        total_time = prefill_time + decode_time
-
-        time_to_first_token = prefill_time
-        if decode_samples:
-            time_to_first_token += decode_samples[0].execution_time
-
         token_bytes = 0.0
         if any("attention" in kinds for kinds in self.layer_mixers):
             head_dim = getattr(self, "head_dim", None)
@@ -2090,15 +2075,32 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 token_bytes = 0.0
         prefill_len = self.seq_len - self.model.decode_len
         decode_len = self.model.decode_len
-        # Preserve CIM diagnostics until their separately approved correction.
-        num_layers = (self.num_layers if self.cim_model is not None else
-                      sum("attention" in kinds for kinds in self.layer_mixers))
+        num_layers = sum("attention" in kinds for kinds in self.layer_mixers)
 
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers
         decode_fetch_bytes = token_bytes * num_layers * (
             decode_len * (prefill_len + self.seq_len) // 2
         )
+        return prefill_store_bytes, decode_store_bytes, decode_fetch_bytes
+
+    def calc_total_inference_time(self) -> dict:
+        """Calculate prefill/decode timing, then report KV traffic diagnostics."""
+        if self.ssm is not None and self.cim_model is None:
+            print("GPU SSM energy: UNMODELED; reported energy zeros are placeholders.")
+            if self.seq_len > self.model.decode_len:
+                print("GPU SSD prefill: NEW, UNVALIDATED against old goldens (CIM work law).")
+        prefill_time, prefill_energy = self.calc_time()
+        decode_time, decode_energy, decode_samples = self.calc_decode_time()
+        total_time = prefill_time + decode_time
+
+        time_to_first_token = prefill_time
+        if decode_samples:
+            time_to_first_token += decode_samples[0].execution_time
+
+        prefill_store_bytes, decode_store_bytes, decode_fetch_bytes = self._kv_cache_diagnostic_bytes()
+        prefill_len = self.seq_len - self.model.decode_len
+        decode_len = self.model.decode_len
 
         def _to_gib(byte_val: int) -> str:
             gib_val = byte_val / (1024 ** 3)

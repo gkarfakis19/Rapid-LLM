@@ -151,6 +151,41 @@ refused because the archive supplies no gated-DeltaNet GPU law. Its existing
 CIM path and evidence remain intact; it is not reported as a validated GPU
 hybrid. See the gaps below.
 
+## CIM changes
+
+The pure-SSM decode GEMM shortcut is restricted to GPU execution. CIM keeps
+the existing shape adapter before mapped evaluation; the shared Mamba2 YAML
+now completes through `run_perf.py`, including sampled decode. Decode samples
+also inherit the configured output directory instead of writing to
+`./output/LLM`. Full CLI tests use unchanged Mamba2 and Granite model YAMLs
+on both GPU and CIM hardware (four slow cases).
+
+The approved CIM KV reporting correction counts attention layers only,
+including hybrid CIM models. Granite-4.0-H-1B has 4 attention layers out of
+40, so the three returned diagnostic fields move as follows:
+
+| Output | Before | Corrected bytes |
+|---|---:|---:|
+| `kv_cache_prefill_store_bytes` | 146800640 | 14680064 |
+| `kv_cache_decode_store_bytes` | 20971520 | 2097152 |
+| `kv_cache_decode_fetch_bytes` | 40265318400 | 4026531840 |
+
+Each corrected value is exactly `(4 / 40) * before`; a fast test pins both
+the values and the ratio. The other numerical output that moves is their
+formatted stdout line: `prefill_store=0.1 GiB, decode_store=0.0 GiB,
+decode_fetch=37.5 GiB` becomes `prefill_store=0.0 GiB, decode_store=0.0 GiB,
+decode_fetch=3.8 GiB`. Decode store's formatted value stays 0.0 GiB.
+Pure SSM has zero KV diagnostics; all-attention plans retain their values.
+
+`_kv_cache_diagnostic_bytes` is called after both phase evaluations and has
+no pricing consumers. The returned fields are not read by `run_perf.py`'s
+result writer or by the validator. Timing (Granite total
+`0.6709804030642821` s), mapping, area, energy, validator rows and the mapped
+QIF report remain unchanged. Golden and QIF artifacts are not regenerated.
+Output paths and sample artifact locations follow `--output_dir`; file
+locations change when that flag is set. Wall-clock/progress log lines are
+runtime metadata, not numerical model results.
+
 ### Archive reproduction
 
 Run from this worktree with the documented LD_LIBRARY_PATH:
