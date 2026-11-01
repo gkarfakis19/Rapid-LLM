@@ -1,0 +1,82 @@
+# Converted from archive/ssm-gpu-old fdbb0ea; see docs/ssm/SSM.md.
+model_param:
+  mode: LLM
+  run_type: inference
+  tied_embeddings: true
+  model_type: llama
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 2048
+  decode_len: 2048
+  hidden_dim: 4096
+  attention:
+    attention_type: gqa
+    num_heads: 128
+    kv_heads: 8
+    use_flashattention: true
+    attention_tile_size: 128
+  moe:
+    num_experts: 72
+    top_k: 10
+    moe_intermediate_size: 1536
+    n_shared_experts: 0
+    moe_layer_freq: 1
+    first_k_dense_replace: 0
+  intermediate_size: 768
+  vocab_size: 100352
+  num_layers: 40
+  model_id: granitemoehybrid
+  layer_plan:
+    layer_types:
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - attention
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - attention
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - attention
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - attention
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    ffn_per_layer: true
+  ssm:
+    variant: mamba2
+    d_state: 128
+    d_conv: 4
+    n_heads: 128
+    d_head: 64
+    expand: 2
+    n_groups: 1
+    chunk_size: 256
+inference_param:
+  sample_every: -1

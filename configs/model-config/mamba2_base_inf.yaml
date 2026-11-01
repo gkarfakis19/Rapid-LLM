@@ -1,0 +1,61 @@
+# Converted from archive/ssm-gpu-old fdbb0ea; see docs/ssm/SSM.md.
+model_param:
+  mode: LLM
+  model_type: gpt
+  run_type: inference
+  tied_embeddings: true
+  global_batch_size: 1
+  gradient_accumulation_steps: 1
+  seq_len: 256
+  decode_len: 256
+  hidden_dim: 768
+  moe:
+    num_experts: 1
+    top_k: 1
+    moe_intermediate_size: 0
+    n_shared_experts: 0
+    moe_layer_freq: 0
+    first_k_dense_replace: 0
+  intermediate_size: 1536
+  vocab_size: 1000
+  num_layers: 24
+  disable_embedding_unembedding: true
+  model_id: mamba2
+  layer_plan:
+    layer_types:
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    - ssm
+    ffn_per_layer: true
+  ssm:
+    variant: mamba2
+    d_state: 128
+    d_conv: 4
+    n_heads: 24
+    d_head: 64
+    expand: 2
+    n_groups: 8
+    chunk_size: 256
+inference_param:
+  sample_every: -1

@@ -1597,6 +1597,24 @@ def _reject_unknown_keys(context: str, data: Dict[str, object], allowed: Sequenc
         )
 
 
+def _reject_old_ssm_keys(model_dict: Dict[str, object]) -> None:
+    """Archive GPU settings must be explicitly migrated, never ignored."""
+    renames = {"state_size": "ssm.d_state", "conv_kernel": "ssm.d_conv",
+               "num_heads": "ssm.n_heads", "headdim": "ssm.d_head",
+               "head_dim": "ssm.d_head", "n_groups": "ssm.n_groups",
+               "expand": "ssm.expand", "chunk_size": "ssm.chunk_size",
+               "hybrid_schedule": "layer_plan", "linear": "ssm.variant"}
+    for key, target in renames.items():
+        if key in model_dict:
+            raise ValueError(f"model_param.{key} is retired; use model_param.{target}. "
+                             "Migrate with tools/convert_ssm_config.py.")
+    for key, target in renames.items():
+        if key in {"state_size", "conv_kernel", "num_heads", "headdim", "head_dim"}:
+            if key in (model_dict.get("ssm") or {}):
+                raise ValueError(f"model_param.ssm.{key} is retired; use model_param.{target}. "
+                                 "Migrate with tools/convert_ssm_config.py.")
+
+
 def _parse_block_kind(value: object, context: str) -> str:
     key = str(value).strip().lower()
     if key not in _HF_BLOCK_KIND_ALIASES:
@@ -2400,6 +2418,7 @@ class LLMConfig:
     @classmethod
     def from_dict(cls, model_dict: Dict[str, object]) -> "LLMConfig":
         model_dict = _require_mapping("model_param", model_dict)
+        _reject_old_ssm_keys(model_dict)
 
         mode_raw = _parse_str_field("model_param", model_dict, "mode")
         mode = mode_raw.strip().upper()
