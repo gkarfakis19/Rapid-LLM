@@ -91,6 +91,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 import yaml
 
@@ -1356,7 +1357,7 @@ def check_bridge_gate(table):
         print("  * %s: %s" % (name, reason))
 
 
-def _run_qif_dse_tool(hw_yaml_path, model_yaml_name, out_dir, extra_args=()):
+def _run_qif_dse_tool(hw_yaml_path, model_yaml_name, out_dir, extra_args=(), timeout=1800):
     """Run tools/fws_qif_dse.py as a subprocess; return (proc, payload|None).
 
     Like the closed-form rows, the tool writes only under out_dir (and
@@ -1380,7 +1381,7 @@ def _run_qif_dse_tool(hw_yaml_path, model_yaml_name, out_dir, extra_args=()):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
-        timeout=1800,
+        timeout=timeout,
     )
     report_path = os.path.join(out_dir, "dse_report.json")
     payload = None
@@ -2518,6 +2519,57 @@ def check_qif_service_links(table):
         )
 
 
+def check_qif_current_frontier_roundtrip(table, model_id):
+    """Select a CURRENT fill frontier, emit its YAML and rerun run_perf.
+
+    This is a small legal D38 search, not a rebaseline of either historical
+    curve. Two live candidates ensure selection really occurs on a front.
+    """
+    hardware, model = {
+        "Granite-4.0-H-Tiny": ("fws_cim_granite_tiny.yaml", "granite_4_0_h_tiny_inf.yaml"),
+        "Qwen3.5-4B": ("fws_cim_qwen3_5_4b.yaml", "qwen3_5_4b_inf.yaml"),
+    }[model_id]
+    name = "P7.4 CURRENT frontier %s" % model_id
+    scratch = os.path.join(REPO_ROOT, "tmp", "qif_frontier_verify")
+    os.makedirs(scratch, exist_ok=True)
+    # A fresh directory prevents a previous report/config from satisfying
+    # this run's output-presence checks.
+    out_dir = tempfile.mkdtemp(prefix=model_id + "-", dir=scratch)
+    raw = load_yaml(os.path.join(HW_DIR, hardware))
+    raw["mapping_dse"] = {
+        "label": name, "objective": "throughput", "axes": {"pp_util": [0.5, 1.0]},
+    }
+    hw_path = os.path.join(out_dir, "current_frontier.yaml")
+    emitted_path = os.path.join(out_dir, "selected.yaml")
+    with open(hw_path, "w") as handle:
+        yaml.safe_dump(raw, handle, sort_keys=False)
+    started = time.monotonic()
+    proc, live = _run_qif_dse_tool(
+        hw_path, model, out_dir,
+        extra_args=["--emit-config", emitted_path, "--verify", "--no-atlas-points"],
+        timeout=300,
+    )
+    print("%s live --emit-config --verify: %.2f s" % (model_id, time.monotonic() - started))
+    if not table.boolean("%s: live sweep and verify exit code" % name, "0", proc.returncode == 0, str(proc.returncode)):
+        print(proc.stdout[-3000:])
+        return
+    if not table.boolean("%s: current report exists" % name, "written", live is not None):
+        return
+    table.exact("%s: both legal fill candidates priced" % name, (2, 2), (live["num_candidates"], live["num_valid"]))
+    table.boolean("%s: selected point belongs to the CURRENT Pareto front" % name,
+                  "selected_id in front_ids", live["selected_id"] in live["front_ids"])
+    verify = live.get("verify") or {}
+    table.boolean("%s: --emit-config --verify ran and passed" % name,
+                  "run_perf reproduces the selection", verify.get("ran") is True and verify.get("pass") is True,
+                  str(verify.get("message") or "PASS"))
+    checks = {row["name"]: row for row in verify.get("checks", [])}
+    for metric in ("tokens_per_s", "analog_chips", "tiles", "analog_macro_slots"):
+        check = checks.get(metric)
+        table.boolean("%s: %s independently round-tripped" % (name, metric),
+                      "comparison present and passing", check is not None and check.get("ok") is True)
+    table.boolean("%s: emitted YAML exists" % name, "exists", os.path.isfile(emitted_path))
+
+
 def check_qif_frontier(table):
     """QIF P7.4/P7.5 rows: the (area, tokens/s) FRONTIER under regime v2.
 
@@ -2851,13 +2903,14 @@ def check_qif_frontier(table):
             % ", ".join(sorted({row["device_class"] for row in valid[0]["utilization"]})),
         )
 
-        # 0176fa6 preserves provisional historical reports, without a verify
-        # run. The LIVE round-trip gate is check_qif_dse_verify above.
+        # Keep historical provenance honest, then verify a CURRENT selection
+        # on legal D38 inputs instead of substituting absence for a round trip.
         table.exact(
             "%s: historical report claims no unrun verification" % name,
             None,
             payload["verify"],
         )
+        check_qif_current_frontier_roundtrip(table, model_id)
 
 
 def _cross_product_size(axes):

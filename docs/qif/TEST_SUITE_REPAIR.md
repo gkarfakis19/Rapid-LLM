@@ -21,7 +21,7 @@ Counts are failing **cases**, including parametrization, rather than functions.
 | `test_fws_cim.py` | 3 | 0 | The link amendment changed intra-chip latency from 50 ns to 5 ns. |
 | `test_qif_atlas.py` | 0 | 1 | Historical PD atlas byte comparison needs a reference decision. |
 | `test_qif_dse_allocation.py` | 23 | 0 | D36/D38 retired the old axes; use legal Y/Z/fill axes, named refusals, the committed batch-one Llama twin, and explicit small-capacity controls. The frozen demo is history, not a copy of a current point. |
-| `test_qif_folding_mapping.py` | 2 | 1 | D37 saves two further boundary remainders; D38/ADJ-16 enlarge the lowered observation window. Test comparison arithmetic rather than an old op count or time delta. Historical comparison JSON needs a reference decision. |
+| `test_qif_folding_mapping.py` | 2 | 1 | D37 saves two further boundary remainders; D38/ADJ-16 enlarge the lowered observation window. Pin current op counts, lowered-step deltas and both headline rates as regression anchors. Historical comparison JSON needs a reference decision. |
 | `test_qif_folding.py` | 2 | 0 | Dense packing across stage boundaries changes macro count from 4828 to 4826 and the endpoint comparison by two boundary remainders. |
 | `test_qif_frontier.py` | 25 | 2 | Current axes, derived per-layer stages, fill-dependent state, explicit partition refusal, source-specific binding terms, and historical reports with no verification claim. Two full regeneration comparisons need reference decisions. |
 | `test_qif_granite_e2e.py` | 5 | 1 | D37/D38 change placement, stages, demand and softmax sizing. Read all stages for the pool comparison and export the current pool view from the same evaluation. Historical report comparison needs a reference decision. |
@@ -99,14 +99,16 @@ the original OPTIMA reference numbers. Its live mapped-DSE gate now sweeps
 fill on the legacy lockstep vehicle: full fill round-trips, underfill carries
 a named mapping refusal. Historical frontier rows explicitly check that
 provisional reports claim no unrun verification; the separate live round-trip
-gate still runs. No tolerances or frozen OPTIMA targets are changed.
+gate still runs. The audit repair additionally selects and round-trips a
+CURRENT frontier for each model using the legal fill axis; this does not
+rebaseline either historical curve. No frozen OPTIMA targets are changed.
 
 The only production edit corrects the link provenance **text** from 50 ns to
 5 ns, matching the existing numeric constant and documented amendment.
 All other changes are tests, validation code, test documentation or ignore
 rules. Golden recordings and A100 baseline files remain unchanged.
 
-## Verification
+## Stage 1 verification (before the audit repair)
 
 - Golden gate: 221 passed before the production text correction and 221
   passed afterward (39.48 s for the final dedicated run). SHA-256 comparison
@@ -117,7 +119,7 @@ rules. Golden recordings and A100 baseline files remain unchanged.
 - Targeted runs: 129 physical/e2e tests passed, 107 SA-geometry tests
   passed, and 115 DSE/frontier/bundle/helper tests passed. Three slow
   whole-Granite packing checks also passed (97.19 s).
-- Missing results root: the artifact consumer skips with the full missing
+- Missing results root (superseded by the audit): the artifact consumer skips with the full missing
   path and `RAPID_QIF_RESULTS`; the local fixture check still passes.
 - Slow-lane probes: default gives one pass/one skip; `-m slow` gives one
   pass/one deselection; `RAPID_RUN_SLOW=1` gives two passes.
@@ -136,3 +138,75 @@ rules. Golden recordings and A100 baseline files remain unchanged.
   functional rows were 232 passes and the two existing XPASS cases. The
   retired Markdown reader was subsequently rebuilt and passed its focused
   check; the final full run above includes it.
+
+## Audit repairs
+
+Retiring an input must preserve the property its test guarded. No production
+code, pricing law, model parameter or historical result is changed in this round.
+
+1. D34 mismatch warnings are positively exercised with synthetic spans on
+   legal D38 stage IDs. The real balance law, quiet-mode stdout warning,
+   Markdown headline, candidate cell and legend all run. Separate assertions
+   pin occupancy spread (5x) and digital spread (9x). Explicit-partition
+   refusals and the balanced negative control remain additional coverage.
+2. The run-ID test holds its label fixed and changes `pp_util` from 1 to 0.5;
+   it also checks that the machine's resident-stream count changes.
+3. Granite's headline test pins beat 26.3210577032 us, 37992.3941992 tokens/s,
+   digital area 30306.92152689 mm2 and total energy 807802607914.4937 pJ.
+   It restores digital-component energy/partial coverage, engine/fabric
+   provenance and binding terms, and all-stream residency/store checks.
+   These are regression anchors at `3cdce5c`, **not validation targets**:
+   D37/D38 changed packing and stage count; ADJ-16 derives the window.
+4. The packing comparison uses pinned anchors, not a new NEEDS GEORGE:
+   dense accumulator ops 4432; dedicated/dense lowered-step medians
+   13.3004221889/4.01578947368 us; delta -9.28463271521 us (-69.8070526134%).
+   Both headline rates are independently pinned (75244.8206412 and
+   18575.6707049 tokens/s). A smaller lowered-step median does not establish
+   a faster headline: the latter includes pipeline floors. These are current
+   regression anchors with the same D37/D38/ADJ-16 qualification.
+5. Allocation checks again require distinct headlines and timelines, retain
+   both feasible and budget-refused candidates in one legal fill sweep, and
+   continue to a feasible point after a config/card refusal. The last test
+   injects one bad card after applying a legal fill input, exercising the
+   actual parser's refusal rather than a fake candidate result. The frontier
+   state summary again checks its budget basis, measured count and min/max
+   area and state-byte ranges.
+6. Required artifacts now FAIL by default. Only the explicit environment
+   opt-out `RAPID_QIF_ALLOW_MISSING=1` permits skips; `RAPID_QIF_RESULTS` and
+   the missing path remain in the message. Unit checks cover absent, false,
+   non-1 and explicit-1 opt-out values. TESTING.md documents this contract.
+7. The validator now runs `--emit-config --verify` on CURRENT two-point fill
+   frontiers for Granite and Qwen, requires selected IDs on the live Pareto
+   front and checks throughput and placement round trips. The full validator
+   measures 142.36 s for Granite and 21.47 s for Qwen, each below five minutes.
+   These are required live checks, with fresh scratch directories to prevent
+   stale outputs satisfying presence assertions. There is no remaining
+   KNOWN GAP for the historical checks' lost round-trip property; only the
+   original source-bound reference comparisons remain unresolved.
+8. Both frontier regeneration xfails now name the actual first failure:
+   D38 refuses retired axes before comparison with historical results.
+9. The 234 functional cases and Koyeb stay slow. TESTING.md now requires
+   `-m slow` (or `RAPID_RUN_SLOW=1`) before merging. The entire 247-case slow
+   lane is being run for this audit, including the historical regeneration
+   checks; results below will distinguish expected failures and XPASS.
+
+No additional NEEDS GEORGE case has been introduced. The Stage 1 list above
+remains the full list; the two frontier reasons are now more precise.
+
+## Audit gate results
+
+- Golden gate: **221 passed**, exit 0 (36.95 s pytest; 39.15 s process wall).
+  All **46 golden SHA-256 hashes are unchanged** from the pre-repair manifest.
+- Full default suite: **2701 passed, 292 skipped, 8 xfailed, 0 failures**,
+  exit 0. Pytest time 671.70 s; process wall time **674.65 s** (11m 14.65s).
+  The skips retain the Stage 1 distribution (247 slow, 44 environment-gated,
+  one blocked local socket); none skips missing QIF evidence.
+- Focused restored-property checks: 11 helper/frontier checks and both the
+  Granite headline and mixed-feasibility checks pass. The three positive
+  whole-Granite packing checks also pass in the running slow lane.
+- Standalone validator: **544/544 checks pass**, exit 0; process wall time
+  **288.73 s**. This includes 20 additional checks for the two CURRENT
+  frontier selections and their emitted-config round trips.
+- Complete slow-lane result is pending below.
+
+Audit logs and JUnit reports are in repo scratch `tmp/qif-audit/`.
