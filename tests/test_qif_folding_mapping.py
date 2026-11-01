@@ -734,17 +734,9 @@ def test_waste_is_reported_under_dense_and_refused_under_dedicated(
 def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
     granite_packing_document,
 ):
-    # THE HEADLINE, on the shipped Wave D winner (bank_depth = 1). Today's
-    # layers_per_chip placement reaches 5544 macros; Invariant W reaches 4828
-    # for the same weights, against a GLOBAL CELL FLOOR of 2876. What is left
-    # above the floor is chip granularity plus the 40.442% dimension-mismatch
-    # remainder, which is the metric, not a rounding.
-    #
-    # WAVE F: every count here fell by the LM HEAD and by nothing else — D30
-    # drops it entirely, which is 66 macros under either placement law (5610 ->
-    # 5544, 4894 -> 4828) and 65 off the cell floor. The SAVING is unchanged at
-    # 716 macros: the endpoint filled whole macros, so packing it densely never
-    # bought anything.
+    # regression anchor at 3cdce5c, not a validation target; reason: D37 packs
+    # across stage boundaries (4826 macros vs 5544 dedicated), while D30 keeps
+    # endpoints absent. The global cell floor remains 2876 macros.
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["macros_holding_tiles"] == 5544
@@ -765,7 +757,7 @@ def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
         dense["bank_passes"]["column_set_passes_charged"]
         == dedicated["bank_passes"]["column_set_passes_charged"]
     )
-    assert dense["bank_passes"]["column_set_passes_charged"] > 0.0
+    assert dense["bank_passes"]["column_set_passes_charged"] == 3064.0
     # ... and no macro of either placement read a bank TWICE. Some read none:
     # those hold experts this beat did not route to.
     for point in (dedicated, dense):
@@ -776,45 +768,21 @@ def test_granite_dense_packing_saves_macros_at_the_same_bank_passes(
 def test_granite_dense_packing_moves_the_decode_step_by_the_accumulator_trade(
     granite_packing_document,
 ):
-    # The BEAT is NOT assignment-invariant to the last digit and P7 says why:
-    # stacking K blocks in one macro buys an in-macro accumulator and sells a
-    # partial-sum transport. Dense is 684 accumulator ops richer and 0.104%
-    # faster per beat; both numbers are on the artifact.
-    #
-    # WAVE F: the op count rose from 288 with the WINDOW, not with the packing —
-    # the filled pipeline lowers D - 1 fill beats plus the steady ones, so the
-    # same 72 local K stacks fire on more traversals (684 = 72 stacks x the
-    # traversals the window lowers, minus the ones truncated at its edge). The
-    # per-beat trade is what moved: the accumulator saving is now measured
-    # against a beat 17x shorter than the retired regime's step, so the same
-    # trade is a smaller PERCENTAGE of it.
-    #
-    # ADJ-9: -0.10260107% -> -0.10411058%. ADJ-10: -0.10411058% -> -0.26063724%.
-    # THE TRADE IN SECONDS IS UNCHANGED AND THAT IS THE WHOLE POINT — 40 ns
-    # either way, because it is analog and pool work and no digital derivation
-    # touches it. What moves is the DENOMINATOR: each derivation shortens the
-    # beat the saving is measured against (ADJ-9 widened the scan engine,
-    # ADJ-10 widened the attention fabric), so the same saving is a larger
-    # percentage of a smaller beat. A test that pinned only the percentage
-    # would read this as the packing law changing, which is why the SECONDS are
-    # pinned beside it. The machine under this comparison is the demo sweep's
-    # (arrays_per_chip 604 instead of the shipped 640, no declared vector_lanes),
-    # which is what the emitted config carries.
+    # regression anchor at 3cdce5c, not a validation target; reason: D37/D38
+    # change dense packing and stage count; ADJ-16 derives a longer window.
+    # The median lowered step and headline beat are different measurements
+    # (the latter includes pipeline floors). Pin BOTH, without claiming that
+    # the smaller lowered step proves a throughput improvement.
     document = granite_packing_document
     dedicated, dense = document["points"]
     assert dedicated["accumulator_ops"] == 0
-    # 0176fa6 / D38 and ADJ-16: more per-layer stages enlarge the derived
-    # observation window. Total lowered op counts and the old beat delta
-    # are not invariant. The comparison must still report its own arithmetic.
-    assert dense["accumulator_ops"] > 0
-    delta = dense["median_decode_step_s"] - dedicated["median_decode_step_s"]
-    assert document["delta"]["median_decode_step_delta_s"] == pytest.approx(
-        delta
-    )
-    assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(
-        100 * delta / dedicated["median_decode_step_s"]
-    )
-    assert dense["tokens_per_s"] > 0 and dedicated["tokens_per_s"] > 0
+    assert dense["accumulator_ops"] == 4432
+    assert dedicated["median_decode_step_s"] == pytest.approx(1.3300422188894899e-05, rel=1e-8)
+    assert dense["median_decode_step_s"] == pytest.approx(4.015789473684351e-06, rel=1e-8)
+    assert document["delta"]["median_decode_step_delta_s"] == pytest.approx(-9.284632715210548e-06, rel=1e-8)
+    assert document["delta"]["median_decode_step_delta_pct"] == pytest.approx(-69.80705261343276, rel=1e-8)
+    assert dedicated["tokens_per_s"] == pytest.approx(75244.82064118676, rel=1e-8)
+    assert dense["tokens_per_s"] == pytest.approx(18575.670704938988, rel=1e-8)
 
 
 @pytest.mark.slow

@@ -305,8 +305,10 @@ def test_every_candidate_is_priced_on_its_own_mapped_timeline(tmp_path):
         assert candidate["metrics"]["tokens_per_s"] == evaluation.metric("sys.fws.tokens_per_s").value
         assert candidate["metrics"]["makespan_s"] == evaluation.makespan_s
         assert candidate["placement"]["tiles"] == mapping.summary()["tiles"]
-    # Underfill changes the served point, so reusing a neighbour's timeline
-    # would be observable in the independent comparisons above.
+    # D38's live fill axis must actually move the headline, so copying a
+    # neighbour's evaluation cannot pass just by agreeing with itself.
+    assert len({c["metrics"]["tokens_per_s"] for c in payload["candidates"]}) == 2
+    assert len({c["metrics"]["makespan_s"] for c in payload["candidates"]}) == 2
 
 
 def test_parked_banking_axis_is_refused_before_any_candidate_runs(tmp_path):
@@ -332,30 +334,51 @@ def test_allocation_alias_cannot_bypass_the_parked_bank_axis(tmp_path):
 
 
 def test_infeasible_candidate_carries_its_stage_and_the_refusal_message(tmp_path):
-    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
-    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}, "max_chips": 1})
-    assert exit_code == 3
-    assert payload["num_candidates"] == 2 and payload["num_valid"] == 0
-    for failed in payload["candidates"]:
-        assert failed["fail_stage"] == "budget"
-        assert "max_chips" in failed["fail_message"]
-        for stage in ("config", "mapping"):
-            assert failed["stages"][stage] == {"ok": True}
-    assert payload["best_violation"]["id"] in {c["id"] for c in payload["candidates"]}
-
-def test_card_refusal_is_a_config_stage_candidate(tmp_path):
-    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
-    raw = _llama_base()
-    raw["cim"]["cards"]["ctt"]["bank_depth"] = 3
-    spec = DSE.SweepSpec.from_raw({DSE.DSE_BLOCK: {"axes": {"pp_util": [1.0]}}}, "test")
-    failed, _mapping = DSE.evaluate_candidate(
-        "bad-card", raw, {"pp_util": 1.0},
-        config_module.parse_config(str(LLAMA_MODEL), "LLM"), spec, "ctt", "sa", "test"
+    # D38 replaces the retired bank axis with fill. Size a real area budget
+    # at the underfilled point: the fully resident store must then exceed it.
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    base = _llama_base()
+    base["cim"]["cards"]["sa"]["synthesis_library"] = "22nm"
+    _, probe = _run(probe_dir, {"axes": {"pp_util": [0.5]}}, raw=base)
+    budget = probe["candidates"][0]["silicon"]["total_silicon_mm2"]
+    exit_code, payload = _run(
+        tmp_path, {"axes": {"pp_util": [1.0, 0.5]}, "max_silicon_mm2": budget}, raw=base
     )
+    assert exit_code == 0
+    assert payload["num_candidates"] == 2 and payload["num_valid"] == 1
+    failed, feasible = payload["candidates"]
+    assert feasible["ok"] and feasible["knobs"]["pp_util"] == 0.5
+    assert failed["fail_stage"] == "budget"
+    assert "max_silicon_mm2" in failed["fail_message"]
+    for stage in ("config", "mapping", "lowering", "pricing"):
+        assert failed["stages"][stage] == {"ok": True}
+    assert payload["selected"]["id"] == feasible["id"]
+
+
+def test_card_refusal_is_recorded_and_the_sweep_continues(tmp_path, monkeypatch):
+    # D38 parks bank_depth as an INPUT. Inject a bad card at the config seam
+    # for one legal fill point to retain the sweep's continuation PROPERTY;
+    # the actual card parser supplies the refusal, not a mocked result.
+    apply = DSE.apply_point
+
+    def first_card_refuses(raw, point, *args, **kwargs):
+        applied = apply(raw, point, *args, **kwargs)
+        if point["pp_util"] == 0.5:
+            applied["cim"]["cards"]["ctt"]["bank_depth"] = 3
+        return applied
+
+    monkeypatch.setattr(DSE, "apply_point", first_card_refuses)
+    code, payload = _run(tmp_path, {"axes": {"pp_util": [0.5, 1.0]}})
+    assert code == 0 and payload["num_candidates"] == 2 and payload["num_valid"] == 1
+    failed, feasible = payload["candidates"]
     assert failed["ok"] is False
     assert failed["fail_stage"] == "config"
     assert "must divide the card's adc_mux" in failed["fail_message"]
     assert failed["stages"] == {"config": {"ok": False, "message": failed["fail_message"]}}
+    assert feasible["ok"] and feasible["knobs"]["pp_util"] == 1.0
+    assert feasible["stages"]["pricing"] == {"ok": True}
+    assert payload["selected"]["id"] == feasible["id"]
 
 
 def test_memory_verdict_is_a_stage(tmp_path):

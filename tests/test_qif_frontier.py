@@ -640,7 +640,18 @@ def test_more_state_buys_more_sram_instead_of_refusing_the_plan(tmp_path):
         assert silicon["total_silicon_mm2"] == pytest.approx(sum(silicon[k] for k in (
             "analog_macro_silicon_mm2", "shared_digital_silicon_mm2", "macro_pool_silicon_mm2", "state_sram_silicon_mm2")))
         assert store["store_macros"] * 33280 >= sum(row["state_bytes"] for row in store["per_stage"])
-    assert not measured["state_bill_summary"]["infeasible_by_state"]
+    summary = measured["state_bill_summary"]
+    assert summary["budget_bytes"] is None
+    assert "SIZED" in summary["budget_basis"]
+    assert "max_silicon_mm2" in summary["budget_basis"]
+    assert summary["points_measured"] == 2
+    assert summary["store_area_mm2_min"] == half["state_bill"]["store_area_mm2"]
+    assert summary["store_area_mm2_max"] == full["state_bill"]["store_area_mm2"]
+    assert summary["store_area_mm2_min"] < summary["store_area_mm2_max"]
+    assert summary["max_stage_state_bytes_min"] == half["state_bill"]["max_stage_state_bytes"]
+    assert summary["max_stage_state_bytes_max"] == full["state_bill"]["max_stage_state_bytes"]
+    assert not summary["infeasible_by_state"]
+    assert not summary["infeasible_by_memory"]
 
 
 def test_a_residency_budget_is_refused_by_name(tmp_path):
@@ -903,7 +914,7 @@ def _normalized(payload):
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: D38 refuses the historical layers_per_chip/bank_depth/shared_chiplets/conv_placement axes before regeneration reaches the reference comparison; choose current frontier inputs and a replacement reference")
 def test_the_checked_in_curve_regenerates_identically(
     name, frontier, shipped, model, art, model_id, tmp_path
 ):
@@ -1082,12 +1093,13 @@ def test_the_run_id_moves_when_the_inputs_move(tmp_path):
     different generation, and the id says so without anyone comparing 4 MB of
     JSON."""
     _code_a, one = _moe_sweep(
-        tmp_path / "a", {"label": "a", "axes": {"pp_util": [1.0]}}
+        tmp_path / "a", {"label": "same label", "axes": {"pp_util": [1.0]}}
     )
     _code_b, two = _moe_sweep(
-        tmp_path / "b", {"label": "b", "axes": {"pp_util": [1.0]}}
+        tmp_path / "b", {"label": "same label", "axes": {"pp_util": [0.5]}}
     )
     assert one["run_id"] != two["run_id"]
+    assert one["candidates"][0]["state_bill"]["resident_streams"] != two["candidates"][0]["state_bill"]["resident_streams"]
 
 
 def test_every_candidate_says_where_its_beat_goes(tmp_path):
@@ -1496,15 +1508,85 @@ def test_a_map_is_exported_once_and_never_repriced(tmp_path):
 
 
 def _lopsided(raw):
-    """A deliberately uneven stage plan on the fast MoE machine.
-
-    12 layers as 8 + 2 + 2 instead of 4 + 4 + 4. The mapping schema already
-    admits a non-uniform ``layers_per_stage``, so this is a REAL machine the
-    mapper can be asked to build — not a synthetic timeline — and it is the
-    shape D34 is about: one stage carrying four times its neighbours' work,
-    setting the beat while they idle.
-    """
+    """A retired partition input; D38 must refuse it by name."""
     raw["mapping"]["layers_per_stage"] = [8, 2, 2]
+
+
+def _synthetic_mismatch_sweep(tmp_path, monkeypatch):
+    """Exercise D34 reporting with synthetic spans on legal D38 stage IDs.
+
+    D38 retired explicit partitions, not the imbalance warning. Inject only
+    timeline measurements at the evaluator seam; run the real balance law,
+    sweep announcement and Markdown renderer. No production prices change.
+    """
+    evaluate = DSE.evaluate_candidate
+
+    def with_imbalanced_spans(*args, **kwargs):
+        candidate, mapping = evaluate(*args, **kwargs)
+        assert candidate["ok"]
+        rows, terms, layers, fires = [], {}, {}, {}
+        for stage in range(candidate["pipeline"]["stage_count"]):
+            busy = 10e-6 if stage == 0 else 2e-6
+            rows.append(dict(stage=stage, beats_fired=1, compute_s_per_beat=busy,
+                             outgoing_link_s=0.0, outgoing_hops=0,
+                             occupancy_s_per_beat=busy))
+            terms[stage] = {
+                ("analog_macro", "q_proj"): [(0.0, 1e-6)],
+                ("shared_digital", "attention_qk"): [(1e-6, busy)],
+            }
+            layers[stage], fires[stage] = [(0.0, busy)], {0}
+        candidate["pipeline"]["stage_balance"] = DSE_EVAL._stage_balance(
+            rows, terms, layers, fires, 0
+        )
+        candidate["metrics"]["tokens_per_s"] = 100000.0
+        return candidate, mapping
+
+    monkeypatch.setattr(DSE, "evaluate_candidate", with_imbalanced_spans)
+    code, payload = _moe_sweep(tmp_path, {"axes": {"pp_util": [1.0]}})
+    assert code == 0 and payload["num_valid"] == 1
+    return payload
+
+
+def test_stage_mismatch_prints_a_positive_warning_even_when_quiet(tmp_path, monkeypatch, capsys):
+    payload = _synthetic_mismatch_sweep(tmp_path, monkeypatch)
+    candidate = payload["candidates"][0]
+    warning = DSE.stage_mismatch_warning(candidate)
+    assert warning is not None
+    assert f"STAGE MISMATCH {candidate['id']}: stage 0" in warning
+    assert "5.0x median" in warning
+    assert "attention_qk on shared_digital" in warning
+    assert "beat set here" in warning
+    assert "balanced bound ~100000 tok/s vs measured 100000" in warning
+    assert "1 of 12 stages run long" in warning
+    assert "D34" not in warning
+    assert f"[QIF DSE] WARNING: {warning}" in capsys.readouterr().out
+
+
+def test_stage_mismatch_reaches_the_markdown_report(tmp_path, monkeypatch):
+    payload = _synthetic_mismatch_sweep(tmp_path, monkeypatch)
+    report = (tmp_path / "out" / "dse_report.md").read_text()
+    assert report == DSE.render_markdown(payload)
+    assert "**STAGE BALANCE: MISMATCHED**" in report
+    assert "5x the median" in report
+    assert "worst is stage 0, dominated by attention_qk on shared_digital; it sets the beat" in report
+    assert "100000 tokens/s" in report
+    assert "MAPPER failure" in report
+    assert "| stage balance |" in report
+    assert "`stage balance` is D34's verdict" in report
+    assert "**MISMATCHED 5x**" in report
+
+
+def test_digital_spread_is_distinct_from_the_occupancy_spread(tmp_path, monkeypatch):
+    payload = _synthetic_mismatch_sweep(tmp_path, monkeypatch)
+    balance = payload["candidates"][0]["pipeline"]["stage_balance"]
+    assert balance["verdict"] == "MISMATCHED"
+    assert balance["max_stage_busy_s"] == pytest.approx(10e-6)
+    assert balance["median_stage_busy_s"] == pytest.approx(2e-6)
+    assert balance["ratio"] == pytest.approx(5.0)
+    assert balance["max_stage_digital_s"] == pytest.approx(9e-6)
+    assert balance["median_stage_digital_s"] == pytest.approx(1e-6)
+    assert balance["digital_ratio"] == pytest.approx(9.0)
+    assert balance["long_stages"][0]["sets_the_beat"] is True
 
 
 def test_an_explicit_stage_partition_is_a_named_mapping_refusal(tmp_path, capsys):

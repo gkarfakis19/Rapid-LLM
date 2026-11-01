@@ -988,21 +988,63 @@ def test_the_granite_headline_numbers_are_the_ones_reported(granite):
     assert mapping["analog_chips"] == 25
     assert mapping["macros_holding_tiles"] == 4826
     assert mapping["tiles"] == 19304
+    assert mapping["shared_digital_chiplets"] == 5
     assert mapping["serving_regime"] == "filled_pipeline"
     assert mapping["resident_streams"] == len(granite.mapping.stages) == 40
     metrics = {metric["key"]: metric["value"] for metric in document["evaluation"]["metrics"]}
-    beat = metrics["sys.fws.beat"]
-    assert beat > 0
-    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(1 / beat)
-    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(1 / (40 * beat))
+    assert "sys.fws.prefill_latency" not in metrics
+    # regression anchor at 3cdce5c, not a validation target; reason: D37/D38
+    # derive dense chip packing and per-layer stages; ADJ-16 derives the window.
+    assert metrics["sys.fws.beat"] == pytest.approx(2.6321057703233418e-05, rel=1e-8)
+    assert metrics["sys.fws.tokens_per_s"] == pytest.approx(37992.39419915692, rel=1e-8)
+    assert metrics["sys.fws.per_stream_tokens_per_s"] == pytest.approx(949.8098549789231, rel=1e-8)
     assert metrics["sys.fws.resident_streams"] == 40
     silicon = document["evaluation"]["digital_silicon"]
+    assert silicon["vector_lanes"] == 1972224
     assert silicon["vector_lanes_provenance"] == "derived-count"
     assert silicon["library"]["technology"] == "22nm"
-    assert silicon["digital_area_mm2_total"] > 0
+    assert silicon["digital_area_mm2_total"] == pytest.approx(30306.92152689, rel=1e-8)
+    sizing = silicon["derived_engine_sizing"]
+    assert sizing["sizing_target"] == "analog_stage_time"
+    assert sizing["analog_bound_stages"] == [s for s in range(40) if s not in (5, 15, 25, 35)]
+    assert sizing["unreachable_stages"] == []
+    assert sizing["engine_duty_at_target"] == pytest.approx(0.13157894736902415, rel=1e-8)
     fabric = silicon["derived_fabric_sizing"]
     assert silicon["fabric_num_arrays"] == 8
+    assert silicon["fabric_num_arrays_provenance"] == "derived-count"
     assert silicon["fabric_softmax_lanes"] == 348
+    assert fabric["num_arrays_declared"] == 2 and fabric["softmax_lanes_declared"] == 1
     assert fabric["array_rows"] == 32 and fabric["array_cols"] == 64
+    assert fabric["array_geometry_provenance"] == "declared-count"
     assert fabric["saturated_stages"] == [5, 15, 25, 35]
-    assert document["evaluation"]["energy"]["total_pj"] > 0
+    assert fabric["analog_bound_stages"] == []
+    binding = silicon["binding_term"]
+    assert binding["stage"] in (5, 15, 25, 35)
+    assert binding["analog_is_largest_term"] is False
+    assert binding["terms"][0]["block"] == "attention_qk"
+    assert binding["terms"][0]["busy_s"] == pytest.approx(6.876842105263186e-06, rel=1e-8)
+    assert binding["analog_time_s"] == pytest.approx(3e-7, rel=1e-8)
+    named = next(item for item in document["disclosures"] if item["constraint"] == "binding_term")
+    assert "THE NEXT REAL LIMIT IS THE DECLARED ARRAY GEOMETRY" in named["reason"]
+
+    energy = document["evaluation"]["energy"]
+    assert energy["total_pj"] == pytest.approx(807802607914.4937, rel=1e-8)
+    digital = next(c for c in energy["components"] if c["key"] == "shared_digital_chiplet")
+    assert digital["coverage"] == "partial"
+    assert digital["energy_pj"] == pytest.approx(806434316064.6019, rel=1e-8)
+
+    # D29/ADJ-11: every stage holds all D streams; the store is sized to the
+    # bill and charged as area. D38 now derives 40 stages rather than 10.
+    residency = document["evaluation"]["state_residency"]
+    assert residency["resident_streams"] == residency["stages"] == 40
+    assert residency["max_stage_state_bytes"] == 83886080.0
+    assert residency["total_state_bytes"] == 915046400.0
+    assert residency["verdict"] == "sized"
+    assert residency["stages_violating"] == []
+    assert len(residency["per_stage"]) == 40
+    assert all(row["verdict"] == "sized" for row in residency["per_stage"])
+    assert residency["store_macros"] == 27508
+    assert residency["store_bytes"] == 915466240.0
+    assert residency["store_area_mm2"] == pytest.approx(1458.09977612, rel=1e-8)
+    assert silicon["state_store_macros"] == residency["store_macros"]
+    assert silicon["state_store_area_mm2_total"] == pytest.approx(residency["store_area_mm2"])
