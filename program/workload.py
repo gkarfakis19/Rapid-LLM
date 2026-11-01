@@ -229,6 +229,7 @@ class ModelShape:
             )
         object.__setattr__(self, "model_type", str(self.model_type).lower())
         object.__setattr__(self, "moe_layer_mask", tuple(bool(v) for v in self.moe_layer_mask))
+        object.__setattr__(self, "block_kinds", tuple(self.block_kinds))
 
 
 # ---------------------------------------------------------------------------

@@ -202,6 +202,14 @@ def test_prefill_reuses_ssd_law_per_sequence(tmp_path):
         n_groups=d.groups_local, n_heads=d.heads_local, chunk_size=4, act_bytes=2)
     assert tc.ssm_kernel_evidence["scan_flops"] == 4 * work.ops + 2 * d.d_ssm_local * 4 * 5
     assert tc.ssm_kernel_evidence["scan_mem_bytes"] == 4 * work.state_bytes + 4 * 5 * d.d_ssm_local * tc.precision.stats
+    # A one-token prefill is not a decode at the final context length.
+    mixed = calculator(tmp_path / "one-token", ["ssm", "attention", "ssm", "attention"])
+    mixed._prepare_layer_plan_graphs(batch_size=4, seq_len=1, total_seq_len=8)
+    expected, _ = mixed.compute_all_gemm_and_node_times(4, mixed.vocab_size,
+        mixed.hidden_dim, 1, mixed.num_heads, mixed.kv_heads,
+        mixed.intermediate_size, mixed.hw_config.tech_config.core.num_bundles,
+        use_moe_override=False)
+    assert mixed.layer_plan_operation_evidence["dense"][0] == expected
 
 
 def test_moe_ssm_and_attention_compose(tmp_path):

@@ -558,7 +558,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
 
     def _layer_plan_timings(self, *, batch_size: int, seq_len: int,
-                            total_seq_len: int):
+                            total_seq_len: int, decode: bool = False):
         """Price each reachable template once; the shared IR composes layers."""
         import copy
         from ssm_gpu import build_ssm_timings
@@ -567,7 +567,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         pairs = {}
         if has_attention:
             for moe in (False, True) if self.use_moe else (False,):
-                if seq_len == 1:
+                if decode:
                     pair = self._build_decode_transformer_results(
                         batch_size=batch_size, total_seq_len=total_seq_len,
                         use_moe_layer=moe)
@@ -611,9 +611,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         return pairs, kinds, pure
 
     def _prepare_layer_plan_graphs(self, *, batch_size: int, seq_len: int,
-                                   total_seq_len: int):
+                                   total_seq_len: int, decode: bool = False):
         pairs, kinds, pure = self._layer_plan_timings(
-            batch_size=batch_size, seq_len=seq_len, total_seq_len=total_seq_len)
+            batch_size=batch_size, seq_len=seq_len, total_seq_len=total_seq_len, decode=decode)
         base = pairs["ssm" if pure else "dense"]
         graph_pair = self._prepare_execution_graphs(
             node_breakdown=base[1], transformer_timings=base[0],
@@ -637,7 +637,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     ):
         if self.ssm is not None and self.cim_model is None:
             return self._prepare_layer_plan_graphs(batch_size=batch_size, seq_len=1,
-                                                  total_seq_len=total_seq_len)
+                                                  total_seq_len=total_seq_len, decode=True)
         moe_layers_active = bool(self.use_moe and any(getattr(self, "moe_layer_mask", []) or []))
         moe_intermediate = self.moe_intermediate_size
         decode_gemm_shapes_moe = gemm_shapes
