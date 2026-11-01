@@ -213,7 +213,7 @@ same historical reference mismatch. The interrupted attempt is retained in
 `tmp/qif-audit/slow-interrupted.log` and is not counted as a completed gate.
 Default, golden and validator gates were also rerun after this diagnostic fix.
 
-## Final audit gate results
+## First audit gate results (before the re-audit below)
 
 - Golden gate: **221 passed**, exit 0 (39.35 s pytest; 41.52 s process wall).
   All **46 golden SHA-256 hashes are unchanged** from the pre-repair manifest.
@@ -247,3 +247,102 @@ All nine historical regeneration checks execute and remain strict xfails;
 their full IDs and reasons are listed above and in `slow.log`/`slow.xml`.
 The two existing XPASS cases are hierarchical GLM4-MoE training with EP,
 for MHA and GQA, both DP2/EP2/TP2/CP1/PP2/MB2 with sequence parallel enabled.
+
+## Re-audit: required evidence and restored independent assertions
+
+The five remaining coverage findings in `tmp/qif-reaudit/AUDIT.txt` are
+addressed by tests/docs-only commits. No production or pricing file changes
+in this round, no reference files are rewritten, and no new NEEDS GEORGE
+cases are added.
+
+1. All historical regeneration xfails now specify their known exception:
+   `AssertionError` for the seven byte comparisons, `QifDseUsageError` for
+   the two historical frontiers' retired-axis refusals. Required frontier
+   references resolve before the refused sweep. Missing evidence raises
+   `pytest.fail`, which cannot satisfy either exception expectation. The
+   six external atlas names remain in collection even with an empty root;
+   discovery can still add documents, but cannot silently drop these cases.
+   Missing tracked packing evidence also fails outside its comparison xfail.
+2. Both archived curves pin every priced candidate's binding block, analog
+   binding flag and saturation count: **56 Granite and 61 Qwen candidates**.
+   The anchors explicitly retain Granite's analog-bound `c037` and the
+   scan/delta/PV alternatives, rather than prescribing attention everywhere.
+3. The explicit 1 MiB memory control pins **eight** violations, the eight
+   chip scopes, tier, owner, capacity and high water. The summary count must
+   equal the detailed row count, and each detailed ratio is recalculated.
+4. The MoE bank-pass test counts occupied macros and their claimed column
+   sets directly from the mapping (**1708** resident sets). Active reads and
+   unread expert residency remain distinct under M6.
+5. Legal full/half-fill runs check the balanced Markdown headline, absence
+   of the mismatched headline, and an `ok` stage-balance cell on every
+   candidate row, as well as the existing JSON/stdout negative control.
+
+Both additional suggestions are implemented: the objective and full
+objective-specific selection-rule text are pinned, and the Granite fabric
+ratio has a separate hand calculation. At the current probe's 1829 keys,
+32x64 arrays and four folds, QK/PV/softmax/fill total **10398 cycles**.
+At 0.95 GHz over the D38 per-layer 300 ns analog target this gives
+**36.48421052631579**, independently of the reported sizing ratios. These
+are regression anchors at `3cdce5c`, not physical validation targets.
+
+### Mutation evidence
+
+`tmp/qif-reaudit/test_repaired_mutations.py` applies each corruption without
+editing production files. All **nine cases FAIL**, exit 1 (2.66 s pytest;
+8.04 s process wall in `repaired-mutations.log`):
+
+- Flip the analog-binding flag, insert `NONEXISTENT_BLOCK`, and invert the
+  saturation count separately on each archived curve: **6 failures**.
+- Replace the balanced Markdown headline with `STAGE BALANCE: MISMATCHED`:
+  **1 failure** at the required balanced headline.
+- Change the memory count from 8 to 999: **1 failure** at the exact count.
+- Add 100 to both occupied and unread column counters: **1 failure** against
+  the independent mapping census (1808 versus 1708).
+
+With an empty `RAPID_QIF_RESULTS`, all **49 required-artifact consumers**
+reject missing evidence, including all **eight external regeneration
+xfails**: **48 failures and one fixture-setup error**, exit 1, with **zero
+XFAILs** (62.71 s process wall). The fixture error is the missing JSON used
+to rebuild retired Markdown, and names the same required path/env var. Missing-evidence
+behavior is therefore never reported as an expected historical mismatch.
+With `RAPID_QIF_ALLOW_MISSING=1`, the same **49 consumers SKIP**, exit 0
+(61.75 s process wall). A separate missing tracked-packing probe also gives
+an ordinary failure under the original regeneration marker (2.92 s wall).
+
+The existing non-strict markers in `test_func_test.py` and `test_IMEC_inf.py`
+are unchanged. The two functional XPASS cases remain:
+
+- `test_func_test[training:moe:glm4_moe:mha:hierarchical:dp2:ep2:tp2:cp1:pp2:mb2:tp_spTrue]`
+- `test_func_test[training:moe:glm4_moe:gqa:hierarchical:dp2:ep2:tp2:cp1:pp2:mb2:tp_spTrue]`
+
+### Re-audit gate results
+
+All four gates were rerun after the test changes, with the supplied sibling
+results root present. Each exits **0**:
+
+| Gate | Result | Process wall time |
+|---|---|---:|
+| Golden | **221 passed**; **46/46 golden SHA-256 hashes unchanged** | **40.80 s** |
+| Full default suite | **2701 passed, 292 skipped, 8 xfailed, 0 failures** | **674.49 s** |
+| Standalone validator | **544/544 checks pass** | **291.81 s** |
+| Full slow lane | **236 passed, 9 strict xfailed, 2 existing xpassed, 0 failures** | **433.58 s** |
+
+The 292 default skips remain 247 slow cases, 44 environment-gated cases and
+one blocked local socket. No default skip is missing QIF evidence. All nine
+historical regeneration checks execute in the slow lane; the two existing
+functional XPASS markers are listed above. The existing NEEDS GEORGE list
+and 80-case diagnosis table are unchanged.
+
+The scratch observer records every required-artifact consumer in both full
+lanes. Their union is exactly the **49 cases** tested with the empty root
+and opt-out: no consuming case is omitted or reclassified as an XFAIL.
+Generated-output ignore checks also pass with zero tracked output files
+ignored. Only tests and docs changed in this re-audit; no production,
+pricing, reference, golden or existing non-strict marker changes.
+
+Gate evidence: `tmp/qif-reaudit/repair-golden.log`,
+`repair-default.log`/`.xml`, `repair-validator.log`, and
+`repair-slow.log`/`.xml`, with matching zero `.exit` files. Missing-evidence
+proof is in `repair-missing-fail.log`/`.xml`,
+`repair-missing-skip.log`/`.xml`, and `repair-missing-packing.log`;
+the deliberate corruption failures are in `repaired-mutations.log`/`.xml`.
