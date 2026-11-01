@@ -37,6 +37,7 @@ testpaths = [
     "tests",
 ]
 markers = [
+    "slow: whole-atlas/report regeneration or checks taking more than 60 seconds (opt in)",
     "webui_browser: launches the Dash web UI and checks browser layout/aesthetic health",
     "equiv_golden: golden-equivalence gates for the AstraSim execution rewrite (subprocess-heavy)",
 ]

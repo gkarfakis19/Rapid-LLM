@@ -851,6 +851,7 @@ def test_the_comparison_refuses_a_pairing_that_is_not_one_experiment(
         )
 
 
+@pytest.mark.slow
 def test_the_granite_packing_artifact_is_what_a_fresh_run_produces(
     granite_packing_document,
 ):

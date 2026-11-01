@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 # This is magic file that pytest loads. We need it unfortunately to hook the validation_helpers module into pytest.
 
@@ -23,3 +26,13 @@ if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
 
 pytest_plugins = ["validation_scripts.validation_helpers"]
+
+
+def pytest_collection_modifyitems(config, items):
+  # Explicit marker expressions select their own lane, including `-m slow`.
+  if os.environ.get("RAPID_RUN_SLOW") == "1" or "slow" in config.option.markexpr:
+    return
+  skip = pytest.mark.skip(reason="slow test; opt in with -m slow or RAPID_RUN_SLOW=1")
+  for item in items:
+    if item.get_closest_marker("slow"):
+      item.add_marker(skip)

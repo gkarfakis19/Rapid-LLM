@@ -25,6 +25,13 @@ export LD_LIBRARY_PATH=/u1/ee/karfakis/gcc-10.2.0/lib64:/app/nanocad/projects/pe
   (`astra-sim/build/astra_analytical/build/bin`); without it every
   AstraSim-backed test errors out at simulation time.
 
+Generated QIF evidence is read through `tests/qif_artifacts.py` from
+`RAPID_QIF_RESULTS` (default: `../Rapid-LLM-results/qif`, relative to the repo).
+Missing evidence skips its consuming test and prints the missing path.
+Whole-atlas/DSE-report regeneration and checks taking over 60 seconds carry
+`@pytest.mark.slow` and skip by default. Opt in with `-m slow` (only slow
+tests) or `RAPID_RUN_SLOW=1` (all tests, including slow).
+
 ## Tier 1 — the golden gate (must stay green at every step)
 
 ```sh

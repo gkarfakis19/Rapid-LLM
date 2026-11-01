@@ -1000,6 +1000,7 @@ def test_the_export_states_occupancy_the_loader_recomputes(llama_mapping):
         assert macro["occupancy"] == pytest.approx(held / stored, abs=1e-12)
 
 
+@pytest.mark.slow
 def test_the_checked_in_export_is_the_one_the_tool_emits_today(tmp_path):
     # The atlas can be opened with this file, so a stale copy is a wrong
     # picture under the right title — the same failure the P5 embedded-blob

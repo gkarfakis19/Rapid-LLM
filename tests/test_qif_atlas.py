@@ -424,6 +424,7 @@ def test_the_pd_document_validates_clean_through_the_real_loader(tmp_path):
     assert report["warnings"] == []
 
 
+@pytest.mark.slow
 def test_the_pd_document_is_what_a_fresh_run_produces(tmp_path):
     """Regenerate and compare BYTES: a stale artifact is a wrong picture under
     a right title, the same gate p3_llama7b_tp2.json and the Granite atlas have."""

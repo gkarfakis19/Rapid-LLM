@@ -683,6 +683,7 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
     assert 1.0 < (attention / 8) / (delta / 24) < 1.4
 
 
+@pytest.mark.slow
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
     """Regenerate and compare BYTES, the Granite artifacts' own gate.
 
@@ -698,6 +699,7 @@ def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
     assert shipped == json.dumps(fws_eval.report_document(qwen), indent=2)
 
 
+@pytest.mark.slow
 def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     import tools.fws_emit_atlas as emit
 

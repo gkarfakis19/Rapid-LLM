@@ -985,6 +985,7 @@ def _normalized(payload):
 
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)
+@pytest.mark.slow
 def test_the_checked_in_curve_regenerates_identically(
     name, frontier, shipped, model, art, model_id, tmp_path
 ):

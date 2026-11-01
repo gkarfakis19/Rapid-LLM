@@ -844,6 +844,7 @@ def test_the_shipped_granite_atlas_carries_p4s_duty_cycles():
     assert all(0.0 <= value <= 1.0 for value in duty)
 
 
+@pytest.mark.slow
 def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     """The committed artifact cannot rot: it is regenerated and compared.
 
@@ -870,6 +871,7 @@ def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     assert shipped == json.dumps(fws_eval.report_document(granite), indent=2)
 
 
+@pytest.mark.slow
 def test_the_shipped_granite_atlas_is_what_a_fresh_run_produces(tmp_path):
     """The priced atlas cannot rot either — regenerate and compare BYTES.
 
