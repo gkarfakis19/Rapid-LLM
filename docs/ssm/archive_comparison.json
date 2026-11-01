@@ -1,0 +1,2863 @@
+{
+  "cache_mode": "NO_CACHE",
+  "command": "./.venv/bin/python tools/compare_ssm_goldens.py --output tmp/ssm-final-comparison",
+  "comparisons": [
+    {
+      "case": "mamba_a100_tp1_pp1_dp1_ep1_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.126775061858006,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.126775061858006,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            513400384.0
+          ],
+          "static_bytes": [
+            513359232.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.003961720683062687,
+          "step": 0
+        },
+        {
+          "seconds": 0.003961720683062687,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.12166383117437363
+    },
+    {
+      "case": "mamba_a100_tp1_pp1_dp1_ep1_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.125952064,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.125952064,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            513400384.0
+          ],
+          "static_bytes": [
+            513359232.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.003936002,
+          "step": 0
+        },
+        {
+          "seconds": 0.003936002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.26590368151664734
+    },
+    {
+      "case": "mamba_a100_tp1_pp2_dp1_ep1_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.1269442171314435,
+      "new_collectives": [
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ]
+      ],
+      "new_ir_collectives": [],
+      "old": 0.1269442171314435,
+      "old_collectives": [
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ]
+      ],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256720768.0,
+            256720768.0
+          ],
+          "static_bytes": [
+            256679616.0,
+            256679616.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.003967006785357609,
+          "step": 0
+        },
+        {
+          "seconds": 0.003967006785357609,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.0875159502029419
+    },
+    {
+      "case": "mamba_a100_tp1_pp2_dp1_ep1_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.126121216,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.126121216,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256720768.0,
+            256720768.0
+          ],
+          "static_bytes": [
+            256679616.0,
+            256679616.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.003941288,
+          "step": 0
+        },
+        {
+          "seconds": 0.003941288,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.24375303089618683
+    },
+    {
+      "case": "mamba_a100_tp2_pp1_dp1_ep2_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.17970288730431272,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.17970288730431272,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256718624.0,
+            256718624.0
+          ],
+          "static_bytes": [
+            256698048.0,
+            256698048.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.0056157152282597725,
+          "step": 0
+        },
+        {
+          "seconds": 0.0056157152282597725,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.100614994764328
+    },
+    {
+      "case": "mamba_a100_tp2_pp1_dp1_ep2_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.137472064,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.137472064,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256718624.0,
+            256718624.0
+          ],
+          "static_bytes": [
+            256698048.0,
+            256698048.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.004296002,
+          "step": 0
+        },
+        {
+          "seconds": 0.004296002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.8691458180546761
+    },
+    {
+      "case": "mamba_a100_tp2_pp2_dp1_ep2_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.17987204257775025,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.17987204257775025,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128369600.0,
+            128369600.0,
+            128369600.0,
+            128369600.0
+          ],
+          "static_bytes": [
+            128349024.0,
+            128349024.0,
+            128349024.0,
+            128349024.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.005621001330554695,
+          "step": 0
+        },
+        {
+          "seconds": 0.005621001330554695,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.11861962080001831
+    },
+    {
+      "case": "mamba_a100_tp2_pp2_dp1_ep2_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.137641216,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.137641216,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128369600.0,
+            128369600.0,
+            128369600.0,
+            128369600.0
+          ],
+          "static_bytes": [
+            128349024.0,
+            128349024.0,
+            128349024.0,
+            128349024.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.004301288,
+          "step": 0
+        },
+        {
+          "seconds": 0.004301288,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.6064673885703087
+    },
+    {
+      "case": "mamba_a100_tp2_pp2_dp2_ep2_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.137641216,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.137641216,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128369600.0,
+            128369600.0,
+            128369600.0,
+            128369600.0
+          ],
+          "static_bytes": [
+            128349024.0,
+            128349024.0,
+            128349024.0,
+            128349024.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.004301288,
+          "step": 0
+        },
+        {
+          "seconds": 0.004301288,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.844669446349144
+    },
+    {
+      "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.23638247190246603,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.23638247190246603,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128377744.0,
+            128377744.0,
+            128377744.0,
+            128377744.0
+          ],
+          "static_bytes": [
+            128367456.0,
+            128367456.0,
+            128367456.0,
+            128367456.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.007386952246952063,
+          "step": 0
+        },
+        {
+          "seconds": 0.007386952246952063,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.11995935440063477
+    },
+    {
+      "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 10752.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4538660.0,
+        "old_conv_state": 14336.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4538660.0
+      },
+      "memory_match": true,
+      "new": 0.266080361385973,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          8,
+          4,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          8,
+          4
+        ]
+      ],
+      "old": 0.266080361385973,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          8,
+          4,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          8,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            118629776.0,
+            118629776.0,
+            118629776.0,
+            118629776.0
+          ],
+          "static_bytes": [
+            118623072.0,
+            118623072.0,
+            118623072.0,
+            118623072.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.008315011293311657,
+          "step": 0
+        },
+        {
+          "seconds": 0.008315011293311657,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.12441055476665497
+    },
+    {
+      "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms_subgroup",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 12288.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4538660.0,
+        "old_conv_state": 16384.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4538660.0
+      },
+      "memory_match": true,
+      "new": 0.2507566301451211,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          8,
+          2,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          8,
+          2
+        ]
+      ],
+      "old": 0.2507566301451211,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          8,
+          2,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          8,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            118667152.0,
+            118667152.0,
+            118667152.0,
+            118667152.0
+          ],
+          "static_bytes": [
+            118659936.0,
+            118659936.0,
+            118659936.0,
+            118659936.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.007836144692035035,
+          "step": 0
+        },
+        {
+          "seconds": 0.007836144692035035,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.11995747685432434
+    },
+    {
+      "case": "mamba_a100_tp4_pp1_dp1_ep4_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.165888064,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.165888064,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128377744.0,
+            128377744.0,
+            128377744.0,
+            128377744.0
+          ],
+          "static_bytes": [
+            128367456.0,
+            128367456.0,
+            128367456.0,
+            128367456.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.005184002,
+          "step": 0
+        },
+        {
+          "seconds": 0.005184002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.9689957275986671
+    },
+    {
+      "case": "mamba_a100_tp4_pp2_dp1_ep4_analytical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.23655162717590356,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.23655162717590356,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "pipeline",
+          6144.0,
+          2,
+          "cross_layer_conversion"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0
+          ],
+          "static_bytes": [
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.007392238349246986,
+          "step": 0
+        },
+        {
+          "seconds": 0.007392238349246986,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.12814687192440033
+    },
+    {
+      "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.166057216,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.166057216,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0
+          ],
+          "static_bytes": [
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.005189288,
+          "step": 0
+        },
+        {
+          "seconds": 0.005189288,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.9539567828178406
+    },
+    {
+      "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical_rms_wide_fullgroup",
+      "collectives_match": true,
+      "explanation": "Main 1257cbe2 uses the extended_timing GEMM backend (base_timing.py:get_gemm_time); the archive used the native tile roofline. Batch 128 is priced by the extended backend; batch 4 skinny kernels fall back to native. Four grouped op durations round up by 3+1+3+3=10 us per layer in AstraSim; 24 layers x 32 tokens add 0.00768 s. Disabling only _extended_gemm_backend reproduces the old kernel times. Keep main kernel policy; no tolerance.",
+      "kernel_differences": [
+        {
+          "kernel": "in_proj",
+          "new": 1.2514583203863631e-05,
+          "old": 9.795807696109092e-06
+        },
+        {
+          "kernel": "out_proj",
+          "new": 1.1191746324431007e-05,
+          "old": 9.422693424282477e-06
+        }
+      ],
+      "memory": {
+        "new_conv_state": 344064.0,
+        "new_ssm_state": 12582912.0,
+        "new_weights": 4538660.0,
+        "old_conv_state": 458752.0,
+        "old_ssm_state": 12582912.0,
+        "old_weights": 4538660.0
+      },
+      "memory_match": true,
+      "native_backend_ablation": 0.205509024,
+      "new": 0.213189024,
+      "new_collectives": [
+        [
+          "all_gather",
+          196608,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          256,
+          4,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          196608,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          196608,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          196608,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          196608,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          196608,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          196608,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          256,
+          4
+        ]
+      ],
+      "old": 0.205509024,
+      "old_collectives": [
+        [
+          "all_gather",
+          196608,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "all_reduce",
+          256,
+          4,
+          "ssm_rms_stats_allreduce"
+        ],
+        [
+          "reduce_scatter",
+          196608,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          196608,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          196608,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          196608,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          196608,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          196608,
+          4
+        ],
+        [
+          "ssm_scan",
+          "all_reduce",
+          256,
+          4
+        ]
+      ],
+      "op_differences": [
+        {
+          "field": "compute_time",
+          "new": 1.2514583203863631e-05,
+          "old": 9.745386848564955e-06,
+          "op": "ffn1"
+        },
+        {
+          "field": "compute_time",
+          "new": 1.2514583203863631e-05,
+          "old": 9.745386848564955e-06,
+          "op": "ffn2"
+        },
+        {
+          "field": "compute_time",
+          "new": 2.0430043506266355e-05,
+          "old": 1.8660990606117826e-05,
+          "op": "ssm_gate_out_proj"
+        },
+        {
+          "field": "compute_time",
+          "new": 2.1883494390765696e-05,
+          "old": 1.916471888301116e-05,
+          "op": "ssm_proj_conv"
+        }
+      ],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            209802160.0,
+            209802160.0,
+            209802160.0,
+            209802160.0,
+            209802160.0,
+            209802160.0,
+            209802160.0,
+            209802160.0
+          ],
+          "static_bytes": [
+            209587632.0,
+            209587632.0,
+            209587632.0,
+            209587632.0,
+            209587632.0,
+            209587632.0,
+            209587632.0,
+            209587632.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.006662157,
+          "step": 0
+        },
+        {
+          "seconds": 0.006662157,
+          "step": 31
+        }
+      ],
+      "status": "EXPLAINED",
+      "wall_seconds": 1.004221759736538
+    },
+    {
+      "case": "mamba_h100_tp1_pp1_dp1_ep1_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.122112064,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.122112064,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            513400384.0
+          ],
+          "static_bytes": [
+            513359232.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.003816002,
+          "step": 0
+        },
+        {
+          "seconds": 0.003816002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.2752464488148689
+    },
+    {
+      "case": "mamba_h100_tp1_pp2_dp1_ep1_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 86016.0,
+        "new_ssm_state": 1572864.0,
+        "new_weights": 19731088.0,
+        "old_conv_state": 114688.0,
+        "old_ssm_state": 1572864.0,
+        "old_weights": 19731088.0
+      },
+      "memory_match": true,
+      "new": 0.12227936,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.12227936,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256720768.0,
+            256720768.0
+          ],
+          "static_bytes": [
+            256679616.0,
+            256679616.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.00382123,
+          "step": 0
+        },
+        {
+          "seconds": 0.00382123,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.3016040250658989
+    },
+    {
+      "case": "mamba_h100_tp2_pp1_dp1_ep2_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.13670406400000001,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.13670406400000001,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            256718624.0,
+            256718624.0
+          ],
+          "static_bytes": [
+            256698048.0,
+            256698048.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.0042720020000000004,
+          "step": 0
+        },
+        {
+          "seconds": 0.0042720020000000004,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.7916654944419861
+    },
+    {
+      "case": "mamba_h100_tp2_pp2_dp1_ep2_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 43008.0,
+        "new_ssm_state": 786432.0,
+        "new_weights": 9866312.0,
+        "old_conv_state": 57344.0,
+        "old_ssm_state": 786432.0,
+        "old_weights": 9866312.0
+      },
+      "memory_match": true,
+      "new": 0.13687136,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "old": 0.13687136,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          2,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          2,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          2
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          2
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          2
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128369600.0,
+            128369600.0,
+            128369600.0,
+            128369600.0
+          ],
+          "static_bytes": [
+            128349024.0,
+            128349024.0,
+            128349024.0,
+            128349024.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.00427723,
+          "step": 0
+        },
+        {
+          "seconds": 0.00427723,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.6839815154671669
+    },
+    {
+      "case": "mamba_h100_tp4_pp1_dp1_ep4_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.133632064,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.133632064,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            128377744.0,
+            128377744.0,
+            128377744.0,
+            128377744.0
+          ],
+          "static_bytes": [
+            128367456.0,
+            128367456.0,
+            128367456.0,
+            128367456.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.004176002,
+          "step": 0
+        },
+        {
+          "seconds": 0.004176002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.6220166832208633
+    },
+    {
+      "case": "mamba_h100_tp4_pp2_dp1_ep4_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 21504.0,
+        "new_ssm_state": 393216.0,
+        "new_weights": 4933924.0,
+        "old_conv_state": 28672.0,
+        "old_ssm_state": 393216.0,
+        "old_weights": 4933924.0
+      },
+      "memory_match": true,
+      "new": 0.13379936,
+      "new_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "new_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "old": 0.13379936,
+      "old_collectives": [
+        [
+          "all_gather",
+          6144,
+          4,
+          "layernorm_f_all_gather"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_ffn2_f"
+        ],
+        [
+          "reduce_scatter",
+          6144,
+          4,
+          "ssm_out_proj_f"
+        ]
+      ],
+      "old_ir_collectives": [
+        [
+          "ffn2",
+          "reduce_scatter",
+          6144,
+          4
+        ],
+        [
+          "layernorm1",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "layernorm2",
+          "all_gather",
+          6144,
+          4
+        ],
+        [
+          "ssm_gate_out_proj",
+          "reduce_scatter",
+          6144,
+          4
+        ]
+      ],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0,
+            64194016.0
+          ],
+          "static_bytes": [
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0,
+            64183728.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.00418123,
+          "step": 0
+        },
+        {
+          "seconds": 0.00418123,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 0.6148237660527229
+    },
+    {
+      "case": "mamba_hf_a100_tp1_pp1_dp1_ep1_hierarchical",
+      "collectives_match": true,
+      "kernel_differences": [],
+      "memory": {
+        "new_conv_state": 172032.0,
+        "new_ssm_state": 5242880.0,
+        "new_weights": 89611744.0,
+        "old_conv_state": 229376.0,
+        "old_ssm_state": 5242880.0,
+        "old_weights": 89611744.0
+      },
+      "memory_match": true,
+      "new": 0.264192064,
+      "new_collectives": [],
+      "new_ir_collectives": [],
+      "old": 0.264192064,
+      "old_collectives": [],
+      "old_ir_collectives": [],
+      "op_differences": [],
+      "per_device_memory": [
+        {
+          "peak_bytes": [
+            6081804928.0
+          ],
+          "static_bytes": [
+            6081705984.0
+          ]
+        }
+      ],
+      "samples": [
+        {
+          "seconds": 0.008256002,
+          "step": 0
+        },
+        {
+          "seconds": 0.008256002,
+          "step": 31
+        }
+      ],
+      "status": "MATCH",
+      "wall_seconds": 1.9041509330272675
+    }
+  ],
+  "count": 23,
+  "exact_matches": 22,
+  "explained_differences": 1,
+  "sources": {
+    "mamba_a100_tp1_pp1_dp1_ep1_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "674108891cee36751cc20b0fb3443acd7e0c00c019eaa275e502dbb3a1535b8a",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "7cea94d3041bddb962726502f574581d7add51bb7610086e709234d4dbdee297"
+    },
+    "mamba_a100_tp1_pp1_dp1_ep1_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "d3e98a9970c159a301e8210e606b874a9acdc56b427a207a5093747448975b73",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "99cc787eb16efe7441a83c25d6a498ea923ab592a0574443b16a8a20260a9586"
+    },
+    "mamba_a100_tp1_pp2_dp1_ep1_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "fb0dddd81c3dff2987b2f15042819fe97b63d83efb596d85e0e0795ce0789c61",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "6f540567c0ecead8523f04c3ba194ea669890b3b143d23121c7009c3b445fda4"
+    },
+    "mamba_a100_tp1_pp2_dp1_ep1_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "d967115f6088264277545c24475d6f77439ea142da1c316cd78828ce595fc9e7",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "f8fa9df65b97a65166ce3c704d178b164787006c03d5f52de223203dfd317ac2"
+    },
+    "mamba_a100_tp2_pp1_dp1_ep2_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "52c4d5fbf5ff9d02bbb7337dd9f1253f8403ecda77bf21599c18d48190808f52",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "1489d69741ed6b4b8ad92e00a7f3fce829dd7295760ff15525233f85a34d73df"
+    },
+    "mamba_a100_tp2_pp1_dp1_ep2_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "08592c180c5b3eee04b3b39deaa815f6bc9888d2f6020f041babb99b6495adcf",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "ffc2cd5c13b48bf763887cf744644dbe47c74828a7e0b06b2520f1ade4e7d78c"
+    },
+    "mamba_a100_tp2_pp2_dp1_ep2_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "956ab1ae23dd8e31934b3b381134ec71fb71a36a1c849ab56b563bdb6d180d99",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "055bf7b09ca60ea3163b0361b497e112485cbbbdfd0c0ad2aaa803cc992f1dfc"
+    },
+    "mamba_a100_tp2_pp2_dp1_ep2_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "54e15fd551160fbe29618cf77e9625073b0d623053a24d6d55b4ec879af8911c",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "c63f45fc87dfed3b96cd98c6c6c7e564782d0e8791581dc29c19de44a8a3dc97"
+    },
+    "mamba_a100_tp2_pp2_dp2_ep2_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "3dc4ad09d007cbb987c46809dcca5dff04bbfd296ecde4898c53024be38d7a4e",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "0ec0b920892d1c65e5d5e2d879f267ee85917bf9cd95f96e16792e6260d4905e"
+    },
+    "mamba_a100_tp4_pp1_dp1_ep4_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "4eb744bc0bbe215500e7ea2596ec89e9482c23238d778894b600d5deb600e2b1",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "d7e7d1495e51c7cdf0d29c9cd11a513c3facd0ec24b864b934b06994c2276a6b"
+    },
+    "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "4eb744bc0bbe215500e7ea2596ec89e9482c23238d778894b600d5deb600e2b1",
+        "model.yaml": "b47145fdba6a728490dd8865e8c3578de0a898921adb882c8e10589cb9e2f3a1"
+      },
+      "reference_sha256": "b09fb0d91bf78e5d958348a98a1acbbbb688f992b4867d1d898a9b9216083662"
+    },
+    "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms_subgroup": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "4eb744bc0bbe215500e7ea2596ec89e9482c23238d778894b600d5deb600e2b1",
+        "model.yaml": "3e953b28f7ae9e0b6610b65963e5706694bd413951c3cd1d74673822dd17ab6a"
+      },
+      "reference_sha256": "68f5b450aaa7819e12963422f782fe936638c8b7e5c274b4d1b8af36be8a2113"
+    },
+    "mamba_a100_tp4_pp1_dp1_ep4_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "aa38cdc535593fdea0aa997e0c0b8bbfb1b222b2943f20072e62e47ced75322e",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "05f8ea0d9e8a2010996fd15de37455df17116c6dcab5d9afa6b6688cab6bd06d"
+    },
+    "mamba_a100_tp4_pp2_dp1_ep4_analytical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "3da64bf01863377006f1685fd320a97d19ad9d0a2f86dd2c7b909d41e53eb814",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "8df6e556cb9a534fc051322c386dd687ed14f2c1d8eba2015e8eb46ed8e9b93c"
+    },
+    "mamba_a100_tp4_pp2_dp1_ep4_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "783d1a902c247b41359891c3d48000ea7091b8581b56b8d051f7eb4e587b11c3",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "3e867f565d52d24caa559f52144ee0f4f05c83beedd69c7a83f3194b2f0513ef"
+    },
+    "mamba_a100_tp4_pp2_dp1_ep4_hierarchical_rms_wide_fullgroup": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "783d1a902c247b41359891c3d48000ea7091b8581b56b8d051f7eb4e587b11c3",
+        "model.yaml": "b8e4c000d496c31ec69004de96ec2fbcfc40096aa53dab4d966809c0b2bc210c"
+      },
+      "reference_sha256": "e96c1857b086a1d921a8088a0a8fb69a3ebd280d244fe9964865a4afb7210afb"
+    },
+    "mamba_h100_tp1_pp1_dp1_ep1_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "c884c0809657996220f20b1c1f28df3e707a982d146d53b37530ed3c766d3e20",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "321f71f81071f791b6f2147c73df1a023d1dd474e1d9ab96a29e9933933dd505"
+    },
+    "mamba_h100_tp1_pp2_dp1_ep1_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "394464404d7bcdffd96ba739dd266a74dfdc2369e0e9592017f48f9ac7acfcb7",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "f4364a273a842e52687f548ba23307378e45446bd548353509b01b2628c5d34d"
+    },
+    "mamba_h100_tp2_pp1_dp1_ep2_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "41ad1ca157175ec13c701308ef642f897f6babb4725652f88f0d30a23595022d",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "6459d007b68588c75a018e782a6527a4a741c0a7e75c22722e2899fedba44741"
+    },
+    "mamba_h100_tp2_pp2_dp1_ep2_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "b98551b4613615a800027ee385ea0374945f636e07a31ea6e9768bcf673e5ad0",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "7b976b6882375da7d6b7a12bff87cd34eb19521d593a4d53a97bdd398570d0e5"
+    },
+    "mamba_h100_tp4_pp1_dp1_ep4_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "7f2e7f39e18e977566b1625de7bdf5101c460a5388e73048ab0a9caf5ff9a043",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "15d856e417a940373a4105b3e557954a41fc8bd44a3527d70272d66bb8aa276d"
+    },
+    "mamba_h100_tp4_pp2_dp1_ep4_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "e590b79d7f29716c2128ed97ac61e0defdc4e72590ee409c54eb2fd04b52a26d",
+        "model.yaml": "edaa893995231d1e5b88c269a33b0bf6db721de8285c55793dd8078a3829011a"
+      },
+      "reference_sha256": "39b9684581ddbbc0efc5e9cdfd5e3841759559d200e237b7fd88c7fc6ee7bef4"
+    },
+    "mamba_hf_a100_tp1_pp1_dp1_ep1_hierarchical": {
+      "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
+      "configs_sha256": {
+        "hardware.yaml": "d3e98a9970c159a301e8210e606b874a9acdc56b427a207a5093747448975b73",
+        "model.yaml": "1d5c85bcdf5af5d1004cac4f6df8d8f745007cbc2cc097711b5a8ee4f7e7f7c6"
+      },
+      "reference_sha256": "08639c1afc937c69444eb5b0d67f25c87358b646406ce12b546f79b8f8006f7c"
+    }
+  },
+  "wall_seconds": 13.52
+}

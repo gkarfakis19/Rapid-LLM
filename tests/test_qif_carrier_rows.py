@@ -148,7 +148,7 @@ def test_falcon_h1_3b_is_refused_on_the_gpu_path_too():
     with pytest.raises(ValueError) as error:
         config.validate_configs(_gpu_hw(), config.parse_config(FALCON_H1_3B, "LLM"))
     assert "layer_plan" in str(error.value)
-    assert "ssm" in str(error.value)
+    assert "no GPU laws for ffn" in str(error.value)
 
 
 # ---------------------------------------------------------------------------

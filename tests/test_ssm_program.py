@@ -65,10 +65,12 @@ def workload(tc):
 
 
 def test_all_attention_is_existing_path_bitwise(tmp_path):
-    plain = workload(calculator(tmp_path / "plain"))
-    explicit = workload(calculator(tmp_path / "explicit", ["attention"] * 4))
+    a = calculator(tmp_path / "plain")
+    b = calculator(tmp_path / "explicit", ["attention"] * 4)
+    plain, explicit = workload(a), workload(b)
     assert plain.blocks == explicit.blocks
     assert plain.durations.snapshot() == explicit.durations.snapshot()
+    assert LLMExecutionDispatcher(a, plain).build_flat_program_for_memory().ops == LLMExecutionDispatcher(b, explicit).build_flat_program_for_memory().ops
     for tc in (calculator(tmp_path / "a"), calculator(tmp_path / "b", ["attention"] * 4)):
         result = LLMExecutionDispatcher(tc, workload(tc)).run(tc.execution_mode)
         if tc.layer_plan is None:
@@ -86,6 +88,7 @@ def test_all_ssm_pattern_and_explicit_are_bitwise(tmp_path):
     wa, wb = workload(a), workload(b)
     assert wa.blocks == wb.blocks
     assert wa.durations.snapshot() == wb.durations.snapshot()
+    assert LLMExecutionDispatcher(a, wa).build_flat_program_for_memory().ops == LLMExecutionDispatcher(b, wb).build_flat_program_for_memory().ops
     assert LLMExecutionDispatcher(a, wa).run(a.execution_mode).total_time == LLMExecutionDispatcher(b, wb).run(b.execution_mode).total_time
 
 

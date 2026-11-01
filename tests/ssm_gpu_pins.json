@@ -1,0 +1,45 @@
+{
+  "mamba_a100_tp4_pp2_dp1_ep4_hierarchical_rms_wide_fullgroup": {
+    "explanation": "Main 1257cbe2 uses the extended_timing GEMM backend (base_timing.py:get_gemm_time); the archive used the native tile roofline. Batch 128 is priced by the extended backend; batch 4 skinny kernels fall back to native. Four grouped op durations round up by 3+1+3+3=10 us per layer in AstraSim; 24 layers x 32 tokens add 0.00768 s. Disabling only _extended_gemm_backend reproduces the old kernel times. Keep main kernel policy; no tolerance.",
+    "kernel_differences": [
+      {
+        "kernel": "in_proj",
+        "new": 1.2514583203863631e-05,
+        "old": 9.795807696109092e-06
+      },
+      {
+        "kernel": "out_proj",
+        "new": 1.1191746324431007e-05,
+        "old": 9.422693424282477e-06
+      }
+    ],
+    "new": 0.213189024,
+    "old": 0.205509024,
+    "op_differences": [
+      {
+        "field": "compute_time",
+        "new": 1.2514583203863631e-05,
+        "old": 9.745386848564955e-06,
+        "op": "ffn1"
+      },
+      {
+        "field": "compute_time",
+        "new": 1.2514583203863631e-05,
+        "old": 9.745386848564955e-06,
+        "op": "ffn2"
+      },
+      {
+        "field": "compute_time",
+        "new": 2.0430043506266355e-05,
+        "old": 1.8660990606117826e-05,
+        "op": "ssm_gate_out_proj"
+      },
+      {
+        "field": "compute_time",
+        "new": 2.1883494390765696e-05,
+        "old": 1.916471888301116e-05,
+        "op": "ssm_proj_conv"
+      }
+    ]
+  }
+}
