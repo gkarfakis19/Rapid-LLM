@@ -557,6 +557,77 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         return transformer_timings, node_breakdown
 
 
+    def _layer_plan_timings(self, *, batch_size: int, seq_len: int,
+                            total_seq_len: int):
+        """Price each reachable template once; the shared IR composes layers."""
+        import copy
+        from ssm_gpu import build_ssm_timings
+
+        has_attention = any("attention" in kinds for kinds in self.layer_mixers)
+        pairs = {}
+        if has_attention:
+            for moe in (False, True) if self.use_moe else (False,):
+                if seq_len == 1:
+                    pair = self._build_decode_transformer_results(
+                        batch_size=batch_size, total_seq_len=total_seq_len,
+                        use_moe_layer=moe)
+                else:
+                    pair = self.compute_all_gemm_and_node_times(
+                        batch_size, self.vocab_size, self.hidden_dim, seq_len,
+                        self.num_heads, self.kv_heads,
+                        self.moe_intermediate_size if moe else self.intermediate_size,
+                        self.hw_config.tech_config.core.num_bundles,
+                        use_moe_override=moe)
+                pairs["moe" if moe else "dense"] = pair
+        proxy = copy.copy(self)
+        proxy.intermediate_size = self.intermediate_size if self.ffn_per_layer else 0
+        pair = build_ssm_timings(proxy, batch_size=batch_size, seq_len=seq_len)
+        self.ssm_kernel_evidence = proxy.ssm_kernel_evidence
+        pairs["ssm"] = pair
+        if self.use_moe:
+            # Reuse the existing MoE FFN laws, with the SSM mixer retained.
+            # These pairs are also available for single-kind composition tests.
+            if not has_attention:
+                raise ValueError("GPU SSM-only MoE plans require an attention template for MoE FFN pricing")
+            ops = dict(pair[0])
+            for key in ("ffn1", "gelu", "ffn2", "layernorm2", "router", "moe_dispatch", "moe_combine"):
+                if key in pairs["moe"][0]:
+                    ops[key] = pairs["moe"][0][key]
+            breakdown = dict(pair[1])
+            breakdown["transformer_time_f"] = sum(
+                op.total_forward_time() for key, op in ops.items()
+                if key not in ("embedding", "linear_softmax"))
+            pairs["ssm_moe"] = (ops, breakdown)
+        if not self.ffn_per_layer and has_attention:
+            raise ValueError("GPU attention without FFN has no GPU layer-plan law yet")
+        # A pure stack uses the ordinary dense slot: same Program path and
+        # floating point ordering as the single SSM template.
+        pure = not has_attention and not self.use_moe
+        kinds = () if pure else tuple(
+            ("ssm_moe" if self.is_moe_layer(i) else "ssm") if "ssm" in mixer
+            else ("moe" if self.is_moe_layer(i) else "dense")
+            for i, mixer in enumerate(self.layer_mixers))
+        self.layer_plan_operation_evidence = pairs
+        return pairs, kinds, pure
+
+    def _prepare_layer_plan_graphs(self, *, batch_size: int, seq_len: int,
+                                   total_seq_len: int):
+        pairs, kinds, pure = self._layer_plan_timings(
+            batch_size=batch_size, seq_len=seq_len, total_seq_len=total_seq_len)
+        base = pairs["ssm" if pure else "dense"]
+        graph_pair = self._prepare_execution_graphs(
+            node_breakdown=base[1], transformer_timings=base[0],
+            moe_node_breakdown=pairs["moe"][1] if "moe" in pairs else None,
+            moe_transformer_timings=pairs["moe"][0] if "moe" in pairs else None,
+            block_timings_by_kind={} if pure else {
+                key: value for key, value in pairs.items() if key not in ("dense", "moe")},
+            layer_block_kinds=kinds,
+            batch_size=batch_size, seq_len=seq_len, hidden_dim=self.hidden_dim,
+            intermediate_size=self.intermediate_size, vocab_size=self.vocab_size,
+            include_pipeline_backward=False, include_transformer_backward=False)
+        self.layer_plan_workload = graph_pair[0]
+        return graph_pair, 0.0  # GPU SSM energy is not calibrated.
+
     def prepare_decode_graphs(
         self,
         *,
@@ -564,6 +635,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_seq_len: int,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
+        if self.ssm is not None and self.cim_model is None:
+            return self._prepare_layer_plan_graphs(batch_size=batch_size, seq_len=1,
+                                                  total_seq_len=total_seq_len)
         moe_layers_active = bool(self.use_moe and any(getattr(self, "moe_layer_mask", []) or []))
         moe_intermediate = self.moe_intermediate_size
         decode_gemm_shapes_moe = gemm_shapes
@@ -1685,55 +1759,69 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.transformer_analytical_time_backward = None
         else:
             num_SMs = self.hw_config.tech_config.core.num_bundles
-            transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
-                batch_size,
-                vocab_size,
-                hidden_dim,
-                prefill_len,
-                num_heads,
-                kv_heads,
-                intermediate_size,
-                num_SMs,
-                use_moe_override=False,
-            )
-            moe_transformer_timings = None
-            moe_node_breakdown = None
-            if self.use_moe and any(getattr(self, "moe_layer_mask", []) or []):
-                moe_transformer_timings, moe_node_breakdown = self.compute_all_gemm_and_node_times(
+            plan_pairs, plan_kinds = {}, ()
+            if self.ssm is not None and self.cim_model is None:
+                pairs, plan_kinds, pure = self._layer_plan_timings(
+                    batch_size=batch_size, seq_len=prefill_len,
+                    total_seq_len=self.seq_len)
+                transformer_timings, node_breakdown = pairs["ssm" if pure else "dense"]
+                moe_transformer_timings, moe_node_breakdown = pairs.get("moe", (None, None))
+                plan_pairs = {} if pure else {k: v for k, v in pairs.items()
+                                             if k not in ("dense", "moe")}
+            else:
+                transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
                     batch_size,
                     vocab_size,
                     hidden_dim,
                     prefill_len,
                     num_heads,
                     kv_heads,
-                    self.moe_intermediate_size,
+                    intermediate_size,
                     num_SMs,
-                    use_moe_override=True,
+                    use_moe_override=False,
                 )
+                moe_transformer_timings = None
+                moe_node_breakdown = None
+                if self.use_moe and any(getattr(self, "moe_layer_mask", []) or []):
+                    moe_transformer_timings, moe_node_breakdown = self.compute_all_gemm_and_node_times(
+                        batch_size,
+                        vocab_size,
+                        hidden_dim,
+                        prefill_len,
+                        num_heads,
+                        kv_heads,
+                        self.moe_intermediate_size,
+                        num_SMs,
+                        use_moe_override=True,
+                    )
 
             output_act_bytes = batch_size * prefill_len * hidden_dim * self.precision_bytes
             total_energy = self.calc_energy(transformer_timings, output_act_bytes)
+            if self.ssm is not None and self.cim_model is None:
+                total_energy = 0.0
 
-            head_dim = getattr(self, "head_dim", None)
-            if head_dim is None:
-                head_dim = hidden_dim // num_heads
-            token_bytes = llm_util.attention_kv_cache_token_bytes(
-                getattr(self, "attention_type", "mha"),
-                batch_size=batch_size,
-                kv_heads=self.kv_heads,
-                head_dim=head_dim,
-                precision_bytes=self.precision.kv_cache,
-                kv_lora_rank=getattr(self, "kv_lora_rank", None),
-                num_heads=getattr(self, "num_heads", None),
-                qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
-                qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
-                v_head_dim=getattr(self, "v_head_dim", None),
-            )
-            if getattr(self, "disable_kv_cache", False):
-                token_bytes = 0.0
+            if any("attention" in kinds for kinds in self.layer_mixers):
+                head_dim = getattr(self, "head_dim", None)
+                if head_dim is None:
+                    head_dim = hidden_dim // num_heads
+                token_bytes = llm_util.attention_kv_cache_token_bytes(
+                    getattr(self, "attention_type", "mha"),
+                    batch_size=batch_size,
+                    kv_heads=self.kv_heads,
+                    head_dim=head_dim,
+                    precision_bytes=self.precision.kv_cache,
+                    kv_lora_rank=getattr(self, "kv_lora_rank", None),
+                    num_heads=getattr(self, "num_heads", None),
+                    qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
+                    qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
+                    v_head_dim=getattr(self, "v_head_dim", None),
+                )
+                if getattr(self, "disable_kv_cache", False):
+                    token_bytes = 0.0
 
             workload, _ = self._prepare_execution_graphs(
                 node_breakdown=node_breakdown,
+                block_timings_by_kind=plan_pairs, layer_block_kinds=plan_kinds,
                 transformer_timings=transformer_timings,
                 moe_node_breakdown=moe_node_breakdown,
                 moe_transformer_timings=moe_transformer_timings,
@@ -1966,6 +2054,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         Returns:
             dict: Breakdown of inference timing components
         """
+        if self.ssm is not None and self.cim_model is None:
+            print("GPU SSM energy: UNMODELED; reported energy zeros are placeholders.")
+            if self.seq_len > self.model.decode_len:
+                print("GPU SSD prefill: NEW, UNVALIDATED against old goldens (CIM work law).")
         # Calculate prefill time (existing functionality)
         prefill_time, prefill_energy = self.calc_time()
         # Calculate decode time (new functionality)
@@ -1976,26 +2068,30 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         if decode_samples:
             time_to_first_token += decode_samples[0].execution_time
 
-        head_dim = getattr(self, "head_dim", None)
-        if head_dim is None:
-            head_dim = self.hidden_dim // self.num_heads
-        token_bytes = llm_util.attention_kv_cache_token_bytes(
-            getattr(self, "attention_type", "mha"),
-            batch_size=self._effective_transformer_batch(),
-            kv_heads=self.kv_heads,
-            head_dim=head_dim,
-            precision_bytes=self.precision.kv_cache,
-            kv_lora_rank=getattr(self, "kv_lora_rank", None),
-            num_heads=getattr(self, "num_heads", None),
-            qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
-            qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
-            v_head_dim=getattr(self, "v_head_dim", None),
-        )
-        if getattr(self, "disable_kv_cache", False):
-            token_bytes = 0.0
+        token_bytes = 0.0
+        if any("attention" in kinds for kinds in self.layer_mixers):
+            head_dim = getattr(self, "head_dim", None)
+            if head_dim is None:
+                head_dim = self.hidden_dim // self.num_heads
+            token_bytes = llm_util.attention_kv_cache_token_bytes(
+                getattr(self, "attention_type", "mha"),
+                batch_size=self._effective_transformer_batch(),
+                kv_heads=self.kv_heads,
+                head_dim=head_dim,
+                precision_bytes=self.precision.kv_cache,
+                kv_lora_rank=getattr(self, "kv_lora_rank", None),
+                num_heads=getattr(self, "num_heads", None),
+                qk_nope_head_dim=getattr(self, "qk_nope_head_dim", None),
+                qk_rope_head_dim=getattr(self, "qk_rope_head_dim", None),
+                v_head_dim=getattr(self, "v_head_dim", None),
+            )
+            if getattr(self, "disable_kv_cache", False):
+                token_bytes = 0.0
         prefill_len = self.seq_len - self.model.decode_len
         decode_len = self.model.decode_len
-        num_layers = self.num_layers
+        # Preserve CIM diagnostics until their separately approved correction.
+        num_layers = (self.num_layers if self.cim_model is not None else
+                      sum("attention" in kinds for kinds in self.layer_mixers))
 
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers

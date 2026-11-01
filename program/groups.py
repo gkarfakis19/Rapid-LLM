@@ -170,6 +170,30 @@ class CommunicatorFactory:
             self._memo[memo_key] = cached
         return cached  # type: ignore[return-value]
 
+    def tp_subgroup(self, anchor: DeviceId, width: int) -> GroupKey:
+        """Contiguous TP coordinates, fixing every other layout coordinate.
+
+        Width is a declared sharding policy input, not an inferred participant
+        count. Mamba RMS uses T/gcd(G,T); see docs/ssm/SSM.md.
+        """
+        total = self.layout.axis_sizes.get("tp", 1)
+        if width < 1 or total % width:
+            raise GroupError(f"TP subgroup width {width} must divide TP={total}")
+        coords = dict(self.layout.coords_of(int(anchor)))
+        start = coords.get("tp", 0) // width * width
+        members = []
+        for value in range(start, start + width):
+            members.append(self.layout.linearize(dict(coords, tp=value)))
+        return GroupKey(axis="tp", members=tuple(sorted(members)))
+
+    def for_spec(self, spec, anchor: DeviceId) -> GroupKey:
+        """Resolve the explicit communicator policy carried by a block spec."""
+        if "tp_subgroup_size" in spec.extra:
+            if tuple(spec.axes) != ("tp",):
+                raise GroupError("tp_subgroup_size requires exactly the tp axis")
+            return self.tp_subgroup(anchor, int(spec.extra["tp_subgroup_size"]))
+        return self.group_for(spec.axes, anchor)
+
     def groups_for(
         self, req: "SyncRequirement", placement: "Placement"  # noqa: F821
     ) -> Tuple[Optional[GroupKey], ...]:

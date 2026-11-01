@@ -29,8 +29,8 @@ no chunk-size timing input; migration declares 256 explicitly. This is a
 NEW prefill assumption, not a recovered old parameter.
 Explicit old schedules are 1-based; the converter writes a complete ordered
 list. Interval 0 means all SSM. The archive's `int(interval or 1)` bug is not
-preserved. Pure Mamba uses the GPT/GELU FFN carrier; Granite/Jamba use
-llama/SwiGLU, as in the archive. Mixer-only models set `ffn_per_layer: false`;
+preserved. Mamba2 and Granite/Jamba use the llama/SwiGLU FFN carrier: the
+archive treated every non-GPT model as SwiGLU. Mixer-only models set `ffn_per_layer: false`;
 their required positive intermediate_size is unused.
 
 Conv history contains `(d_conv - 1)` cached inputs per channel, including

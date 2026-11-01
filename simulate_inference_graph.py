@@ -93,6 +93,7 @@ class DecodeGraph:
         self.moe_num_experts = int(getattr(config, "num_experts", 1) or 1)
         self.moe_top_k = int(getattr(config, "top_k", 1) or 1)
         model_cfg = getattr(model_config, "model_config", None)
+        self.layer_mixers = getattr(model_cfg, "layer_mixers", (("attention",),))
         self.moe_intermediate_size = int(
             getattr(model_cfg, "moe_intermediate_size", getattr(config, "intermediate_size", 0))
         )
@@ -150,7 +151,7 @@ class DecodeGraph:
                     current_seq_len=total_seq_len,
                     execution_time=sample_time,
                     execution_energy=sample_energy,
-                    kv_cache_tokens=total_seq_len,
+                    kv_cache_tokens=total_seq_len if any("attention" in k for k in self.layer_mixers) else 0,
                 )
             )
 

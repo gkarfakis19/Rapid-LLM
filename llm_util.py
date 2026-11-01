@@ -1094,44 +1094,48 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
 
     prefill_peak_gb = 0.0
     if prefill_len > 0:
-        transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
-            batch_size,
-            vocab_size,
-            hidden_dim,
-            prefill_len,
-            num_heads,
-            kv_heads,
-            intermediate_size,
-            num_SMs,
-            use_moe_override=False,
-        )
-        moe_transformer_timings = None
-        moe_node_breakdown = None
-        if tc.use_moe and any(getattr(tc, "moe_layer_mask", []) or []):
-            moe_transformer_timings, moe_node_breakdown = tc.compute_all_gemm_and_node_times(
+        if tc.ssm is not None and tc.cim_model is None:
+            (workload, _), _ = tc._prepare_layer_plan_graphs(
+                batch_size=batch_size, seq_len=prefill_len, total_seq_len=seq_len)
+        else:
+            transformer_timings, node_breakdown = tc.compute_all_gemm_and_node_times(
                 batch_size,
                 vocab_size,
                 hidden_dim,
                 prefill_len,
                 num_heads,
                 kv_heads,
-                tc.moe_intermediate_size,
+                intermediate_size,
                 num_SMs,
-                use_moe_override=True,
+                use_moe_override=False,
             )
-        workload, _ = tc._prepare_execution_graphs(
-            node_breakdown=node_breakdown,
-            transformer_timings=transformer_timings,
-            moe_node_breakdown=moe_node_breakdown,
-            moe_transformer_timings=moe_transformer_timings,
-            batch_size=batch_size,
-            seq_len=prefill_len,
-            hidden_dim=hidden_dim,
-            intermediate_size=intermediate_size,
-            vocab_size=vocab_size,
-            include_pipeline_backward=False,
-            include_transformer_backward=False,
-        )
+            moe_transformer_timings = None
+            moe_node_breakdown = None
+            if tc.use_moe and any(getattr(tc, "moe_layer_mask", []) or []):
+                moe_transformer_timings, moe_node_breakdown = tc.compute_all_gemm_and_node_times(
+                    batch_size,
+                    vocab_size,
+                    hidden_dim,
+                    prefill_len,
+                    num_heads,
+                    kv_heads,
+                    tc.moe_intermediate_size,
+                    num_SMs,
+                    use_moe_override=True,
+                )
+            workload, _ = tc._prepare_execution_graphs(
+                node_breakdown=node_breakdown,
+                transformer_timings=transformer_timings,
+                moe_node_breakdown=moe_node_breakdown,
+                moe_transformer_timings=moe_transformer_timings,
+                batch_size=batch_size,
+                seq_len=prefill_len,
+                hidden_dim=hidden_dim,
+                intermediate_size=intermediate_size,
+                vocab_size=vocab_size,
+                include_pipeline_backward=False,
+                include_transformer_backward=False,
+            )
         dispatcher = LLMExecutionDispatcher(tc, workload)
         prefill_program = dispatcher.build_flat_program_for_memory()
         prefill_memory_data = mem_estimator.build_memory_data(
@@ -1375,6 +1379,10 @@ def process_decode_gemm_shapes(
 
     Integrates with existing RAPID-LLM GEMM processing infrastructure.
     """
+    if getattr(self, "layer_mixers", ()) and not any(
+        "attention" in kinds for kinds in self.layer_mixers
+    ):
+        return {}
     # Generate decode GEMM shapes in 4D
     gemm_shapes_4d = autoregressive_decoder_gemm(
         self,

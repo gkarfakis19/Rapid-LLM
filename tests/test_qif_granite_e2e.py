@@ -83,12 +83,12 @@ def test_the_same_granite_config_is_still_refused_without_a_mapping_block():
     assert "mapping:" in message  # the message names the way forward
 
 
-def test_the_gpu_path_rejection_is_untouched():
-    """P1.4's GPU refusal is not scoped to fws_cim and must not move."""
+def test_gpu_still_refuses_unpriced_shared_expert_width():
+    """SSM now has a GPU law; this model's separate expert width does not."""
     hw = config.parse_config(A100, "hardware")
     with pytest.raises(ValueError) as excinfo:
         config.validate_configs(hw, config.parse_config(GRANITE_MODEL, "LLM"))
-    assert "ssm" in str(excinfo.value)
+    assert "ffn_dims" in str(excinfo.value)
 
 
 @pytest.mark.parametrize(

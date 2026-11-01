@@ -1,7 +1,7 @@
 # Converted from archive/ssm-gpu-old fdbb0ea; see docs/ssm/SSM.md.
 model_param:
   mode: LLM
-  model_type: gpt
+  model_type: llama
   run_type: inference
   tied_embeddings: true
   global_batch_size: 1

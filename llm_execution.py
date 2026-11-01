@@ -486,6 +486,9 @@ class LLMExecutionDispatcher:
             moe=moe_timings or self._transformer_moe_baseline_timings,
             stage_dense=dict(self._transformer_stage_timings),
             stage_moe=dict(self._transformer_stage_moe_timings),
+            by_layer={idx: self._kind_timings[kind]
+                      for idx, kind in enumerate(self.workload.shape.block_kinds)
+                      if kind in getattr(self, "_kind_timings", {})},
         )
 
     def _run_pipeline_with_analytical_comm(
@@ -708,7 +711,7 @@ class LLMExecutionDispatcher:
     # BLOCK measurements
     # ==================================================================
     def _build_transformer_block_programs(
-        self, *, moe: bool, label: str
+        self, *, moe: bool, label: str, kind: Optional[str] = None
     ) -> Tuple[Optional[Program], Optional[Program]]:
         """The (forward, backward) BLOCK Programs for one template.
 
@@ -718,7 +721,7 @@ class LLMExecutionDispatcher:
         workload" (``build(directions=...)``).
         """
         block_workload = self.workload.for_block(
-            layout=_layout_of(self._transformer_rank_layout), moe=moe
+            layout=_layout_of(self._transformer_rank_layout), moe=moe, kind=kind
         )
         forward = self._build_program(
             Granularity.BLOCK,
@@ -813,6 +816,15 @@ class LLMExecutionDispatcher:
                 )
                 self._transformer_stage_moe_timings[(dp_idx, stage_id)] = stage_timings
 
+        self._kind_timings = {}
+        for kind in blocks.by_kind:
+            fwd, bwd = self._build_transformer_block_programs(
+                moe=False, label=f"block_{kind}", kind=kind)
+            dirs = self._transformer_artifact_dirs(label=kind, persist=persist)
+            value, _, _ = self._execute_transformer_run(
+                *dirs, forward_program=fwd, backward_program=bwd,
+                faulty_links_override=())
+            self._kind_timings[kind] = value
         return baseline_timings, moe_timings
 
     def _transformer_artifact_dirs(self, label: Optional[str], persist: bool) -> Tuple[str, str]:
@@ -890,6 +902,7 @@ class LLMExecutionDispatcher:
             dense_backward=None if baseline is None else baseline.backward,
             moe_forward=None if moe_baseline is None else moe_baseline.forward,
             moe_backward=None if moe_baseline is None else moe_baseline.backward,
+            by_kind=getattr(self, "_kind_timings", {}),
         )
 
 

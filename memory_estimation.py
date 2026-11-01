@@ -30,6 +30,9 @@ class MemKind(Enum):
     QKV_PROJ = "qkv_proj"
     ATTENTION = "attention"
     OUTPUT_PROJ = "output_proj"
+    SSM_PROJ_CONV = "ssm_proj_conv"
+    SSM_SCAN = "ssm_scan"
+    SSM_GATE_OUT_PROJ = "ssm_gate_out_proj"
     LAYERNORM2 = "layernorm2"
     MLP = "MLP"
     ROUTER = "router"
@@ -40,6 +43,7 @@ class MemKind(Enum):
 _OP_NAME_TO_MEM_KIND: Dict[str, MemKind] = {
     kind.value: kind for kind in MemKind
 }
+_OP_NAME_TO_MEM_KIND.update({name: MemKind.MLP for name in ("ffn1", "gelu", "ffn2")})
 
 
 def mem_kind_from_op_name(op_name: str) -> MemKind:
@@ -54,6 +58,9 @@ TRANSFORMER_OP_KINDS: FrozenSet[MemKind] = frozenset(
         MemKind.QKV_PROJ,
         MemKind.ATTENTION,
         MemKind.OUTPUT_PROJ,
+        MemKind.SSM_PROJ_CONV,
+        MemKind.SSM_SCAN,
+        MemKind.SSM_GATE_OUT_PROJ,
         MemKind.LAYERNORM2,
         MemKind.MLP,
         MemKind.MOE_DISPATCH,
@@ -89,6 +96,10 @@ class MemoryEstimator:
         zero3_ephemeral_peak_bytes: Optional[float] = None,
     ) -> Dict[str, Any]:
         tc = self.time_calc
+        if getattr(tc, "ssm", None) is not None and getattr(tc, "cim_model", None) is None:
+            from ssm_gpu import build_memory_data
+            return build_memory_data(self, mode=mode, batch_size=batch_size,
+                seq_len=seq_len, gemm_shapes=gemm_shapes, kv_cache_tokens=kv_cache_tokens)
         precision = tc.precision
 
         dp = max(1, int(getattr(tc, "dp", 1)))

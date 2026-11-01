@@ -1604,6 +1604,10 @@ def _reject_old_ssm_keys(model_dict: Dict[str, object]) -> None:
                "head_dim": "ssm.d_head", "n_groups": "ssm.n_groups",
                "expand": "ssm.expand", "chunk_size": "ssm.chunk_size",
                "hybrid_schedule": "layer_plan", "linear": "ssm.variant"}
+    if str(model_dict.get("model_type", "")).lower() in {"mamba", "mamba2", "mamba2_ssm", "ssm", "jamba", "jamba2", "granitemoehybrid"}:
+        raise ValueError("Archive model_param.model_type is retired; declare model_param.layer_plan "
+                         "and model_param.ssm.variant with a llama FFN carrier. "
+                         "Migrate with tools/convert_ssm_config.py.")
     for key, target in renames.items():
         if key in model_dict:
             raise ValueError(f"model_param.{key} is retired; use model_param.{target}. "
@@ -5712,7 +5716,7 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             if kind not in _FWS_CIM_MAPPED_BLOCK_KINDS
         )
         if mapped_fws
-        else tuple(model.hybrid_block_kinds)
+        else tuple(kind for kind in model.hybrid_block_kinds if kind != "ssm")
     )
     if unpriced_kinds:
         raise ValueError(
@@ -5725,6 +5729,29 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             "P2 (macro resource model) laws. Until then only attention-only layer "
             "plans run."
         )
+
+    if device_class != "fws_cim" and model.layer_plan is not None:
+        unsupported = set(model.block_kinds) - {"attention", "ssm"}
+        if unsupported:
+            raise ValueError("GPU model_param.layer_plan has no GPU laws for " + ", ".join(sorted(unsupported)))
+        if not model.ffn_per_layer and "attention" in model.block_kinds:
+            raise ValueError("GPU attention with layer_plan.ffn_per_layer: false has no GPU law")
+        if model.use_moe and "attention" not in model.block_kinds:
+            raise ValueError("GPU SSM-only MoE layer_plan has no standalone MoE FFN pricing law yet")
+        if model.has_hybrid_blocks and getattr(hw_config.network_layout, "faulty_links", ()):
+            raise ValueError("GPU SSM layer_plan does not yet support faulty_links; variant fault retiming is unvalidated")
+    if not mapped_fws and model.has_hybrid_blocks and not device_class == "fws_cim":
+        if model.run_type != "inference":
+            raise ValueError("GPU model_param.layer_plan SSM blocks require run_type: inference; training is unsupported")
+        if model.layer_plan.structure != "sequential":
+            raise ValueError("GPU model_param.layer_plan.structure: parallel_branch has no GPU branch scheduling law")
+        if model.ssm is not None:
+            if model.ssm.variant != "mamba2":
+                raise ValueError("GPU model_param.ssm.variant supports mamba2 only; mamba1 has no GPU law")
+            if model.ssm.n_heads % tp or model.ssm.resolve_d_inner(model.hidden_dim) % tp:
+                raise ValueError("GPU model_param.ssm.n_heads and mixer width must be divisible by parallelism.tp")
+            if model.ssm.n_heads % model.ssm.n_groups:
+                raise ValueError("GPU model_param.ssm.n_groups must divide ssm.n_heads")
 
     unpriced = _unpriced_model_inputs(model, mapped_fws=mapped_fws)
     if unpriced:

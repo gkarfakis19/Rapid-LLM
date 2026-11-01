@@ -291,6 +291,8 @@ def simulate_memory(
 
     def _persistent_bytes_for_op(op: Any) -> float:
         mem_kind = _op_mem_kind(op)
+        if op.layer in memory_data.get("by_layer", {}) and _is_transformer_block(op):
+            return _bytes_for_kind(mem_kind, memory_data["by_layer"][op.layer]["persistent_bytes_by_kind"])
         mapping = (
             persistent_by_kind_moe
             if getattr(op, "is_moe_layer", False) and _is_transformer_block(op)
@@ -300,6 +302,8 @@ def simulate_memory(
 
     def _transient_bytes_for_op(op: Any) -> float:
         mem_kind = _op_mem_kind(op)
+        if op.layer in memory_data.get("by_layer", {}) and _is_transformer_block(op):
+            return _bytes_for_kind(mem_kind, memory_data["by_layer"][op.layer]["transient_bytes_by_kind"])
         mapping = (
             transient_by_kind_moe
             if getattr(op, "is_moe_layer", False) and _is_transformer_block(op)
@@ -374,6 +378,12 @@ def simulate_memory(
             )
             if kv_cache_bytes_per_layer:
                 static_bytes += kv_cache_bytes_per_layer * layer_count
+            if "by_layer" in memory_data:
+                owned = dense_layers_by_device.get(idx, set()) | moe_layers_by_device.get(idx, set())
+                static_bytes = sum(memory_data["by_layer"][layer]["weight_mem_per_layer"]
+                    + memory_data["by_layer"][layer].get("ssm_cache_bytes_per_layer", 0.0)
+                    + memory_data["by_layer"][layer].get("kv_cache_bytes_per_layer", 0.0)
+                    for layer in owned)
         elif mode == "training":
             dense_count = (
                 transformer_dense_layers_per_device[idx]

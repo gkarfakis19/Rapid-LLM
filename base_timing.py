@@ -175,6 +175,10 @@ class model_LLM:
         self.moe_layer_freq = int(getattr(exp_config.model_config, "moe_layer_freq", 1))
         self.first_k_dense_replace = int(getattr(exp_config.model_config, "first_k_dense_replace", 0))
         self.moe_layer_mask = list(getattr(exp_config.model_config, "moe_layer_mask", []))
+        self.layer_mixers = exp_config.model_config.layer_mixers
+        self.layer_plan = exp_config.model_config.layer_plan
+        self.ssm = exp_config.model_config.ssm
+        self.ffn_per_layer = exp_config.model_config.ffn_per_layer
         self.use_moe = bool(getattr(exp_config.model_config, "use_moe", False))
 
         inference_cfg = getattr(exp_config, "inference_config", None)
@@ -583,6 +587,10 @@ class TimeCalculation:
             self.moe_layer_freq = int(getattr(self.model, "moe_layer_freq", 1))
             self.first_k_dense_replace = int(getattr(self.model, "first_k_dense_replace", 0))
             self.moe_layer_mask = list(getattr(self.model, "moe_layer_mask", []))
+            self.layer_mixers = self.model.layer_mixers
+            self.layer_plan = self.model.layer_plan
+            self.ssm = self.model.ssm
+            self.ffn_per_layer = self.model.ffn_per_layer
             self.use_moe = bool(getattr(self.model, "use_moe", False))
             self.num_moe_layers = sum(self.moe_layer_mask)
 

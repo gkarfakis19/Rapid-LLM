@@ -346,6 +346,11 @@ def duration_key(item: WorkItem, fw: FrozenWorkload) -> str:
     False for it and this returns the dense key — the MoE key is selected
     per owned layer inside :func:`optimizer_duration`.
     """
+    if item.layer is not None and fw.shape.block_kinds:
+        kind = fw.shape.block_kind(item.layer)
+        if kind not in ("dense", "moe"):
+            suffix = "f" if item.direction is Direction.FORWARD else "b"
+            return f"block_{kind}_{suffix}"
     entry = _DURATION_KEYS.get((item.kind, item.direction))
     if entry is None:
         raise WorkError(f"No duration key for {item!r}")

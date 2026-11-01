@@ -64,6 +64,7 @@ class BlockTimings:
     moe: Optional[Any] = None
     stage_dense: Mapping[Tuple[int, int], Any] = field(default_factory=dict)
     stage_moe: Mapping[Tuple[int, int], Any] = field(default_factory=dict)
+    by_layer: Mapping[int, Any] = field(default_factory=dict)
 
 
 def apply_block_timings(
@@ -96,6 +97,8 @@ def apply_block_timings(
         )
         if timing_source is None:
             timing_source = timings.dense
+        if op.layer in timings.by_layer:
+            timing_source = timings.by_layer[op.layer]
         if timing_source is None:
             # Legacy rule: no baseline -> keep the analytical duration.
             continue

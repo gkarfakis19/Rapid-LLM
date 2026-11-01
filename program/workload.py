@@ -185,6 +185,14 @@ class ModelShape:
     micro_batches: int  #: legacy ``misc["num_batch"]``
     model_type: str  #: lowercase; "vit*" selects the ViT block naming
     moe_layer_mask: Tuple[bool, ...] = ()  #: () when dense-only; else len == num_layers
+    block_kinds: Tuple[str, ...] = ()  #: explicit template kind per layer; () preserves legacy dense/MoE
+
+    def block_kind(self, layer: LayerId) -> str:
+        if layer < 0 or layer >= self.num_layers:
+            raise WorkloadError(f"Layer {layer} is out of range for {self.num_layers} layers")
+        if self.block_kinds:
+            return self.block_kinds[layer]
+        return "moe" if self.is_moe_layer(layer) else "dense"
 
     def is_moe_layer(self, layer: LayerId) -> bool:
         if not self.moe_layer_mask:
@@ -200,6 +208,8 @@ class ModelShape:
         return any(self.moe_layer_mask)
 
     def __post_init__(self) -> None:
+        if self.block_kinds and len(self.block_kinds) != self.num_layers:
+            raise WorkloadError("ModelShape.block_kinds must name every layer")
         if not isinstance(self.num_layers, int) or self.num_layers <= 0:
             raise WorkloadError(
                 f"ModelShape.num_layers must be a positive int (got {self.num_layers!r}); "
@@ -630,6 +640,7 @@ class DurationTable:
         dense_backward: Optional[float] = None,
         moe_forward: Optional[float] = None,
         moe_backward: Optional[float] = None,
+        by_kind: Optional[Mapping[str, Any]] = None,
     ) -> int:
         """The ONLY mutator. Writes the six legacy keys atomically and returns
         the new revision. Replaces the dict-poking at llm_execution.py:995-1004
@@ -656,6 +667,11 @@ class DurationTable:
         if moe_backward is not None:
             staged["transformer_b_moe"] = float(moe_backward)
 
+        for kind, timing in (by_kind or {}).items():
+            if timing.forward < 0 or timing.backward < 0:
+                raise WorkloadError(f"Negative block timing for {kind}")
+            staged[f"block_{kind}_f"] = float(timing.forward)
+            staged[f"block_{kind}_b"] = float(timing.backward)
         self._values = staged
         self._revision += 1
         return self._revision
@@ -835,6 +851,21 @@ class BlockTemplates:
     dense_comm: Optional[CommSpecTable] = None
     #: comm table of ``moe``; derived from ``moe.comm_metadata`` when absent.
     moe_comm: Optional[CommSpecTable] = None
+    by_kind: Mapping[str, BlockTemplate] = field(default_factory=dict)
+
+    def kind_template(self, kind: str) -> BlockTemplate:
+        if kind in self.by_kind:
+            return self.by_kind[kind]
+        if kind not in ("dense", "moe"):
+            raise WorkloadError(f"Missing block template for kind {kind!r}")
+        return self.template_for(kind == "moe")
+
+    def kind_comm(self, kind: str) -> CommSpecTable:
+        if kind in self.by_kind:
+            return CommSpecTable.from_block_template(self.by_kind[kind])
+        if kind not in ("dense", "moe"):
+            raise WorkloadError(f"Missing block comm table for kind {kind!r}")
+        return self.comm_for(kind == "moe")
 
     def __post_init__(self) -> None:
         if not isinstance(self.dense, BlockTemplate):
@@ -887,6 +918,7 @@ class BlockTemplates:
         out = [self.comm_for(False)]
         if self.moe_comm is not None:
             out.append(self.moe_comm)
+        out.extend(self.kind_comm(kind) for kind in self.by_kind)
         return tuple(out)
 
 
@@ -1004,7 +1036,7 @@ class WorkloadSpec:
         return self.degrees.cluster_size()
 
     def block_template(self, layer: LayerId) -> BlockTemplate:
-        return self.blocks.template_for(self.shape.is_moe_layer(layer))
+        return self.blocks.kind_template(self.shape.block_kind(layer))
 
     def block_comm(self, layer: LayerId) -> CommSpecTable:
         """The comm table the block expansion of ``layer`` resolves against.
@@ -1012,7 +1044,7 @@ class WorkloadSpec:
         THE fix for the dense/MoE comm-key collision: a block comm key is only
         ever looked up through the template that declared it.
         """
-        return self.blocks.comm_for(self.shape.is_moe_layer(layer))
+        return self.blocks.kind_comm(self.shape.block_kind(layer))
 
     def all_comm_specs(self) -> Tuple[CommSpec, ...]:
         """Every declared spec: pipeline-level first, then each block table.
@@ -1056,6 +1088,7 @@ class WorkloadSpec:
         layout: Optional[RankLayout] = None,
         granularity_hint: Any = None,
         durations: Optional[DurationTable] = None,
+        block_kinds: Tuple[str, ...] = (),
     ) -> "WorkloadSpec":
         """THE §1.7 producer map, in ONE place.
 
@@ -1111,6 +1144,7 @@ class WorkloadSpec:
             num_layers=int(_require_misc(misc_metadata, "num_layer") or 0),
             micro_batches=int(_require_misc(misc_metadata, "num_batch") or 0),
             model_type=str(_require_misc(misc_metadata, "model_type") or ""),
+            block_kinds=tuple(block_kinds),
             moe_layer_mask=tuple(
                 bool(value)
                 for value in (_require_misc(misc_metadata, "moe_layer_mask") or [])
@@ -1131,7 +1165,8 @@ class WorkloadSpec:
             ),
         )
 
-    def for_block(self, *, layout: Optional[RankLayout], moe: bool) -> "WorkloadSpec":
+    def for_block(self, *, layout: Optional[RankLayout], moe: bool = False,
+                  kind: Optional[str] = None) -> "WorkloadSpec":
         """The BLOCK workload: ONE layer of ONE template over the (tp,cp,ep)
         sublayout (INTERFACES §3.1).
 
@@ -1156,6 +1191,9 @@ class WorkloadSpec:
             if moe
             else BlockTemplates(dense=self.blocks.dense, dense_comm=self.blocks.dense_comm)
         )
+        if kind is not None:
+            blocks = BlockTemplates(dense=self.blocks.kind_template(kind),
+                                    dense_comm=self.blocks.kind_comm(kind))
         return replace(
             self,
             degrees=ParallelDegrees(

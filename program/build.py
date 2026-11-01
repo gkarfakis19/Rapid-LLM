@@ -947,7 +947,7 @@ class _Builder:
         group = (
             None
             if is_dp
-            else self._placement.communicators.group_for(spec.axes, DeviceId(device))
+            else self._placement.communicators.for_spec(spec, DeviceId(device))
         )
         axes = tuple(spec.axes)
         nid = self._add_op(

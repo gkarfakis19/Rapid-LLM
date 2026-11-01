@@ -300,7 +300,8 @@ class TimeCalculationLLM(TimeCalculation):
         self.disable_embedding_unembedding = bool(
             getattr(self.model, "disable_embedding_unembedding", False)
         )
-        self.disable_kv_cache = str(getattr(self, "mode", "")).upper() == "VIT"
+        self.disable_kv_cache = (str(getattr(self, "mode", "")).upper() == "VIT"
+            or (self._device_class != "fws_cim" and not any("attention" in k for k in self.layer_mixers)))
 
         if self.disable_kv_cache and self.execution_mode == ExecutionMode.FULL_ASTRASIM_FLATTENED:
             raise ValueError(
@@ -4751,6 +4752,8 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_embedding_gather_bytes: float = 0.0,
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
+        block_timings_by_kind: Optional[Dict[str, Any]] = None,
+        layer_block_kinds: Tuple[str, ...] = (),
     ) -> Tuple[WorkloadSpec, Optional[WorkloadSpec]]:
         """Assemble the typed :class:`~program.workload.WorkloadSpec` pair the
         dispatcher consumes: the final grad-accum cycle and (when grad
@@ -4910,6 +4913,7 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_operation_entries: List[Dict[str, Any]] = []
             transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
             rules_by_mode = _resolve_comm_rules(parallelism_mode, use_moe_layer)
+            is_ssm = "ssm_scan" in transformer_timings_local
 
             def _register_specs(specs: Sequence[CommSpec]) -> List[str]:
                 names: List[str] = []
@@ -4978,7 +4982,22 @@ class TimeCalculationLLM(TimeCalculation):
             ) -> Dict[str, Any]:
                 if timing is None:
                     return {"duration": 0.0, "reduction": 0.0, "comm_keys": []}
-                if op_name in {"moe_dispatch", "moe_combine"}:
+                if is_ssm and op_name == "ssm_scan":
+                    from ssm_gpu import local_dims
+                    width = local_dims(self).tp_shard_factor
+                    specs = [] if not timing.comm_bytes or width <= 1 else [CommSpec(
+                        name="ssm_rms_stats", kind=ALL_REDUCE,
+                        size_bytes=int(timing.comm_bytes), participants=width,
+                        interconnect="tp", extra={"tp_subgroup_size": width})]
+                elif is_ssm and op_name == "ssm_proj_conv":
+                    specs = []
+                elif is_ssm and op_name in ("ssm_gate_out_proj", "ffn2") and not (use_moe_layer and op_name == "ffn2"):
+                    kind = REDUCE_SCATTER if self.tp_sp else ALL_REDUCE
+                    specs = [] if not timing.comm_bytes or self.tp <= 1 else [CommSpec(
+                        name=f"{op_name}_tp", kind=kind,
+                        size_bytes=int(timing.comm_bytes), participants=self.tp,
+                        interconnect="tp")]
+                elif op_name in {"moe_dispatch", "moe_combine"}:
                     specs = list(self._make_moe_comm_specs(op_name, direction, timing.comm_bytes))
                 else:
                     specs = list(_make_comm_specs(op_name, direction, timing.comm_bytes, rules_by_mode))
@@ -5135,7 +5154,13 @@ class TimeCalculationLLM(TimeCalculation):
             ):
                 raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
             op_names: Sequence[str] = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
+            if is_ssm:
+                op_names = ("layernorm1", "ssm_proj_conv", "ssm_scan", "ssm_gate_out_proj", "layernorm2", "ffn1", "gelu", "ffn2")
             op_names = list(op_names)
+            if is_ssm and use_moe_layer:
+                at = op_names.index("ffn1")
+                op_names[at:at] = ["router", "moe_dispatch"]
+                op_names.append("moe_combine")
             if "optimizer" in transformer_timings_local:
                 op_names.append("optimizer")
             if use_moe_layer and "MLP" in op_names:
@@ -5201,6 +5226,9 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_blocks = BlockTemplates(
             dense=transformer_template,
             moe=moe_transformer_template,
+            by_kind={kind: _build_transformer_template(pair[0],
+                        use_moe_layer=kind.endswith("_moe"), ep_dense_sync_bytes=0)
+                     for kind, pair in (block_timings_by_kind or {}).items()},
         )
 
         transformer_blocks_no_dp: Optional[BlockTemplates] = None
@@ -5242,11 +5270,11 @@ class TimeCalculationLLM(TimeCalculation):
         # of FFN1/FFN2), needed because a stage's layers may be a MIX of dense and
         # MoE (`moe_layer_mask` / `first_k_dense_replace`) and each must be priced
         # with its own kind.
-        optimizer_per_layer_dense = self.get_data_parallel_reduction_llm(
+        optimizer_per_layer_dense = 0.0 if not include_pipeline_backward else self.get_data_parallel_reduction_llm(
             hidden_dim, intermediate_size
         )
         optimizer_per_layer_moe = optimizer_per_layer_dense
-        if has_moe_layers:
+        if has_moe_layers and include_pipeline_backward:
             optimizer_per_layer_moe = self.get_data_parallel_reduction_llm(
                 hidden_dim,
                 self.moe_intermediate_size,
@@ -5291,6 +5319,9 @@ class TimeCalculationLLM(TimeCalculation):
             "optimizer_softmax": optimizer_softmax,
         }
         comp_times_no_dp = None
+        for kind, pair in (block_timings_by_kind or {}).items():
+            comp_times[f"block_{kind}_f"] = pair[1]["transformer_time_f"]
+            comp_times[f"block_{kind}_b"] = 0.0
         if need_no_dp_variant:
             comp_times_no_dp = dict(comp_times)
             if include_pipeline_backward and self.use_moe and self.ep > 1:
@@ -5361,6 +5392,7 @@ class TimeCalculationLLM(TimeCalculation):
                 blocks=blocks,
                 overlap=overlap_spec,
                 interconnect=interconnect_params,
+                block_kinds=layer_block_kinds,
             )
 
         workload = _workload(

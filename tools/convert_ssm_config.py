@@ -23,7 +23,7 @@ def convert_model(data: dict, *, chunk_size: int = 256) -> dict:
 
     The archive did not price/use chunk_size. 256 is the explicit migration
     default (NEW prefill assumption). Conflicting duplicate values are refused.
-    Pure Mamba used the GPT/GELU FFN carrier; hybrids used llama/SwiGLU.
+    The archive treats every non-GPT model, including Mamba2, as SwiGLU.
     """
     result = copy.deepcopy(data)
     model = result["model_param"]
@@ -69,7 +69,7 @@ def convert_model(data: dict, *, chunk_size: int = 256) -> dict:
     if "ssm" not in kinds:
         raise ValueError("Old model has no SSM layers to migrate")
     model["model_id"] = model.get("model_id", old_type)
-    model["model_type"] = "gpt" if pure_type else "llama"
+    model["model_type"] = "llama"
     model["layer_plan"] = {"layer_types": kinds,
                            "ffn_per_layer": int(model["intermediate_size"]) > 0}
     model["ssm"] = ssm
