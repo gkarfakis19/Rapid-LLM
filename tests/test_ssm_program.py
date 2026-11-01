@@ -227,30 +227,48 @@ def test_moe_ssm_and_attention_compose(tmp_path):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("device", ["gpu", "cim"])
 @pytest.mark.parametrize("name,hw_name", [
     ("mamba2_2p7b_decode_inf", "fws_cim_mamba2_frontier"),
     ("granite_4_0_h_1b_decode_inf", "fws_cim_granite_1b_frontier"),
 ])
-def test_same_yaml_gpu_and_mapped_cim(tmp_path, name, hw_name):
-    import fws_mapping
-    import fws_eval
-    from program.fws_build import build_fws_program
-    path = ROOT / f"configs/model-config/{name}.yaml"
-    model = config.parse_config(str(path), "LLM")
-    gpu = config.parse_config(str(ROOT / "configs/hardware-config/a100_80GB.yaml"), "hardware")
-    gpu.sch_config.tp = 1
-    gpu.sch_config.pp = 1
-    gpu.sch_config.mb = 1
-    gpu.execution_backend.model = "analytical"
-    config.validate_configs(gpu, model)
-    tc = TimeCalculationLLMInference(gpu, model, "LLM", output_dir=str(tmp_path))
-    (spec, _), _ = tc.prepare_decode_graphs(batch_size=1, total_seq_len=model.model_config.seq_len)
-    assert LLMExecutionDispatcher(tc, spec).run(tc.execution_mode).total_time > 0
-    cim = config.parse_config(str(ROOT / f"configs/hardware-config/{hw_name}.yaml"), "hardware")
-    config.validate_configs(cim, model)
-    mapping = fws_mapping.build_mapping(cim, model)
-    evaluation = fws_eval.evaluate_fws(build_fws_program(mapping, decode_steps=1))
-    assert evaluation.timeline.total_time > 0
+def test_same_yaml_gpu_and_mapped_cim_cli(tmp_path, name, hw_name, device):
+    # Run the real entry point, including process_decode_gemm_shapes, sampled
+    # decode adapters and result writers. Neither checked-in YAML is modified.
+    model = ROOT / f"configs/model-config/{name}.yaml"
+    hardware = ROOT / f"configs/hardware-config/{hw_name if device == 'cim' else 'a100_80GB'}.yaml"
+    output = tmp_path / "configured-output"
+    env = dict(os.environ, PYTHONPATH=str(ROOT), CUDA_VISIBLE_DEVICES="",
+               RAPID_VISUALIZE_GRAPHS="0", RAPID_ASTRA_CACHE_MODE="NO_CACHE")
+    with (tmp_path / "cli.log").open("w") as log:
+        result = subprocess.run([str(ROOT / ".venv/bin/python"), str(ROOT / "run_perf.py"),
+            "--hardware_config", str(hardware), "--model_config", str(model),
+            "--output_dir", str(output)], cwd=tmp_path, env=env,
+            stdout=log, stderr=subprocess.STDOUT, timeout=240)
+    assert result.returncode == 0, (tmp_path / "cli.log").read_text()[-8000:]
+    assert (output / "LLM/LLM_inference_results.txt").is_file()
+    assert "[decode] sample step 255" in (tmp_path / "cli.log").read_text()
+    assert not (tmp_path / "output/LLM").exists(), "decode ignored --output_dir"
+    if device == "cim":
+        report = json.loads((output / "LLM/fws_qif_report.json").read_text())
+        assert report
+
+
+def test_cim_pure_ssm_decode_keeps_adapter_shapes(tmp_path):
+    import llm_util
+    from simulate_inference_graph import DecodeGraph, InferenceConfig
+    model = config.parse_config(str(ROOT / "configs/model-config/mamba2_2p7b_decode_inf.yaml"), "LLM")
+    for device, hw_name in [("gpu", "a100_80GB"), ("cim", "fws_cim_mamba2_frontier")]:
+        hw = config.parse_config(str(ROOT / f"configs/hardware-config/{hw_name}.yaml"), "hardware")
+        tc = TimeCalculationLLMInference(hw, model, "LLM", output_dir=str(tmp_path / device))
+        cfg = InferenceConfig(1, 1792, 256, tc.hidden_dim, tc.num_heads,
+            tc.kv_heads, tc.intermediate_size, tc.vocab_size, False, 1, 1)
+        adapter = DecodeGraph(cfg, hw, model, TimeCalculationLLMInference)
+        shapes = llm_util.process_decode_gemm_shapes(adapter, batch_size=1,
+            current_seq_len=1793, d_model=tc.hidden_dim, num_heads=tc.num_heads,
+            kv_heads=tc.kv_heads, intermediate_size=tc.intermediate_size,
+            vocab_size=tc.vocab_size, model_type=tc.model.model_type)
+        assert ("qkv_proj" in shapes) == (device == "cim")
 
 
 @pytest.mark.parametrize("kinds", [["ssm"] * 4, ["ssm", "attention", "ssm", "attention"]])

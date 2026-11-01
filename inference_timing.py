@@ -2041,6 +2041,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             hw_config=self.hw_config,
             model_config=self._raw_model_config,
             time_calc_cls=TimeCalculationLLMInference,
+            output_dir=self.output_dir,
         )
 
         # Build decode phase using sample-based approach with real RAPID-LLM integration

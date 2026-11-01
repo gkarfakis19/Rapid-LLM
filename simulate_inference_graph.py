@@ -80,11 +80,13 @@ class DecodeGraph:
         hw_config,
         model_config,
         time_calc_cls: Callable[..., Any],
+        output_dir: Optional[str] = None,
     ):
         self.config = config
         self.hw_config = hw_config
         self.model_config = model_config
         self.time_calc_cls = time_calc_cls
+        self.output_dir = output_dir
         self._decode_sample_root: Optional[str] = None
         self.use_moe = config.use_moe
         self.num_experts = config.num_experts
@@ -197,7 +199,7 @@ class DecodeGraph:
             hw_config=self.hw_config,
             model_config=self.model_config,
             mode="LLM",
-            output_dir="./output/LLM/",
+            output_dir=self.output_dir,
         )
 
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
@@ -324,12 +326,14 @@ class InferenceEngine:
         model_config=None,
         *,
         time_calc_cls: Optional[Callable[..., Any]] = None,
+        output_dir: Optional[str] = None,
     ):
         self.config = config
         self.hw_config = hw_config
         self.model_config = model_config
         self.decode_graph: Optional[DecodeGraph] = None
         self.time_calc_cls = time_calc_cls
+        self.output_dir = output_dir
 
 
     def _build_decode_graph(self) -> Tuple[float, float, List[DecodeSample]]:
@@ -347,6 +351,7 @@ class InferenceEngine:
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,
+            output_dir=self.output_dir,
         )
 
         return self.decode_graph.build_decode_graph()

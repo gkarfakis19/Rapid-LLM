@@ -1379,8 +1379,12 @@ def process_decode_gemm_shapes(
 
     Integrates with existing RAPID-LLM GEMM processing infrastructure.
     """
-    if getattr(self, "layer_mixers", ()) and not any(
-        "attention" in kinds for kinds in self.layer_mixers
+    # Only the GPU recurrent Program bypasses attention GEMM adaptation. CIM
+    # still consumes these shapes before entering its mapped evaluator.
+    if (
+        getattr(getattr(self, "hw_config", None), "device_class", "gpu") != "fws_cim"
+        and getattr(self, "layer_mixers", ())
+        and not any("attention" in kinds for kinds in self.layer_mixers)
     ):
         return {}
     # Generate decode GEMM shapes in 4D
