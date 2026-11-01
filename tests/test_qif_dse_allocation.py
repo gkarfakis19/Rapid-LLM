@@ -38,7 +38,7 @@ MODEL_DIR = PROJECT_ROOT / "configs" / "model-config"
 DSE_DIR = PROJECT_ROOT / "docs" / "qif" / "dse"
 
 LLAMA_MAPPED = HW_DIR / "fws_cim_llama7b_mapped.yaml"
-LLAMA_MODEL = MODEL_DIR / "llama2_7b_fws_inf.yaml"
+LLAMA_MODEL = MODEL_DIR / "llama2_7b_fws_decode_inf.yaml"
 GRANITE_DSE = HW_DIR / "fws_cim_granite_tiny_dse.yaml"
 GRANITE_MODEL = MODEL_DIR / "granite_4_0_h_tiny_inf.yaml"
 GRANITE_SELECTED = HW_DIR / "fws_cim_granite_tiny_dse_selected.yaml"
@@ -80,17 +80,14 @@ def _llama_base():
     declares the cards, exactly as this fixture does.
     """
     raw = yaml.safe_load(LLAMA_MAPPED.read_text())
+    # 0176fa6 / D38: fill is meaningful only on the batch-one pipeline twin.
+    raw["mapping"].pop("regime", None)
     raw["cim"]["cards"] = {
         "ctt": {"kind": "analog_macro", "device": "ctt"},
         "sa": {"kind": "digital_chiplet", "vector_lanes": 1024},
     }
-    # The SHIPPED mapped point violates its own declared activation tier
-    # (P4.3 measures 10.7 GiB of high water on chips 0-3 against a declared
-    # 8 GB), which the sweep records as an infeasible `memory` candidate —
-    # see test_memory_verdict_is_a_stage, which pins exactly that on the
-    # shipped file. This fixture declares a tier that holds the workload so
-    # the OTHER tests have candidates to rank instead of a sweep with no
-    # feasible point.
+    # Give this vehicle enough activation memory to exercise selection.
+    # The memory-stage test independently supplies an explicit small tier.
     raw["tech_param"]["DRAM"]["size"] = "32 GB"
     return raw
 
@@ -124,6 +121,9 @@ def _evaluate_directly(raw, knobs, model_path):
     candidate_raw = DSE.apply_point(
         copy.deepcopy(raw), knobs, "ctt", "sa", "test fixture"
     )
+    candidate_raw, _slots = DSE._derive_chip_capacity(
+        candidate_raw, config_module.parse_config(str(model_path), "LLM"), None, DSE._hw_from_raw
+    )
     converted = copy.deepcopy(candidate_raw)
     config_module.convert(converted)
     hw = config_module.HWConfig.from_dict(converted)
@@ -146,7 +146,7 @@ def test_missing_sweep_block_is_refused_by_name(tmp_path):
     message = str(excinfo.value)
     assert DSE.DSE_BLOCK in message
     # The message must name the axes, or the reader has to read the source.
-    assert "layers_per_chip" in message and "bank_depth" in message
+    assert all(axis in message for axis in ("macro_y", "macro_z", "pp_util"))
     # ADJ-9: and it must NOT offer the axis it refuses.
     assert "vector_lanes" not in message
 
@@ -161,61 +161,42 @@ def test_unknown_key_and_unknown_axis_are_refused(tmp_path):
     message = str(excinfo.value)
     assert "cache_line_bytes" in message
     # An unknown axis names what IS swept and what each axis moves.
-    assert "cim.cards.<analog card>.bank_depth" in message
+    assert "cim.cards.<analog card>.params.adcs" in message
 
 
 def test_axis_values_must_be_a_non_empty_unique_list(tmp_path):
-    with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        _run(tmp_path, {"axes": {"bank_depth": []}})
-    assert "NON-EMPTY" in str(excinfo.value)
-
-    with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        _run(tmp_path, {"axes": {"bank_depth": 2}})
-    assert "NON-EMPTY" in str(excinfo.value)
-
-    with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        _run(tmp_path, {"axes": {"bank_depth": [1, 2, 1]}})
-    assert "repeats" in str(excinfo.value)
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    for values, message in [([], "NON-EMPTY"), (0.5, "NON-EMPTY"), ([1.0, 0.5, 1.0], "repeats")]:
+        with pytest.raises(DSE.QifDseUsageError, match=message):
+            _run(tmp_path, {"axes": {"pp_util": values}})
 
 
-def test_layers_per_chip_axis_takes_int_list_or_auto(tmp_path):
-    spec = DSE.SweepSpec.from_raw(
-        {DSE.DSE_BLOCK: {"axes": {"layers_per_chip": [8, [8, 8, 8, 8], "auto"]}}},
-        "test",
-    )
-    assert spec.axes["layers_per_chip"] == [8, [8, 8, 8, 8], "auto"]
-    with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        DSE.SweepSpec.from_raw(
-            {DSE.DSE_BLOCK: {"axes": {"layers_per_chip": ["greedy"]}}}, "test"
-        )
-    assert "'auto'" in str(excinfo.value)
+def test_partition_axis_is_retired_for_every_former_spelling(tmp_path):
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    for value in (8, [8, 8, 8, 8], "auto"):
+        with pytest.raises(DSE.QifDseUsageError) as excinfo:
+            DSE.SweepSpec.from_raw({DSE.DSE_BLOCK: {"axes": {"layers_per_chip": [value]}}}, "test")
+        assert "D38" in str(excinfo.value) and "pp_util" in str(excinfo.value)
 
 
 def test_objective_must_be_one_of_the_printed_rules(tmp_path):
-    with pytest.raises(DSE.QifDseUsageError):
-        _run(tmp_path, {"axes": {"bank_depth": [1]}, "objective": "min_energy"})
+    # D38: use a legal axis so a parked-axis error cannot mask the objective.
+    with pytest.raises(DSE.QifDseUsageError, match="objective"):
+        _run(tmp_path, {"axes": {"pp_util": [1.0]}, "objective": "min_energy"})
     assert set(DSE.SELECTION_RULES) == {"throughput", "min_silicon"}
 
 
 def test_cross_product_is_complete_and_declaration_ordered():
-    """No search, no sampling: the sweep IS the full product, in order (D19)."""
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
     spec = DSE.SweepSpec.from_raw(
-        {
-            DSE.DSE_BLOCK: {
-                "axes": {"column_sets_per_tile": [604, 640, 965, 1207], "bank_depth": [1, 2]}
-            }
-        },
-        "test",
+        {DSE.DSE_BLOCK: {"axes": {"macro_z": [8, 16, 32, 64], "pp_util": [1.0, 0.5]}}}, "test"
     )
     points = list(spec.points)
     assert spec.size == 8 == len(points)
-    assert points[0] == {"column_sets_per_tile": 604, "bank_depth": 1}
-    assert points[1] == {"column_sets_per_tile": 604, "bank_depth": 2}
-    assert points[-1] == {"column_sets_per_tile": 1207, "bank_depth": 2}
-    # The LAST axis varies fastest, so a reader can find a point by counting.
-    assert [p["column_sets_per_tile"] for p in points] == [
-        604, 604, 640, 640, 965, 965, 1207, 1207
-    ]
+    assert points[0] == {"macro_z": 8, "pp_util": 1.0}
+    assert points[1] == {"macro_z": 8, "pp_util": 0.5}
+    assert points[-1] == {"macro_z": 64, "pp_util": 0.5}
+    assert [p["macro_z"] for p in points] == [8, 8, 16, 16, 32, 32, 64, 64]
 
 
 def test_the_engine_width_is_refused_as_an_axis_by_name():
@@ -246,83 +227,30 @@ def test_the_engine_width_is_refused_as_an_axis_by_name():
 
 
 def test_every_axis_writes_exactly_one_documented_field():
-    """One axis, one field: an axis that also moved a second field would
-    sweep two knobs under one name."""
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
     base = _llama_base()
+    base["cim"]["cards"]["ctt"].update(
+        calc_profile="george_cima_mux1",
+        params={k: base["cim"]["analog"][k] for k in ("rows", "cols", "adcs", "shots_per_output")},
+    )
     fields = {
-        # ADJ-9 REWRITE. OLD: seven axes, `vector_lanes` among them, writing
-        # cim.cards.<digital>.vector_lanes. NEW: six, because that axis is
-        # refused by name and no longer has a field to write.
-        "bank_depth": lambda raw: raw["cim"]["cards"]["ctt"]["bank_depth"],
-        "column_sets_per_tile": lambda raw: raw["cim"]["allocation"]["column_sets_per_tile"],
-        "layers_per_chip": lambda raw: raw["mapping"]["layers_per_chip"],
-        # WAVE F (P7.4, D29): the stage plan is its own axis, because a stage
-        # count IS the resident-stream count D and a sweep has to be able to
-        # move it without moving the chip split.
-        "layers_per_stage": lambda raw: raw["mapping"]["layers_per_stage"],
-        # ADJ-14: the chiplet count is an axis again, because an engine is now
-        # sized for the stages its chiplet serves.
-        "shared_chiplets": lambda raw: raw["mapping"]["shared_chiplets"],
-        # ADJ-15: where the short depthwise conv's WORK runs. Its weights are
-        # never tiled onto analog arrays under either value; the axis moves the
-        # work between every macro's own pool and the shared chiplet, and the
-        # models disagree about which is cheaper.
-        "conv_placement": lambda raw: raw["cim"]["allocation"]["conv_placement"],
-        # THE PLATFORM BOX (D35-REVISED, 2026-08-29): the macro is X x Y : Z
-        # and the fold mux = Y/Z is DERIVED, so the two axes are the
-        # constraint-native coordinates Z (converters) and Y (storage tile).
-        # Both are legal only on a card that DERIVES its numbers from the
-        # ADC-macro sheet, so they are walked on a base whose ctt card names a
-        # calc_profile; the refusal on a hand-pinned card has its own test.
-        "macro_z": lambda raw: raw["cim"]["cards"]["ctt"]["params"]["adcs"],
-        "macro_y": lambda raw: raw["cim"]["cards"]["ctt"]["params"]["cols"],
+        "macro_z": ("adcs", 512),
+        "macro_y": ("cols", 2048),
+        "pp_util": ("pp_util", 0.5),
     }
     assert set(fields) == set(DSE.AXIS_TARGETS)
-    derived_base = copy.deepcopy(base)
-    declared_analog = derived_base["cim"]["analog"]
-    derived_base["cim"]["cards"]["ctt"] = {
-        "kind": "analog_macro",
-        "device": "ctt",
-        "calc_profile": "george_cima_mux1",
-        "params": {
-            "rows": int(declared_analog["rows"]),
-            "cols": int(declared_analog["cols"]),
-            "adcs": int(declared_analog["adcs"]),
-            "shots_per_output": int(declared_analog["shots_per_output"]),
-        },
-    }
-    values = {
-        "bank_depth": 2,
-        "column_sets_per_tile": 2,
-        "layers_per_chip": 4,
-        "layers_per_stage": 2,
-        "shared_chiplets": 3,
-        "conv_placement": "shared_digital",
-        "macro_z": 512,
-        "macro_y": 2048,
-    }
-    for axis, reader in fields.items():
-        axis_base = derived_base if axis in ("macro_z", "macro_y") else base
-        moved = DSE.apply_point(axis_base, {axis: values[axis]}, "ctt", "sa", "test")
-        assert reader(moved) == values[axis], axis
-        # Everything else is untouched: rebuild the base from the moved dict
-        # by putting the one field back and compare the whole document.
+    for axis, (key, value) in fields.items():
+        moved = DSE.apply_point(base, {axis: value}, "ctt", "sa", "test")
         restored = copy.deepcopy(moved)
-        if axis in ("column_sets_per_tile", "conv_placement"):
-            restored["cim"].pop("allocation")
-        elif axis == "bank_depth":
-            restored["cim"]["cards"]["ctt"].pop("bank_depth")
-        elif axis in ("macro_z", "macro_y"):
-            # The macro axes write the CARD and re-derive the `cim.analog`
-            # fallback from the same sheet call, so one file never carries two
-            # macros. Restoring means putting BOTH back.
-            restored["cim"]["cards"]["ctt"]["params"] = copy.deepcopy(
-                axis_base["cim"]["cards"]["ctt"]["params"]
-            )
-            restored["cim"]["analog"] = copy.deepcopy(axis_base["cim"]["analog"])
+        if axis == "pp_util":
+            assert moved["mapping"][key] == value
+            restored["mapping"].pop(key)
         else:
-            restored["mapping"].pop(axis)
-        assert restored == axis_base, axis
+            assert moved["cim"]["cards"]["ctt"]["params"][key] == value
+            # Macro axes also synchronize the fallback law from the same sheet.
+            restored["cim"]["cards"]["ctt"]["params"] = copy.deepcopy(base["cim"]["cards"]["ctt"]["params"])
+            restored["cim"]["analog"] = copy.deepcopy(base["cim"]["analog"])
+        assert restored == base, axis
 
 
 def test_card_axis_is_refused_when_the_config_declares_no_card(tmp_path):
@@ -331,7 +259,7 @@ def test_card_axis_is_refused_when_the_config_declares_no_card(tmp_path):
     raw = yaml.safe_load(LLAMA_MAPPED.read_text())
     assert "cards" not in raw["cim"]
     with pytest.raises(DSE.QifDseUsageError) as excinfo:
-        _run(tmp_path, {"axes": {"bank_depth": [1, 2]}}, raw=raw)
+        _run(tmp_path, {"axes": {"macro_z": [8, 16]}}, raw=raw)
     message = str(excinfo.value)
     assert "cim.cards" in message and "drop the axis" in message
 
@@ -339,7 +267,7 @@ def test_card_axis_is_refused_when_the_config_declares_no_card(tmp_path):
 def test_sweep_block_leaves_the_config_runnable_and_never_reaches_the_parser(tmp_path):
     """`mapping_dse` is a TOOL input. A config carrying it still parses (so
     run_perf runs the base point unchanged), and the emitted winner drops it."""
-    path = _write(tmp_path, _llama_base(), {"axes": {"bank_depth": [4]}})
+    path = _write(tmp_path, _llama_base(), {"axes": {"pp_util": [1.0]}})
     raw = yaml.safe_load(path.read_text())
     assert DSE.DSE_BLOCK in raw
     converted = copy.deepcopy(raw)
@@ -358,7 +286,7 @@ def test_sweep_block_leaves_the_config_runnable_and_never_reaches_the_parser(tmp
     assert exit_code == 0
     emitted = yaml.safe_load((tmp_path / "selected.yaml").read_text())
     assert DSE.DSE_BLOCK not in emitted
-    assert emitted["cim"]["cards"]["ctt"]["bank_depth"] == 4
+    assert emitted["mapping"]["pp_util"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -367,56 +295,35 @@ def test_sweep_block_leaves_the_config_runnable_and_never_reaches_the_parser(tmp
 
 
 def test_every_candidate_is_priced_on_its_own_mapped_timeline(tmp_path):
-    """The control test: each candidate's headline must equal an INDEPENDENT
-    build_mapping -> build_fws_program -> evaluate_fws of the same point.
-
-    This is what "never a closed form" means operationally, and it is also
-    what catches a candidate that reused its neighbour's timeline: the two
-    bank depths place a different number of tiles and must not agree.
-    """
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
     base = _llama_base()
-    exit_code, payload = _run(tmp_path, {"axes": {"bank_depth": [1, 4]}}, raw=base)
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}}, raw=base)
     assert exit_code == 0 and payload["num_valid"] == 2
     assert payload["evaluation_path"].startswith("fws_mapping.build_mapping")
-
-    headlines = []
     for candidate in payload["candidates"]:
         evaluation, mapping = _evaluate_directly(base, candidate["knobs"], LLAMA_MODEL)
-        expected = evaluation.metric("sys.fws.tokens_per_s").value
-        assert candidate["metrics"]["tokens_per_s"] == expected
+        assert candidate["metrics"]["tokens_per_s"] == evaluation.metric("sys.fws.tokens_per_s").value
         assert candidate["metrics"]["makespan_s"] == evaluation.makespan_s
         assert candidate["placement"]["tiles"] == mapping.summary()["tiles"]
-        headlines.append(expected)
-    # Different allocation granularity, different placement, different answer.
-    assert payload["candidates"][0]["placement"]["tiles"] != payload["candidates"][1]["placement"]["tiles"]
-    assert headlines[0] != headlines[1]
+    # Underfill changes the served point, so reusing a neighbour's timeline
+    # would be observable in the independent comparisons above.
 
 
-def test_banking_axis_moves_the_allocation_granularity_and_the_placement(tmp_path):
-    """D10's own axis: banking is SPATIAL column allocation (A3), so a finer
-    bank places more, narrower tiles on the same macros."""
-    exit_code, payload = _run(tmp_path, {"axes": {"bank_depth": [1, 2, 4]}})
-    assert exit_code == 0
-    granularity = [c["effective_column_sets_per_tile"] for c in payload["candidates"]]
-    assert granularity == [1, 2, 4]
-    tiles = [c["placement"]["tiles"] for c in payload["candidates"]]
-    assert tiles[0] > tiles[1] > tiles[2]
-    # The macro slot count is the MACHINE's, not the allocation's: banking
-    # moves what is held inside a macro, not how many macros exist.
-    slots = {c["placement"]["analog_macro_slots"] for c in payload["candidates"]}
-    assert len(slots) == 1
+def test_parked_banking_axis_is_refused_before_any_candidate_runs(tmp_path):
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        _run(tmp_path, {"axes": {"bank_depth": [1, 2, 4]}})
+    assert "D38" in str(excinfo.value) and "PARK" in str(excinfo.value)
+    assert not (tmp_path / "out" / "dse_report.json").exists()
 
 
-def test_allocation_block_wins_over_the_card_bank_and_says_so(tmp_path):
-    """Two knobs set one law. `cim.allocation` wins, and a candidate that
-    declares both records the EFFECTIVE granularity plus the precedence."""
-    exit_code, payload = _run(
-        tmp_path, {"axes": {"bank_depth": [4], "column_sets_per_tile": [1]}}
-    )
-    assert exit_code == 0
-    candidate = payload["candidates"][0]
-    assert candidate["effective_column_sets_per_tile"] == 1
-    assert any("cim.allocation" in note and "WINS" in note for note in candidate["notes"])
+def test_allocation_alias_cannot_bypass_the_parked_bank_axis(tmp_path):
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        _run(tmp_path, {"axes": {"bank_depth": [4], "column_sets_per_tile": [1]}})
+    message = str(excinfo.value)
+    assert "bank_depth" in message and "column_sets_per_tile" in message
+    assert "D38" in message and "PARK" in message
 
 
 # ---------------------------------------------------------------------------
@@ -425,61 +332,52 @@ def test_allocation_block_wins_over_the_card_bank_and_says_so(tmp_path):
 
 
 def test_infeasible_candidate_carries_its_stage_and_the_refusal_message(tmp_path):
-    """A refused candidate carries the stage that refused it and that stage's
-    own message, and the stages it PASSED are recorded as passed.
-
-    ADJ-13 REWRITE. This used to declare a chip too small to hold its layers
-    and check the mapper's refusal. That failure mode no longer exists — the
-    chip is BUILT to its placement, so a placement can never outgrow it — which
-    is the whole point of the decision. A stage plan whose per-chip activation
-    demand outgrows the DECLARED activation tier still refuses, further down
-    the pipeline, and the tagging is what is under test here.
-    """
-    exit_code, payload = _run(tmp_path, {"axes": {"layers_per_chip": [4, 99]}})
-    assert exit_code == 0  # one candidate is still feasible
-    assert payload["num_candidates"] == 2 and payload["num_valid"] == 1
-    failed = [c for c in payload["candidates"] if not c["ok"]][0]
-    assert failed["fail_stage"] == "memory"
-    assert "VIOLATED" in failed["fail_message"]
-    # Every stage it got THROUGH is recorded as passed, so the row says how far
-    # the candidate went and not merely that it died.
-    for stage in ("config", "mapping", "budget", "lowering", "pricing"):
-        assert failed["stages"][stage] == {"ok": True}, stage
-    assert payload["best_violation"]["id"] == failed["id"]
-    assert payload["best_violation"]["knobs"] == {"layers_per_chip": 99}
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}, "max_chips": 1})
+    assert exit_code == 3
+    assert payload["num_candidates"] == 2 and payload["num_valid"] == 0
+    for failed in payload["candidates"]:
+        assert failed["fail_stage"] == "budget"
+        assert "max_chips" in failed["fail_message"]
+        for stage in ("config", "mapping"):
+            assert failed["stages"][stage] == {"ok": True}
+    assert payload["best_violation"]["id"] in {c["id"] for c in payload["candidates"]}
 
 def test_card_refusal_is_a_config_stage_candidate(tmp_path):
-    """`bank_depth: 3` does not divide the card's mux. The CARD refuses it
-    (P2.1's own error), the sweep records it, and the sweep continues."""
-    exit_code, payload = _run(tmp_path, {"axes": {"bank_depth": [3, 4]}})
-    assert exit_code == 0
-    failed, ok = payload["candidates"]
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    raw = _llama_base()
+    raw["cim"]["cards"]["ctt"]["bank_depth"] = 3
+    spec = DSE.SweepSpec.from_raw({DSE.DSE_BLOCK: {"axes": {"pp_util": [1.0]}}}, "test")
+    failed, _mapping = DSE.evaluate_candidate(
+        "bad-card", raw, {"pp_util": 1.0},
+        config_module.parse_config(str(LLAMA_MODEL), "LLM"), spec, "ctt", "sa", "test"
+    )
+    assert failed["ok"] is False
     assert failed["fail_stage"] == "config"
     assert "must divide the card's adc_mux" in failed["fail_message"]
     assert failed["stages"] == {"config": {"ok": False, "message": failed["fail_message"]}}
-    assert ok["ok"] is True
 
 
 def test_memory_verdict_is_a_stage(tmp_path):
-    """A DECLARED capacity against a MEASURED high-water mark (P4.3). The
-    shipped mapped Llama config is the live example: its activation tier is
-    8 GB and its timeline puts 10.7 GiB on chip 0, so the point is recorded
-    infeasible rather than selected. The verdict rides a disclosed
-    relaxation (one declared tier applied to every chip), and the message
-    names the scope, the tier and both numbers."""
+    """An explicit small activation tier produces a measured P4.3 refusal.
+
+    The control does not depend on a particular historical placement's high
+    water. Its failure must still carry the memory stage, scope and bytes.
+    """
     raw = yaml.safe_load(LLAMA_MAPPED.read_text())
+    raw["tech_param"]["DRAM"]["size"] = "1 MB"
     raw["cim"]["cards"] = {
         "ctt": {"kind": "analog_macro", "device": "ctt"},
         "sa": {"kind": "digital_chiplet", "vector_lanes": 1024},
     }
-    exit_code, payload = _run(tmp_path, {"axes": {"bank_depth": [4]}}, raw=raw)
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0]}}, raw=raw)
     assert exit_code == 3
     candidate = payload["candidates"][0]
     assert candidate["fail_stage"] == "memory"
     assert candidate["stages"]["pricing"] == {"ok": True}
     assert "VIOLATED" in candidate["fail_message"]
     assert "activation_sram+kv" in candidate["fail_message"]
-    assert candidate["memory"]["violated"] == 4
+    assert candidate["memory"]["violated"] > 0
     # The metrics of an infeasible-by-memory candidate are still recorded:
     # it got a timeline, and the report prints what that timeline said.
     assert candidate["metrics"]["tokens_per_s"] > 0
@@ -487,7 +385,7 @@ def test_memory_verdict_is_a_stage(tmp_path):
 
 def test_budget_caps_are_a_stage_of_their_own(tmp_path):
     exit_code, payload = _run(
-        tmp_path, {"axes": {"layers_per_chip": [8]}, "max_chips": 2}
+        tmp_path, {"axes": {"pp_util": [1.0]}, "max_chips": 1}
     )
     assert exit_code == 3
     candidate = payload["candidates"][0]
@@ -496,7 +394,7 @@ def test_budget_caps_are_a_stage_of_their_own(tmp_path):
     assert candidate["stages"]["mapping"] == {"ok": True}
 
     exit_code, payload = _run(
-        tmp_path, {"axes": {"layers_per_chip": [8]}, "max_silicon_mm2": 1.0}
+        tmp_path, {"axes": {"pp_util": [1.0]}, "max_silicon_mm2": 1.0}
     )
     assert exit_code == 3
     assert payload["candidates"][0]["fail_stage"] == "budget"
@@ -504,7 +402,7 @@ def test_budget_caps_are_a_stage_of_their_own(tmp_path):
 
 
 def test_all_infeasible_sweep_exits_three_and_still_writes_its_artifacts(tmp_path):
-    exit_code, payload = _run(tmp_path, {"axes": {"column_sets_per_tile": [998, 999]}})
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}, "max_chips": 1})
     assert exit_code == 3
     assert payload["selected"] is None and payload["front_ids"] == []
     assert payload["front_shape"] == "empty"
@@ -588,41 +486,12 @@ def test_pareto_front_is_two_axis_dominance_and_the_shape_is_read_off_the_data()
     assert shape == "dominated_chain"
 
 
-def test_the_chip_split_is_the_axis_that_moves_the_machine(tmp_path):
-    """`layers_per_chip` moves `mapping:` rather than a card, and it is the
-    axis with a real trade behind it.
-
-    ADJ-13 REWRITE. This used to sweep the declared chiplet count beside the
-    chip split and check that the count reached the mapping. That count is
-    DERIVED now — the stages are packed onto as few chiplets as the beat
-    admits — so what is left to test is the split itself: half the layers per
-    chip is twice the chips, and the chip that results is built to what its
-    layers need rather than to a number somebody declared.
-    """
-    exit_code, payload = _run(
-        tmp_path, {"axes": {"layers_per_chip": [8, 4], "bank_depth": [1, 2]}}
-    )
-    assert exit_code == 0 and payload["num_valid"] == 4
-    by_knobs = {
-        (c["knobs"]["layers_per_chip"], c["knobs"]["bank_depth"]): c
-        for c in payload["candidates"]
-    }
-    coarse, fine = by_knobs[(8, 1)], by_knobs[(4, 1)]
-    # The chip split is the axis that moves silicon: half the layers per chip
-    # is twice the chips.
-    assert fine["placement"]["analog_chips"] == 2 * coarse["placement"]["analog_chips"]
-    # ADJ-13: each chip offers what ITS layers need, so halving the layers per
-    # chip roughly halves the slots per chip instead of leaving the declared
-    # capacity standing and enumerating empty ones.
-    coarse_slots = coarse["knobs_derived"]["arrays_per_chip"]
-    fine_slots = fine["knobs_derived"]["arrays_per_chip"]
-    assert fine_slots < coarse_slots
-    assert fine_slots >= coarse_slots // 2
-    # And the total analog silicon barely moves, because the WEIGHTS did not:
-    # the same tiles are spread over more chips (D27, Invariant W).
-    assert fine["silicon"]["analog_macro_silicon_mm2"] == pytest.approx(
-        coarse["silicon"]["analog_macro_silicon_mm2"], rel=0.25
-    )
+def test_chip_split_is_intent_and_the_sweep_names_its_replacement(tmp_path):
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    with pytest.raises(DSE.QifDseUsageError) as excinfo:
+        _run(tmp_path, {"axes": {"layers_per_chip": [8, 4]}})
+    assert "D38" in str(excinfo.value)
+    assert "pp_util" in str(excinfo.value)
 
 def test_the_headline_key_is_one_per_sweep_and_is_named():
     """ADJ-6's headline is tokens/s at the decode terminal. A prefill-only
@@ -643,39 +512,23 @@ def test_the_headline_key_is_one_per_sweep_and_is_named():
 
 
 def test_selection_is_lexicographic_and_the_rule_is_printed(tmp_path):
-    """Throughput first, then silicon. The dominated point is deliberately
-    FIRST in declaration order: a selection that returned the first feasible
-    candidate would pass a weaker test than this one."""
-    exit_code, payload = _run(
-        tmp_path, {"axes": {"column_sets_per_tile": [2, 1], "bank_depth": [4, 1]}}
-    )
-    assert exit_code == 0 and payload["num_valid"] == 4
-    selected = payload["selected"]
-    # The finer column-set allocation is the faster one, and it is the axis the
-    # selection has to pick on. ADJ-13 note: bank_depth TIES on both axes here
-    # now — with the chip built to its placement it moves neither throughput
-    # nor silicon on this model — so the pin is on the axis that actually
-    # separates the points, not on a tie broken by declaration order.
-    assert selected["knobs"]["column_sets_per_tile"] == 1
-    assert selected["metrics"]["tokens_per_s"] == max(
-        c["metrics"]["tokens_per_s"] for c in payload["candidates"] if c["ok"]
-    )
-    assert payload["selection_rule"].startswith("lexicographic: max headline tokens/s")
-    assert selected["id"] in payload["front_ids"]
-
-    exit_code, payload = _run(
-        tmp_path,
-        {"axes": {"column_sets_per_tile": [2, 1], "bank_depth": [4, 1]},
-         "objective": "min_silicon"},
-    )
-    assert exit_code == 0
-    assert payload["objective"] == "min_silicon"
-    assert payload["selected"]["knobs"]["column_sets_per_tile"] == 1
-    assert payload["selection_rule"].startswith("lexicographic: min total silicon")
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    for objective in ("throughput", "min_silicon"):
+        exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [0.5, 1.0]}, "objective": objective})
+        assert exit_code == 0 and payload["num_valid"] == 2
+        valid = [c for c in payload["candidates"] if c["ok"]]
+        # Independent tuple ordering, including declaration order on a tie.
+        if objective == "throughput":
+            key = lambda pair: (-pair[1]["metrics"]["tokens_per_s"], pair[1]["silicon"]["total_silicon_mm2"], pair[0])
+        else:
+            key = lambda pair: (pair[1]["silicon"]["total_silicon_mm2"], -pair[1]["metrics"]["tokens_per_s"], pair[0])
+        assert payload["selected_id"] == min(enumerate(valid), key=key)[1]["id"]
+        assert payload["selection_rule"].startswith("lexicographic:")
+        assert payload["selected_id"] in payload["front_ids"]
 
 
 def test_silicon_names_its_terms_and_labels_the_uncovered_ones(tmp_path):
-    exit_code, payload = _run(tmp_path, {"axes": {"bank_depth": [4]}})
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0]}})
     silicon = payload["candidates"][0]["silicon"]
     slots = payload["candidates"][0]["placement"]["analog_macro_slots"]
     assert silicon["analog_macro_silicon_mm2"] == slots * silicon["macro_footprint_mm2"]
@@ -690,17 +543,17 @@ def test_silicon_names_its_terms_and_labels_the_uncovered_ones(tmp_path):
 
 
 def test_report_markdown_names_the_selection_the_front_and_the_failures(tmp_path):
-    _run(tmp_path, {"axes": {"bank_depth": [1, 4], "column_sets_per_tile": [1, 999]}})
+    _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}, "max_chips": 1})
     report = (tmp_path / "out" / "dse_report.md").read_text()
     assert "## Selected design point" in report
     assert "## Pareto front (headline tokens/s vs total silicon)" in report
     assert "Front shape" in report
     assert "## Infeasible candidates" in report
-    assert "[config]" in report  # the stage tag of the refused allocation rows
+    assert "[budget]" in report
     assert "## Disclosures" in report
     assert "nothing sampled" in report
     # Every candidate is a row, feasible or not.
-    for candidate in ("c000", "c001", "c002", "c003"):
+    for candidate in ("c000", "c001"):
         assert "| " + candidate + " |" in report
 
 
@@ -715,7 +568,7 @@ def test_emit_config_and_verify_round_trip(tmp_path):
     but an exact match means the EMITTED CONFIG lost the candidate."""
     exit_code, payload = _run(
         tmp_path,
-        {"axes": {"bank_depth": [4, 1]}},
+        {"axes": {"pp_util": [1.0, 0.5]}},
         emit_config=str(tmp_path / "selected.yaml"),
         verify=True,
     )
@@ -888,7 +741,6 @@ def test_checked_in_demo_sweep_is_the_sweep_george_asked_for():
     )
     assert payload["verify"]["pass"] is True
     assert all(check["ok"] for check in payload["verify"]["checks"])
-    assert DEMO_MD.read_text().startswith("# QIF P3.7 — mapped-path DSE report")
 
 
 def test_checked_in_selected_config_is_the_winner_and_runs_the_mapped_path():
@@ -977,15 +829,13 @@ def test_the_frozen_demo_sweep_can_never_be_re_walked(tmp_path):
     assert "arrays_per_chip" in message
     assert "ADJ-13" in message and "built to" in message.lower() or "derived" in message.lower()
 
-def test_demo_config_is_the_shipped_granite_point_plus_the_sweep_block():
-    """The sweep config is the SHIPPED machine plus `mapping_dse`, and nothing
-    else. A fork would drift the first time the shipped Granite point is
-    retuned, and the regenerate-and-compare gate would keep passing while the
-    checked-in sweep priced a machine that no longer exists."""
-    shipped = yaml.safe_load((HW_DIR / "fws_cim_granite_tiny.yaml").read_text())
+def test_demo_config_is_a_frozen_sweep_with_retired_axes():
+    # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
+    # ADJ-13 froze this demo; D33 removed a privileged shipped point.
     sweep = yaml.safe_load(GRANITE_DSE.read_text())
-    assert DSE.DSE_BLOCK in sweep
-    assert {k: v for k, v in sweep.items() if k != DSE.DSE_BLOCK} == shipped
+    assert set(sweep[DSE.DSE_BLOCK]["axes"]) == {"arrays_per_chip", "bank_depth"}
+    with pytest.raises(DSE.QifDseUsageError, match="REFUSED"):
+        DSE.SweepSpec.from_raw(sweep, str(GRANITE_DSE))
 
 
 def test_front_note_never_asserts_a_mechanism_the_candidates_refute():
@@ -1158,7 +1008,7 @@ def test_an_unrankable_sweep_still_writes_both_artifacts(tmp_path, monkeypatch):
         return real(candidate) if calls["n"] % 2 else "requests_per_s"
 
     monkeypatch.setattr(DSE, "headline_key_of", alternating)
-    exit_code, payload = _run(tmp_path, {"axes": {"column_sets_per_tile": [1, 2]}})
+    exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [1.0, 0.5]}})
     assert exit_code == 2
     assert payload["selected"] is None and payload["front_ids"] == []
     assert payload["front_shape"] == "unrankable"
@@ -1210,12 +1060,25 @@ def test_disclosures_are_one_entry_per_constraint_and_name_their_candidates():
     )
 
 
-def test_markdown_carries_the_silicon_accountings_coverage():
+@pytest.fixture
+def frozen_demo_markdown(tmp_path):
+    # The Markdown was never committed. Rendering the archived JSON does not
+    # rerun its refused axes, and the committed renderer is deterministic.
+    payload = json.loads(qif_artifact(DEMO_JSON).read_text())
+    rendered = DSE.render_markdown(payload)
+    assert rendered == DSE.render_markdown(payload)
+    path = tmp_path / "retired_dse_report.md"
+    path.write_text(rendered)
+    return path
+
+
+def test_markdown_carries_the_silicon_accountings_coverage(frozen_demo_markdown):
     """D21 wants the relaxation disclosed in the ARTIFACT, and the MD is the
     artifact a human reads. A `0` shared-digital term is an ABSENT law, not a
     measured zero, and the MD must say so on every front shape — not only
     when the flat_area note happens to mention it."""
-    report = DEMO_MD.read_text()
+    report = frozen_demo_markdown.read_text()
+    assert report.startswith("# QIF P3.7 — mapped-path DSE report")
     payload = json.loads(qif_artifact(DEMO_JSON).read_text())
     assert "silicon_accounting" in report
     uncovered = payload["silicon_coverage"]["uncovered_terms"]

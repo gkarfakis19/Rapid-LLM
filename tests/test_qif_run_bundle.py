@@ -103,7 +103,7 @@ def test_every_subset_v1_member_points_at_files_that_exist(index):
 
 
 @pytest.mark.parametrize("index", range(4))
-def test_every_subset_v1_member_parses_through_the_dse_config_path(index):
+def test_subset_v1_members_parse_or_name_the_documented_retired_axes(index):
     import config as config_module
 
     sys.path.insert(0, str(PROJECT_ROOT / "tools"))
@@ -112,6 +112,11 @@ def test_every_subset_v1_member_parses_through_the_dse_config_path(index):
     member = runner.load_bundle(SUBSET_V1)["members"][index]
     hw_path = PROJECT_ROOT / member["hardware_config"]
     raw_hw = dse._load_yaml(hw_path)
+    # 0176fa6 explicitly leaves the two older subset_v1 configs on retired axes.
+    if member["name"] in {"vit_huge_story_64", "granite_4_0_h_1b"}:
+        with pytest.raises(dse.QifDseUsageError, match="D38"):
+            dse.SweepSpec.from_raw(raw_hw, str(hw_path))
+        return
     spec = dse.SweepSpec.from_raw(raw_hw, str(hw_path))
     assert spec.size > 0
     base = dse._hw_from_raw(dse._base_without_sweep(raw_hw))

@@ -17,6 +17,8 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
   sys.path.insert(0, str(PROJECT_ROOT))
@@ -24,6 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from validation_scripts import koyeb
 
 
+# This whole validation sweep exceeded 60 s in the consolidated-main gate.
+@pytest.mark.slow
 def test_koyeb_average_absolute_error_below_threshold(record_validation):
   results = koyeb.run_all_and_plot(enable_plot=False, verbose=False)
   avg_abs_error = results["avg_abs_error"]

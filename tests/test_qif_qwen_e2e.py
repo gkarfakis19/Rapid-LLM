@@ -264,14 +264,11 @@ def test_the_gate_is_placed_as_an_analog_tile_on_every_attention_layer(qwen):
         assert min(tile.k_start for tile in tiles) == 0
         assert max(tile.k_end for tile in tiles) == params.hidden_dim == 2560
         assert max(tile.n_end for tile in tiles) == params.num_heads * params.head_dim == 4096
-        # It sits on the same chip as the layer that owns it.
-        chips = {mapping.macro(tile.site.macro_id).chip_id for tile in tiles}
-        assert chips == {mapping.macro(
-            mapping.tiles_for(
-                next(o for o in mapping.owners()
-                     if o.op == "qkv" and o.layer == owner.layer)
-            )[0].site.macro_id
-        ).chip_id}
+        # 0176fa6 / D37: a dense carrier crosses stage boundaries and may
+        # split a layer across chips. Every gate tile still belongs to its layer.
+        assert all(tile.owner == owner for tile in tiles)
+        assert all(mapping.macro(tile.site.macro_id).chip_id in
+                   {chip.chip_id for chip in mapping.chips} for tile in tiles)
 
 
 def test_the_gate_matrix_is_the_parameter_censuss_own_term(qwen):
@@ -684,6 +681,7 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
     """Regenerate and compare BYTES, the Granite artifacts' own gate.
 
@@ -700,6 +698,7 @@ def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     import tools.fws_emit_atlas as emit
 

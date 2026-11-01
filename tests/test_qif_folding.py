@@ -545,17 +545,18 @@ def test_a_finer_bank_lets_invariant_w_fill_macros_and_the_delta_is_disclosed():
         FWS_GRANITE, GRANITE, mutate=_bank_depth(1), packing=fws_mapping.PACKING_DENSE
     )
     summary = dense.packing_summary()
-    assert summary["macros"] == 4828
+    # 0176fa6 / D37: pipeline-order dense carriers save two more macros.
+    assert summary["macros"] == 4826
     assert summary["dedicated_macros"] == 5544
-    assert summary["macros_saved"] == 716
+    assert summary["macros_saved"] == 718
     assert summary["cell_floor_macros"] == 2876
     assert summary["real_cells"] + summary["remainder_cells"] + summary["tail_cells"] == (
         summary["committed_cells"]
     )
-    assert summary["waste_pct"] == pytest.approx(40.4420395, abs=1e-6)
+    assert summary["waste_pct"] == pytest.approx(40.4173574, abs=1e-6)
     # DISCLOSED, never silent (D21): the delta rides in a relaxation banner.
     relaxation = [r for r in dense.relaxations() if r.constraint == "packing"][0]
-    assert "716 macros" in relaxation.reason
+    assert "718 macros" in relaxation.reason
     assert "cell floor 2876" in relaxation.value
     # The shipped card's own waste USED to be a separate, larger number - the
     # card's granularity speaking. The sweep has since selected that same finer
@@ -564,7 +565,7 @@ def test_a_finer_bank_lets_invariant_w_fill_macros_and_the_delta_is_disclosed():
     # variant land on one waste figure is the co-design working, not a lost
     # distinction.
     shipped = _mapping(FWS_GRANITE, GRANITE, packing=fws_mapping.PACKING_DENSE)
-    assert shipped.packing_summary()["waste_pct"] == pytest.approx(40.4420395, abs=1e-6)
+    assert shipped.packing_summary()["waste_pct"] == pytest.approx(40.4173574, abs=1e-6)
     # The shipped card no longer banks the whole macro (its sweep selected the
     # finer bank), so the whole-macro note is correctly absent. What must hold
     # is that the card's granularity is STATED either way.
@@ -597,7 +598,9 @@ def test_the_endpoint_macros_are_gone_and_that_is_the_whole_delta():
     assert filled.regime == fws_mapping.REGIME_FILLED
     assert "lm_head" in lockstep.endpoint_blocks and not filled.endpoint_blocks
     dropped = lockstep.packing_summary()["macros"] - filled.packing_summary()["macros"]
-    assert dropped == 66 == math.ceil(100352 / 1536)
+    # 0176fa6 / D37: lockstep retains per-chip packing, filled crosses
+    # stages. The 66 head macros plus 2 changed boundary remainders disappear.
+    assert dropped == math.ceil(100352 / 1536) + 2 == 68
     assert (
         lockstep.packing_summary()["cell_floor_macros"]
         - filled.packing_summary()["cell_floor_macros"]

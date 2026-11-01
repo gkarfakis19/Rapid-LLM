@@ -129,8 +129,10 @@ Highlights:
   workload signature stays stable as the per-bundle run identity.
 - Modeling/config suites: `test_mla_modeling.py`, `test_vit_modeling.py`,
   `test_moe_expert_imbalance.py`, `test_deepseek_v3_config.py`,
-  `test_func_test.py`, `test_IMEC_*`, `test_koyeb_inf_single_gpu.py`,
-  `test_webui_formatting.py`.
+  `test_IMEC_*`, `test_webui_formatting.py`.
+  The full Koyeb sweep in `test_koyeb_inf_single_gpu.py` and the functional
+  matrix in `test_func_test.py` use the opt-in slow lane (>60 s, including
+  the functional matrix's shared setup).
 
 ## Tier 3 — the env-gated build sweep (dev gate)
 

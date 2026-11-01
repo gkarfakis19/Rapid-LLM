@@ -1001,6 +1001,7 @@ def test_the_export_states_occupancy_the_loader_recomputes(llama_mapping):
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_checked_in_export_is_the_one_the_tool_emits_today(tmp_path):
     # The atlas can be opened with this file, so a stale copy is a wrong
     # picture under the right title — the same failure the P5 embedded-blob

@@ -37,6 +37,7 @@ layers_per_chip 6, 2 stages, D = 2). No new machine is invented here.
 from __future__ import annotations
 
 import copy
+from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -239,14 +240,16 @@ def test_the_bytes_are_a_fact_and_the_zeroed_run_reports_the_priced_ones(
     zeroed_bytes = [float(cost.bytes_moved) for cost in zeroed_eval.pricing.costs]
     assert priced_bytes == zeroed_bytes
 
-    # And in the ARTIFACT: every bytes-bearing number of the report document.
-    priced_document = _bytes_in(fws_eval.report_document(priced_eval))
-    zeroed_document = _bytes_in(fws_eval.report_document(zeroed_eval))
+    # 0176fa6 / ADJ-16: removing hop latency changes concurrent memory high
+    # water and derived engine demand. Traffic bytes remain the invariant;
+    # memory-residency and width-dependent bytes are different quantities.
+    priced_document = _bytes_in([asdict(row) for row in _mapping.boundary_table()])
+    zeroed_document = _bytes_in([asdict(row) for row in _zmapping.boundary_table()])
     assert priced_document and priced_document == zeroed_document
 
 
-def test_compute_and_intra_chip_pricing_are_untouched(priced, zeroed):
-    """Only the inter-chip TIME moves. Everything else is the priced run."""
+def test_compute_pricing_is_untouched_and_all_stage_hops_are_zeroed(priced, zeroed):
+    """0176fa6's flat intra-chip hops join the existing boundary relaxation."""
     _mapping, priced_program, priced_eval = priced
     _zmapping, _zprogram, zeroed_eval = zeroed
     annotations = annotations_of(priced_program)
@@ -257,7 +260,8 @@ def test_compute_and_intra_chip_pricing_are_untouched(priced, zeroed):
     for uid, cost in priced_costs.items():
         annotation = annotations[uid]
         other = zeroed_costs[uid]
-        if annotation.kind == "transfer" and annotation.crosses_chip:
+        if annotation.kind == "transfer" and (annotation.crosses_chip or cost.block == "boundary"):
+            assert other.duration_s == 0.0
             moved += 1
             continue
         assert other.duration_s == cost.duration_s, (
@@ -395,7 +399,8 @@ def _one_point_sweep(tmp_path, links):
     )
     raw["tech_param"]["DRAM"]["size"] = "32 GB"
     raw.setdefault("mapping", {})["links"] = links
-    raw[dse.DSE_BLOCK] = {"axes": {"layers_per_chip": [4]}}
+    # 0176fa6 / D38: a one-point sweep uses the current fill axis.
+    raw[dse.DSE_BLOCK] = {"axes": {"pp_util": [1.0]}}
     path = tmp_path / "fws_cim_links_sweep.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     exit_code, payload = dse.run_sweep(

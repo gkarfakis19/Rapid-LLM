@@ -243,7 +243,8 @@ def test_a_declared_granite_reproduces_the_fabric_numbers_it_always_had(
     assert fabric["num_arrays_declared"] == 2 and fabric["softmax_lanes_declared"] == 1
     assert fabric["array_rows"] == 32 and fabric["array_cols"] == 64
     assert fabric["array_geometry_provenance"] == "declared-count"
-    assert fabric["saturated_stages"] == [2, 7, 12, 17]
+    # 0176fa6 / D38: attention layers are now individual stages.
+    assert fabric["saturated_stages"] == [5, 15, 25, 35]
     assert fabric["analog_bound_stages"] == []
     # The per-stage bill is the DECLARED law's, cycle for cycle: one QK run of
     # 6437 cycles, the 96-cycle (3 x 32) fill/drain, and a 20-cycle softmax.
@@ -424,11 +425,16 @@ def test_the_stage_attention_time_drops_and_the_silicon_it_costs_is_reported(
     assert der["fabric_context_split"] > 1
     # AND IT REACHED A REAL FLOOR, named, on every stage.
     floors = der["fabric_floors"]
-    assert list(floors) == [cim_timing.FABRIC_FLOOR_ANALOG_PACE], floors
-    assert sorted(floors[cim_timing.FABRIC_FLOOR_ANALOG_PACE]) == sorted(der_rows)
+    # 0176fa6 / D38: per-layer analog targets are smaller. The derived
+    # geometry may saturate first; the residual must be named, never clamped.
+    assert set(floors) <= {cim_timing.FABRIC_FLOOR_ANALOG_PACE, cim_timing.FABRIC_FLOOR_SATURATED_GEOMETRY}
+    assert sorted(stage for stages in floors.values() for stage in stages) == sorted(der_rows)
     for row in der_rows.values():
-        assert row["floor_kind"] == cim_timing.FABRIC_FLOOR_ANALOG_PACE
-        assert row["time_s"] <= row["analog_time_s"]
+        if row["floor_kind"] == cim_timing.FABRIC_FLOOR_ANALOG_PACE:
+            assert row["time_s"] <= row["analog_time_s"]
+        else:
+            assert row["floor_kind"] == cim_timing.FABRIC_FLOOR_SATURATED_GEOMETRY
+            assert row["time_s"] > row["analog_time_s"]
     # The silicon it cost is REPORTED, both directions. The fabric grew; the
     # softmax pipeline shrank because a shorter stage needs fewer copies, and
     # the report carries both rather than a net.

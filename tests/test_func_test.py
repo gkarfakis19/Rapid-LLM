@@ -22,6 +22,10 @@ import pytest
 
 from validation_scripts.validation_helpers import ValidationSpec, run_validation_suite
 
+# The shared fixture runs the entire 234-case matrix (86.46 s in the gate).
+# Skipping individual rows would still pay that whole setup on the next row.
+pytestmark = pytest.mark.slow
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HW_BASE = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB.yaml"
 MODEL_BASE = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "model-config" / "Llama2-7B.yaml"

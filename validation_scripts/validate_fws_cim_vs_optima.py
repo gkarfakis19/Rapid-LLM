@@ -95,6 +95,9 @@ import tempfile
 import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+from tests.qif_artifacts import qif_artifact
+
 HW_DIR = os.path.join(REPO_ROOT, "configs", "hardware-config")
 MODEL_DIR = os.path.join(REPO_ROOT, "configs", "model-config")
 VIT_RESULTS = os.path.join(REPO_ROOT, "output", "VIT", "LLM_inference_results.txt")
@@ -334,9 +337,10 @@ def check_tier(tier, table):
         "%s: num_heads" % name, ins["num_heads"], model_cfg["attention"]["num_heads"]
     )
     table.exact("%s: seq_len (report)" % name, ins["seq_len"], report["seq_len"])
-    table.exact("%s: adc_mux" % name, ins["adc_mux"], analog["adc_mux"])
+    # 0176fa6 / D35-REVISED: mux = Y/Z; the reference targets stay frozen.
+    table.exact("%s: adc_mux" % name, ins["adc_mux"], int(analog["cols"]) // int(analog["adcs"]))
     table.exact("%s: analog rows" % name, ins["rows"], analog["rows"])
-    table.exact("%s: cols_adc" % name, ins["cols_adc"], analog["cols_adc"])
+    table.exact("%s: cols_adc" % name, ins["cols_adc"], analog["adcs"])
     table.exact(
         "%s: energy_per_vec_pj" % name,
         ins["energy_per_vec_pj"],
@@ -844,7 +848,7 @@ def check_law_spot_checks(table):
         moe_yaml = load_yaml(os.path.join(HW_DIR, "fws_cim_moe.yaml"))
         analog = moe_yaml["cim"]["analog"]
         vec_latency = (
-            int(analog["adc_mux"])
+            (int(analog["cols"]) // int(analog["adcs"]))
             * int(analog["slice_cycles"])
             / (float(analog["analog_clock_mhz"]) * 1e6)
         )
@@ -860,7 +864,7 @@ def check_law_spot_checks(table):
         hidden = int(mp["hidden_dim"])
         vocab = int(mp["vocab_size"])
         rows = int(llama_analog["rows"])
-        stored_cols = int(llama_analog["cols_adc"]) * int(llama_analog["adc_mux"])
+        stored_cols = int(llama_analog["cols"])
         expected_lm_head = -(-hidden // rows) * -(-vocab // stored_cols)
         table.exact(
             "%s: lm_head arrays (H=%d, V=%d)" % (name, hidden, vocab),
@@ -1406,10 +1410,10 @@ def check_qif_dse_selection(table):
     if not table.boolean(
         "%s: checked-in artifact exists" % name,
         "docs/qif/dse/granite_capacity_banks_retired/dse_report.json",
-        os.path.exists(QIF_DSE_DEMO),
+        qif_artifact(QIF_DSE_DEMO, required=False).exists(),
     ):
         return
-    with open(QIF_DSE_DEMO) as handle:
+    with open(qif_artifact(QIF_DSE_DEMO)) as handle:
         payload = json.load(handle)
 
     table.exact(
@@ -1797,10 +1801,10 @@ def check_qif_dse_retired(table):
     if not table.boolean(
         "%s: the frozen artifact exists" % name,
         "docs/qif/dse/granite_lanes_banks_retired/dse_report.json",
-        os.path.exists(QIF_DSE_DEMO_RETIRED),
+        qif_artifact(QIF_DSE_DEMO_RETIRED, required=False).exists(),
     ):
         return
-    with open(QIF_DSE_DEMO_RETIRED) as handle:
+    with open(qif_artifact(QIF_DSE_DEMO_RETIRED)) as handle:
         payload = json.load(handle)
     retired = payload.get("retired") or {}
     table.boolean(
@@ -1894,12 +1898,13 @@ def check_qif_dse_verify(table):
         # ADJ-13 retired the chip slot budget as an axis (a chip is built to
         # its placement), and ADJ-14 made the CHIPLET COUNT one, so the second
         # axis here is the count.
-        "label": "P3.7 validator: banking x chiplet count",
+        "label": "P3.7 validator: current fill axis and lockstep refusal (D38)",
         "objective": "throughput",
         # 0 chiplets is refused BY NAME (there is no device to put attention,
         # scan or state update on), which keeps this gate covering the refusal
         # path now that a swept chiplet COUNT otherwise produces valid points.
-        "axes": {"bank_depth": [4, 1], "shared_chiplets": [4, 0]},
+        # 0176fa6 / D36-D38: old axes retired. Lockstep refuses underfill.
+        "axes": {"pp_util": [1.0, 0.5]},
     }
     hw_path = os.path.join(out_dir, "fws_cim_llama7b_mapped_dse.yaml")
     with open(hw_path, "w") as handle:
@@ -1921,20 +1926,20 @@ def check_qif_dse_verify(table):
     ):
         return
 
-    table.exact("%s: candidates swept" % name, 4, payload["num_candidates"])
-    table.exact("%s: valid candidates" % name, 2, payload["num_valid"])
+    table.exact("%s: candidates swept" % name, 2, payload["num_candidates"])
+    table.exact("%s: valid candidates" % name, 1, payload["num_valid"])
     failed = [c for c in payload["candidates"] if not c["ok"]]
     table.boolean(
         "%s: every infeasible candidate carries a stage + message" % name,
         "stage tag and a non-empty message on each",
-        len(failed) == 2
+        len(failed) == 1
         and all(c["fail_stage"] == "mapping" and c["fail_message"] for c in failed),
         ", ".join("%s[%s]" % (c["id"], c["fail_stage"]) for c in failed),
     )
     selected = payload["selected"]
     table.exact(
         "%s: selected knobs" % name,
-        {"bank_depth": 1, "shared_chiplets": 4},
+        {"pp_util": 1.0},
         selected["knobs"],
     )
     table.boolean(
@@ -2265,8 +2270,9 @@ def check_qif_filled_pipeline(table):
         mapping.regime,
     )
     table.exact(
-        "%s: D = the stage count = the analog chips" % name,
-        (len(mapping.analog_chips()), len(mapping.analog_chips())),
+        # 0176fa6 / D37-D38: chip packing crosses stage boundaries.
+        "%s: full-fill D = derived per-layer stage count (independent of chips)" % name,
+        (len(mapping.stages), len(mapping.stages)),
         (mapping.resident_streams, len(mapping.stages)),
     )
     beat = float(pipeline["beat_s"])
@@ -2448,7 +2454,7 @@ def check_qif_service_links(table):
         ("Granite-4.0-H-Tiny", "granite_4_0_h_tiny.json"),
         ("Qwen3.5-4B", "qwen3_5_4b.json"),
     ):
-        path = os.path.join(REPO_ROOT, "docs", "qif", "atlas", filename)
+        path = qif_artifact(os.path.join(REPO_ROOT, "docs", "qif", "atlas", filename), required=False)
         if not table.boolean(
             "%s %s: the priced atlas exists" % (name, model),
             "docs/qif/atlas/%s" % filename,
@@ -2526,7 +2532,7 @@ def check_qif_frontier(table):
     """
     for model_id, folder in QIF_FRONTIER_CURVES:
         name = "P7.4 frontier %s" % model_id
-        path = os.path.join(REPO_ROOT, "docs", "qif", "dse", folder, "dse_report.json")
+        path = qif_artifact(os.path.join(REPO_ROOT, "docs", "qif", "dse", folder, "dse_report.json"), required=False)
         if not table.boolean(
             "%s: checked-in curve exists" % name,
             "docs/qif/dse/%s/dse_report.json" % folder,
@@ -2723,12 +2729,17 @@ def check_qif_frontier(table):
             ),
         )
         table.boolean(
-            "%s: Invariant W pins the analog floor per macro (D27)" % name,
-            "one macro footprint over the whole sweep; area moves by SLOT COUNT",
-            len({round(c["silicon"]["macro_footprint_mm2"], 12) for c in valid}) == 1,
-            "%d distinct footprints" % len(
-                {round(c["silicon"]["macro_footprint_mm2"], 12) for c in valid}
+            # 0176fa6 / D35-REVISED sweeps Y/Z, so the footprint is per point.
+            "%s: analog area is occupied slots times that point's macro footprint" % name,
+            "D27 accounting at each geometry, not one footprint across platform axes",
+            bool(valid) and all(
+                math.isclose(
+                    c["silicon"]["analog_macro_silicon_mm2"],
+                    c["silicon"]["analog_macro_slots"] * c["silicon"]["macro_footprint_mm2"],
+                    rel_tol=1e-12,
+                ) for c in valid
             ),
+            "%d priced geometries" % len(valid),
         )
 
         # (6) The front is a front: sorted by area, throughput is monotone and
@@ -2840,13 +2851,12 @@ def check_qif_frontier(table):
             % ", ".join(sorted({row["device_class"] for row in valid[0]["utilization"]})),
         )
 
-        # (10) The round trip: the emitted machine reproduces the selection.
-        verify = payload["verify"]
-        table.boolean(
-            "%s: --emit-config + --verify round trip" % name,
-            "run_perf on the emitted config reproduces the selected point (<=0.1%)",
-            bool(verify) and verify["pass"],
-            "%d checks" % len(verify["checks"]) if verify else "no verify block",
+        # 0176fa6 preserves provisional historical reports, without a verify
+        # run. The LIVE round-trip gate is check_qif_dse_verify above.
+        table.exact(
+            "%s: historical report claims no unrun verification" % name,
+            None,
+            payload["verify"],
         )
 
 

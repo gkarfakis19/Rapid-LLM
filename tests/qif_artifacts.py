@@ -12,8 +12,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def qif_artifact(path, *, required=True):
     """Resolve a repo-relative artifact; only its consuming test may skip.
 
-    ``required=False`` is for collection-time directory discovery. Actual
-    readers must use the default so missing evidence is an explicit skip.
+    ``required=False`` is for collection-time discovery and standalone gate
+    presence probes. Pytest readers use the default for an explicit skip.
     """
     relative = Path(path)
     if relative.is_absolute():

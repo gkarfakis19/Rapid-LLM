@@ -1,0 +1,138 @@
+# Consolidated-main CIM/QIF test repair
+
+Baseline: `3cdce5c`, with the original failure logs supplied for this repair.
+The old-checkout log has exactly 80 failing cases in the 13 files below.
+The new-checkout log has 112 failures; resolving external artifacts exposes
+the same historical checks without restoring generated results to git.
+
+The policy authority is `DECISIONS.md`, especially D35-REVISED, D36, D37,
+D38, the 2026-08-29 link amendment, and ADJ-16. Original checkpoint
+`0176fa6` (rewritten `6ccaf2d`) explicitly describes historical reports as
+provisional, the real-model mapper as stub-v0, and two subset configs as
+retaining retired axes. `28009de` (rewritten `3cdce5c`) says production
+mapper behavior is unchanged by its scheduling diagnostics.
+
+## Accounting for all 80 pre-existing failures
+
+Counts are failing **cases**, including parametrization, rather than functions.
+
+| Test file | Stale tests repaired | NEEDS GEORGE | Diagnosis |
+|---|---:|---:|---|
+| `test_fws_cim.py` | 3 | 0 | The link amendment changed intra-chip latency from 50 ns to 5 ns. |
+| `test_qif_atlas.py` | 0 | 1 | Historical PD atlas byte comparison needs a reference decision. |
+| `test_qif_dse_allocation.py` | 23 | 0 | D36/D38 retired the old axes; use legal Y/Z/fill axes, named refusals, the committed batch-one Llama twin, and explicit small-capacity controls. The frozen demo is history, not a copy of a current point. |
+| `test_qif_folding_mapping.py` | 2 | 1 | D37 saves two further boundary remainders; D38/ADJ-16 enlarge the lowered observation window. Test comparison arithmetic rather than an old op count or time delta. Historical comparison JSON needs a reference decision. |
+| `test_qif_folding.py` | 2 | 0 | Dense packing across stage boundaries changes macro count from 4828 to 4826 and the endpoint comparison by two boundary remainders. |
+| `test_qif_frontier.py` | 25 | 2 | Current axes, derived per-layer stages, fill-dependent state, explicit partition refusal, source-specific binding terms, and historical reports with no verification claim. Two full regeneration comparisons need reference decisions. |
+| `test_qif_granite_e2e.py` | 5 | 1 | D37/D38 change placement, stages, demand and softmax sizing. Read all stages for the pool comparison and export the current pool view from the same evaluation. Historical report comparison needs a reference decision. |
+| `test_qif_links_relaxation.py` | 4 | 0 | All flat stage-boundary hops are relaxed; traffic bytes stay fixed but concurrent memory high water need not. DSE uses the current fill axis. |
+| `test_qif_mapping.py` | 0 | 1 | Historical P3 atlas byte comparison needs a reference decision. |
+| `test_qif_pipeline.py` | 2 | 1 | MoE residency is not activity (M6); inactive experts remain unread. Hop expectation is 5 ns. The slow-ADC contention probe still returns zero without a documented explanation. |
+| `test_qif_qwen_e2e.py` | 1 | 2 | D37 no longer guarantees the gate and QKV share a chip; weight ownership and dimensions remain checked. Historical report and atlas comparisons need reference decisions. |
+| `test_qif_run_bundle.py` | 2 | 0 | The checkpoint explicitly preserves the ViT-Huge and Granite-1B bundle members with retired axes; assert their named refusals. |
+| `test_qif_sa_geometry.py` | 2 | 0 | D38 changes attention stage indices and smaller per-layer targets can reach geometry saturation before analog pace. |
+| **Total** | **71** | **9** | **80 cases; no numerical production-law bug identified.** |
+
+## Strict expected failures
+
+Every new expected failure is `xfail(strict=True)` with a `NEEDS GEORGE:`
+reason. The contention case remains in the default suite:
+
+- `test_qif_pipeline.py::test_cross_stage_bank_sharing_costs_real_time_when_the_macro_collides`
+
+The reference question is whether to retain an archived source-bound golden
+or establish a new reference for the deliberately redesigned implementation.
+No historical artifact is overwritten or promoted to a current performance reference.
+These nine cases are also `slow` and therefore skipped by default:
+
+- `test_qif_atlas.py::test_the_pd_document_is_what_a_fresh_run_produces`
+- `test_qif_mapping.py::test_the_checked_in_export_is_the_one_the_tool_emits_today`
+- `test_qif_granite_e2e.py::test_the_shipped_granite_report_is_what_a_fresh_run_produces`
+- `test_qif_granite_e2e.py::test_the_shipped_granite_atlas_is_what_a_fresh_run_produces`
+- `test_qif_qwen_e2e.py::test_the_shipped_qwen_report_is_what_a_fresh_run_produces`
+- `test_qif_qwen_e2e.py::test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces`
+- `test_qif_folding_mapping.py::test_the_granite_packing_artifact_is_what_a_fresh_run_produces`
+- `test_qif_frontier.py::test_the_checked_in_curve_regenerates_identically[granite-frontier0-shipped0-model0-art0-Granite-4.0-H-Tiny]`
+- `test_qif_frontier.py::test_the_checked_in_curve_regenerates_identically[qwen-frontier1-shipped1-model1-art1-Qwen3.5-4B]`
+
+Eight of these nine slow cases belong to the 80-case baseline. The Granite
+atlas case was deselected there because it had already run for over an hour.
+The three other whole-Granite packing-report readers are slow too: their
+shared setup measured 95.45 seconds.
+
+The full-suite pass also identified the existing Koyeb validation sweep as
+longer than 60 seconds. It is marked `slow`; its error threshold and all
+model inputs are unchanged. This additional lane change is outside the
+80-case CIM/QIF failure accounting above. The completed timing report also
+measured 86.46 s in the shared fixture for the 234-case functional matrix.
+All its consumers are marked `slow`, since skipping one row alone would
+move the entire setup cost to the next row. The matrix's inputs, assertions
+and two existing non-strict expected-failure markers are unchanged; the
+221-test golden gate remains always on.
+
+The seven pre-existing default xfails remain in `test_IMEC_inf.py`, all with
+reason `Pending model refinements`: `test_avg_abs_error_by_model` for
+`H100-model-Llama 2-13B`, `H100-model-Llama 2-70B`, and
+`H100-model-Llama 2-7B`; and `test_avg_abs_error_by_tp` for
+`H100-TP-1`, `H100-TP-2`, `H100-TP-4`, and `H100-TP-8`.
+
+## Missing inputs and validation scope
+
+The never-committed six toy point JSONs are rebuilt by the committed
+`tools/fws_toy_slotmap.py` in pytest scratch, with fixed authored/generated
+timestamps. Generation takes less than one second; all six pass both the
+independent slot checker and the atlas loader. They are additional input
+repairs, not members of the 80-case old-checkout failure list.
+Two fixed-time runs also reproduce all six point files, the report and
+the manifest byte for byte.
+
+The retired `granite_capacity_banks_retired/dse_report.md` was never
+committed. Its old sweep axes are now refused, but the committed
+`fws_qif_dse.render_markdown` can rebuild the document directly from its
+archived JSON without running that sweep. The reader renders it twice,
+checks byte equality, and writes only to pytest scratch. Both classes of
+never-committed input are therefore rebuilt, with no missing-input skip.
+
+The standalone OPTIMA validator uses the same external-artifact resolver.
+Its schema checks read Z from `adcs` and derive mux as `cols/adcs`, preserving
+the original OPTIMA reference numbers. Its live mapped-DSE gate now sweeps
+fill on the legacy lockstep vehicle: full fill round-trips, underfill carries
+a named mapping refusal. Historical frontier rows explicitly check that
+provisional reports claim no unrun verification; the separate live round-trip
+gate still runs. No tolerances or frozen OPTIMA targets are changed.
+
+The only production edit corrects the link provenance **text** from 50 ns to
+5 ns, matching the existing numeric constant and documented amendment.
+All other changes are tests, validation code, test documentation or ignore
+rules. Golden recordings and A100 baseline files remain unchanged.
+
+## Verification
+
+- Golden gate: 221 passed before the production text correction and 221
+  passed afterward (39.48 s for the final dedicated run). SHA-256 comparison
+  finds all 46 golden files unchanged; `git diff` against `3cdce5c` also
+  confirms no golden or A100-baseline file changed.
+- Standalone validator: 524/524 checks pass, exit 0, 126.44 s wall time.
+  Its A100 result-file comparisons remain exact byte comparisons.
+- Targeted runs: 129 physical/e2e tests passed, 107 SA-geometry tests
+  passed, and 115 DSE/frontier/bundle/helper tests passed. Three slow
+  whole-Granite packing checks also passed (97.19 s).
+- Missing results root: the artifact consumer skips with the full missing
+  path and `RAPID_QIF_RESULTS`; the local fixture check still passes.
+- Slow-lane probes: default gives one pass/one skip; `-m slow` gives one
+  pass/one deselection; `RAPID_RUN_SLOW=1` gives two passes.
+- `git check-ignore` verifies generated output patterns, the fixture
+  exception, and zero newly ignored tracked files (including a comparison
+  with the pre-change ignored set).
+
+- Final default suite: **2695 passed, 292 skipped, 8 xfailed, 0 failures**,
+  exit 0. Pytest reports 653.04 s; process wall time is **659.97 s**
+  (10 min 59.97 s). Of the skips, 247 are opt-in slow cases (234 functional
+  matrix rows plus 13 other slow cases), 44 are the existing environment-gated
+  determinism sweep, and one is the sandbox's blocked local socket. There
+  are no missing-input skips with the provided results root.
+- Before the functional matrix moved lanes, a full run also completed with
+  zero failures: 2926 passed, 59 skipped, 8 xfailed, 2 xpassed. Its 234
+  functional rows were 232 passes and the two existing XPASS cases. The
+  retired Markdown reader was subsequently rebuilt and passed its focused
+  check; the final full run above includes it.
