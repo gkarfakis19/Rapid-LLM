@@ -29,6 +29,8 @@ Generated QIF evidence is read through `tests/qif_artifacts.py` from
 `RAPID_QIF_RESULTS` (default: `../Rapid-LLM-results/qif`, relative to the repo).
 Missing evidence fails its consuming test and names the missing path and
 `RAPID_QIF_RESULTS`. Only `RAPID_QIF_ALLOW_MISSING=1` permits missing-evidence skips.
+Historical regeneration xfails cover only their known comparison/refusal
+exception; missing references still fail, including in the slow lane.
 Whole-atlas/DSE-report regeneration and checks taking over 60 seconds carry
 `@pytest.mark.slow` and skip by default. Opt in with `-m slow` (only slow
 tests) or `RAPID_RUN_SLOW=1` (all tests, including slow).

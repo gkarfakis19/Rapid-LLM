@@ -828,7 +828,7 @@ def test_the_comparison_refuses_a_pairing_that_is_not_one_experiment(
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_granite_packing_artifact_is_what_a_fresh_run_produces(
     granite_packing_document,
 ):
@@ -844,10 +844,11 @@ def test_the_granite_packing_artifact_is_what_a_fresh_run_produces(
         PACKING_ARTIFACT.write_text(regenerated, encoding="utf-8")
     # A missing artifact FAILS, never skips: deleting the file must not turn
     # this gate green.
-    assert PACKING_ARTIFACT.exists(), (
-        "docs/qif/folding/granite_dense_vs_dedicated.json is committed; regenerate "
-        "it with the command in its provenance block"
-    )
+    if not PACKING_ARTIFACT.exists():
+        pytest.fail(
+            "docs/qif/folding/granite_dense_vs_dedicated.json is committed; "
+            "regenerate it with the command in its provenance block"
+        )
     # Keep exact equality without pytest's expensive multi-MB string diff.
     same_bytes = regenerated == PACKING_ARTIFACT.read_text(encoding="utf-8")
     assert same_bytes, (

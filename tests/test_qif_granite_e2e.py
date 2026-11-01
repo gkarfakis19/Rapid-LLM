@@ -853,7 +853,7 @@ def test_the_shipped_granite_atlas_carries_p4s_duty_cycles():
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
     """The committed artifact cannot rot: it is regenerated and compared.
 
@@ -883,7 +883,7 @@ def test_the_shipped_granite_report_is_what_a_fresh_run_produces(granite):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_granite_atlas_is_what_a_fresh_run_produces(tmp_path):
     """The priced atlas cannot rot either — regenerate and compare BYTES.
 
@@ -894,15 +894,15 @@ def test_the_shipped_granite_atlas_is_what_a_fresh_run_produces(tmp_path):
     import tools.fws_emit_atlas as emit
     import fws_atlas_export
 
+    reference = qif_artifact(os.path.join(
+        PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
+    ))
     _mapping, _rows, document = emit.build(GRANITE_HW, GRANITE_MODEL, priced=True)
     regenerated = fws_atlas_export.write_atlas_json(
         document, os.path.join(str(tmp_path), "granite.json")
     )
-    path = os.path.join(
-        PROJECT_ROOT, "docs", "qif", "atlas", "granite_4_0_h_tiny.json"
-    )
     # Keep exact equality without pytest's expensive multi-MB string diff.
-    same_bytes = regenerated == open(qif_artifact(path), encoding="utf-8").read()
+    same_bytes = regenerated == reference.read_text(encoding="utf-8")
     assert same_bytes, (
         "docs/qif/atlas/granite_4_0_h_tiny.json is stale; regenerate it with "
         "the command in its provenance block"

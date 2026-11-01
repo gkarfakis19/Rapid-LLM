@@ -333,7 +333,13 @@ def _shipped_documents():
     silently skipped one. Globbing by the schema id means a document another
     workstream lands is covered the moment it exists, with nobody to remember.
     """
-    found = []
+    # 3cdce5c's six external atlas documents remain required even when the
+    # results root is empty: discovery must not silently remove their cases.
+    found = [
+        "falcon_mamba_7b.json", "granite_4_0_h_tiny.json",
+        "p3_llama7b_tp2.json", "pd_llama7b.json", "qwen3_5_4b.json",
+        "vit_huge_story_64.json",
+    ]
     for path in sorted((*ATLAS_DIR.glob("*.json"), *qif_artifact(ATLAS_DIR, required=False).glob("*.json"))):
         try:
             blob = json.loads(path.read_text(encoding="utf-8"))
@@ -425,17 +431,18 @@ def test_the_pd_document_validates_clean_through_the_real_loader(tmp_path):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_pd_document_is_what_a_fresh_run_produces(tmp_path):
     """Regenerate and compare BYTES: a stale artifact is a wrong picture under
     a right title, the same gate p3_llama7b_tp2.json and the Granite atlas have."""
     import tools.fws_emit_atlas as emit
     import fws_atlas_export
 
+    reference = qif_artifact(PD_ATLAS)
     _pair, _rows, document = emit.build_pd(**PD_ARGS)
     regenerated = fws_atlas_export.write_atlas_json(document, tmp_path / "pd.json")
     # Keep exact equality without pytest's expensive multi-MB string diff.
-    same_bytes = regenerated == qif_artifact(PD_ATLAS).read_text(encoding="utf-8")
+    same_bytes = regenerated == reference.read_text(encoding="utf-8")
     assert same_bytes, (
         "docs/qif/atlas/pd_llama7b.json is stale; regenerate it with the command "
         "in its provenance block"

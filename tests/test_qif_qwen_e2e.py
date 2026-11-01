@@ -681,7 +681,7 @@ def test_the_prefill_is_shared_digital_bound_and_the_split_is_the_finding(qwen_l
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
     """Regenerate and compare BYTES, the Granite artifacts' own gate.
 
@@ -700,7 +700,7 @@ def test_the_shipped_qwen_report_is_what_a_fresh_run_produces(qwen):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_shipped_qwen_atlas_is_what_a_fresh_run_produces(tmp_path):
     import tools.fws_emit_atlas as emit
 

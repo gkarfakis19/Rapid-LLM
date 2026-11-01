@@ -914,7 +914,7 @@ def _normalized(payload):
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: D38 refuses the historical layers_per_chip/bank_depth/shared_chiplets/conv_placement axes before regeneration reaches the reference comparison; choose current frontier inputs and a replacement reference")
+@pytest.mark.xfail(strict=True, raises=DSE.QifDseUsageError, reason="NEEDS GEORGE: D38 refuses the historical layers_per_chip/bank_depth/shared_chiplets/conv_placement axes before regeneration reaches the reference comparison; choose current frontier inputs and a replacement reference")
 def test_the_checked_in_curve_regenerates_identically(
     name, frontier, shipped, model, art, model_id, tmp_path
 ):
@@ -922,6 +922,8 @@ def test_the_checked_in_curve_regenerates_identically(
     re-walked through the real mapped path and the verify round trip reruns
     run_perf. Nothing is sampled to make it faster — a gate that re-walks part
     of a ladder is a gate that lets the rest of it rot."""
+    # Require the reference before the known retired-axis refusal can occur.
+    historical = _payload(art)
     exit_code, payload = DSE.run_sweep(
         str(frontier),
         str(model),
@@ -937,7 +939,7 @@ def test_the_checked_in_curve_regenerates_identically(
     )
     assert exit_code == 0
     fresh = json.loads((tmp_path / "out" / "dse_report.json").read_text())
-    assert _normalized(fresh) == _normalized(_payload(art))
+    assert _normalized(fresh) == _normalized(historical)
     assert yaml.safe_load((tmp_path / "selected.yaml").read_text()) == yaml.safe_load(
         (art / "selected_config.yaml").read_text()
     )

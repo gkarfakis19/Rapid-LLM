@@ -1001,13 +1001,15 @@ def test_the_export_states_occupancy_the_loader_recomputes(llama_mapping):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="NEEDS GEORGE: 0176fa6 preserves provisional historical results; choose a replacement reference before rebaselining regeneration")
 def test_the_checked_in_export_is_the_one_the_tool_emits_today(tmp_path):
     # The atlas can be opened with this file, so a stale copy is a wrong
     # picture under the right title — the same failure the P5 embedded-blob
     # test guards. Regenerating and comparing is the whole check.
     import tools.fws_emit_atlas as emit
 
+    # Missing evidence is a failure, outside the expected assertion mismatch.
+    reference = qif_artifact(P3_ATLAS)
     _mapping_obj, _rows, document = emit.build(
         str(FWS_LLAMA7B),
         str(LLAMA2_7B_FWS_INF),
@@ -1016,7 +1018,7 @@ def test_the_checked_in_export_is_the_one_the_tool_emits_today(tmp_path):
     )
     regenerated = fws_atlas_export.write_atlas_json(document, tmp_path / "p3.json")
     # Keep exact equality without pytest's expensive multi-MB string diff.
-    same_bytes = regenerated == qif_artifact(P3_ATLAS).read_text(encoding="utf-8")
+    same_bytes = regenerated == reference.read_text(encoding="utf-8")
     assert same_bytes, (
         "docs/qif/atlas/p3_llama7b_tp2.json is stale; regenerate it with "
         "tools/fws_emit_atlas.py (the command is in its provenance block)"
