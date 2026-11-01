@@ -56,3 +56,11 @@ tools/parallelism_best_runtimes_*
 tools/scan_configs.py
 tools/add_interm_dim_from_configs.py
 stochastic_test
+
+# Generated QIF evidence lives in Rapid-LLM-results/qif (fixtures stay in git).
+docs/qif/atlas/*.json
+!docs/qif/atlas/fixture_*.json
+docs/qif/dse/*/dse_report.json
+docs/qif/diagnostics/**/*.json
+docs/qif/diagnostics/**/*.log
+docs/qif/board_snapshot.html
