@@ -1,0 +1,77 @@
+{
+  "base_commit": "a61c18ac196b23dd57daa45f3a973edb7a465f18",
+  "cpu_only": true,
+  "extraction": "git archive HEAD with tests/test_ssm_program.py overlaid; .venv and astra-sim symlinked to this worktree",
+  "extraction_archive_removed": true,
+  "gates": {
+    "golden": {
+      "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/test_equiv_golden.py -q",
+      "log": "tmp/ssm-fixes/relocation-golden.log",
+      "passed": 221,
+      "wall_seconds": 41.09
+    },
+    "program": {
+      "command": "RAPID_RUN_SLOW=1 ./.venv/bin/python -m pytest -p no:cacheprovider tests/test_ssm_program.py -q",
+      "log": "tmp/ssm-fixes/relocation-program.log",
+      "passed": 25,
+      "wall_seconds": 153.86
+    },
+    "relocated_cli": {
+      "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/test_ssm_program.py -m slow -k same_yaml -q",
+      "log": "tmp/ssm-relocation/relocated.log",
+      "passed": 4,
+      "wall_seconds": 140.86
+    }
+  },
+  "normalized_checkout_prefix": "<CHECKOUT>/",
+  "production_code_unchanged": true,
+  "relocated_copy_removed": true,
+  "report_files_edited": false,
+  "reports": [
+    {
+      "baseline_raw_report_byte_unchanged": true,
+      "model": "mamba2_2p7b_decode_inf",
+      "normalized_sha256": "0735af5b5981706d72903f0c7d6b6656eff5cd4fe1cdc57fc0a3002881c0525e",
+      "numeric_fields_unchanged": 35729,
+      "original_raw_sha256": "1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40",
+      "raw_differences": [
+        [
+          "evaluation",
+          "digital_silicon",
+          "disclosures",
+          0
+        ],
+        [
+          "evaluation",
+          "digital_silicon",
+          "library",
+          "path"
+        ]
+      ],
+      "relocated_raw_sha256": "9d9119e83604dcbf26b042428fc08ee9c88536f89d2819f6c7c04e4d4499e97c"
+    },
+    {
+      "baseline_raw_report_byte_unchanged": true,
+      "model": "granite_4_0_h_1b_decode_inf",
+      "normalized_sha256": "0e9c7e9d2057681359933bb79d9fe2332322ab7d023577bd6401782e147c05ea",
+      "numeric_fields_unchanged": 19148,
+      "original_raw_sha256": "76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0",
+      "raw_differences": [
+        [
+          "evaluation",
+          "digital_silicon",
+          "disclosures",
+          0
+        ],
+        [
+          "evaluation",
+          "digital_silicon",
+          "library",
+          "path"
+        ]
+      ],
+      "relocated_raw_sha256": "787060a15bf60d8768f1d210e1f29b758cb37f09eb60ca0536d64104735b6bb7"
+    }
+  ],
+  "test_file_sha256": "6df9ceeb9fe1404dc926bdc88f72ec1aaf18b5eb510f5583e62bf4601b95dead"
+}

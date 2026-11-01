@@ -293,6 +293,34 @@ under this worktree's tmp/ and separate pytest temporary roots. No saved
 golden or numerical CIM/QIF artifact was regenerated.
 
 
+### Portable QIF CLI pins
+
+The CLI tests hash the complete parsed report after replacing only the
+checkout prefix in `evaluation.digital_silicon.library.path` and
+`evaluation.digital_silicon.disclosures[0]` with `<CHECKOUT>/`. Canonical JSON
+serialization retains every numeric field, path suffix, source-project path
+and other disclosure. Production code and production report files are not
+edited. The normalized pins were derived from the auditor's baseline reports.
+A fast regression checks relocation invariance, preservation of unrelated
+strings and detection of numeric mutations.
+
+The corrected test was run from an extraction of `a61c18ac`, with only this
+test file overlaid. The interpreter and AstraSim checkout were linked from
+the original worktree. Both model YAMLs ran through the full CLI on GPU and
+CIM: 4 passed in 140.86 s command wall time.
+Local `test_ssm_program.py`, including every slow case, passed all 25 tests
+in 153.86 s; the golden gate passed 221 in
+41.09 s, with all 46 golden files byte-unchanged.
+
+The original-checkout raw reports remain byte-identical to the auditor's
+baselines. Between checkouts, exactly the two normalized string fields differ;
+all 35729 Mamba2 and
+19148 Granite numeric fields are unchanged.
+The relocated copy and extraction archive were removed. `relocation_check.json`
+retains the commands, full-report digests, numeric counts and changed paths.
+Earlier gate receipts retain their original test-source fingerprints.
+
+
 ## Known gaps and owner decisions
 
 - GPU laws currently cover sequential attention/Mamba2 plans and their dense

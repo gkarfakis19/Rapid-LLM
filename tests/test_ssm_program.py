@@ -227,6 +227,50 @@ def test_moe_ssm_and_attention_compose(tmp_path):
     MemoryEstimator(tc).simulate_peak(program, memory, mode="inference")
 
 
+def _qif_report_digest(report_bytes, checkout_root):
+    """Hash the entire report, normalizing only two checkout prefixes."""
+    report = json.loads(report_bytes)
+    digital = report["evaluation"]["digital_silicon"]
+    prefix = str(checkout_root) + "/"
+    path = digital["library"]["path"]
+    disclosure = digital["disclosures"][0]
+    assert path.startswith(prefix)
+    assert disclosure.count(prefix) == 1
+    digital["library"]["path"] = "<CHECKOUT>/" + path[len(prefix):]
+    digital["disclosures"][0] = disclosure.replace(prefix, "<CHECKOUT>/", 1)
+    # All numeric fields, path suffixes, source-project paths and other
+    # disclosures remain covered. Production report bytes are never edited.
+    return hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def test_qif_digest_normalizes_only_checkout_prefixes_and_covers_numbers():
+    path = str(ROOT) + "/configs/hardware-config/library.yaml"
+    report = {"evaluation": {"digital_silicon": {
+        "library": {"path": path, "area_um2": 123.5},
+        "disclosures": [f"source /fixed/library; checked in at {path}", str(ROOT) + "/keep"]}},
+        "total_seconds": 0.125, "count": 42}
+    raw = json.dumps(report).encode()
+    expected = copy.deepcopy(report)
+    digital = expected["evaluation"]["digital_silicon"]
+    digital["library"]["path"] = "<CHECKOUT>/configs/hardware-config/library.yaml"
+    digital["disclosures"][0] = "source /fixed/library; checked in at <CHECKOUT>/configs/hardware-config/library.yaml"
+    digest = _qif_report_digest(raw, ROOT)
+    assert digest == hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    relocated = copy.deepcopy(report)
+    digital = relocated["evaluation"]["digital_silicon"]
+    digital["library"]["path"] = digital["library"]["path"].replace(str(ROOT), "/relocated/checkout", 1)
+    digital["disclosures"][0] = digital["disclosures"][0].replace(str(ROOT), "/relocated/checkout", 1)
+    assert _qif_report_digest(json.dumps(relocated).encode(), "/relocated/checkout") == digest
+    for keys in [("total_seconds",), ("count",), ("evaluation", "digital_silicon", "library", "area_um2")]:
+        changed = copy.deepcopy(report)
+        target = changed
+        for key in keys[:-1]:
+            target = target[key]
+        target[keys[-1]] += 1
+        assert _qif_report_digest(json.dumps(changed).encode(), ROOT) != digest
+    assert json.dumps(report).encode() == raw
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("device", ["gpu", "cim"])
 @pytest.mark.parametrize("name,hw_name", [
@@ -252,13 +296,13 @@ def test_same_yaml_gpu_and_mapped_cim_cli(tmp_path, name, hw_name, device):
     assert not (tmp_path / "output/LLM").exists(), "decode ignored --output_dir"
     if device == "cim":
         report = (output / "LLM/fws_qif_report.json").read_bytes()
-        # Full mapped reports from the independently extracted main evaluator.
-        # Neither adapter restoration nor KV reporting may move any QIF byte.
+        # Full mapped reports from the independently extracted main evaluator,
+        # with only the two checkout prefixes normalized by the test helper.
         baseline = {
-            "mamba2_2p7b_decode_inf": "1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40",
-            "granite_4_0_h_1b_decode_inf": "76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0",
+            "mamba2_2p7b_decode_inf": "0735af5b5981706d72903f0c7d6b6656eff5cd4fe1cdc57fc0a3002881c0525e",
+            "granite_4_0_h_1b_decode_inf": "0e9c7e9d2057681359933bb79d9fe2332322ab7d023577bd6401782e147c05ea",
         }
-        assert hashlib.sha256(report).hexdigest() == baseline[name]
+        assert _qif_report_digest(report, ROOT) == baseline[name]
 
 
 def test_cim_pure_ssm_decode_keeps_adapter_shapes(tmp_path):
