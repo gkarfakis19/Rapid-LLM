@@ -944,16 +944,22 @@ def test_mamba2_decode_twin_is_the_base_row_plus_d29_and_d30():
 @pytest.mark.parametrize(
     "name", sorted(key for key, kinds in MATRIX_YAMLS.items() if kinds)
 )
-def test_hybrid_layer_plans_are_rejected_on_the_gpu_path(name):
+def test_gpu_layer_plan_support_is_scoped_to_priced_laws(name):
     hw_config = _build_hw_config()
     model = config.parse_config(str(_matrix_yaml_path(name)), "LLM")
-    with pytest.raises(ValueError) as excinfo:
+    if name in {"granite_4_0_h_1b", "mamba2_2p7b"}:
         config.validate_configs(hw_config, model)
-    message = str(excinfo.value)
-    assert "layer_plan" in message
-    assert "P2" in message and "P4" in message
-    for kind in MATRIX_YAMLS[name]:
-        assert kind in message
+    else:
+        gap = {
+            "granite_4_0_h_tiny": "ffn_dims",
+            "falcon_h1_7b": "layer_plan",
+            "falcon_h1_3b": "layer_plan",
+            "falcon_mamba_7b": "ssm.variant",
+            "lfm2_2p6b": "short_conv",
+            "qwen3_5_4b": "linear_attn",
+        }[name]
+        with pytest.raises(ValueError, match=gap):
+            config.validate_configs(hw_config, model)
 
 
 def test_attention_only_layer_plan_is_not_rejected():

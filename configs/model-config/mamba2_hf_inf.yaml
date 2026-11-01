@@ -1,4 +1,6 @@
 # Converted from archive/ssm-gpu-old fdbb0ea; see docs/ssm/SSM.md.
+# Shared serving workload: batch 1, endpoints dropped, one prefill token, FlashAttention off.
+# Use converter without --shared-inference-workload to preserve the archive workload.
 model_param:
   mode: LLM
   run_type: inference
@@ -7,7 +9,7 @@ model_param:
   global_batch_size: 1
   gradient_accumulation_steps: 1
   seq_len: 2048
-  decode_len: 2048
+  decode_len: 2047
   hidden_dim: 2560
   moe:
     num_experts: 1

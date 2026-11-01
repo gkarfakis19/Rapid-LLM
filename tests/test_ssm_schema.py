@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from config import LLMConfig
-from tools.convert_ssm_config import convert_model
+from tools.convert_ssm_config import convert_model, shared_inference_workload
 
 
 @pytest.fixture
@@ -54,3 +54,16 @@ def test_converted_models_parse(name):
     parsed = LLMConfig.from_dict(data["model_param"])
     assert parsed.run_type == "inference"
     assert parsed.layer_plan.count("ssm") > 0
+    assert parsed.seq_len > parsed.decode_len
+    assert parsed.disable_embedding_unembedding
+
+
+def test_shared_workload_changes_are_explicit_and_do_not_mutate_input(model):
+    model["model_param"].update(seq_len=8, decode_len=8, global_batch_size=4,
+        disable_embedding_unembedding=False)
+    shared = shared_inference_workload(model)
+    assert model["model_param"]["decode_len"] == 8
+    assert model["model_param"]["global_batch_size"] == 4
+    assert shared["model_param"]["decode_len"] == 7
+    assert shared["model_param"]["global_batch_size"] == 1
+    assert shared["model_param"]["disable_embedding_unembedding"]

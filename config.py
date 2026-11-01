@@ -5704,11 +5704,9 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     if mapped_fws:
         _validate_fws_filled_pipeline(hw_config, model)
 
-    # Every timing path in this repo prices ONE uniform transformer layer
-    # repeated num_layers times. A hybrid layer plan would be priced as if its
-    # SSM / linear-attention / short-conv blocks were attention layers, which
-    # is a wrong number rather than a missing one — so refuse it outright on
-    # every device class. Pricing lands with P2-P4.
+    # Admit only block kinds with a device law. GPU Mamba2 inference now uses
+    # the same Program builder as attention/MoE; CIM's mapped-law set and the
+    # unmapped CIM refusal above remain unchanged.
     unpriced_kinds = (
         tuple(
             kind

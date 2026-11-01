@@ -69,7 +69,7 @@ def convert_model(data: dict, *, chunk_size: int = 256) -> dict:
     if "ssm" not in kinds:
         raise ValueError("Old model has no SSM layers to migrate")
     model["model_id"] = model.get("model_id", old_type)
-    model["model_type"] = "llama"
+    model["model_type"] = "gpt" if old_type == "gpt" else "llama"
     model["layer_plan"] = {"layer_types": kinds,
                            "ffn_per_layer": int(model["intermediate_size"]) > 0}
     model["ssm"] = ssm
@@ -84,14 +84,39 @@ def convert_model(data: dict, *, chunk_size: int = 256) -> dict:
     return result
 
 
+def shared_inference_workload(data: dict) -> dict:
+    """Explicitly select a workload accepted by mapped CIM and GPU.
+
+    CIM D29/D30 fixes local batch=1 and drops endpoints. Its report requires
+    a prefill wavefront; retain total sequence length and reserve one token
+    for that wavefront when the archive example was decode-only.
+    """
+    result = copy.deepcopy(data)
+    model = result["model_param"]
+    model["global_batch_size"] = 1
+    model["disable_embedding_unembedding"] = True
+    if model["decode_len"] >= model["seq_len"]:
+        if model["seq_len"] < 2:
+            raise ValueError("A shared workload needs seq_len >= 2 for prefill and decode")
+        model["decode_len"] = model["seq_len"] - 1
+    if "attention" in model:
+        model["attention"]["use_flashattention"] = False
+        model["attention"].pop("attention_tile_size", None)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--chunk-size", type=int, default=256)
+    parser.add_argument("--shared-inference-workload", action="store_true",
+        help="Explicitly adapt batch/endpoints/prefill/FlashAttention to mapped CIM serving rules")
     args = parser.parse_args()
-    args.destination.write_text(yaml.safe_dump(convert_model(
-        yaml.safe_load(args.source.read_text()), chunk_size=args.chunk_size), sort_keys=False))
+    result = convert_model(yaml.safe_load(args.source.read_text()), chunk_size=args.chunk_size)
+    if args.shared_inference_workload:
+        result = shared_inference_workload(result)
+    args.destination.write_text(yaml.safe_dump(result, sort_keys=False))
 
 
 if __name__ == "__main__":

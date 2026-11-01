@@ -178,6 +178,18 @@ def test_conv_history_and_state_are_resident_per_owned_layer(tmp_path, monkeypat
     assert peak > 2 * (layer["weight_mem_per_layer"] + layer["ssm_cache_bytes_per_layer"]) / 1024**3
 
 
+@pytest.mark.parametrize("kinds", [["ssm"] * 4, ["ssm", "attention", "ssm", "attention"]])
+def test_memory_only_matches_inference_memory(tmp_path, kinds):
+    import llm_util
+    data = model_data(kinds)
+    data["model_param"]["decode_len"] = 4
+    tc = calculator(tmp_path / "inference", data=data)
+    tc.calc_time()
+    result = llm_util.estimate_inference_memory(tc.hw_config, tc._raw_model_config,
+        output_dir=str(tmp_path / "memory_only"))
+    assert result["max_peak_gb"] == tc.memory_peak_gb
+
+
 def test_prefill_reuses_ssd_law_per_sequence(tmp_path):
     from cim_timing import ssd_chunked_scan_work
     tc = calculator(tmp_path, ["ssm"] * 4, tp=2)
