@@ -3,9 +3,9 @@
   "code_sha256": {
     "base_timing.py": "0ea5ae45f29cba86f96957e23dac7f7052e389e7b98f3cb026400c2ecbd78aba",
     "config.py": "a4af61a7284a2d1dfcf0f85af80d65b4740b08d986da63995c78b7c3b7aae0d5",
-    "inference_timing.py": "64af2e66cda116f308efb0c45bdb00f0af9bf80680feabe9f4809d751a41c3ca",
+    "inference_timing.py": "2f91be3f25977e702809b6e20dcf95c1b7e0c5ef1364fb19c78a355a102dbff2",
     "llm_execution.py": "0ceb3d9f13bbfa125b052a276f5f25b72b7ced600bf90f71c27850d01e253864",
-    "llm_util.py": "7c83f982451d288a582f0835d658ee483abde6b52e932b942f9fa8067ffe9d85",
+    "llm_util.py": "3af9151a1cfda0637647cca3f116a576e1a3d600d2de3af5a74bf6e35ea9d7cb",
     "memory_estimation.py": "7dd24830f77393b5dc7a61118ef465292e250c712f994d3b9c72895fddd7bc96",
     "program/build.py": "9b44784ae42a7153b2a06ea5468db15f918fe09822d050f050d077b2bb574622",
     "program/groups.py": "14824f4eb883f0c19c9b88bc3713810a67e557772708f0cb9f088c92cacaa513",
@@ -13,14 +13,18 @@
     "program/retime.py": "353c6b12bbb8bc1c034984390776a4f8d7fa61238cab9f493549fc7e18cbc0d9",
     "program/work.py": "79164b5d5ea932e92c11ed668513cdf6b0ce24e58d84e3bed172d948ebd39896",
     "program/workload.py": "6ad9bac5638d54ea31d32c34f93559cbcaee3c5eb5c04df416ef097ed7ae7186",
-    "simulate_inference_graph.py": "089b0d7d926b6c3aefd8bbfb1bb8a73c5350e22ad955581add3a0aaf8c74bc3b",
+    "simulate_inference_graph.py": "d38f513e66fe9c8fa3c18bbf032aee79015e14c5b13c8d43970a5f13f00dd9eb",
     "ssm_gpu.py": "e9f785c71c0425188f5f8443167175e84f5f40cb9a7ccafef2f88478dfbc3a19",
     "tests/ssm_gpu_pins.json": "1435af77973510e2abbe6f266eb273c125523361632111b7242d23f5e054c151",
-    "tools/compare_ssm_goldens.py": "46e8cc893d11f967c4ea5bdfb4a209bac30f2e0cd0f043d21fee0879dcfca945",
+    "tests/test_ssm_cim_diagnostics.py": "894bd4b3eff335297badfc7f66381d859aa7eff5e60e4948f80902e64800fef2",
+    "tests/test_ssm_comparison.py": "79aa3614194dc11e21bdee9c15053e72271400670ec70f20e395201909aae5e5",
+    "tests/test_ssm_program.py": "6483c5dfa7ff4ffb954a492681b0d09a2f00d059332a4c13c7c9df652b8a9808",
+    "tools/compare_ssm_goldens.py": "8ca65205906cbb3216ecf1921a97e5ec180ebdee2e3a4d1fd824af8a9938b40f",
     "tools/convert_ssm_config.py": "cee5a3d38dcdb3c77c4431b81be7f03d339cc77dafc088368eca3de9d2ff088b",
     "train_timing.py": "3d4e2ee953c9f64920447cd62670a5b098250b44d2b9bd9bfd86b5e74ff058bb"
   },
-  "command": "./.venv/bin/python tools/compare_ssm_goldens.py --output tmp/ssm-final-comparison",
+  "collective_multiplicities_match": 23,
+  "command": "./.venv/bin/python tools/compare_ssm_goldens.py --output tmp/ssm-fixes/final-comparison",
   "comparisons": [
     {
       "case": "mamba_a100_tp1_pp1_dp1_ep1_analytical",
@@ -52,6 +56,20 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 473546112.0,
+          "conv_history_bytes_saved": 688128.0,
+          "device": 0,
+          "expected_peak_bytes": 513400384.0,
+          "expected_static_bytes": 513359232.0,
+          "new_peak_bytes": 513400384.0,
+          "new_static_bytes": 513359232.0,
+          "old_peak_bytes": 987634624.0,
+          "old_static_bytes": 987593472.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.003961720683062687,
@@ -63,7 +81,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.1273774430155754
+      "wall_seconds": 0.1413654461503029
     },
     {
       "case": "mamba_a100_tp1_pp1_dp1_ep1_hierarchical",
@@ -95,6 +113,20 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 473546112.0,
+          "conv_history_bytes_saved": 688128.0,
+          "device": 0,
+          "expected_peak_bytes": 513400384.0,
+          "expected_static_bytes": 513359232.0,
+          "new_peak_bytes": 513400384.0,
+          "new_static_bytes": 513359232.0,
+          "old_peak_bytes": 987634624.0,
+          "old_static_bytes": 987593472.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.003936002,
@@ -106,7 +138,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.22358448803424835
+      "wall_seconds": 0.23593131452798843
     },
     {
       "case": "mamba_a100_tp1_pp2_dp1_ep1_analytical",
@@ -123,22 +155,28 @@
       "memory_match": true,
       "new": 0.1269442171314435,
       "new_collectives": [
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ]
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        }
       ],
       "new_ir_collectives": [],
       "old": 0.1269442171314435,
       "old_collectives": [
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ]
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        }
       ],
       "old_ir_collectives": [],
       "op_differences": [],
@@ -154,6 +192,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.003967006785357609,
@@ -165,7 +228,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.08762039244174957
+      "wall_seconds": 0.09619400650262833
     },
     {
       "case": "mamba_a100_tp1_pp2_dp1_ep1_hierarchical",
@@ -199,6 +262,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.003941288,
@@ -210,7 +298,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.20393866300582886
+      "wall_seconds": 0.2104116752743721
     },
     {
       "case": "mamba_a100_tp2_pp1_dp1_ep2_analytical",
@@ -227,97 +315,139 @@
       "memory_match": true,
       "new": 0.17970288730431272,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.17970288730431272,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -332,6 +462,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.0056157152282597725,
@@ -343,7 +498,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.10038328915834427
+      "wall_seconds": 0.11804026365280151
     },
     {
       "case": "mamba_a100_tp2_pp1_dp1_ep2_hierarchical",
@@ -360,97 +515,139 @@
       "memory_match": true,
       "new": 0.137472064,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.137472064,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -465,6 +662,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.004296002,
@@ -476,7 +698,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.5555647164583206
+      "wall_seconds": 0.6577481329441071
     },
     {
       "case": "mamba_a100_tp2_pp2_dp1_ep2_analytical",
@@ -493,109 +715,157 @@
       "memory_match": true,
       "new": 0.17987204257775025,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.17987204257775025,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -614,6 +884,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.005621001330554695,
@@ -625,7 +942,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.09988141804933548
+      "wall_seconds": 0.10715559124946594
     },
     {
       "case": "mamba_a100_tp2_pp2_dp1_ep2_hierarchical",
@@ -642,97 +959,139 @@
       "memory_match": true,
       "new": 0.137641216,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.137641216,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -751,6 +1110,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.004301288,
@@ -762,7 +1168,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.5518180280923843
+      "wall_seconds": 0.5404887720942497
     },
     {
       "case": "mamba_a100_tp2_pp2_dp2_ep2_hierarchical",
@@ -779,97 +1185,139 @@
       "memory_match": true,
       "new": 0.137641216,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.137641216,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -888,6 +1336,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.004301288,
@@ -899,7 +1394,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.5545008927583694
+      "wall_seconds": 0.5234119966626167
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical",
@@ -916,97 +1411,139 @@
       "memory_match": true,
       "new": 0.23638247190246603,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.23638247190246603,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1025,6 +1562,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.007386952246952063,
@@ -1036,7 +1620,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.117229163646698
+      "wall_seconds": 0.1284492164850235
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms",
@@ -1053,121 +1637,175 @@
       "memory_match": true,
       "new": 0.266080361385973,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          8,
-          4,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            8,
+            4,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          8,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            8,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.266080361385973,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          8,
-          4,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            8,
+            4,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          8,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            8,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1186,6 +1824,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 0,
+          "expected_peak_bytes": 118629776.0,
+          "expected_static_bytes": 118623072.0,
+          "new_peak_bytes": 118629776.0,
+          "new_static_bytes": 118623072.0,
+          "old_peak_bytes": 227643632.0,
+          "old_static_bytes": 227636928.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 1,
+          "expected_peak_bytes": 118629776.0,
+          "expected_static_bytes": 118623072.0,
+          "new_peak_bytes": 118629776.0,
+          "new_static_bytes": 118623072.0,
+          "old_peak_bytes": 227643632.0,
+          "old_static_bytes": 227636928.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 2,
+          "expected_peak_bytes": 118629776.0,
+          "expected_static_bytes": 118623072.0,
+          "new_peak_bytes": 118629776.0,
+          "new_static_bytes": 118623072.0,
+          "old_peak_bytes": 227643632.0,
+          "old_static_bytes": 227636928.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 3,
+          "expected_peak_bytes": 118629776.0,
+          "expected_static_bytes": 118623072.0,
+          "new_peak_bytes": 118629776.0,
+          "new_static_bytes": 118623072.0,
+          "old_peak_bytes": 227643632.0,
+          "old_static_bytes": 227636928.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.008315011293311657,
@@ -1197,7 +1882,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.13497038185596466
+      "wall_seconds": 0.13166604191064835
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_analytical_rms_subgroup",
@@ -1214,121 +1899,175 @@
       "memory_match": true,
       "new": 0.2507566301451211,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          8,
-          2,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            8,
+            2,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          8,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            8,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.2507566301451211,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          8,
-          2,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            8,
+            2,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          8,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            8,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1347,6 +2086,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 98304.0,
+          "device": 0,
+          "expected_peak_bytes": 118667152.0,
+          "expected_static_bytes": 118659936.0,
+          "new_peak_bytes": 118667152.0,
+          "new_static_bytes": 118659936.0,
+          "old_peak_bytes": 227693296.0,
+          "old_static_bytes": 227686080.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 98304.0,
+          "device": 1,
+          "expected_peak_bytes": 118667152.0,
+          "expected_static_bytes": 118659936.0,
+          "new_peak_bytes": 118667152.0,
+          "new_static_bytes": 118659936.0,
+          "old_peak_bytes": 227693296.0,
+          "old_static_bytes": 227686080.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 98304.0,
+          "device": 2,
+          "expected_peak_bytes": 118667152.0,
+          "expected_static_bytes": 118659936.0,
+          "new_peak_bytes": 118667152.0,
+          "new_static_bytes": 118659936.0,
+          "old_peak_bytes": 227693296.0,
+          "old_static_bytes": 227686080.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 108927840.0,
+          "conv_history_bytes_saved": 98304.0,
+          "device": 3,
+          "expected_peak_bytes": 118667152.0,
+          "expected_static_bytes": 118659936.0,
+          "new_peak_bytes": 118667152.0,
+          "new_static_bytes": 118659936.0,
+          "old_peak_bytes": 227693296.0,
+          "old_static_bytes": 227686080.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.007836144692035035,
@@ -1358,7 +2144,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.1210583746433258
+      "wall_seconds": 0.1317829042673111
     },
     {
       "case": "mamba_a100_tp4_pp1_dp1_ep4_hierarchical",
@@ -1375,97 +2161,139 @@
       "memory_match": true,
       "new": 0.165888064,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.165888064,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1484,6 +2312,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.005184002,
@@ -1495,7 +2370,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6329367607831955
+      "wall_seconds": 0.6258303299546242
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_analytical",
@@ -1512,109 +2387,157 @@
       "memory_match": true,
       "new": 0.23655162717590356,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.23655162717590356,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "pipeline",
-          6144.0,
-          2,
-          "cross_layer_conversion"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "pipeline",
+            6144.0,
+            2,
+            "cross_layer_conversion"
+          ],
+          "count": 2
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1641,6 +2564,97 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 0,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 1,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 2,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 3,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 4,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 5,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 6,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 7,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.007392238349246986,
@@ -1652,7 +2666,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.11953558772802353
+      "wall_seconds": 0.14593252539634705
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical",
@@ -1669,97 +2683,139 @@
       "memory_match": true,
       "new": 0.166057216,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.166057216,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -1786,6 +2842,97 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 0,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 1,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 2,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 3,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 4,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 5,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 6,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 7,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.005189288,
@@ -1797,7 +2944,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6515960544347763
+      "wall_seconds": 0.9879095554351807
     },
     {
       "case": "mamba_a100_tp4_pp2_dp1_ep4_hierarchical_rms_wide_fullgroup",
@@ -1827,121 +2974,175 @@
       "native_backend_ablation": 0.205509024,
       "new": 0.213189024,
       "new_collectives": [
-        [
-          "all_gather",
-          196608,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          256,
-          4,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          196608,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          196608,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            196608,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            256,
+            4,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            196608,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            196608,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          196608,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          196608,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          196608,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          196608,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          256,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            256,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.205509024,
       "old_collectives": [
-        [
-          "all_gather",
-          196608,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "all_reduce",
-          256,
-          4,
-          "ssm_rms_stats_allreduce"
-        ],
-        [
-          "reduce_scatter",
-          196608,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          196608,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            196608,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "all_reduce",
+            256,
+            4,
+            "ssm_rms_stats_allreduce"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            196608,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            196608,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          196608,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          196608,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          196608,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          196608,
-          4
-        ],
-        [
-          "ssm_scan",
-          "all_reduce",
-          256,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            196608,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_scan",
+            "all_reduce",
+            256,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [
         {
@@ -1993,6 +3194,97 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 0,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 1,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 2,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 3,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 4,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 5,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 6,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 54463920.0,
+          "conv_history_bytes_saved": 1376256.0,
+          "device": 7,
+          "expected_peak_bytes": 209802160.0,
+          "expected_static_bytes": 209587632.0,
+          "new_peak_bytes": 209802160.0,
+          "new_static_bytes": 209587632.0,
+          "old_peak_bytes": 265642336.0,
+          "old_static_bytes": 265427808.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.006662157,
@@ -2004,7 +3296,7 @@
         }
       ],
       "status": "EXPLAINED",
-      "wall_seconds": 0.8507485613226891
+      "wall_seconds": 0.8643828630447388
     },
     {
       "case": "mamba_h100_tp1_pp1_dp1_ep1_hierarchical",
@@ -2036,6 +3328,20 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 473546112.0,
+          "conv_history_bytes_saved": 688128.0,
+          "device": 0,
+          "expected_peak_bytes": 513400384.0,
+          "expected_static_bytes": 513359232.0,
+          "new_peak_bytes": 513400384.0,
+          "new_static_bytes": 513359232.0,
+          "old_peak_bytes": 987634624.0,
+          "old_static_bytes": 987593472.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.003816002,
@@ -2047,7 +3353,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.21456176787614822
+      "wall_seconds": 0.21360211819410324
     },
     {
       "case": "mamba_h100_tp1_pp2_dp1_ep1_hierarchical",
@@ -2081,6 +3387,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236773056.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256720768.0,
+          "expected_static_bytes": 256679616.0,
+          "new_peak_bytes": 256720768.0,
+          "new_static_bytes": 256679616.0,
+          "old_peak_bytes": 493837888.0,
+          "old_static_bytes": 493796736.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.00382123,
@@ -2092,7 +3423,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.2138146087527275
+      "wall_seconds": 0.21007391065359116
     },
     {
       "case": "mamba_h100_tp2_pp1_dp1_ep2_hierarchical",
@@ -2109,97 +3440,139 @@
       "memory_match": true,
       "new": 0.13670406400000001,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.13670406400000001,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -2214,6 +3587,31 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 0,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 236791488.0,
+          "conv_history_bytes_saved": 344064.0,
+          "device": 1,
+          "expected_peak_bytes": 256718624.0,
+          "expected_static_bytes": 256698048.0,
+          "new_peak_bytes": 256718624.0,
+          "new_static_bytes": 256698048.0,
+          "old_peak_bytes": 493854176.0,
+          "old_static_bytes": 493833600.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.0042720020000000004,
@@ -2225,7 +3623,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.5649752914905548
+      "wall_seconds": 0.5672133341431618
     },
     {
       "case": "mamba_h100_tp2_pp2_dp1_ep2_hierarchical",
@@ -2242,97 +3640,139 @@
       "memory_match": true,
       "new": 0.13687136,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "old": 0.13687136,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          2,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          2,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            2,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            2,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          2
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          2
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          2
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            2
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            2
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -2351,6 +3791,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118395744.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128369600.0,
+          "expected_static_bytes": 128349024.0,
+          "new_peak_bytes": 128369600.0,
+          "new_static_bytes": 128349024.0,
+          "old_peak_bytes": 246937376.0,
+          "old_static_bytes": 246916800.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.00427723,
@@ -2362,7 +3849,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.5401486307382584
+      "wall_seconds": 0.6925332024693489
     },
     {
       "case": "mamba_h100_tp4_pp1_dp1_ep4_hierarchical",
@@ -2379,97 +3866,139 @@
       "memory_match": true,
       "new": 0.133632064,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.133632064,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -2488,6 +4017,53 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 0,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 1,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 2,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 118414176.0,
+          "conv_history_bytes_saved": 172032.0,
+          "device": 3,
+          "expected_peak_bytes": 128377744.0,
+          "expected_static_bytes": 128367456.0,
+          "new_peak_bytes": 128377744.0,
+          "new_static_bytes": 128367456.0,
+          "old_peak_bytes": 246963952.0,
+          "old_static_bytes": 246953664.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.004176002,
@@ -2499,7 +4075,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6460407450795174
+      "wall_seconds": 0.6056706383824348
     },
     {
       "case": "mamba_h100_tp4_pp2_dp1_ep4_hierarchical",
@@ -2516,97 +4092,139 @@
       "memory_match": true,
       "new": 0.13379936,
       "new_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "new_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "old": 0.13379936,
       "old_collectives": [
-        [
-          "all_gather",
-          6144,
-          4,
-          "layernorm_f_all_gather"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_ffn2_f"
-        ],
-        [
-          "reduce_scatter",
-          6144,
-          4,
-          "ssm_out_proj_f"
-        ]
+        {
+          "collective": [
+            "all_gather",
+            6144,
+            4,
+            "layernorm_f_all_gather"
+          ],
+          "count": 6
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_ffn2_f"
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "reduce_scatter",
+            6144,
+            4,
+            "ssm_out_proj_f"
+          ],
+          "count": 3
+        }
       ],
       "old_ir_collectives": [
-        [
-          "ffn2",
-          "reduce_scatter",
-          6144,
-          4
-        ],
-        [
-          "layernorm1",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "layernorm2",
-          "all_gather",
-          6144,
-          4
-        ],
-        [
-          "ssm_gate_out_proj",
-          "reduce_scatter",
-          6144,
-          4
-        ]
+        {
+          "collective": [
+            "ffn2",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm1",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "layernorm2",
+            "all_gather",
+            6144,
+            4
+          ],
+          "count": 3
+        },
+        {
+          "collective": [
+            "ssm_gate_out_proj",
+            "reduce_scatter",
+            6144,
+            4
+          ],
+          "count": 3
+        }
       ],
       "op_differences": [],
       "per_device_memory": [
@@ -2633,6 +4251,97 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 0,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 1,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 2,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 3,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 4,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 5,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 6,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        },
+        {
+          "archive_duplicate_weight_bytes": 59207088.0,
+          "conv_history_bytes_saved": 86016.0,
+          "device": 7,
+          "expected_peak_bytes": 64194016.0,
+          "expected_static_bytes": 64183728.0,
+          "new_peak_bytes": 64194016.0,
+          "new_static_bytes": 64183728.0,
+          "old_peak_bytes": 123487120.0,
+          "old_static_bytes": 123476832.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.00418123,
@@ -2644,7 +4353,7 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 0.6352573186159134
+      "wall_seconds": 0.6204795017838478
     },
     {
       "case": "mamba_hf_a100_tp1_pp1_dp1_ep1_hierarchical",
@@ -2676,6 +4385,20 @@
           ]
         }
       ],
+      "per_device_peak_comparison": [
+        {
+          "archive_duplicate_weight_bytes": 5735151616.0,
+          "conv_history_bytes_saved": 3670016.0,
+          "device": 0,
+          "expected_peak_bytes": 6081804928.0,
+          "expected_static_bytes": 6081705984.0,
+          "new_peak_bytes": 6081804928.0,
+          "new_static_bytes": 6081705984.0,
+          "old_peak_bytes": 11820626560.0,
+          "old_static_bytes": 11820527616.0
+        }
+      ],
+      "per_device_peak_match": true,
       "samples": [
         {
           "seconds": 0.008256002,
@@ -2687,12 +4410,17 @@
         }
       ],
       "status": "MATCH",
-      "wall_seconds": 1.7053252533078194
+      "wall_seconds": 2.206274576485157
     }
   ],
   "count": 23,
   "exact_matches": 22,
   "explained_differences": 1,
+  "peak_corrections": [
+    "archive duplicate dense weights for SSM layers",
+    "d_conv to d_conv - 1 cached history slots"
+  ],
+  "per_device_peaks_match_after_declared_corrections": 23,
   "sources": {
     "mamba_a100_tp1_pp1_dp1_ep1_analytical": {
       "archive_git_sha": "fdbb0eab65eef026389a9592eca3f180a5267355",
@@ -2879,5 +4607,5 @@
       "reference_sha256": "08639c1afc937c69444eb5b0d67f25c87358b646406ce12b546f79b8f8006f7c"
     }
   },
-  "wall_seconds": 11.05
+  "wall_seconds": 12.89
 }

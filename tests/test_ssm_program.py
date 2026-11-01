@@ -1,5 +1,6 @@
 """Fast schema/IR/composition evidence; archive matrix is in the slow lane."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -250,8 +251,14 @@ def test_same_yaml_gpu_and_mapped_cim_cli(tmp_path, name, hw_name, device):
     assert "[decode] sample step 255" in (tmp_path / "cli.log").read_text()
     assert not (tmp_path / "output/LLM").exists(), "decode ignored --output_dir"
     if device == "cim":
-        report = json.loads((output / "LLM/fws_qif_report.json").read_text())
-        assert report
+        report = (output / "LLM/fws_qif_report.json").read_bytes()
+        # Full mapped reports from the independently extracted main evaluator.
+        # Neither adapter restoration nor KV reporting may move any QIF byte.
+        baseline = {
+            "mamba2_2p7b_decode_inf": "1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40",
+            "granite_4_0_h_1b_decode_inf": "76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0",
+        }
+        assert hashlib.sha256(report).hexdigest() == baseline[name]
 
 
 def test_cim_pure_ssm_decode_keeps_adapter_shapes(tmp_path):

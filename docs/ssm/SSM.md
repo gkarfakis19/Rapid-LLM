@@ -118,9 +118,9 @@ Conversion **without** that option preserves the original workload, as the
 23-case reproduction does. No hardware-specific SSM schema is introduced.
 
 `mamba2_2p7b_decode_inf.yaml` and `granite_4_0_h_1b_decode_inf.yaml` were each
-loaded unchanged for GPU decode and mapped CIM evaluation (full-size slow
-probes, 2 passed in 39.52 s). Fast probes run a single shared YAML through GPU
-prefill/decode and the CIM mapper/Program/evaluator for pure and mixed stacks.
+run unchanged through complete GPU and CIM `run_perf.py` invocations
+(four full-size slow cases). Fast probes cover the pure-CIM decode adapter,
+GPU prefill/decode, and the CIM mapper/Program/evaluator for pure and mixed stacks.
 CIM's authoritative evaluator is `fws_mapping -> program.fws_build -> fws_eval`.
 No CIM law or saved QIF numerical artifact was edited.
 
@@ -176,6 +176,8 @@ formatted stdout line: `prefill_store=0.1 GiB, decode_store=0.0 GiB,
 decode_fetch=37.5 GiB` becomes `prefill_store=0.0 GiB, decode_store=0.0 GiB,
 decode_fetch=3.8 GiB`. Decode store's formatted value stays 0.0 GiB.
 Pure SSM has zero KV diagnostics; all-attention plans retain their values.
+For other CIM hybrid schedules, the same three fields use that schedule's
+attention-layer fraction. No other returned timing field changes.
 
 `_kv_cache_diagnostic_bytes` is called after both phase evaluations and has
 no pricing consumers. The returned fields are not read by `run_perf.py`'s
@@ -186,7 +188,7 @@ Output paths and sample artifact locations follow `--output_dir`; file
 locations change when that flag is set. Wall-clock/progress log lines are
 runtime metadata, not numerical model results.
 
-### Archive reproduction
+## Archive reproduction
 
 Run from this worktree with the documented LD_LIBRARY_PATH:
 
@@ -255,30 +257,43 @@ output directory, which must be inside this worktree's `tmp/`.
 | mamba_h100_tp4_pp2_dp1_ep4_hierarchical | 0.13379936 | 0.13379936 | MATCH |
 | mamba_hf_a100_tp1_pp1_dp1_ep1_hierarchical | 0.264192064 | 0.264192064 | MATCH |
 
-### Gates
+## Gates
+
+Rebased onto main `ef023ea7`; all gates below ran on the rebased branch.
 
 | Gate | Result | Command wall seconds |
 |---|---|---:|
-| Existing rewrite golden gate | 221 passed; 46 tracked golden files byte-identical to 1257cbe2 | 41.21 |
-| Full default test tree, including webui suites | 2737 passed, 295 skipped, 8 xfailed; zero failures | 685.97 |
-| CIM vs OPTIMA validator | 544/544; exit 0 | 300.62 |
-| Archive Mamba2 comparison | 23/23 accepted: 22 exact, 1 explained and exactly pinned | 11.05 |
+| Existing rewrite golden gate | 221 passed; 46 tracked golden files byte-identical to 1257cbe2 | 43.07 |
+| Full default test tree, including webui suites | 2741 passed, 297 skipped, 8 xfailed; zero failures | 687.3 |
+| CIM vs OPTIMA validator | 544/544; every row byte-identical to the prior 544-row run | 294.03 |
+| Archive Mamba2 comparison | 23/23 accepted: 22 exact timing, 1 explained; all multiplicities and corrected device peaks exact | 12.89 |
+| Unchanged Mamba2/Granite YAMLs through complete GPU/CIM CLI | 4 passed, including both QIF report hash pins and configured-output checks | 142.34 |
+| Fast SSM suites | 40 passed, 5 slow cases skipped | 4.75 |
 
-The full default baseline was 2701 passed / 292 skipped / 8 xfailed. This
-change adds 36 fast cases and 3 slow cases; the fast SSM suites report 36
-passed / 3 skipped in 1.82 s. The 23-case matrix and two full-size GPU/CIM
-probes are behind the existing slow marker. Full-size dual-device probes
-were also run separately: 2 passed in 39.52 s.
+The default lane adds four fast cases to the previous Stage 2/3 suite. Its
+five slow cases are the four full CLI runs and the archive matrix. Full CLI
+tests use `run_perf.py`, including the sampled-decode shape adapter; they do
+not replace it with direct mapper/evaluator calls.
 
-All gates used the repo interpreter and required LD_LIBRARY_PATH, CPU only,
-with scratch under this worktree's tmp/. Pytest runs used separate temporary
-roots; a preliminary parallel golden attempt that failed before producing
-one run artifact was superseded by the completed passing run above.
-`gates.json` records the exact commands, counts, wall times and byte hashes.
-No saved golden or numerical CIM/QIF artifact was regenerated.
+Independent full-entry-point captures compare the exact timing dictionaries
+against the auditor's extracted-baseline runs. Mamba2 remains
+`0.04770706627467109` s and Granite remains `0.6709804030642821` s. Only the
+three Granite KV diagnostic fields listed under **CIM changes** move.
+The complete mapped QIF reports are byte-identical, with SHA-256:
+
+- Mamba2: `1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40`
+- Granite: `76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0`
+
+`gates.json` retains commands, counts, wall times, row/golden/QIF hashes,
+complete before/after CIM timing dictionaries and the implementation commits.
+`archive_comparison.json` retains every operation, collective multiplicity and
+per-device peak comparison, plus reference/config/code hashes. All gates used
+the repository Python and required LD_LIBRARY_PATH, CPU only, with scratch
+under this worktree's tmp/ and separate pytest temporary roots. No saved
+golden or numerical CIM/QIF artifact was regenerated.
 
 
-### Known gaps and owner decisions
+## Known gaps and owner decisions
 
 - GPU laws currently cover sequential attention/Mamba2 plans and their dense
   or MoE FFNs. Mamba1, linear_attn (including Qwen3.5), short_conv, standalone

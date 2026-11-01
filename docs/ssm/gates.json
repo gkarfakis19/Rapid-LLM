@@ -1,25 +1,136 @@
 {
   "archive": {
     "cases": 23,
+    "collective_multiplicities_match": 23,
     "exact_matches": 22,
     "exit_code": 0,
     "explained_differences": 1,
-    "wall_seconds": 11.05
+    "per_device_peaks_match_after_declared_corrections": 23,
+    "wall_seconds": 12.89
   },
+  "cim_authoritative_files_byte_unchanged": {
+    "cim_timing.py": "485f77b82c1db82928e009a5041c5dfe67d97aafd69f5dc373a3332f624188ef",
+    "fws_eval.py": "7ab009071b336d6c3b9e24ebc7bc5c71ecaac4d4ae767e77ae22458e7c0a49e2",
+    "fws_mapping.py": "98fa437012e4f5cd9f570ad12372a01f8188e7fc816137c1c7348f7154914004",
+    "program/fws_build.py": "f5bdcb14bb54c12413d44bd6f1e0d6204554a82f6283953abb2374d45fe02f8a"
+  },
+  "cim_full_runs": [
+    {
+      "after": {
+        "decode_time": 0.00882898328433389,
+        "decode_tokens_per_s": {
+          "end": 28995.41110857524,
+          "midpoint": 28995.41110857524,
+          "midpoint_step": 128,
+          "overall": 28995.41110857524,
+          "start": 28995.41110857524
+        },
+        "kv_cache_decode_fetch_bytes": 0.0,
+        "kv_cache_decode_store_bytes": 0.0,
+        "kv_cache_prefill_store_bytes": 0.0,
+        "prefill_time": 0.0388780829903372,
+        "time_to_first_token": 0.03891257120629163,
+        "total_inference_time": 0.04770706627467109
+      },
+      "baseline_qif_sha256": "1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40",
+      "before": {
+        "decode_time": 0.00882898328433389,
+        "decode_tokens_per_s": {
+          "end": 28995.41110857524,
+          "midpoint": 28995.41110857524,
+          "midpoint_step": 128,
+          "overall": 28995.41110857524,
+          "start": 28995.41110857524
+        },
+        "kv_cache_decode_fetch_bytes": 0,
+        "kv_cache_decode_store_bytes": 0,
+        "kv_cache_prefill_store_bytes": 0,
+        "prefill_time": 0.0388780829903372,
+        "time_to_first_token": 0.03891257120629163,
+        "total_inference_time": 0.04770706627467109
+      },
+      "hardware": "fws_cim_mamba2_frontier",
+      "model": "mamba2_2p7b_decode_inf",
+      "moved_outputs": {},
+      "qif_byte_identical": true,
+      "qif_sha256": "1a43fb8b73d0979e8bb07fdf6c3934bb3beeaf7232603d37d3d652cad8965d40",
+      "wall_seconds": 204.17195469886065
+    },
+    {
+      "after": {
+        "decode_time": 0.40426278471582894,
+        "decode_tokens_per_s": {
+          "end": 603.8247559306782,
+          "midpoint": 633.0109221056805,
+          "midpoint_step": 128,
+          "overall": 633.2514633518683,
+          "start": 665.4279679644378
+        },
+        "kv_cache_decode_fetch_bytes": 4026531840.0,
+        "kv_cache_decode_store_bytes": 2097152.0,
+        "kv_cache_prefill_store_bytes": 14680064.0,
+        "prefill_time": 0.2667176183484531,
+        "time_to_first_token": 0.2682204106086868,
+        "total_inference_time": 0.6709804030642821
+      },
+      "baseline_qif_sha256": "76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0",
+      "before": {
+        "decode_time": 0.40426278471582894,
+        "decode_tokens_per_s": {
+          "end": 603.8247559306782,
+          "midpoint": 633.0109221056805,
+          "midpoint_step": 128,
+          "overall": 633.2514633518683,
+          "start": 665.4279679644378
+        },
+        "kv_cache_decode_fetch_bytes": 40265318400.0,
+        "kv_cache_decode_store_bytes": 20971520.0,
+        "kv_cache_prefill_store_bytes": 146800640.0,
+        "prefill_time": 0.2667176183484531,
+        "time_to_first_token": 0.2682204106086868,
+        "total_inference_time": 0.6709804030642821
+      },
+      "hardware": "fws_cim_granite_1b_frontier",
+      "model": "granite_4_0_h_1b_decode_inf",
+      "moved_outputs": {
+        "kv_cache_decode_fetch_bytes": [
+          40265318400.0,
+          4026531840.0
+        ],
+        "kv_cache_decode_store_bytes": [
+          20971520.0,
+          2097152.0
+        ],
+        "kv_cache_prefill_store_bytes": [
+          146800640.0,
+          14680064.0
+        ]
+      },
+      "qif_byte_identical": true,
+      "qif_sha256": "76ba67fcb60f0f5ea18bd0dd0e0114f02e4d81815483e04b7dda4066664b4db0",
+      "wall_seconds": 67.234120413661
+    }
+  ],
   "cim_validator": {
+    "baseline_log": "tmp/ssm/validator-final.log",
     "command": "./.venv/bin/python validation_scripts/validate_fws_cim_vs_optima.py",
+    "current_log": "tmp/ssm-fixes/validator.log",
     "exit_code": 0,
     "passed": 544,
+    "rows_byte_unchanged": 544,
+    "rows_sha256": "cfbc25d9ab85931b57fa00ccfa383b5eacae587d0362508ebb7524fb28ef5f9e",
     "total": 544,
-    "wall_seconds": 300.62
+    "wall_seconds": 294.03
   },
+  "committed_tree_byte_identical_after_cim_commit_isolation": true,
   "default": {
-    "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/ -q",
+    "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests -q",
+    "deselected": 0,
     "exit_code": 0,
-    "passed": 2737,
-    "pytest_elapsed_seconds": 682.55,
-    "skipped": 295,
-    "wall_seconds": 685.97,
+    "passed": 2741,
+    "pytest_elapsed_seconds": 683.82,
+    "skipped": 297,
+    "wall_seconds": 687.3,
     "xfailed": 8
   },
   "environment": {
@@ -27,19 +138,30 @@
     "cpu_only": true,
     "isolated_pytest_tmp_roots": true,
     "python": "./.venv/bin/python",
-    "scratch": "tmp/ssm/"
+    "scratch": "tmp/ssm-fixes/"
   },
   "focused": {
-    "passed": 36,
-    "pytest_elapsed_seconds": 1.82,
-    "skipped": 3
+    "deselected": 0,
+    "exit_code": 0,
+    "passed": 40,
+    "pytest_elapsed_seconds": 1.86,
+    "skipped": 5,
+    "wall_seconds": 4.75,
+    "xfailed": 0
   },
-  "full_size_dual_device": {
-    "passed": 2,
-    "pytest_elapsed_seconds": 39.52
+  "full_cli": {
+    "deselected": 20,
+    "exit_code": 0,
+    "passed": 4,
+    "pytest_elapsed_seconds": 139.61,
+    "skipped": 0,
+    "wall_seconds": 142.34,
+    "xfailed": 0
   },
+  "gates_run_at_commit": "33cfd4dc",
   "golden": {
     "command": "./.venv/bin/python -m pytest -p no:cacheprovider tests/test_equiv_golden.py -q",
+    "deselected": 0,
     "exit_code": 0,
     "golden_files_byte_unchanged": {
       "tests/golden_equiv/bug_ledger.json": "4a9fab9c436fbe7413d4997bc76dbdf1319e689ce493a10281394d7776589456",
@@ -90,7 +212,23 @@
       "tests/golden_equiv/train_hybrid_dp2tp2cp2pp2mb2sp1.json": "3905ffacf5205193ad98115bdd2965726a4b48a525823663e431d575644e3918"
     },
     "passed": 221,
-    "pytest_elapsed_seconds": 38.81,
-    "wall_seconds": 41.21
-  }
+    "pytest_elapsed_seconds": 40.29,
+    "skipped": 0,
+    "wall_seconds": 43.07,
+    "xfailed": 0
+  },
+  "implementation_commits": [
+    "1fff8d04 Compare SSM collective multiplicities and exact per-device memory peaks",
+    "00b8863b Correct CIM KV store/fetch diagnostics to count attention layers only",
+    "c93d132a Keep the CIM SSM decode adapter and propagate the output directory",
+    "044faf47 Seal SSM validation evidence and document conservative support boundaries",
+    "653b14e9 Distinguish one-token prefill from decode in hybrid pricing",
+    "df38dba1 Pin archive SSM comparisons and hybrid composition evidence",
+    "26a8a2e9 Complete shared SSM serving constraints and regression coverage",
+    "708d5cc5 Price Mamba2 and mixed inference layers through the program IR",
+    "dc2c167f Unify SSM model configuration and migrate archive YAMLs"
+  ],
+  "tested_committed_tree_git_oid": "c6a6717fb10ec28d23caf6ef76d38cdb597c8e0c",
+  "upstream_base": "ef023ea72f4b47fbc9172c6333e12e4aa5bd83fc",
+  "verified_code_commit": "1fff8d04ea111f2f0118aa99b4f3b130a2837ced"
 }
