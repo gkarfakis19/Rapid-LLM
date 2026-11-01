@@ -400,7 +400,28 @@ def test_memory_verdict_is_a_stage(tmp_path):
     assert candidate["stages"]["pricing"] == {"ok": True}
     assert "VIOLATED" in candidate["fail_message"]
     assert "activation_sram+kv" in candidate["fail_message"]
-    assert candidate["memory"]["violated"] > 0
+    memory = candidate["memory"]
+    # regression anchor at 3cdce5c, not a validation target; reason: the
+    # checkpoint's four analog and four shared-digital chiplets each own a
+    # declared activation tier; this explicit 1 MiB tier refuses all eight.
+    assert memory["verdicts"] == memory["violated"] == 8
+    assert memory["undeclared"] == 0
+    rows = memory["violated_verdicts"]
+    assert len(rows) == memory["violated"]
+    assert {row["scope"] for row in rows} == {f"chip {i}" for i in range(8)}
+    for row in rows:
+        chip = int(row["scope"].split()[1])
+        assert row["tier"] == "activation_sram+kv"
+        expected_owner = (
+            f"analog chiplet {chip}, tp shard 0 (backbone, analog)" if chip < 4
+            else f"shared digital chiplet {chip - 4} (shared_digital, digital)"
+        )
+        assert row["owner"] == expected_owner
+        assert row["capacity_bytes"] == 1048576
+        assert row["high_water_bytes"] == (2862612480 if chip < 4 else 293994496)
+        assert row["high_water_bytes"] > row["capacity_bytes"]
+        assert row["ratio"] == row["high_water_bytes"] / row["capacity_bytes"]
+    assert memory["worst_ratio"] == max(row["ratio"] for row in rows)
     # The metrics of an infeasible-by-memory candidate are still recorded:
     # it got a timeline, and the report prints what that timeline said.
     assert candidate["metrics"]["tokens_per_s"] > 0
@@ -536,7 +557,14 @@ def test_the_headline_key_is_one_per_sweep_and_is_named():
 
 def test_selection_is_lexicographic_and_the_rule_is_printed(tmp_path):
     # 0176fa6 / DECISIONS D35-REVISED, D36 and D38: only Y, Z and fill are axes.
-    for objective in ("throughput", "min_silicon"):
+    rules = {
+        "throughput": "lexicographic: max headline tokens/s (ADJ-6, off each candidate's own "
+        "timeline), then min total silicon, then min analog chips, then min "
+        "placed tiles, then first in declaration order",
+        "min_silicon": "lexicographic: min total silicon, then max headline tokens/s (ADJ-6), "
+        "then min analog chips, then min placed tiles, then first in declaration order",
+    }
+    for objective, rule in rules.items():
         exit_code, payload = _run(tmp_path, {"axes": {"pp_util": [0.5, 1.0]}, "objective": objective})
         assert exit_code == 0 and payload["num_valid"] == 2
         valid = [c for c in payload["candidates"] if c["ok"]]
@@ -546,7 +574,8 @@ def test_selection_is_lexicographic_and_the_rule_is_printed(tmp_path):
         else:
             key = lambda pair: (pair[1]["silicon"]["total_silicon_mm2"], -pair[1]["metrics"]["tokens_per_s"], pair[0])
         assert payload["selected_id"] == min(enumerate(valid), key=key)[1]["id"]
-        assert payload["selection_rule"].startswith("lexicographic:")
+        assert payload["sweep"]["objective"] == objective
+        assert payload["selection_rule"] == rule
         assert payload["selected_id"] in payload["front_ids"]
 
 

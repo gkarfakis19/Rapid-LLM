@@ -519,7 +519,16 @@ def test_the_fabric_derivation_names_its_floor_instead_of_clamping_it(granite):
         assert row.num_arrays == 8
     # NOT PADDED: the ratio to the target is reported ABOVE 1 rather than
     # capped, which is the number a reader needs to see the residual at all.
-    # 0176fa6 / D38 changes the analog target per layer; report the actual ratio.
+    # regression anchor at 3cdce5c, not a validation target; reason: D38 uses
+    # a 300 ns per-layer analog target. ADJ-16's probe reaches 1829 keys:
+    # four folds on four arrays/group, 32x64 geometry, 348 softmax copies.
+    # Compute its 10398-cycle floor independently of the sizing/result rows.
+    qk = math.ceil(3 / 32) * math.ceil(1829 / 64) * (128 + 32 + 64 - 2) - 1
+    pv = math.ceil(3 / 32) * math.ceil(128 / 64) * (1829 + 32 + 64 - 2) - 1
+    softmax = 20 + math.ceil(12 * math.ceil(1829 / 64) / 348) - 1
+    expected_ratio = ((qk + 96 + pv + softmax) / 0.95e9) / (30 * 10e-9)
+    assert expected_ratio == pytest.approx(36.48421052631579, rel=1e-12)
+    assert fabric.target_ratio == pytest.approx(expected_ratio, rel=1e-10)
     assert fabric.target_ratio == pytest.approx(max(row.time_s / row.analog_time_s for row in fabric.per_stage))
     # The disclosure says the words, so the artifact carries the finding.
     text = " ".join(fabric.disclosures)

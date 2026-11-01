@@ -716,6 +716,31 @@ CURVES = (
     ("qwen", QWEN_FRONTIER_HW, QWEN_HW, QWEN_MODEL, QWEN_ART, "Qwen3.5-4B"),
 )
 
+# regression anchor at 3cdce5c, not a validation target; reason: the D38
+# checkpoint archives contain several binding terms, not universal attention
+# bottlenecks. Pin every priced candidate of each frozen source independently.
+# Entries are (binding block, analog is largest, saturated stages, candidate IDs).
+ARCHIVED_BINDING = {
+    "granite": (
+        ("attention_qk", False, 4,
+         "000 001 002 003 004 005 006 009 010 011 012 013 016 017 018 019 023 024 027 029"),
+        ("attention_qk", False, 0, "015 021 028 030 031"),
+        ("attention_pv", False, 0, "032 034 035 038 042"),
+        ("ssm_scan", False, 0,
+         "008 033 036 039 040 041 043 044 045 046 047 048 049 050 051 052 053 054 055 056 057 058 059 060 061"),
+        ("ffn2_routed", True, 0, "037"),
+    ),
+    "qwen": (
+        ("attention_qk", False, 8,
+         "000 002 003 004 005 006 007 009 010 011 012 013 014 015 016 017 018 019 020 021 022 023 024 026 027 028 029 030 032 040"),
+        ("attention_qk", False, 4, "001 049 054"),
+        ("attention_qk", False, 2, "059"),
+        ("attention_qk", False, 0, "036 041 042 043 047 052 053"),
+        ("delta_rule", False, 0,
+         "008 033 034 035 037 038 039 044 045 046 048 050 051 055 057 058 060 062 063 064"),
+    ),
+}
+
 
 @pytest.mark.parametrize("name,frontier,shipped,model,art,model_id", CURVES)
 def test_frontier_configs_declare_current_axes_or_the_documented_checkpoint_retirement(
@@ -758,6 +783,12 @@ def test_the_checked_in_curve_is_a_real_frontier_with_its_state_bill(
         if c["ok"] or c["fail_stage"] == "state"
     ]
     assert priced
+    expected_binding = {
+        f"c{cid}": (block, analog, saturated)
+        for block, analog, saturated, ids in ARCHIVED_BINDING[name]
+        for cid in ids.split()
+    }
+    assert {candidate["id"] for candidate in priced} == set(expected_binding)
     for candidate in priced:
         bill = candidate["state_bill"]
         assert bill["measured"] is True
@@ -785,20 +816,10 @@ def test_the_checked_in_curve_is_a_real_frontier_with_its_state_bill(
         assert derived["fabric_stages_sized"] >= 1
         assert derived["binding_block"] and derived["binding_busy_s"] > 0
         assert derived["binding_analog_time_s"] > 0
-        # None of these machines is bound by the analog floor, and the row NAMES
-        # what binds instead of leaving the reader to infer it from a throughput
-        # number. ADJ-16 changed the answer on this curve: with the inter-chip
-        # handoffs priced (they used to cost 0 s, because the producer resolved
-        # to an op already on the destination chip) the BOUNDARY is what the
-        # binding stage spends most of its beat on. Pinning "attention_" here is
-        # what let the link hide - a test that names the expected bottleneck
-        # cannot discover a new one.
-        assert isinstance(derived["binding_is_analog"], bool)
-        # 0176fa6 reprices scan/delta work and SA geometry. The binding
-        # block is measured, not prescribed by the test's former machine.
-        assert derived["binding_block"]
-        # SA-rule/context-split redesign can remove saturation (0176fa6).
-        assert 0 <= derived["fabric_saturated_stages"] <= derived["fabric_stages_sized"]
+        block, analog, saturated = expected_binding[candidate["id"]]
+        assert derived["binding_block"] == block, candidate["id"]
+        assert derived["binding_is_analog"] is analog, candidate["id"]
+        assert derived["fabric_saturated_stages"] == saturated, candidate["id"]
         named = [
             item for item in candidate["disclosures"]
             if item["constraint"] == "binding_term"
@@ -1620,6 +1641,16 @@ def test_an_even_stage_plan_is_balanced_and_prints_no_warning(tmp_path, capsys):
         assert balance["long_stages"] == []
         assert DSE.stage_mismatch_warning(candidate) is None
     assert "STAGE MISMATCH" not in capsys.readouterr().out
+    report = (tmp_path / "out" / "dse_report.md").read_text()
+    assert "stage balance: **balanced**" in report
+    assert "STAGE BALANCE: MISMATCHED" not in report
+    table = [line.split("|")[1:-1] for line in report.splitlines() if line.startswith("|")]
+    header = next(row for row in table if "stage balance" in [cell.strip() for cell in row])
+    balance_column = [cell.strip() for cell in header].index("stage balance")
+    for candidate in payload["candidates"]:
+        row = next(row for row in table if row[0].strip() == candidate["id"])
+        assert row[balance_column].strip().startswith("ok "), candidate["id"]
+        assert "MISMATCHED" not in row[balance_column], candidate["id"]
 
 
 def test_the_partition_refusal_reaches_the_markdown_report(tmp_path):

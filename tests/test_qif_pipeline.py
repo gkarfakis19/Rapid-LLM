@@ -906,6 +906,9 @@ def test_moe_reads_active_experts_once_and_reports_unread_resident_weights(moe):
     assert 0 < passes["macros_walked_exactly_once"] < passes["macros_holding_tiles"]
     assert passes["column_sets_never_read"] > 0
     assert passes["column_sets_read_more_than_once"] == 0
+    occupied = [macro for macro in moe.mapping.macros if macro.tiles]
+    assert passes["macros_holding_tiles"] == len(occupied)
+    assert passes["column_sets_occupied"] == sum(macro.claimed_column_sets for macro in occupied)
     assert passes["column_set_passes_charged"] + passes["column_sets_never_read"] == passes["column_sets_occupied"]
 
 
