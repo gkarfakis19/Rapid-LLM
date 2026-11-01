@@ -3606,12 +3606,13 @@ def test_the_device_names_its_macro_as_X_by_Y_colon_Z_with_the_mux_derived(cim_t
 
 
 def test_the_two_link_prices_are_the_declared_interim_numbers_with_a_basis():
-    """50 ns intra-chip, 500 ns cross-chip, and a basis that says they are interim."""
-    assert cim_timing.T_HOP_INTRA_CHIP == 50e-9
+    """5 ns intra-chip, 500 ns cross-chip, and a basis that says they are interim."""
+    # 0176fa6 / DECISIONS link amendment (2026-08-29): 50 ns -> 5 ns.
+    assert cim_timing.T_HOP_INTRA_CHIP == 5e-9
     assert cim_timing.T_HOP_CROSS_CHIP == 500e-9
     basis = cim_timing.LINK_PRICE_BASIS
     assert "2026-08-29" in basis
-    assert "50 ns" in basis and "500 ns" in basis
+    assert "5 ns" in basis and "500 ns" in basis
     # The basis has to say what it REPLACES, or a reader cannot tell that the
     # default moved off `links: zeroed`.
     assert "zeroed" in basis
@@ -3620,10 +3621,10 @@ def test_the_two_link_prices_are_the_declared_interim_numbers_with_a_basis():
 @pytest.mark.parametrize(
     "args, kind, seconds",
     [
-        (((0, 0), {}), "intra_chip", 50e-9),
+        (((0, 0), {}), "intra_chip", 5e-9),
         (((0, 1), {}), "cross_chip", 500e-9),
         (((3, 3), {"from_macro": 7, "to_macro": 7}), "intra_macro", 0.0),
-        (((3, 3), {"from_macro": 7, "to_macro": 8}), "intra_chip", 50e-9),
+        (((3, 3), {"from_macro": 7, "to_macro": 8}), "intra_chip", 5e-9),
         (((3, 4), {"from_macro": 7, "to_macro": 7}), "cross_chip", 500e-9),
     ],
 )

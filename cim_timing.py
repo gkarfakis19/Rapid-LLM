@@ -3953,7 +3953,7 @@ T_HOP_CROSS_CHIP: float = 500e-9
 #: Where the two numbers come from, quoted wherever they are charged (D21: a
 #: number carries its basis or it is not reportable).
 LINK_PRICE_BASIS: str = (
-    "George, 2026-08-29: interim link prices, 50 ns intra-chip and 500 ns "
+    "George, 2026-08-29: interim link prices, 5 ns intra-chip and 500 ns "
     "cross-chip per stage handoff. They are LATENCY per hop and nothing else — "
     "no bandwidth term, no per-byte term, no serialization — because this repo "
     "has measured no link width and a per-byte law would be an invented number "
