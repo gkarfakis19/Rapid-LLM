@@ -7,6 +7,7 @@ goldens and failed/refused probes are deliberately excluded.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from contextlib import redirect_stdout, redirect_stderr
 import json
 import hashlib
@@ -20,6 +21,41 @@ sys.path.insert(0, str(ROOT))
 
 import yaml
 from tools.convert_ssm_config import convert_model
+
+
+def collective_counts(records):
+    """A sorted multiset; dropping duplicate collectives must fail the gate."""
+    return [dict(collective=list(key), count=count)
+            for key, count in sorted(Counter(records).items())]
+
+
+def compare_peak_memory(old_memory, device_memory, conv_bytes_saved):
+    """Compare every rank exactly after two source-backed archive corrections.
+
+    The archive counts SSM layers as both dense and SSM when allocating
+    weights, and stores d_conv history slots instead of d_conv - 1.
+    """
+    expected = []
+    for device in old_memory["summary"]:
+        rank = device["gpu_id"]
+        saved = old_memory["ssm_layers_per_device"][rank] * conv_bytes_saved
+        duplicate = (old_memory["transformer_dense_layers_per_device"][rank]
+                     * old_memory["weight_mem_per_layer_dense"])
+        expected.append(dict(device=rank, conv_history_bytes_saved=saved,
+            archive_duplicate_weight_bytes=duplicate,
+            old_static_bytes=device["static_gib"] * 1024**3,
+            old_peak_bytes=device["peak_gib"] * 1024**3,
+            expected_static_bytes=device["static_gib"] * 1024**3 - saved - duplicate,
+            expected_peak_bytes=device["peak_gib"] * 1024**3 - saved - duplicate))
+    matches = len(device_memory) == 1 and len(expected) == len(device_memory[0]["peak_bytes"])
+    if device_memory:
+        for row in expected:
+            rank = row["device"]
+            row["new_static_bytes"] = device_memory[0]["static_bytes"][rank]
+            row["new_peak_bytes"] = device_memory[0]["peak_bytes"][rank]
+            matches = matches and row["new_static_bytes"] == row["expected_static_bytes"]
+            matches = matches and row["new_peak_bytes"] == row["expected_peak_bytes"]
+    return expected, matches
 
 
 def compare_case(reference: Path, output: Path) -> dict:
@@ -42,8 +78,18 @@ def compare_case(reference: Path, output: Path) -> dict:
     events = old["runs"][0]["observed"]["events"]
     old_event = next(e for e in events if e["function"] == "build_ssm_timings")
     collectives = []
+    ir_collectives = []
     device_memory = []
     def observe(frame, event, result):
+        if event == "return" and frame.f_code.co_name == "_prepare_layer_plan_graphs" and frame.f_code.co_filename.endswith("inference_timing.py"):
+            # Observe every graph build, including both sampled decode steps,
+            # rather than comparing the archive's calls to one final template.
+            template = result[0][0].blocks.dense
+            for entry in template.entries:
+                for key in entry.forward.comm_keys:
+                    spec = template.comm_metadata[key]
+                    ir_collectives.append((entry.name, spec.kind.value,
+                                           spec.size_bytes, spec.participants))
         if event == "return" and frame.f_code.co_name == "simulate_memory" and frame.f_code.co_filename.endswith("program/memory_sim.py"):
             snapshot = frame.f_locals["memory_snapshot"]
             device_memory.append(dict(static_bytes=snapshot.static, peak_bytes=snapshot.peak))
@@ -78,20 +124,14 @@ def compare_case(reference: Path, output: Path) -> dict:
         after = tc.ssm_kernel_evidence[new_key]
         if before != after:
             kernel_diffs.append(dict(kernel=new_key, old=before, new=after))
-    old_colls = sorted({(e["kind"], e["size_bytes"], e["participants"], e["debug_label"])
-        for e in events if e["function"] == "collective" and e["size_bytes"] > 0 and e["participants"] > 1})
-    new_colls = sorted({(e["kind"], e["bytes"], e["participants"], e["label"]) for e in collectives})
-    old_ir = sorted({(e["graph_collective"]["extra"]["op_name"],
+    old_colls = collective_counts((e["kind"], e["size_bytes"], e["participants"], e["debug_label"])
+        for e in events if e["function"] == "collective" and e["size_bytes"] > 0 and e["participants"] > 1)
+    new_colls = collective_counts((e["kind"], e["bytes"], e["participants"], e["label"]) for e in collectives)
+    old_ir = collective_counts((e["graph_collective"]["extra"]["op_name"],
         e["graph_collective"]["kind"], e["graph_collective"]["size_bytes"],
         e["graph_collective"]["participants"]) for e in events if "graph_collective" in e
-        and e["graph_collective"]["interconnect"] == "tp"})
-    new_ir = []
-    template = tc.layer_plan_workload.blocks.dense
-    for entry in template.entries:
-        for key in entry.forward.comm_keys:
-            spec = template.comm_metadata[key]
-            new_ir.append((entry.name, spec.kind.value, spec.size_bytes, spec.participants))
-    new_ir = sorted(set(new_ir))
+        and e["graph_collective"]["interconnect"] == "tp")
+    new_ir = collective_counts(ir_collectives)
     old_mem = next(e for e in events if e["function"] == "build_mamba2_memory_data")
     new_mem = tc.layer_plan_memory_evidence[0]
     memory = dict(old_ssm_state=old_mem["cache_locals"]["ssm_state_bytes"],
@@ -100,12 +140,16 @@ def compare_case(reference: Path, output: Path) -> dict:
         new_conv_state=new_mem["conv_state_bytes_per_layer"],
         old_weights=old_mem["return"]["weight_mem_per_layer"],
         new_weights=new_mem["weight_mem_per_layer"])
+    old_peak = next(e["per_device_inputs"] for e in events if e["function"] == "simulate_memory")
+    peak_comparison, peak_match = compare_peak_memory(old_peak, device_memory,
+        memory["old_conv_state"] - memory["new_conv_state"])
     result = dict(case=case, old=old["totals"]["total_inference_time"], new=prefill + decode,
         op_differences=op_diffs, kernel_differences=kernel_diffs,
         old_collectives=old_colls, new_collectives=new_colls,
         collectives_match=old_colls == new_colls and old_ir == new_ir,
         old_ir_collectives=old_ir, new_ir_collectives=new_ir, memory=memory,
         per_device_memory=device_memory,
+        per_device_peak_comparison=peak_comparison, per_device_peak_match=peak_match,
         samples=[dict(step=s.step_id, seconds=s.execution_time) for s in samples],
         wall_seconds=time.perf_counter()-start)
     result["status"] = "MATCH" if result["old"] == result["new"] else "DIFFERENCE"
@@ -170,12 +214,13 @@ def main() -> int:
         rows.append(row)
         print(f"{ref.stem:65} {row['status']:10} {row.get('old')!r:22} {row.get('new')!r:22} "
               f"ops={len(row.get('op_differences', []))} kernels={len(row.get('kernel_differences', []))} "
-              f"collectives={row.get('collectives_match')}", flush=True)
+              f"collectives={row.get('collectives_match')} peaks={row.get('per_device_peak_match')}", flush=True)
     (output / "summary.json").write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
     return int(not rows or (args.cases is not None and set(args.cases) != {r["case"] for r in rows})
         or any(r["status"] not in ("MATCH", "EXPLAINED")
         or (r["status"] == "MATCH" and (r.get("op_differences") or r.get("kernel_differences")))
-        or not r.get("collectives_match") or not r.get("memory_match") for r in rows)
+        or not r.get("collectives_match") or not r.get("memory_match")
+        or not r.get("per_device_peak_match") for r in rows)
         or (not args.cases and len(rows) != 23))
 
 

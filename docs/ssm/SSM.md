@@ -199,9 +199,20 @@ The script checks the recorded input YAML hashes, reads only completed pure
 Mamba2 references, disables the AstraSim result cache, and writes logs and
 full-precision comparison JSON under `tmp/ssm-comparison/`. It compares every
 op's compute/communication/FLOPs/memory fields, standalone kernel times,
-network calls and IR collective bytes/participants, recurrent state and
+network calls and IR collective bytes/participants and multiplicities, recurrent state and
 weights. Conv history is checked against the explicit K-1 convention.
-Per-device static and peak bytes are captured from the actual memory replay.
+Per-device static and peak bytes are compared from the actual memory replay.
+For every rank in all 23 references, the exact expected peak is the archive
+peak minus two explicit corrections: one conv-history slot per owned layer,
+and the archive's duplicate dense weight allocation for those same SSM layers.
+`archive/ssm-gpu-old:simulate_train_graph.py:1883-1892` adds both the dense
+and SSM weight counts, although its census reports the same pure-SSM layers
+in both sets. The shared IR owns each layer once. For example, the TP1/PP1
+A100 case changes from 987634624 to 513400384 peak bytes: 473546112 duplicate
+weight bytes and 688128 history bytes are removed. Transient peak bytes are
+unchanged. The receipt pins old/new/expected bytes and both corrections for
+each device, with no tolerance. This is a memory-only archive difference;
+the timing statuses in the table below retain their meaning.
 The 19 completed archive hybrid fallback cases are never treated as SSM
 references. A missing reference or unexpected numeric movement fails.
 
