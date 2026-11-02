@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-LLMA = "/app/nanocad/projects/ispass_deepflow/deepflow_astra_dev/llm-analysis"
+LLMA = "/app/nanocad/projects/ispass_deepflow/external/llm-analysis"
 CFG = str(Path(__file__).resolve().parent / "train_validation_data" / "llm_analysis_configs")
 sys.path.insert(0, LLMA)
 
