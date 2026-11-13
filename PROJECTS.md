@@ -25,7 +25,7 @@ usual, then time the attention and FFN parts of decode separately, and add the c
 between them at every layer. Report time per token, with and without overlap, and the largest batch
 each side can hold.
 
-**Evaluate:** `configs/model-config/course_project/qwen3_30b_a3b_inf.yaml`, batch 256, prompt 512,
+**Evaluate:** `configs/model-config/course_project/qwen3_30b_a3b_inf.yaml`, batch 32, prompt 2048,
 output 128 and 256, link 100 GB/s with 5 µs latency.
 
 ## Project 2: Sliding-window attention
@@ -51,5 +51,5 @@ Model speculative decoding with D multi-token-prediction (MTP) modules that gues
 full-model pass that checks them. Report time per output token, speedup over normal decode, and
 peak memory.
 
-**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 1 and 128, prompt 512,
+**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 16, prompt 2048 and 8192,
 output 128 and 256, D = 3, acceptance p = 0.8.
