@@ -51,5 +51,5 @@ Model speculative decoding with D multi-token-prediction (MTP) modules that gues
 full-model pass that checks them. Report time per output token, speedup over normal decode, and
 peak memory.
 
-**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 16, prompt 2048 and 8192,
+**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 32 and 64, prompt 2048,
 output 128 and 256, D = 3, acceptance p = 0.8.
