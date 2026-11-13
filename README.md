@@ -1,303 +1,212 @@
-# RAPID-LLM
+# RAPID-LLM (course branch)
 
-RAPID-LLM is a Python modeling tool for hardware- and network-aware LLM training/inference performance, memory, and (rudimentary) energy modeling. It builds compute/communication graphs and runs either analytically or via AstraSim. It also supports running standalone GEMM operations.
+RAPID-LLM estimates how long a large language model takes to run on given hardware, and how much
+GPU memory it needs. It does not run the model. It turns the model shape (layers, hidden size,
+heads, experts) into matrix multiplications and other operations, prices each one from the GPU's
+compute rate and memory bandwidth, adds communication time when several GPUs work together, and
+adds everything up.
 
-## Installation Guide
+This course branch runs on the analytical backend. You will change the core code for one of four
+projects. This file names functions, not line numbers.
 
-Prerequisite: Python 3
-
-### Step 1. Clone the repository
-
-```bash
-git clone https://github.com/nanocad-lab/Rapid-LLM.git
-cd Rapid-LLM
-```
-
-### Step 2. Set up the environment
-
-#### Option A: Using uv (recommended)
-
-- `pip install uv`
-- `uv venv [/path/to/new/virtual/environment]`
-- `source [/path/to/new/virtual/environment]/bin/activate`
-- `uv sync`
-
-If you want the example scripts to run through uv, set `RAPID_UV_RUN=1` before invoking them. Otherwise they default to `python`.
-
-### Launch Web UI
-
-After `uv sync`, run from the repository root:
+## Setup (Python 3.12)
 
 ```bash
-./launch_webui.sh
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt pytest
+pytest -q                           # should pass
 ```
 
-Open `http://127.0.0.1:8050` in a browser. The launcher runs `uv run --frozen --no-sync python -m webui.app.main`; override the bind address with `RAPID_WEBUI_HOST` or `RAPID_WEBUI_PORT` if needed.
-
-#### Option B: Using pip
-
-- `python3 -m venv [/path/to/new/virtual/environment]`
-- `source [/path/to/new/virtual/environment]/bin/activate`
-- `pip install --upgrade pip`
-- `pip install -r requirements.txt`
-
-### Step 3. (Optional) Set up AstraSim for advanced network simulation
-
-- `git submodule update --init --recursive`
-- `git submodule update --remote -- astra-sim`
-- `ASTRA_SIM=$(realpath ./astra-sim)`
-- `cd ${ASTRA_SIM}`
-- `git submodule update --remote -- extern/network_backend/analytical`
-- `./build/astra_analytical/build.sh`
-- `cd ..`
-
-### Troubleshooting
-
-If you encounter protobuf failures while building AstraSim, try:
-
-- `pip uninstall protobuf`
-- `pip install protobuf==3.20.3`
-
-### Step 4. Verify the installation (LLM)
-
-Examples use `python` by default. To route them through uv, run them with `RAPID_UV_RUN=1`.
-
-- `./examples/llm.sh` (analytical backend, training on Llama2-7B)
-- `./examples/llm_inference.sh` (analytical backend, inference on Llama2-7B)
-- `./examples/llm_astra.sh` (AstraSim backend, training on Llama2-7B)
-- `./examples/llm_astra_inference.sh` (AstraSim backend, inference on Llama2-7B)
-
-Example with uv:
+## Running one config
 
 ```bash
-RAPID_UV_RUN=1 ./examples/llm.sh
+python run_perf.py --hardware_config configs/hardware-config/projects/a100_80GB_1gpu.yaml \
+                   --model_config configs/model-config/projects/Llama3.1-8B_inf.yaml
 ```
 
-## Quick Start (LLM)
+Results go to `output/LLM/`: `LLM_inference_results.txt` repeats the summary, and
+`memory-summary/memory_capacity_comparison.txt` gives the prefill, decode and maximum peak memory
+per GPU. The lines that matter on screen:
 
-Training:
-
-```bash
-python run_perf.py \
-  --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/LLM.yaml
+```
+[decode] sample step 0: seq_len=1025, time=0.0121s
+[decode] sample step 1023: seq_len=2048, time=0.0122s
+[prefill] time: 0.0661s, [decode] time: 12.4618s, [total] time: 12.5279s
+[kv-cache] prefill_store=0.1 GiB, decode_store=0.1 GiB, decode_fetch=192.0 GiB
+LLM time to first token: 0.08s
+Aggregate decode throughput tok/s (batch=1, replica_count=1): start=82.40, mid(token 512)=82.17, end=81.94
 ```
 
-Inference (prefill + decode):
+- `sample step`: one decode step (one new token for every sequence) at that context length.
+- `prefill` processes the prompt once; `decode` generates all output tokens; time to first token
+  is prefill plus the first decode step.
+- `kv-cache`: key/value bytes written in prefill and decode and read in decode. `tok/s`: tokens
+  per second over the whole batch at the start, middle and end of decoding.
 
-```bash
-python run_perf.py \
-  --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/LLM_inf.yaml
-```
+## Configs
 
-Results are written under `output/`.
+Put all your settings in the model config. The hardware configs are shared: do not edit them.
 
-## GEMM
+`configs/model-config/projects/` holds the four project models; `configs/hardware-config/projects/`
+holds the one GPU every project evaluation uses.
 
-GEMM mode is a focused, lightweight distributed GEMM checker. It is not a full model simulation, but is useful for validating GEMM sharding assumptions.
+| Model config | What it is |
+|---|---|
+| `projects/qwen3_30b_a3b_inf.yaml` | Qwen3-30B-A3B, mixture of experts (Project 1) |
+| `projects/gemma_3_4b_inf.yaml` | Gemma 3 4B text model with sliding window (Project 2) |
+| `projects/Llama3.1-8B_inf.yaml` | Llama-3.1-8B, dense (Project 3) |
+| `projects/mimo_7b_inf.yaml` | MiMo-7B base model, dense (Project 4) |
+| `Llama2-7B/13B/70B_inf.yaml`, `Llama3.1-70B/405B_inf.yaml` | more dense Llama models |
+| `DeepSeekV3_inf.yaml`, `GLM_4.5_AIR_106B_inf.yaml`, `GLM4.7_358B_inf.yaml` | large mixture-of-experts models |
+| `hunyuan_4b_inf.yaml`, `hunyuan_7b_inf.yaml`, `minicpm3_4b_inf.yaml` | small dense models (MiniCPM3 uses MLA attention) |
+| `LLM_inf.yaml` | a generic GPT-style dense model |
+| `GEMM.yaml` | a single matrix multiply |
 
-- Configure GEMM dimensions and `gemm_shard_axis` in `configs/model-config/GEMM.yaml`.
-- Configure `parallelism.tp` in the hardware config.
-- Run:
+| Hardware config | What it is |
+|---|---|
+| `projects/a100_80GB_1gpu.yaml` | one A100 80 GB (all project evaluations) |
+| `a100_80GB.yaml` | two A100 80 GB, tensor parallel |
+| `a100_80GB_moe.yaml` | A100s set up for mixture-of-experts models only |
+| `H100_SXM5_80GB.yaml` | one H100 SXM5 80 GB |
+| `H100_SXM5_80GB_tp8.yaml` | eight H100 SXM5 80 GB, tensor parallel |
+| `v100.yaml` | one V100 |
+| `waferscale_20v100_80hbm.yaml` | 20 V100-class GPUs in one node, tensor parallel |
 
-```bash
-python run_perf.py \
-  --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/GEMM.yaml
-```
+The Gemma file is refused until Project 2 is done; delete its `window:` block to run it as a dense
+model. Units: in the YAML files `GB` means 2^30 bytes (as a bandwidth, 2^30 bytes per second);
+latencies are in seconds.
 
-## Execution Backend Configuration
+## Changing the inputs
 
-RAPID-LLM supports four execution backends with different accuracy and performance characteristics. Configure the backend in your hardware config file under `execution_backend`.
+In the model YAML, under `model_param`: `global_batch_size` is the number of sequences served
+together (B), `decode_len` the decode (output) tokens per sequence, and `seq_len` the prefill plus
+decode tokens; to change only the output length, change both by the same amount. Under
+`inference_param`, `sample_every: -1` (the default) prices only the first and last decode step;
+`sample_every: N` also prices every Nth step.
 
-### 1. Analytical RAPID-LLM (Default - no AstraSim needed)
+Your own inputs (link bandwidth and latency, window size, block size, number of guesses, and so
+on) go in a `project_param:` block in the model YAML; see H1 below.
 
-- **Accuracy:** Very fast but inaccurate; ring-only network model and no congestion modeling.
-- **Configuration:**
+## How a decode step is priced
 
-```yaml
-execution_backend:
-  model: analytical
-```
+1. `TimeCalculationLLMInference.calc_total_inference_time` (inference_timing.py) runs prefill
+   and peak memory in `calc_time`, then decode in `calc_decode_time`, which hands over to
+   `DecodeGraph.build_decode_graph` (simulate_inference_graph.py).
+2. `build_decode_graph` picks the sampled steps (`_generate_sample_points`; by default only the
+   first and last step), computes the GEMM shapes for the current context length
+   (`llm_util.process_decode_gemm_shapes`, which calls `autoregressive_decoder_gemm`) and calls
+   `_execute_decode_step`.
+3. `_execute_decode_step` makes a fresh timing object and calls `prepare_decode_graphs`
+   (inference_timing.py).
+4. `prepare_decode_graphs` calls `_build_decode_transformer_results` for a dense layer and, for
+   MoE models, an MoE layer. Each call returns a table of operations (`qkv_proj`, `attention`,
+   `ffn1`, ...) and a `node_breakdown` holding the per-layer time `transformer_time_f` and the
+   output-head time `linear_softmax_f`.
+5. `_prepare_execution_graphs` (train_timing.py) turns these into a graph of layers
+   (simulate_train_graph.py), and `LLMExecutionDispatcher.run` (llm_execution.py) returns the
+   step time.
+6. `_integrate_decode_samples` joins the sampled steps with straight lines (trapezoid rule) to
+   get the total decode time.
 
-### 2. Hybrid (AstraSim needed)
+Peak memory: `calc_time` calls `MemoryEstimator.build_memory_data` (memory_estimation.py) for
+weights, KV cache and activations, then `simulate_peak`, which replays the layer graph
+(simulate_train_graph.py). Going over the GPU's memory prints a warning; it does not stop the run.
 
-- **Accuracy:** More accurate; models congestion in transformer blocks only but roughly 2-3x slower.
-- **Execution:** RAPID-LLM executes the pipeline graph; AstraSim executes the transformer block graph.
-- **Configuration:**
+## Helpers
 
-```yaml
-execution_backend:
-  model: astra
-  astra:
-    mode: hybrid
-```
+Three small hooks are in the code. Each is off by default and changes no number until used.
 
-### 3. Full AstraSim Hierarchical (AstraSim needed)
+- **H1 `project_param`** (all projects). Add a top-level block to the model YAML, next to
+  `model_param`:
+  ```yaml
+  project_param:
+    my_switch: true
+    my_number: 4
+  ```
+  It is read as written (no unit conversion) and is available on the timing object as
+  `self.project_param`, a dict (`{}` when absent). Nothing checks the names, so a typo is
+  silently ignored. See `_read_project_param` in config.py.
+- **H2 `query_tokens`** (Projects 3 and 4): new tokens per decode call. It is passed from
+  `build_decode_graph` down the decode path to `autoregressive_decoder_gemm`, and appears at the
+  decode-memory call in `calc_time`. The shapes still use a literal 1, so any other value raises
+  `NotImplementedError`. Deciding what changes when it is not 1 is your job.
+- **H3 `kv_cache_bytes_by_layer`** (Project 2). If `build_memory_data` adds this list (one entry
+  per layer), the memory replay in simulate_train_graph.py sums it over the layers each GPU holds
+  instead of using `kv_cache_bytes_per_layer` times the layer count.
 
-- **Accuracy:** More accurate; models congestion in transformer and pipeline graphs separately. Assumes no congestion between pipeline/data parallelism and tensor parallelism (optimistic). Roughly as fast as Hybrid for small systems, increasingly slower for larger systems.
-- **Execution:** AstraSim executes both pipeline and transformer block graphs separately.
-- **Configuration:**
+## Projects
 
-```yaml
-execution_backend:
-  model: astra
-  astra:
-    mode: full_astrasim_hierarchical
-```
+For your project, first run exactly the evaluation given below, then run case studies of your own
+that show off your feature. All evaluations use `projects/a100_80GB_1gpu.yaml`. The pointers below
+are where to start reading, not a recipe.
 
-### 4. Full AstraSim Flattened (AstraSim needed)
+## Project 1: attention/FFN disaggregation (Qwen3-30B-A3B)
 
-- **Accuracy:** Most accurate; models congestion between all collectives with no separate network assumptions. Very slow for large systems but most comprehensive.
-- **Execution:** AstraSim executes one big flattened graph combining pipeline and transformer operations.
-- **Configuration:**
+Estimate what it would cost to run decode attention and the feed-forward (expert) part of each
+layer on separate GPUs. Do it analytically from single-GPU runs: prefill as usual, then decode with
+only the attention side of each layer, and with only the FFN side, and add the data transfers
+between the two sides yourself. Report time per token with and without overlap, and the largest
+batch each side can hold. No multi-GPU or routing code is needed.
 
-```yaml
-execution_backend:
-  model: astra
-  astra:
-    mode: full_astrasim_flattened
-```
+- Prefill-only and decode-only runs need no code: set the output to 0 (`decode_len: 0`, `seq_len`
+  = prompt) for prefill only, or the prompt to 0 (`seq_len` = `decode_len`) for decode only. With
+  a prompt of 0, decode starts from an empty context; to keep the prompt's KV context, subtract a
+  prefill-only run from a full run instead.
+- RAPID-LLM has no switch for attention-only or FFN-only time. You have to do surgery inside the
+  model so that a run reports only one side. Start at `_build_decode_transformer_results`
+  (inference_timing.py): the per-layer decode time is `transformer_time_f` in its
+  `node_breakdown`, not the sum of the operation table.
+- `MemoryEstimator.build_memory_data` (memory_estimation.py): the weights, KV cache, embedding and
+  output head each side would hold.
+- Use `project_param` (H1) to choose the side.
 
-## AstraSim Artifact and Graph Visualization
+Evaluate: `qwen3_30b_a3b_inf.yaml`, batch 8, prompt 512, output 128 and 256, link 100 GB/s with
+5 µs latency.
 
-RAPID-LLM can generate and visualize graphs, and when using the AstraSim network backend, can also generate and visualize network communication artifacts.
+## Project 2: sliding-window attention (Gemma 3 4B)
 
-### Environment Flags
+Gemma 3 has 5 local layers, which attend only to the last w = 1024 tokens, for every global layer.
+Today RAPID-LLM refuses such a model. Make it price local layers in decode, prefill and memory,
+and compare with dense attention: time per token, prefill time, peak memory and largest batch.
 
-- `RAPID_VISUALIZE_GRAPHS=1`: Generate graph visualizations of RAPID-LLM computation graphs (no AstraSim artifact visualization).
-- `RAPID_PERSIST_ASTRASIM_ARTIFACTS=1`: Enable artifact persistence to disk (for both AstraSim and RAPID-LLM artifacts).
-- `RAPID_PERSIST_ARTIFACT_VIZ=1`: Generate PNG visualizations and text dumps for persisted AstraSim ET files (very slow for many nodes).
-- Do not set `RAPID_PERSIST_ARTIFACT_VIZ=1` for multi-threaded runs.
+- `AttentionWindowConfig` (config.py) holds the parsed window and the local/global layer rule; the
+  refusal is in `validate_model_config`. The window reaches the timing object as
+  `self._raw_model_config.model_config.attention.window`.
+- `prepare_decode_graphs` (inference_timing.py) and `_prepare_execution_graphs` (train_timing.py)
+  already build two layer templates, dense and MoE, and pick one per layer (`is_moe_layer`). Local
+  and global layers need the same kind of split.
+- `flash_attention_kernel_forward` (train_timing.py) for prefill; H3 for per-layer KV memory;
+  `_generate_sample_points` decides which decode steps are priced.
 
-### Artifact Output Locations
+Evaluate: `gemma_3_4b_inf.yaml` (w = 1024, 5 local : 1 global), batch 4, prompt 8192, output 128
+and 256.
 
-- Flattened execution mode: `output/LLM/astra_flat/`
-- Hierarchical/Hybrid modes: `output/LLM/astra_hier/`
+## Project 3: block diffusion (Llama-3.1-8B)
 
-### Generated Files
+A block-diffusion model produces its output in blocks of b tokens, refining each block over R
+rounds, and every call works on all b positions of the block at once. Model this and compare with
+normal decode: total time, number of model calls and peak memory.
 
-- `.et` files: Chakra execution traces for AstraSim replay.
-- `.png` files: Rendered PNG visualizations (when `RAPID_VISUALIZE_GRAPHS=1` or `RAPID_PERSIST_ARTIFACT_VIZ=1`).
-- `.txt` files: Human-readable text dumps of ET files (when `RAPID_PERSIST_ARTIFACT_VIZ=1`).
+- H2 `query_tokens`, from `build_decode_graph` down to `autoregressive_decoder_gemm` (llm_util.py),
+  and `output_seq_len` in `_build_decode_transformer_results`.
+- The decode loop: `build_decode_graph`, `_generate_sample_points` and `_integrate_decode_samples`
+  (simulate_inference_graph.py).
+- Put b and R in `project_param` (H1).
 
-### Debugging: Usage Example
+Evaluate: `Llama3.1-8B_inf.yaml`, batch 1, prompt 512, output 128 and 256, b = 8, R = 4.
 
-```bash
-RAPID_PERSIST_ASTRASIM_ARTIFACTS=1 RAPID_VISUALIZE_GRAPHS=1 RAPID_PERSIST_ARTIFACT_VIZ=1 python run_perf.py \
-  --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/LLM.yaml
-```
+## Project 4: MTP speculative decoding (MiMo-7B)
 
-## Example Case Study: Tensor Parallelism on Inference Runtime
+With D multi-token-prediction (MTP) modules, each round makes D cheap guesses and then one pass of
+the full model checks D + 1 positions; each guess is accepted with probability p. The MiMo YAML
+models only the base model. Model the rounds and compare with normal decode: time per output
+token, speedup and peak memory.
 
-This is a short step-by-step guide on how to use RAPID-LLM to estimate the inference runtime of a LLM model with varying degrees of tensor parallelism on the default A100 80GB hardware config.
+- H2 for the checking pass (the same shape work as Project 3).
+- `transformer_time_f` and `linear_softmax_f` from `_build_decode_transformer_results`;
+  `get_gemm_time` (base_timing.py) prices any new matrix multiply.
+- `memory_data["extra_static_bytes_per_device"]` (memory_estimation.py) for extra weights and KV.
+- Put D and p in `project_param` (H1).
 
-1. Start by creating a model config yaml file. You can do so manually, but for this example we will use the helper configs/model-config/hf_to_config.py script to generate the config file from a HuggingFace model (in this case, Qwen/Qwen2.5-3B).
-
-```bash
-python configs/model-config/hf_to_config.py Qwen/Qwen2.5-3B --run-type inference --batch-size 32 --seq-len 65536 --decode-len 1024 --use-flashattention true --flash-tile-size 256 -o configs/model-config/Qwen2.5-3B.yaml
-```
-
-The config file for Qwen2.5-3B is generated under `configs/model-config`.
-
-2. Open the provided A100 hardware file and set tensor parallel degree to 1:
-
-Edit `configs/hardware-config/a100_80GB.yaml` so that `parallelism.tp: 1`. This models one GPU without tensor parallelism.
-
-Run the inference estimation using the example configs:
-
-```bash
-python run_perf.py --hardware_config configs/hardware-config/a100_80GB.yaml --model_config configs/model-config/Qwen2.5-3B.yaml
-```
-
-3. To see the effects of tensor-parallelism, modify the hardware file, switching to two devices per node, and tp = 2.
-
-Edit `configs/hardware-config/a100_80GB.yaml` so that `parallelism.tp: 2`. This models two GPU inference with tensor parallelism degree of 2.
-
-Re-run the same inference command with the updated hardware config.
-
-Comparing the two runs will show how increasing tensor parallelism changes the predicted inference runtime for this model (in this case, by around 50%).
-
-## Current Support and Feature Status (LLM)
-
-### AstraSim Integration
-- **Supported:** AstraSim integration is supported for all LLM execution modes.
-
-### Network Topologies
-- **Supported:** 1D and 2D topologies (+SuperPOD-style Fat Tree) in AstraSim configs.
-
-### Faulty Links
-- **Supported:** Faulty links are supported in AstraSim runs. We support soft (bandwidth derate, all cases) and hard (link failure, dense 2D topologies only) link failures. Hierarchical/flattened mode only.
-
-### FlashAttention
-- **Current support:**
-  - Training and inference(prefill only).
-- **Work in progress:**
-  - Attention tile size is manually specified when FlashAttention is enabled.
-  - Inference decode is memory bound and does not typically benefit from FlashAttention. Hence it is disabled. FlashDecoding kernels are not implemented.
-
-### Data Parallelism
-- **Supported:** training and inference.
-- For inference, `replica_count` scales throughput only and replicas do not communicate.
-
-### Tensor Parallelism
-- **Supported:** training and inference.
-- Implements Megatron-LM style tensor parallelism, with optional sequence parallelism.
-
-### Pipeline Parallelism
-- **Supported:** training and inference.
-- GPipe-style pipeline scheduling only.
-
-### Context Parallelism
-- **Supported:** Training. No MoE support.
-- Inference CP is not supported yet.
-
-### Hybrid Parallelism
-- **Supported:** Hybrid parallelism is supported for all LLM training/inference configurations with limitations listed for each parallelism type above.
-
-### Attention Types
-- **Supported:** MHA and GQA (MQA = GQA with `num_kv_heads=1`).
-- **Work in progress:** MLA and sliding-window attention.
-
-### Mixture of Experts (MoE)
-- **Training support:**
-  - Single GPU and multi GPU expert parallelism
-  - TP with EP requires sequence parallelism
-- **Inference support:**
-  - TP GPUs are also used for expert parallelism
-  - `moe_dp` expands the expert pool. The routing group size is `tp * moe_dp`.
-- **Work in progress:**
-  - Validation coverage for large multi GPU MoE runs
-  - MoE with ZeRO-2/3 is not supported
-  - MoE with faulty links is not supported
-  - MoE is not supported with flattened AstraSim graphs
-
-### ZeRO and Optimizer Sharding
-- **Supported:** ZeRO stages 0 through 3 with parameter, gradient, and optimizer sharding. ZeRO-3 parameter materialization is modeled as communication and ephemeral memory. Hierarchical mode only, no MoE support.
-
-### Gradient Accumulation
-- **Supported:** Gradient accumulation is supported for training using `gradient_accumulation_steps`. No ZeRO-2/3 support.
-
-### Memory Estimation
-- **Status:** Enabled.
-- **Supported:** Per-GPU peak from flattened graphs for training and inference. Training uses persistent vs transient activations with full and selective recompute. Inference uses `max(prefill peak, final decode peak)` and includes KV-cache bytes plus embedding and LM head weights. Validated against 3000 case dataset, with ~95% accuracy (predicting OOM vs non-OOM).
-
-### KV-Cache
-- **Supported:** KV-cache runtime impact and memory estimation (graph-based peak uses per-layer KV cache bytes).
-
-### Energy Estimation
-- **Supported:** WIP Rudimentary inference-only model. Not yet validated.
-- **Work in progress:** Training support and refinement.
-
-### Mixed Precision
-- **Supported:** Mixed precision is supported for all supported parallelism and model types, including configurable KV cache precision.
-
-### Validation
-- **Status:** Validation scripts are available in validation_scripts folder. We also validate against Megatron-LM and other paper data for inference and training, including networking, for up to 3000 GPUs. Below is a validation plot against Koyeb's single NVIDIA A100 data on Llama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`. A memory-estimator smoke test lives at `validation_scripts/memory_estimator_smoke.py`.
-- **NVIDIA inference validation:** `validation_scripts/nvidia_inf.py` runs RAPID-LLM inference validation against NVIDIA Llama 2 7B/13B/70B and Llama 3.3-70B datasets (A100 by default) references, then generates combined comparison plots (actual vs RAPID-LLM and optional LLMCompass/Vidur/GenZ) under `output/validation/inf`. Options: `--llmcompass`, `--vidur`, `--genz` (pick comparison tools; if any are set, only those run) and `--plot errors|ratio|both` (select plot type; default is `ratio`).
-- **Large-scale training validation:** `validation_scripts/nvidia_train_validation.py` runs RAPID-LLM training validation for NVIDIA large-scale training cases and writes per-run artifacts under `validation_scripts/train_validation_data/nvidia_train_validation_runs`, with results in `validation_scripts/train_validation_data/nvidia_train_validation_result.csv` and an optional comparison plot. Command: `./venv/bin/python validation_scripts/nvidia_train_validation.py`.
-- **4-GPU system training validation:** `validation_scripts/uci_train_validation.py` runs RAPID-LLM training validation on the 4-GPU UCI cases and writes per-run artifacts under `validation_scripts/train_validation_data/uci_train_validation_runs`, with results in `validation_scripts/train_validation_data/uci_train_validation_result.csv` and an optional comparison plot. Command: `./venv/bin/python validation_scripts/uci_train_validation.py`.
-
-![Koyeb Validation](validation_scripts/koyeb_a100_sxm_no_parallelism.png)
+Evaluate: `mimo_7b_inf.yaml`, batch 1, prompt 512, output 128 and 256, D = 3, p = 0.8.
