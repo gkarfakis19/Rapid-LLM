@@ -21,8 +21,8 @@ pytest -q                           # should pass
 ## Running one config
 
 ```bash
-python run_perf.py --hardware_config configs/hardware-config/projects/a100_80GB_1gpu.yaml \
-                   --model_config configs/model-config/projects/Llama3.1-8B_inf.yaml
+python run_perf.py --hardware_config configs/hardware-config/course_project/a100_80GB_1gpu.yaml \
+                   --model_config configs/model-config/course_project/Llama3.1-8B_inf.yaml
 ```
 
 Results go to `output/LLM/`: `LLM_inference_results.txt` repeats the summary, and
@@ -48,29 +48,24 @@ Aggregate decode throughput tok/s (batch=1, replica_count=1): start=82.40, mid(t
 
 Put all your settings in the model config. The hardware configs are shared: do not edit them.
 
-`configs/model-config/projects/` holds the four project models; `configs/hardware-config/projects/`
-holds the one GPU every project evaluation uses.
+`configs/model-config/course_project/` holds the four project models, and
+`configs/hardware-config/course_project/` the GPUs used in the course.
 
 | Model config | What it is |
 |---|---|
-| `projects/qwen3_30b_a3b_inf.yaml` | Qwen3-30B-A3B, mixture of experts (Project 1) |
-| `projects/gemma_3_4b_inf.yaml` | Gemma 3 4B text model with sliding window (Project 2) |
-| `projects/Llama3.1-8B_inf.yaml` | Llama-3.1-8B, dense (Project 3) |
-| `projects/mimo_7b_inf.yaml` | MiMo-7B base model, dense (Project 4) |
-| `Llama2-7B/13B/70B_inf.yaml`, `Llama3.1-70B/405B_inf.yaml` | more dense Llama models |
-| `DeepSeekV3_inf.yaml`, `GLM_4.5_AIR_106B_inf.yaml`, `GLM4.7_358B_inf.yaml` | large mixture-of-experts models |
-| `hunyuan_4b_inf.yaml`, `hunyuan_7b_inf.yaml`, `minicpm3_4b_inf.yaml` | small dense models (MiniCPM3 uses MLA attention) |
-| `LLM_inf.yaml` | a generic GPT-style dense model |
-| `GEMM.yaml` | a single matrix multiply |
+| `course_project/qwen3_30b_a3b_inf.yaml` | Qwen3-30B-A3B, mixture of experts (Project 1) |
+| `course_project/gemma_3_4b_inf.yaml` | Gemma 3 4B text model with sliding window (Project 2) |
+| `course_project/Llama3.1-8B_inf.yaml` | Llama-3.1-8B, dense (Project 3) |
+| `course_project/mimo_7b_inf.yaml` | MiMo-7B base model, dense (Project 4) |
+| `Llama3.1-70B_inf.yaml`, `Llama3.1-405B_inf.yaml` | larger dense Llama models |
+| `DeepSeekV3_inf.yaml`, `GLM4.7_358B_inf.yaml` | large mixture-of-experts models |
+| `minicpm3_4b_inf.yaml` | a small dense model with MLA attention |
 
 | Hardware config | What it is |
 |---|---|
-| `projects/a100_80GB_1gpu.yaml` | one A100 80 GB (all project evaluations) |
-| `a100_80GB.yaml` | two A100 80 GB, tensor parallel |
-| `a100_80GB_moe.yaml` | A100s set up for mixture-of-experts models only |
-| `H100_SXM5_80GB.yaml` | one H100 SXM5 80 GB |
-| `H100_SXM5_80GB_tp8.yaml` | eight H100 SXM5 80 GB, tensor parallel |
-| `v100.yaml` | one V100 |
+| `course_project/a100_80GB_1gpu.yaml` | one A100 80 GB (all project evaluations) |
+| `course_project/a100_80GB.yaml` | two A100 80 GB, tensor parallel (tp: 2) |
+| `course_project/H100_SXM5_80GB.yaml` | one H100 SXM5 80 GB |
 | `waferscale_20v100_80hbm.yaml` | 20 V100-class GPUs in one node, tensor parallel |
 
 The Gemma file is refused until Project 2 is done; delete its `window:` block to run it as a dense
@@ -145,7 +140,7 @@ Four small hooks are in the code. Each is off by default and changes no number u
 ## Projects
 
 For your project, first run exactly the evaluation given below, then run case studies of your own
-that show off your feature. All evaluations use `projects/a100_80GB_1gpu.yaml`. The pointers below
+that show off your feature. All evaluations use `course_project/a100_80GB_1gpu.yaml`. The pointers below
 are where to start reading, not a recipe.
 
 ## Project 1: attention/FFN disaggregation (Qwen3-30B-A3B)

@@ -1,6 +1,6 @@
 # DO NOT EDIT. Put all your project settings in the model config, not here.
-# Hardware: A100 80 GB GPUs for mixture-of-experts models only (tp: 2, ep: 2, pp: 4). Analytical backend.
-# Dense models are refused on this file.
+# Hardware: one A100 80 GB GPU. Used by every project evaluation. Analytical backend.
+# Same as a100_80GB.yaml except tp: 1 and tp_sp: false.
 
 sw_param:
   full_recomputation: true # Enable full activation recompute during backward instead of selective recomputation
@@ -17,9 +17,8 @@ sw_param:
     # Each field accepts: numeric byte counts, dtype strings (fp8/fp16/bf16/fp32), or "as_tensor_format"
     kv_cache: as_tensor_format # KV cache precision. WIP - currently ignored.
     parameters: as_tensor_format  # Model parameter precision
-    gradients: as_tensor_format  # Accumulated gradients 
-    grad_microbatch: as_tensor_format  # Ephemeral per-microbatch gradients 
-    grad_communication: as_tensor_format  # Gradient communication precision 
+    gradients: fp32  # Accumulated gradients 
+    grad_communication: fp32  # Gradient communication precision 
     optimizer_states: as_tensor_format  # Optimizer states 
     stats: as_tensor_format  # Normalization statistics 
     master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
@@ -37,7 +36,7 @@ tech_param:
     FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 4
     dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
-    util: 1.0
+    util: 1
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB     # (/s)
@@ -78,25 +77,25 @@ memory_hierarchy:
     scope: global
 
 parallelism:
-  tp: 2 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
+  tp: 1 # tensor parallelism
+  tp_sp: false # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  pp: 4 # pipeline parallelism. Number of pipeline stages
+  pp: 1 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 4 # micro-batches (for best results set to >= pp).
+  mb: 1 # micro-batches (for best results set to >= pp).
 
   train:
-    dp: 2 # data parallelism
-    ep: 4 # expert parallelism
+    dp: 1 # data parallelism
+    ep: 1 # expert parallelism
     # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
     tp_ep: true
   inference:
-    replica_count: 2 # inference throughput scaling only
-    moe_dp: 2 # inference expert pool expansion (EP_eff = tp * moe_dp)
+    replica_count: 1 # inference throughput scaling only
+    moe_dp: 1 # inference expert pool expansion (EP_eff = tp * moe_dp)
 network:
   overlap:
-    tp_overlap: 0.63
-    tp_sp_overlap: 0.6
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
     cp_overlap: 0.0
   dimensions:
     - id: dim0
@@ -104,7 +103,7 @@ network:
       size: auto
       topology:
         type: Ring
-        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        bandwidth: 50 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
@@ -114,7 +113,7 @@ network:
       size: auto
       topology:
         type: Ring
-        bandwidth: 25 GB # SPLIT INTO BW_PER_GPU, BW_TOTAL. BW TOTAL IS ONLY ALLOWED IF PREV DIM is 2D.
+        bandwidth: 20 GB # SPLIT INTO BW_PER_GPU, BW_TOTAL. BW TOTAL IS ONLY ALLOWED IF PREV DIM is 2D.
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0

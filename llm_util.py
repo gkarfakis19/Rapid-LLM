@@ -1240,35 +1240,3 @@ def process_decode_gemm_shapes(
             processed[key] = reshape_gemm_to_3d(shape)
 
     return processed
-
-
-
-
-
-
-if __name__ == "__main__":
-
-    
-    exp_hw_config_path = "configs/hardware-config/a100_80GB.yaml"
-    exp_model_config_path = "configs/model-config/LLM.yaml"
-    exp_hw_path = os.path.expandvars(os.path.expanduser(exp_hw_config_path))
-    exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
-    exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
-    exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    summary = estimate_inference_memory(
-        exp_hw_config,
-        exp_model_config,
-    )
-    print("Memory Estimator Smoke Test")
-    print(f"Prefill peak memory (per gpu): {summary['prefill_peak_gb']:.2f} GiB")
-    print(f"Final decode peak memory (per gpu): {summary['decode_peak_gb']:.2f} GiB")
-    print(f"Max peak memory (per gpu): {summary['max_peak_gb']:.2f} GiB")
-    if summary["capacity_gb"] is None:
-        print("Hardware memory capacity (per gpu): unknown")
-    else:
-        print(f"Hardware memory capacity (per gpu): {summary['capacity_gb']:.2f} GiB")
-    if summary["headroom_gb"] is None:
-        print("Memory headroom: unknown")
-    else:
-        print(f"Memory headroom: {summary['headroom_gb']:.2f} GiB")
-    print(f"Output dir: {summary['output_dir']}")
