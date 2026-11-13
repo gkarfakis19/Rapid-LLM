@@ -18,8 +18,7 @@ Four small hooks are in the code. Each is off by default and changes no number u
     my_number: 4
   ```
   It is read as written (no unit conversion) and is available on the timing object as
-  `self.project_param`, a dict (`{}` when absent). Nothing checks the names, so a typo is
-  silently ignored. See `_read_project_param` in config.py.
+  `self.project_param`, a dict (`{}` when absent). See `_read_project_param` in config.py.
 - **H2 `query_tokens`** (Projects 3 and 4): new tokens per decode call. It is passed from
   `build_decode_graph` down the decode path to `autoregressive_decoder_gemm`, and appears at the
   decode-memory call in `calc_time`. The shapes still use a literal 1, so any other value raises
@@ -36,8 +35,6 @@ Four small hooks are in the code. Each is off by default and changes no number u
   `prepare_decode_graphs` (decode) and `calc_time` (prefill).
 
 ## Where to start, by project
-
-These are starting points for reading, not a recipe.
 
 ### Project 1: attention/FFN disaggregation (Qwen3-30B-A3B)
 
@@ -57,7 +54,7 @@ batch each side can hold. No multi-GPU or routing code is needed.
   `node_breakdown`, not the sum of the operation table.
 - `MemoryEstimator.build_memory_data` (memory_estimation.py): the weights, KV cache, embedding and
   output head each side would hold.
-- Use `project_param` (H1) to choose the side.
+- `project_param` (H1) may be useful.
 
 
 ### Project 2: sliding-window attention (Gemma 3 4B)
@@ -86,7 +83,7 @@ normal decode: total time, number of model calls and peak memory.
   and `output_seq_len` in `_build_decode_transformer_results`.
 - The decode loop: `build_decode_graph`, `_generate_sample_points` and `_integrate_decode_samples`
   (simulate_inference_graph.py).
-- Put b and R in `project_param` (H1).
+- `project_param` (H1) may be useful.
 
 
 ### Project 4: MTP speculative decoding (MiMo-7B)
@@ -100,4 +97,4 @@ token, speedup and peak memory.
 - `transformer_time_f` and `linear_softmax_f` from `_build_decode_transformer_results`;
   `get_gemm_time` (base_timing.py) prices any new matrix multiply.
 - `memory_data["extra_static_bytes_per_device"]` (memory_estimation.py) for extra weights and KV.
-- Put D and p in `project_param` (H1).
+- `project_param` (H1) may be useful.
