@@ -15,7 +15,7 @@ from train_timing import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HW_BASE = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB.yaml"
+HW_BASE = PROJECT_ROOT / "tests" / "fixtures" / "a100_80GB.yaml"
 
 
 def _build_hw_config(*, tp: int = 1, cp: int = 1, tp_sp: bool = False) -> config.HWConfig:

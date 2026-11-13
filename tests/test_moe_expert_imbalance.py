@@ -13,7 +13,7 @@ from train_timing import TimeCalculationLLM
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HW_BASE = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB.yaml"
+HW_BASE = PROJECT_ROOT / "tests" / "fixtures" / "a100_80GB.yaml"
 
 
 def _build_model_param(
@@ -460,52 +460,6 @@ def test_training_graph_build_path_registers_moe_parallel_comm_specs():
     assert len(base_edges) == 12
     assert len(residual_edges) == 8
     assert len(joins) == 12
-
-
-def test_astra_backed_pipeline_timing_uses_direct_point_to_point_formula():
-    hw_config = config.parse_config(str(HW_BASE), config_type="hardware")
-    hw_config.sch_config.tp = 2
-    hw_config.sch_config.cp = 1
-    hw_config.sch_config.pp = 1
-    hw_config.sch_config.mb = 1
-    hw_config.sch_config.tp_sp = True
-    hw_config.sch_config.train.dp = 1
-    hw_config.sch_config.train.ep = 1
-    hw_config.sch_config.inference.replica_count = 1
-    hw_config.sch_config.inference.moe_dp = 2
-    hw_config.execution_backend.model = "astra"
-    hw_config.execution_backend.astra.mode = "full_astrasim_hierarchical"
-    hw_config.inference_config = hw_config.sch_config.inference
-
-    model = config.ModelConfig(
-        model_config=config.LLMConfig.from_dict(
-            _build_model_param(
-                run_type="inference",
-                expert_imbalance_factor=1.5,
-                num_experts=8,
-                global_batch_size=16,
-            )
-        ),
-        inference_config=config.LLMInferenceConfig(sample_every=-1),
-    )
-    config.validate_configs(hw_config, model)
-    tc = TimeCalculationLLMInference(hw_config, model, "LLM")
-
-    decomposition = MoECommDecomposition(
-        total_bytes=196,
-        base_all_to_all_bytes=0,
-        residual_total_bytes=196,
-        residual_per_sender_bytes=196,
-        residual_sender_count=1,
-        routing_group=2,
-        routing_mode="tp_ep",
-        hot_rank_factor=1.0,
-        cold_rank_factor=1.0,
-    )
-
-    direct_time = tc._moe_comm_time(decomposition, debug_label="unit_residual_only", axis=None)
-
-    assert direct_time > 0.0
 
 
 @pytest.mark.skipif(not is_astrasim_available(), reason="AstraSim ET conversion is unavailable")

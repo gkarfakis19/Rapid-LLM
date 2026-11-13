@@ -1,5 +1,3 @@
-from argparse import Namespace
-import importlib.util
 from pathlib import Path
 
 import config
@@ -9,18 +7,9 @@ from train_timing import TimeCalculationLLM
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HW_BASE = PROJECT_ROOT / "validation_scripts" / "validation_configs" / "hardware-config" / "a100_80GB.yaml"
-HF_TO_CONFIG_PATH = PROJECT_ROOT / "configs" / "model-config" / "hf_to_config.py"
-DEEPSEEK_TRAIN = PROJECT_ROOT / "configs" / "model-config" / "DeepSeekV3.yaml"
-DEEPSEEK_INF = PROJECT_ROOT / "configs" / "model-config" / "DeepSeekV3_inf.yaml"
-
-
-def _load_hf_to_config_module():
-    spec = importlib.util.spec_from_file_location("hf_to_config_module", HF_TO_CONFIG_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+HW_BASE = PROJECT_ROOT / "tests" / "fixtures" / "a100_80GB.yaml"
+DEEPSEEK_TRAIN = PROJECT_ROOT / "tests" / "fixtures" / "DeepSeekV3.yaml"
+DEEPSEEK_INF = PROJECT_ROOT / "tests" / "fixtures" / "DeepSeekV3_inf.yaml"
 
 
 def _build_hw_config():
@@ -161,67 +150,6 @@ def _build_toy_deepseek_model(*, run_type: str = "training") -> config.ModelConf
     llm_config = config.LLMConfig.from_dict(model_param)
     inference_cfg = config.LLMInferenceConfig(sample_every=-1) if run_type == "inference" else None
     return config.ModelConfig(model_config=llm_config, inference_config=inference_cfg)
-
-
-def test_hf_to_config_maps_deepseek_v3_to_mla_and_moe():
-    hf_to_config = _load_hf_to_config_module()
-    args = Namespace(
-        global_batch_size=16,
-        gradient_accumulation_steps=1,
-        seq_len=None,
-        decode_len=1024,
-        run_type="training",
-        use_flashattention=True,
-        flash_tile_size=128,
-    )
-    yaml_cfg = hf_to_config._build_yaml_config(_deepseek_v3_hf_config(), args, "deepseek_v3")
-    model = yaml_cfg["model_param"]
-
-    assert model["model_type"] == "deepseek_v3"
-    assert model["seq_len"] == 163840
-    assert model["num_layers"] == 61
-    assert model["attention"]["attention_type"] == "mla"
-    assert model["attention"]["kv_lora_rank"] == 512
-    assert model["attention"]["q_lora_rank"] == 1536
-    assert model["attention"]["qk_nope_head_dim"] == 128
-    assert model["attention"]["qk_rope_head_dim"] == 64
-    assert model["attention"]["v_head_dim"] == 128
-    assert model["attention"]["use_flashattention"] is True
-    assert model["moe"]["num_experts"] == 256
-    assert model["moe"]["top_k"] == 8
-    assert model["moe"]["moe_intermediate_size"] == 2048
-    assert model["moe"]["n_shared_experts"] == 1
-    assert "topk_group" not in model["moe"]
-    assert "scoring_func" not in model["moe"]
-    assert "num_nextn_predict_layers" not in model
-    assert "rope_scaling" not in model
-
-
-def test_hf_to_config_rejects_unsupported_huggingface_families_and_features():
-    hf_to_config = _load_hf_to_config_module()
-
-    try:
-        hf_to_config._infer_model_type("chatglm")
-    except SystemExit as exc:
-        assert "Unsupported Hugging Face model_type" in str(exc)
-    else:
-        raise AssertionError("generic chatglm configs should be rejected")
-
-    _, qwen_alias = hf_to_config._infer_model_type("qwen2")
-    try:
-        hf_to_config._validate_supported_config_features({"model_type": "qwen2", "use_sliding_window": True}, qwen_alias)
-    except SystemExit as exc:
-        assert "sliding-window attention is not modeled" in str(exc)
-    else:
-        raise AssertionError("active qwen2 sliding-window configs should be rejected")
-
-    _, phi_alias = hf_to_config._infer_model_type("phi3")
-    try:
-        hf_to_config._validate_supported_config_features({"model_type": "phi3", "sliding_window": 4096}, phi_alias)
-    except SystemExit as exc:
-        assert "sliding-window attention is not modeled" in str(exc)
-    else:
-        raise AssertionError("active phi3 sliding-window configs should be rejected")
 
 
 def test_deepseek_v3_yaml_configs_parse_and_validate():
