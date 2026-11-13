@@ -12,7 +12,7 @@ off your feature. Change the hardware, the model, the batch size or the sequence
 where your feature helps, where it stops helping, and why. The project slides shown in class have
 examples, but we encourage you to think outside the box.
 
-All modeling is inference only, on one GPU. All evaluations use
+All modeling is inference only, on one GPU (except AFD). All evaluations use
 `configs/hardware-config/course_project/a100_80GB_1gpu.yaml` (one A100 80 GB). Put all your
 settings in the model config; do not edit the hardware configs.
 
