@@ -4555,6 +4555,8 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_embedding_gather_bytes: float = 0.0,
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
+        block_timings_by_kind: Optional[Dict[str, Tuple[Dict[str, OperationTiming], Dict[str, float]]]] = None,
+        layer_block_kinds: Sequence[str] = (),
     ) -> Tuple[
         Graph,
         Any,
@@ -5070,6 +5072,33 @@ class TimeCalculationLLM(TimeCalculation):
                 else 0.0
             )
 
+        # Course helper H4 (Project 2): layers of different kinds. layer_block_kinds names
+        # one kind per layer. "dense" and "moe" are the two templates above; any other
+        # name must be a key of block_timings_by_kind, which maps it to the
+        # (transformer_timings, node_breakdown) pair of that kind, built like the dense
+        # pair. Each layer then takes transformer_time_f (and _b) of its own kind. Only
+        # the analytical pipeline uses it. Left empty, every number is as before.
+        misc_layer_times = {}
+        if layer_block_kinds:
+            if len(layer_block_kinds) != self.num_layers:
+                raise ValueError(
+                    f"layer_block_kinds names {len(layer_block_kinds)} layers; the model has {self.num_layers}"
+                )
+            kinds = dict(block_timings_by_kind or {})
+            breakdown_of = {"dense": node_breakdown, "moe": moe_node_breakdown or node_breakdown}
+            for name, (_, breakdown) in kinds.items():
+                breakdown_of[name] = breakdown
+            unknown = sorted(set(layer_block_kinds) - set(breakdown_of))
+            if unknown:
+                raise ValueError(f"layer_block_kinds uses kinds with no timings: {unknown}")
+            misc_layer_times["layer_time_f"] = [
+                breakdown_of[kind].get("transformer_time_f", 0.0) for kind in layer_block_kinds
+            ]
+            if include_pipeline_backward:
+                misc_layer_times["layer_time_b"] = [
+                    breakdown_of[kind].get("transformer_time_b", 0.0) for kind in layer_block_kinds
+                ]
+
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),
             "embedding_b": node_breakdown.get('embedding_b', 0.0) if include_pipeline_backward else 0.0,
@@ -5125,6 +5154,7 @@ class TimeCalculationLLM(TimeCalculation):
             "model_type": self.model_type,
             "disable_embedding_unembedding": self.disable_embedding_unembedding,
         }
+        misc_metadata.update(misc_layer_times)  # course helper H4 (empty unless layer_block_kinds is set)
         misc_metadata_final = dict(misc_metadata)
         misc_metadata_final["grad_accum_cycle"] = "final"
         misc_metadata_nonfinal = dict(misc_metadata)

@@ -115,7 +115,7 @@ weights, KV cache and activations, then `simulate_peak`, which replays the layer
 
 ## Helpers
 
-Three small hooks are in the code. Each is off by default and changes no number until used.
+Four small hooks are in the code. Each is off by default and changes no number until used.
 
 - **H1 `project_param`** (all projects). Add a top-level block to the model YAML, next to
   `model_param`:
@@ -134,6 +134,13 @@ Three small hooks are in the code. Each is off by default and changes no number 
 - **H3 `kv_cache_bytes_by_layer`** (Project 2). If `build_memory_data` adds this list (one entry
   per layer), the memory replay in simulate_train_graph.py sums it over the layers each GPU holds
   instead of using `kv_cache_bytes_per_layer` times the layer count.
+- **H4 `block_timings_by_kind` / `layer_block_kinds`** (Project 2): layers of different kinds.
+  `_prepare_execution_graphs` (train_timing.py) takes `layer_block_kinds`, one kind name per
+  layer. `"dense"` and `"moe"` are the two templates it already builds; any other name must be a
+  key of `block_timings_by_kind`, mapped to a `(transformer_timings, node_breakdown)` pair built
+  like the dense one (for example by `_build_decode_transformer_results`). Each layer then takes
+  `transformer_time_f` of its own kind. Both arguments are already passed, empty, in
+  `prepare_decode_graphs` (decode) and `calc_time` (prefill).
 
 ## Projects
 
@@ -173,9 +180,9 @@ and compare with dense attention: time per token, prefill time, peak memory and 
 - `AttentionWindowConfig` (config.py) holds the parsed window and the local/global layer rule; the
   refusal is in `validate_model_config`. The window reaches the timing object as
   `self._raw_model_config.model_config.attention.window`.
-- `prepare_decode_graphs` (inference_timing.py) and `_prepare_execution_graphs` (train_timing.py)
-  already build two layer templates, dense and MoE, and pick one per layer (`is_moe_layer`). Local
-  and global layers need the same kind of split.
+- H4: price a local layer once (decode: `_build_decode_transformer_results` at a context of
+  min(S, w)), name each layer's kind in `layer_block_kinds`, and pass both where
+  `prepare_decode_graphs` and `calc_time` call `_prepare_execution_graphs`.
 - `flash_attention_kernel_forward` (train_timing.py) for prefill; H3 for per-layer KV memory;
   `_generate_sample_points` decides which decode steps are priced.
 

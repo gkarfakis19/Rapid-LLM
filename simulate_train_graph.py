@@ -185,6 +185,10 @@ class Graph:
         self.grad_accum_cycle = str(self.misc_metadata.get("grad_accum_cycle", "final") or "final").lower()
         self.dp_zero_stage = int(self.misc_metadata.get("dp_zero_stage", 0) or 0)
         self.moe_layer_mask = list(self.misc_metadata.get("moe_layer_mask", []) or [])
+        # Course helper H4: optional per-layer times (one entry per layer), set by
+        # _prepare_execution_graphs from layer_block_kinds. Empty = dense/MoE as before.
+        self.layer_time_f = list(self.misc_metadata.get("layer_time_f", []) or [])
+        self.layer_time_b = list(self.misc_metadata.get("layer_time_b", []) or [])
 
         self.transformer_cfg = self.comp_times.get("transformer", {})
         self.T_grad_transformer = self.comp_times.get("grad_transformer", 0.0)
@@ -228,6 +232,12 @@ class Graph:
         if layer_idx < 0 or layer_idx >= len(self.moe_layer_mask):
             return False
         return bool(self.moe_layer_mask[layer_idx])
+
+    def _layer_time(self, layer_idx: int, per_layer: List[float], dense: float, moe: float) -> float:
+        """Time of one layer: its own entry in per_layer (helper H4), else dense or MoE."""
+        if per_layer:
+            return float(per_layer[layer_idx])
+        return moe if self._is_moe_layer(layer_idx) else dense
 
     def _is_nonfinal_grad_accum_cycle(self) -> bool:
         return self.grad_accum_cycle == "nonfinal"
@@ -776,7 +786,7 @@ class Graph:
             for l in range(self.num_layer):
                 hw_id = self._stage_for_layer(l)
                 is_moe_layer = self._is_moe_layer(l)
-                transformer_duration = transformer_f_moe if is_moe_layer else transformer_f_dense
+                transformer_duration = self._layer_time(l, self.layer_time_f, transformer_f_dense, transformer_f_moe)
                 transformer_node = Node(
                     f"{block_prefix}{l}",
                     op_id,
@@ -903,7 +913,7 @@ class Graph:
                         f"{block_prefix}{l}_recompute",
                         op_id,
                         hw_id,
-                        transformer_f_moe if self._is_moe_layer(l) else transformer_f_dense,
+                        self._layer_time(l, self.layer_time_f, transformer_f_dense, transformer_f_moe),
                         fwd=True,
                         mem_kind=MemKind.TRANSFORMER,
                         recompute=True,
@@ -921,7 +931,7 @@ class Graph:
                     f"{block_prefix}{l}_b",
                     op_id,
                     hw_id,
-                    transformer_b_moe if is_moe_layer else transformer_b_dense,
+                    self._layer_time(l, self.layer_time_b, transformer_b_dense, transformer_b_moe),
                     fwd=False,
                     mem_kind=MemKind.TRANSFORMER,
                 )

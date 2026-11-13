@@ -667,6 +667,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             include_pipeline_backward=False,
             include_transformer_backward=False,
             gemm_shapes=decode_gemm_shapes_moe if self.use_moe else decode_gemm_shapes_dense,
+            block_timings_by_kind=None,  # helper H4: extra layer kinds (Project 2)
+            layer_block_kinds=(),
         ), energy
     
     def calc_energy(self, transformer_timings: Dict[str, OperationTiming], cross_layer_comm) -> float:
@@ -826,6 +828,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 vocab_size=vocab_size,
                 include_pipeline_backward=False,
                 include_transformer_backward=False,
+                block_timings_by_kind=None,  # helper H4: extra layer kinds (Project 2)
+                layer_block_kinds=(),
             )
 
             self.pipeline_graph = pipeline_graph
