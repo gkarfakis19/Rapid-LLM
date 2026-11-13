@@ -25,7 +25,7 @@ usual, then time the attention and FFN parts of decode separately, and add the c
 between them at every layer. Report time per token, with and without overlap, and the largest batch
 each side can hold.
 
-**Evaluate:** `configs/model-config/course_project/qwen3_30b_a3b_inf.yaml`, batch 8, prompt 512,
+**Evaluate:** `configs/model-config/course_project/qwen3_30b_a3b_inf.yaml`, batch 256, prompt 512,
 output 128 and 256, link 100 GB/s with 5 µs latency.
 
 ## Project 2: Sliding-window attention
@@ -35,15 +35,15 @@ layers to everything. Report time per token, prefill time, peak memory and large
 compared with dense attention.
 
 **Evaluate:** `configs/model-config/course_project/gemma_3_4b_inf.yaml` (w = 1024, 5 local : 1
-global), batch 4, prompt 8192, output 128 and 256.
+global), batch 16, prompt 8192, output 128 and 256.
 
 ## Project 3: Block diffusion LLM
 
 Model a block diffusion LLM: output is generated in blocks of b tokens, each refined over R rounds.
 Report total time, number of model calls and peak memory, each compared with normal decode.
 
-**Evaluate:** `configs/model-config/course_project/Llama3.1-8B_inf.yaml`, batch 1, prompt 512,
-output 128 and 256, b = 8, R = 4.
+**Evaluate:** `configs/model-config/course_project/Llama3.1-8B_inf.yaml`, batch 1, 16 and 64,
+prompt 512, output 128 and 256, b = 8, R = 4.
 
 ## Project 4: Speculative decoding with MTP
 
@@ -51,5 +51,5 @@ Model speculative decoding with D multi-token-prediction (MTP) modules that gues
 full-model pass that checks them. Report time per output token, speedup over normal decode, and
 peak memory.
 
-**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 1, prompt 512, output
-128 and 256, D = 3, acceptance p = 0.8.
+**Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 1 and 128, prompt 512,
+output 128 and 256, D = 3, acceptance p = 0.8.
