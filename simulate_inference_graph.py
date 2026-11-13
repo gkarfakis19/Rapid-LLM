@@ -128,6 +128,7 @@ class DecodeGraph(Graph):
 
         # Execute graphs at sample points
         decode_samples = []
+        query_tokens = 1  # Course helper H2: new tokens per decode call (Projects 3 and 4)
         for step_id in sample_points:
             generated_tokens = step_id + 1
             total_seq_len = self.config.seq_len + generated_tokens
@@ -142,12 +143,14 @@ class DecodeGraph(Graph):
                 intermediate_size=self.moe_intermediate_size if self.use_moe else self.config.intermediate_size,
                 vocab_size=self.config.vocab_size,
                 model_type=self.model_config.model_config.model_type,
+                query_tokens=query_tokens,
             )
 
             sample_time, sample_energy = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
+                query_tokens=query_tokens,
             )
 
             decode_samples.append(
@@ -189,6 +192,7 @@ class DecodeGraph(Graph):
         step_id: int,
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
+        query_tokens: int = 1,
     ) -> float:
         """Execute decode step using appropriate RAPID-LLM execution mode."""
 
@@ -225,6 +229,7 @@ class DecodeGraph(Graph):
             batch_size=self.config.batch_size,
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
+            query_tokens=query_tokens,
         )
         (
             pipeline_graph,

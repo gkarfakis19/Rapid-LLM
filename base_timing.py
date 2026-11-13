@@ -173,6 +173,8 @@ class model_LLM:
             self.inference_sample_every = inference_cfg.sample_every
         else:
             self.inference_sample_every = -1
+        # Course helper H1: the model YAML's project_param block ({} if absent).
+        self.project_param = dict(getattr(exp_config, "project_param", None) or {})
 
 class NetworkModel:
     def __init__(self, hw_config, precision, kernel_overhead, roofline_cb, astra_policy: Optional[str] = None):
@@ -464,7 +466,7 @@ class TimeCalculation:
 
         model_class = self.get_model_class(mode)
         self.model = model_class(model_config)
-
+        self.project_param = getattr(self.model, "project_param", {})  # course helper H1
         if mode == "GEMM":
             self.M = self.model.M
             self.K = self.model.K

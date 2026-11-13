@@ -2052,6 +2052,12 @@ class Graph:
         weight_mem_per_layer_dense = memory_data.get("weight_mem_per_layer_dense", weight_mem_per_layer)
         weight_mem_per_layer_moe = memory_data.get("weight_mem_per_layer_moe", weight_mem_per_layer_dense)
         kv_cache_bytes_per_layer = memory_data.get("kv_cache_bytes_per_layer", 0.0)
+        # Course helper H3 (Project 2): optional list with one KV-cache size per layer.
+        # When present, each device holds the sum over its own layers instead of
+        # kv_cache_bytes_per_layer * layer_count. Devices hold consecutive layers in
+        # device order. When absent nothing changes.
+        kv_cache_bytes_by_layer = memory_data.get("kv_cache_bytes_by_layer")
+        layer_offset = 0
         extra_static_bytes_per_device = memory_data.get("extra_static_bytes_per_device", {}) or {}
         total_tracked_layers = sum(transformer_dense_layers_per_device) + sum(transformer_moe_layers_per_device)
         if total_tracked_layers == 0:
@@ -2072,8 +2078,11 @@ class Graph:
                     dense_count = 1
                     layer_count = 1
                 static_bytes = (weight_mem_per_layer_dense * dense_count) + (weight_mem_per_layer_moe * moe_count)
-                if kv_cache_bytes_per_layer:
+                if kv_cache_bytes_by_layer is not None:
+                    static_bytes += sum(kv_cache_bytes_by_layer[layer_offset:layer_offset + layer_count])
+                elif kv_cache_bytes_per_layer:
                     static_bytes += kv_cache_bytes_per_layer * layer_count
+                layer_offset += layer_count
             elif mode == "training":
                 dense_count = transformer_dense_layers_per_device[idx] if idx < len(transformer_dense_layers_per_device) else 0
                 moe_count = transformer_moe_layers_per_device[idx] if idx < len(transformer_moe_layers_per_device) else 0

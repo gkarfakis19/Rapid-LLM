@@ -2257,6 +2257,19 @@ class HWConfig:
 class ModelConfig:
     model_config: object
     inference_config: Optional["LLMInferenceConfig"]
+    project_param: Dict[str, object] = field(default_factory=dict)  # see _read_project_param
+
+
+def _read_project_param(config_dict: Dict[str, object]) -> Dict[str, object]:
+    """Course helper H1 (all four projects): your own inputs, read verbatim.
+
+    A model YAML may carry a top-level ``project_param:`` block next to
+    ``model_param:``. It is removed from the YAML dict here (so no unit
+    conversion touches it) and returned as a plain dict; nothing in RAPID-LLM
+    reads it. The timing object exposes it as ``self.project_param``. Without
+    the block the result is ``{}`` and every number is the same as before.
+    """
+    return dict(config_dict.pop("project_param", None) or {})
 
 
 def _convert_scalar_string(value: str):
@@ -2385,6 +2398,7 @@ def parse_config(filename, config_type):
             )
             raise ValueError(hint) from exc
         # print(config_dict)
+        project_param = _read_project_param(config_dict)
         convert(config_dict)
     if config_type == "hardware":
         config = HWConfig.from_dict(config_dict)
@@ -2396,7 +2410,8 @@ def parse_config(filename, config_type):
         inference_config = None
         if model_config.run_type == "inference":
             inference_config = LLMInferenceConfig.from_dict(config_dict.get("inference_param"))
-        config = ModelConfig(model_config=model_config, inference_config=inference_config)
+        config = ModelConfig(model_config=model_config, inference_config=inference_config,
+                             project_param=project_param)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))
     

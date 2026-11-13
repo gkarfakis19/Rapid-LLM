@@ -1062,7 +1062,7 @@ def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
     return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
-def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_heads, kv_heads, intermediate_size, vocab_size, model_type="gpt"):
+def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_heads, kv_heads, intermediate_size, vocab_size, model_type="gpt", query_tokens=1):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
@@ -1079,10 +1079,18 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         kv_heads (int): Number of key/value heads (H_kv)
         intermediate_size (int): First FFN layer output dimension (typically 4 * D)
         vocab_size (int): Vocabulary size (V)
+        query_tokens (int): Course helper H2 (Projects 3 and 4): new tokens per
+            decode call (q). It is passed down from the decode loop, but the
+            shapes below still use a literal 1, so the default (1) gives
+            exactly today's numbers and any other value raises.
 
     Returns:
         OrderedDict: GEMM shapes [M, K, N] for decode step operations
     """
+    if query_tokens != 1:
+        raise NotImplementedError(
+            "query_tokens != 1 is Project 3/4: decide which 1s below become query_tokens"
+        )
     assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim, q_size, kv_size = attention_dim_sizes(
         d_model,
@@ -1197,6 +1205,7 @@ def process_decode_gemm_shapes(
     intermediate_size,
     vocab_size,
     model_type="gpt",
+    query_tokens=1,
 ):
     """
     Process decode GEMM shapes and reshape them into 3D.
@@ -1217,6 +1226,7 @@ def process_decode_gemm_shapes(
         intermediate_size=intermediate_size,
         vocab_size=vocab_size,
         model_type=model_type,
+        query_tokens=query_tokens,
     )
 
     processed = OrderedDict()

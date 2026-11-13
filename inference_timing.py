@@ -63,6 +63,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_seq_len: int,
         use_moe_layer: bool,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+        query_tokens: int = 1,
     ) -> Tuple[Dict[str, OperationTiming], Dict[str, float]]:
         """Construct transformer timings + node breakdown for a single decode step."""
 
@@ -117,6 +118,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=intermediate_size,
                 vocab_size=self.vocab_size,
                 model_type=self.model_type,
+                query_tokens=query_tokens,
             )
 
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
@@ -136,7 +138,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         mla_decode = str(getattr(self, "attention_type", "mha")).lower() == "mla" and run_type == "inference"
 
 
-        output_seq_len = 1
+        output_seq_len = 1  # tokens per decode call; query_tokens (H2) is threaded but unused
 
         transformer_timings: Dict[str, OperationTiming] = {}
 
@@ -562,6 +564,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         batch_size: int,
         total_seq_len: int,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+        query_tokens: int = 1,
     ):
         moe_layers_active = bool(self.use_moe and any(getattr(self, "moe_layer_mask", []) or []))
         moe_intermediate = self.moe_intermediate_size
@@ -577,6 +580,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=moe_intermediate if self.use_moe else self.intermediate_size,
                 vocab_size=self.vocab_size,
                 model_type=self.model_type,
+                query_tokens=query_tokens,
             )
         decode_gemm_shapes_dense = decode_gemm_shapes_moe
         if self.use_moe:
@@ -611,6 +615,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=self.intermediate_size,
                 vocab_size=self.vocab_size,
                 model_type=self.model_type,
+                query_tokens=query_tokens,
             )
 
         transformer_timings, node_breakdown = self._build_decode_transformer_results(
@@ -618,6 +623,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             total_seq_len=total_seq_len,
             use_moe_layer=False,
             gemm_shapes=decode_gemm_shapes_dense,
+            query_tokens=query_tokens,
         )
         moe_transformer_timings = None
         moe_node_breakdown = None
@@ -627,6 +633,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 total_seq_len=total_seq_len,
                 use_moe_layer=True,
                 gemm_shapes=decode_gemm_shapes_moe,
+                query_tokens=query_tokens,
             )
 
         output_act_bytes = decode_gemm_shapes_dense["qkv_proj"][0] * decode_gemm_shapes_dense["qkv_proj"][1] * self.precision_bytes
@@ -885,6 +892,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=self.moe_intermediate_size if self.use_moe else intermediate_size,
                 vocab_size=vocab_size,
                 model_type=self.model_type,
+                query_tokens=1,  # H2: tokens per decode call for the decode memory peak
             )
             (
                 decode_pipeline_graph,
@@ -902,6 +910,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 batch_size=batch_size,
                 total_seq_len=self.seq_len,
                 gemm_shapes=decode_gemm_shapes,
+                query_tokens=1,
             )
             decode_dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
