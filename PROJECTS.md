@@ -52,4 +52,4 @@ full-model pass that checks them. Report time per output token, speedup over nor
 peak memory.
 
 **Evaluate:** `configs/model-config/course_project/mimo_7b_inf.yaml`, batch 32 and 64, prompt 2048,
-output 128 and 256, D = 3, acceptance p = 0.8.
+output 128 and 256, D = 3, acceptance p = 0.8 and 0.6.
