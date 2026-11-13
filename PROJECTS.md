@@ -62,7 +62,7 @@ Multi-token prediction (MTP) adds D small modules to the model. Each module is o
 layer plus a projection from 2H to H, and shares the model's embedding and output head. In each
 round the D modules guess the next D tokens one after another, then one pass of the full model
 checks all D + 1 positions at once. Each guess is accepted with probability p, and a round stops at
-the first wrong guess, so a round produces 1 + p + p² + … + p^D tokens on average. Model the rounds,
+the first wrong guess, so a round produces 1 + p + p² + … + p<sup>D</sup> tokens on average. Model the rounds,
 including the cost of the guesses, the D + 1-token check, and the memory for the MTP layers and
 their KV cache. Report time per output token, speedup over normal decode, and peak memory.
 
