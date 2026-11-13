@@ -1230,6 +1230,8 @@ class LLMAttentionConfig:
     v_head_dim: Optional[int] = None
     use_flashattention: bool = False
     attention_tile_size: Optional[int] = None
+    #: Sliding-window pattern (model_param.attention.window); None = every layer global.
+    window: Optional["AttentionWindowConfig"] = None
 
     @classmethod
     def from_dict(cls, attention_dict: Dict[str, object]) -> "LLMAttentionConfig":
@@ -1360,6 +1362,9 @@ class LLMAttentionConfig:
         else:
             attention_tile_size = None
 
+        window_raw = attention_dict.get("window", None)
+        window = None if window_raw is None else AttentionWindowConfig.from_dict(window_raw)
+
         return cls(
             attention_type=attn_type,
             num_heads=num_heads,
@@ -1372,6 +1377,49 @@ class LLMAttentionConfig:
             v_head_dim=v_head_dim,
             use_flashattention=use_flashattention,
             attention_tile_size=attention_tile_size,
+            window=window,
+        )
+
+
+@dataclass(frozen=True)
+class AttentionWindowConfig:
+    """Sliding-window attention pattern (model_param.attention.window).
+
+    ``local_global_interval`` = N means one global layer every N layers
+    (Gemma 3 uses 6: 5 local, then 1 global); 1 makes every layer global.
+
+    Layer rule, for layer index i (0-based) of a model with num_layers layers:
+    layer i is GLOBAL (attends to the full context) when N <= 1, or when
+    last_layer_global is true and i == num_layers - 1, or when (i + 1) % N == 0.
+    Every other layer is LOCAL: it attends to at most the last ``window_size``
+    tokens. With N = 6 that is layers 5, 11, 17, ... global.
+
+    Nothing prices the window yet: validate_model_config refuses a model that
+    declares one with local layers.
+    """
+
+    window_size: int
+    local_global_interval: int
+    last_layer_global: bool
+
+    @classmethod
+    def from_dict(cls, window_dict: Dict[str, object]) -> "AttentionWindowConfig":
+        window_dict = _require_mapping("model_param.attention.window", window_dict)
+        allowed = {"window_size", "local_global_interval", "last_layer_global"}
+        unknown = sorted(set(window_dict) - allowed)
+        if unknown:
+            raise ValueError(f"model_param.attention.window does not support the keys: {', '.join(unknown)}")
+        return cls(
+            window_size=_parse_int_field("model_param.attention.window", window_dict, "window_size"),
+            local_global_interval=_coerce_int(
+                window_dict.get("local_global_interval", 1),
+                "model_param.attention.window.local_global_interval",
+                min_value=1,
+            ),
+            last_layer_global=_coerce_bool(
+                window_dict.get("last_layer_global", False),
+                "model_param.attention.window.last_layer_global",
+            ),
         )
 
 
@@ -1777,17 +1825,9 @@ class LLMConfig:
                     "model_param.attention.head_dim must be specified when model_type is 'glm4_moe'"
                 )
         elif attention.head_dim is not None:
-            if hidden_dim % attention.num_heads != 0:
-                raise ValueError(
-                    "model_param.hidden_dim must be divisible by attention.num_heads when "
-                    "model_param.attention.head_dim is provided for non-GLM models"
-                )
-            expected_head_dim = hidden_dim // attention.num_heads
-            if attention.head_dim != expected_head_dim:
-                raise ValueError(
-                    "model_param.attention.head_dim must match hidden_dim/num_heads for non-GLM models "
-                    f"(expected {expected_head_dim}, got {attention.head_dim})"
-                )
+            # A declared head_dim is used as given; it need not equal
+            # hidden_dim // num_heads (Qwen3: 2048 / 32 heads, head_dim 128).
+            pass
         else:
             if hidden_dim % attention.num_heads != 0:
                 raise ValueError(
@@ -2401,6 +2441,14 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
 
     if not isinstance(model, LLMConfig):
         raise ValueError("Unsupported model config type for validation")
+
+    window = getattr(getattr(model, "attention", None), "window", None)
+    if window is not None and int(window.local_global_interval) != 1:
+        raise ValueError(
+            "model_param.attention.window is declared, but nothing prices it yet: every "
+            "attention op is priced against the full KV context, so a local layer would be "
+            "charged as global. Remove the window block, or add the pricing."
+        )
 
     if model.use_moe and model.top_k > model.num_experts:
         raise ValueError("model_param.moe.top_k cannot exceed model_param.moe.num_experts")
