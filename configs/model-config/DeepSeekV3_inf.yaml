@@ -1,31 +1,35 @@
+# Model: DeepSeek-V3 (MLA attention, mixture of experts)
+# Source: https://huggingface.co/deepseek-ai/DeepSeek-V3
+# Note: Slow to simulate (about 2 minutes per run).
+
 model_param:
-  mode: "LLM"
-  run_type: "inference"
-  tied_embeddings: false
-  model_type: "deepseek_v3"
-  global_batch_size: 1
-  gradient_accumulation_steps: 1
-  seq_len: 163840
-  decode_len: 1024
-  hidden_dim: 7168
+  mode: "LLM"                         # LLM, or GEMM for a single matrix multiply
+  run_type: "inference"               # inference or training
+  model_type: "deepseek_v3"           # gpt (GELU MLP), llama (SwiGLU), deepseek_v3 or glm4_moe
+  tied_embeddings: false              # input embedding shared with the output head (memory only)
+  global_batch_size: 1                # sequences served together (B)
+  gradient_accumulation_steps: 1      # training only; leave at 1
+  seq_len: 163840                     # prefill + decode tokens
+  decode_len: 1024                    # decode tokens (output length)
+  hidden_dim: 7168                    # hidden size (H)
+  num_layers: 61                      # transformer layers
+  vocab_size: 129280                  # vocabulary size
+  intermediate_size: 18432            # dense feed-forward width
   attention:
-    attention_type: "mla"
-    num_heads: 128
-    kv_lora_rank: 512
-    q_lora_rank: 1536
-    qk_nope_head_dim: 128
-    qk_rope_head_dim: 64
-    v_head_dim: 128
-    use_flashattention: true  # Simulator knob; only affects MLA prefill, not decode.
-    attention_tile_size: 128
+    attention_type: "mla"             # mha, gqa or mla
+    num_heads: 128                    # query heads
+    q_lora_rank: 1536                 # MLA: query compression rank
+    kv_lora_rank: 512                 # MLA: key/value latent width (what the KV cache stores)
+    qk_nope_head_dim: 128             # MLA: per-head query/key width without rotary part
+    qk_rope_head_dim: 64              # MLA: per-head rotary width
+    v_head_dim: 128                   # MLA: per-head value width
+    use_flashattention: true          # price attention as FlashAttention
+    attention_tile_size: 128          # FlashAttention tile size
   moe:
-    num_experts: 256
-    top_k: 8
-    moe_intermediate_size: 2048
-    n_shared_experts: 1
-    expert_imbalance_factor: 1.0
-    moe_layer_freq: 1
-    first_k_dense_replace: 3
-  intermediate_size: 18432
-  vocab_size: 129280
-  num_layers: 61
+    num_experts: 256                  # experts per MoE layer (1 = dense model)
+    top_k: 8                          # experts used per token
+    moe_intermediate_size: 2048       # feed-forward width of one expert
+    n_shared_experts: 1               # always-on shared experts
+    moe_layer_freq: 1                 # every Nth layer is an MoE layer
+    first_k_dense_replace: 3          # the first k layers are dense
+    expert_imbalance_factor: 1.0      # 1.0 = tokens spread evenly over experts

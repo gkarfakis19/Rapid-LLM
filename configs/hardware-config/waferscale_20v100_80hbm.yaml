@@ -1,6 +1,6 @@
-# Config that models 20 V100 GPUs in a node.
-# We are ignoring NVLINK2.0 controller area for now.
-
+# DO NOT EDIT. Put all your project settings in the model config, not here.
+# Hardware: 20 V100-class GPUs in one node, tensor parallel (tp: 20). Analytical backend.
+# MoE models need an expert count divisible by 20.
 
 sw_param:
   full_recomputation: false # Enable full activation recompute during backward instead of selective recomputation
@@ -124,12 +124,11 @@ network:
       label: wafer_mesh
       size: 20
       topology:
-        type: Mesh
+        type: Ring  # analytical backend: Ring only
         bandwidth: 5000 Gb
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 0.95
-      collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep, pp, dp]
 
   overlap:
@@ -139,23 +138,5 @@ network:
     tp_overlap: 0.6
     # fraction of CP comm that can overlap CP compute
     cp_overlap: 0.0
-execution_backend:
-  model: astra # analytical | astra
-  astra:
-    backend: astra
-    mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collectives:
-      # Default collective algorithms. Per-dimension collective_override entries can override these.
-      # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
-      # Note: leave to auto unless you have a specific reason to change it.
-      all_gather: auto
-      all_reduce: auto
-      reduce_scatter: auto
-      all_to_all: auto
-    sys_options:
-      endpoint_delay: 10
-      active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
-      preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
-
 inference:
   kvcache_type: hbm_only

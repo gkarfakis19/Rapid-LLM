@@ -1,0 +1,35 @@
+# Model: MiniCPM3-4B (MLA attention, dense)
+# Source: https://huggingface.co/openbmb/MiniCPM3-4B
+
+model_param:
+  mode: "LLM"                         # LLM, or GEMM for a single matrix multiply
+  run_type: "inference"               # inference or training
+  model_type: "deepseek_v3"           # gpt (GELU MLP), llama (SwiGLU), deepseek_v3 or glm4_moe
+  tied_embeddings: true               # input embedding shared with the output head (memory only)
+  global_batch_size: 4                # sequences served together (B)
+  gradient_accumulation_steps: 1      # training only; leave at 1
+  seq_len: 2048                       # prefill + decode tokens
+  decode_len: 256                     # decode tokens (output length)
+  hidden_dim: 2560                    # hidden size (H)
+  num_layers: 62                      # transformer layers
+  vocab_size: 73448                   # vocabulary size
+  intermediate_size: 6400             # dense feed-forward width
+  attention:
+    attention_type: "mla"             # mha, gqa or mla
+    num_heads: 40                     # query heads
+    q_lora_rank: 768                  # MLA: query compression rank
+    kv_lora_rank: 256                 # MLA: key/value latent width (what the KV cache stores)
+    qk_nope_head_dim: 64              # MLA: per-head query/key width without rotary part
+    qk_rope_head_dim: 32              # MLA: per-head rotary width
+    v_head_dim: 64                    # MLA: per-head value width
+    use_flashattention: false         # price attention as FlashAttention
+  moe:
+    num_experts: 1                    # experts per MoE layer (1 = dense model)
+    top_k: 1                          # experts used per token
+    moe_intermediate_size: 6400       # feed-forward width of one expert
+    n_shared_experts: 0               # always-on shared experts
+    moe_layer_freq: 1                 # every Nth layer is an MoE layer
+    first_k_dense_replace: 62         # the first k layers are dense
+
+inference_param:
+  sample_every: -1                    # -1: price only the first and last decode step; N: also every Nth

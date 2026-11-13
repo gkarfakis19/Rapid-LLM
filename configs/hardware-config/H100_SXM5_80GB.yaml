@@ -1,8 +1,8 @@
-# RAPID-LLM configuration for NVIDIA H100 PCIe 80 GB
-# specifications from the following sources:
+# DO NOT EDIT. Put all your project settings in the model config, not here.
+# Hardware: one H100 SXM5 80 GB GPU. Analytical backend.
+# Specifications:
 # [NVIDIA] https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c
 # [TePU] https://www.techpowerup.com/gpu-specs/h100-sxm5-80-gb.c3900
-# [Semi] https://semianalysis.com/2025/06/23/nvidia-tensor-core-evolution-from-volta-to-blackwell/#4th-generation-tensor-core-warpgroup-level-asynchronous-mma
 
 sw_param:
   full_recomputation: true # Enable full activation recompute during backward instead of selective recomputation
@@ -84,11 +84,11 @@ parallelism:
   auto: false
   ### LLM PARAMS ###
   tp: 1 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
+  tp_sp: false # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  pp: 23 # pipeline parallelism. Number of pipeline stages
+  pp: 1 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 23 # micro-batches (for best results set to >= pp). 
+  mb: 1 # micro-batches (for best results set to >= pp). 
 
   train:
     dp: 1 # data parallelism
@@ -104,24 +104,21 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: FC
+        type: Ring  # analytical backend: Ring only
         bandwidth: 300 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
-        optimize_2dmap: false
-      collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep]
     - id: dim1
       label: inter_torus_infiniband
       size: auto
       topology:
-        type: Ring 
+        type: Ring
         bandwidth: 25 GB
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
-      collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [pp,dp]
     - id: dim2
       label: inter_torus_infiniband_dp
@@ -133,7 +130,6 @@ network:
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       parallelisms: []
-      collective_override: {} # overrides execution_backend.collectives when provided
 
   overlap:
     # fraction of TP+SP compute that can overlap TP/SP comm
@@ -142,23 +138,5 @@ network:
     tp_overlap: 0.0
     # fraction of CP comm that can overlap CP compute
     cp_overlap: 0.0
-execution_backend:
-  model: astra # analytical | astra
-  astra:
-    backend: astra
-    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collectives:
-      # Default collective algorithms. Per-dimension collective_override entries can override these.
-      # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
-      # Note: leave to auto unless you have a specific reason to change it.
-      all_gather: auto
-      all_reduce: auto
-      reduce_scatter: auto
-      all_to_all: auto
-    sys_options:
-      endpoint_delay: 5
-      active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
-      preferred_dataset_splits: 4 # Should be same as active_chunks_per_dimension
-
 inference:
   kvcache_type: hbm_only

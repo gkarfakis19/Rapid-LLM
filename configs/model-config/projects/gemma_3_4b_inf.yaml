@@ -1,0 +1,41 @@
+# Model: Gemma 3 4B, text backbone only (dense, sliding window)
+# Source: https://huggingface.co/google/gemma-3-4b-pt
+# Project: 2 (sliding-window attention)
+# Note: 5 local layers (window w = 1024) for every global layer. RAPID-LLM refuses the
+#   window on GPU until Project 2 adds it; delete the window: block to run it dense.
+
+model_param:
+  mode: "LLM"                         # LLM, or GEMM for a single matrix multiply
+  run_type: "inference"               # inference or training
+  model_id: "gemma_3_4b"              # display name only
+  model_type: "llama"                 # gpt (GELU MLP), llama (SwiGLU), deepseek_v3 or glm4_moe
+  tied_embeddings: true               # input embedding shared with the output head (memory only)
+  global_batch_size: 4                # sequences served together (B)
+  gradient_accumulation_steps: 1      # training only; leave at 1
+  seq_len: 2048                       # prefill + decode tokens
+  decode_len: 256                     # decode tokens (output length)
+  hidden_dim: 2560                    # hidden size (H)
+  num_layers: 34                      # transformer layers
+  vocab_size: 262208                  # vocabulary size
+  intermediate_size: 10240            # dense feed-forward width
+  attention:
+    attention_type: "gqa"             # mha, gqa or mla
+    num_heads: 8                      # query heads
+    kv_heads: 4                       # key/value heads
+    head_dim: 256                     # width of one head (default hidden_dim / num_heads)
+    use_flashattention: true          # price attention as FlashAttention
+    attention_tile_size: 128          # FlashAttention tile size
+    window:
+      window_size: 1024               # tokens a local layer attends to (w)
+      local_global_interval: 6        # every Nth layer is global; the others are local
+      last_layer_global: false        # force the last layer to be global
+  moe:
+    num_experts: 1                    # experts per MoE layer (1 = dense model)
+    top_k: 1                          # experts used per token
+    moe_intermediate_size: 10240      # feed-forward width of one expert
+    n_shared_experts: 0               # always-on shared experts
+    moe_layer_freq: 1                 # every Nth layer is an MoE layer
+    first_k_dense_replace: 34         # the first k layers are dense
+
+inference_param:
+  sample_every: -1                    # -1: price only the first and last decode step; N: also every Nth

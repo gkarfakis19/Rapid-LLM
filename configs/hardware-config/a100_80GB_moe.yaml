@@ -1,3 +1,7 @@
+# DO NOT EDIT. Put all your project settings in the model config, not here.
+# Hardware: A100 80 GB GPUs for mixture-of-experts models only (tp: 2, ep: 2, pp: 4). Analytical backend.
+# Dense models are refused on this file.
+
 sw_param:
   full_recomputation: true # Enable full activation recompute during backward instead of selective recomputation
   kernel_launch_overhead: 9e-6   # (s)
@@ -94,8 +98,6 @@ network:
     tp_overlap: 0.63
     tp_sp_overlap: 0.6
     cp_overlap: 0.0
-  # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
-  # faulty_links: [[0,1,0.6],[16,17,0.1]]
   dimensions:
     - id: dim0
       label: torus2d_tp
@@ -106,19 +108,16 @@ network:
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
-        optimize_2dmap: false
-      collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep]
     - id: dim1
       label: inter_torus_infiniband
       size: auto
       topology:
-        type: Ring 
+        type: Ring
         bandwidth: 25 GB # SPLIT INTO BW_PER_GPU, BW_TOTAL. BW TOTAL IS ONLY ALLOWED IF PREV DIM is 2D.
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
-      collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [pp,dp]
     - id: dim2
       label: inter_torus_infiniband_dp
@@ -130,26 +129,6 @@ network:
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       parallelisms: []
-      collective_override: {} # overrides execution_backend.collectives when provided
-
-execution_backend:
-  model: astra # analytical | astra
-  astra:
-    backend: astra
-    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collectives:
-      # Default collective algorithms. Per-dimension collective_override entries can override these.
-      # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
-      # Note: leave to auto unless you have a specific reason to change it.
-      all_gather: auto
-      all_reduce: auto
-      reduce_scatter: auto
-      all_to_all: auto
-    sys_options:
-      endpoint_delay: 5
-      active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
-      preferred_dataset_splits: 4 # Should be same as active_chunks_per_dimension
-      collective_arbitration: last_resort  
 
 inference:
   kvcache_type: hbm_only # Only supported mode for now.

@@ -1,7 +1,9 @@
+# Model: one matrix multiply, M x K times K x N (mode: GEMM)
+
 model_param:
-  mode: GEMM
-  M: 4096
-  K: 524288
-  N: 2048
-  backward: true
-  gemm_shard_axis: row
+  mode: "GEMM"                        # LLM, or GEMM for a single matrix multiply
+  M: 4096                             # rows of the left matrix
+  K: 524288                           # shared dimension
+  N: 2048                             # columns of the right matrix
+  backward: true                      # also price the backward pass
+  gemm_shard_axis: "row"              # row or col, used when tp > 1

@@ -1,26 +1,29 @@
+# Model: Llama-3.1-405B (dense)
+# Source: https://huggingface.co/meta-llama/Llama-3.1-405B
+
 model_param:
-  mode: "LLM"  # Mode of operation
-  run_type: "inference" # Type of run: "training" or "inference"
-  tied_embeddings: true  # Share input and output embedding weights (WIP: affects memory estimation only)
-  model_type: "llama"  # gpt assumes dense-style architecture with GELU; llama assumes llama-style architecture with SwiGLU
-  global_batch_size: 1  # Sequences per global batch
-  gradient_accumulation_steps: 1  # Number of gradient accumulation micro-steps per optimizer update
-  seq_len: 2048  # Total context length (prefill + decode_len for inference)
-  decode_len: 1024 # Number of tokens to decode during inference
-  hidden_dim: 16384 # Transformer hidden dimension
-  attention: # Attention-related parameters
-    attention_type: "gqa"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)
-    num_heads: 128 # Total number of attention heads
-    kv_heads: 8  # Number of key/value heads (used only when attention_type = "gqa")
-    use_flashattention: false # Enable FlashAttention optimization (when false, we model naive attention without causal masking or flash optimizations)
-    attention_tile_size: null  # Tile size used in attention computation
+  mode: "LLM"                         # LLM, or GEMM for a single matrix multiply
+  run_type: "inference"               # inference or training
+  model_type: "llama"                 # gpt (GELU MLP), llama (SwiGLU), deepseek_v3 or glm4_moe
+  tied_embeddings: true               # input embedding shared with the output head (memory only)
+  global_batch_size: 1                # sequences served together (B)
+  gradient_accumulation_steps: 1      # training only; leave at 1
+  seq_len: 2048                       # prefill + decode tokens
+  decode_len: 1024                    # decode tokens (output length)
+  hidden_dim: 16384                   # hidden size (H)
+  num_layers: 126                     # transformer layers
+  vocab_size: 128256                  # vocabulary size
+  intermediate_size: 53248            # dense feed-forward width
+  attention:
+    attention_type: "gqa"             # mha, gqa or mla
+    num_heads: 128                    # query heads
+    kv_heads: 8                       # key/value heads
+    use_flashattention: false         # price attention as FlashAttention
+    attention_tile_size: null         # FlashAttention tile size
   moe:
-    num_experts: 1
-    top_k: 1
-    moe_intermediate_size: 53248
-    n_shared_experts: 0
-    moe_layer_freq: 1
-    first_k_dense_replace: 126
-  intermediate_size: 53248 # Output dimension of the first FFN layer (typically 4×hidden_dim)
-  vocab_size: 128256  # Vocabulary size
-  num_layers: 126 # Number of transformer layers
+    num_experts: 1                    # experts per MoE layer (1 = dense model)
+    top_k: 1                          # experts used per token
+    moe_intermediate_size: 53248      # feed-forward width of one expert
+    n_shared_experts: 0               # always-on shared experts
+    moe_layer_freq: 1                 # every Nth layer is an MoE layer
+    first_k_dense_replace: 126        # the first k layers are dense
